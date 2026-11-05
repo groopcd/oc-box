@@ -995,10 +995,55 @@ with tempfile.TemporaryFile() as output:
     return json.loads(result.stdout)
 
 
+def verify_session_import(data, exported, imported):
+    """Verify all transcript content, tolerating one known schema omission.
+
+    Mainline ToolStatePending owns `raw`; the other tool-state schemas strip
+    stale raw buffers on import. Permit only its removal from a nonpending
+    tool state. Do not ignore changes to raw when it is present in both copies,
+    nested user data named raw, or pending raw buffers required for replay.
+    """
+    ident = exported["info"]["id"]
+    validate_session_export(exported, ident)
+    validate_session_export(imported, ident)
+    expected = {message["info"]["id"]: message for message in exported["messages"]}
+    actual = {message["info"]["id"]: message for message in imported["messages"]}
+    expected = json.loads(json.dumps(expected))
+    omitted = 0
+    for mid, message in expected.items():
+        actual_parts = {
+            part["id"]: part for part in actual.get(mid, {}).get("parts", [])
+        }
+        for part in message["parts"]:
+            other = actual_parts.get(part["id"], {})
+            state = part.get("state")
+            other_state = other.get("state")
+            if (
+                part.get("type") == other.get("type") == "tool"
+                and isinstance(state, dict)
+                and isinstance(other_state, dict)
+                and state.get("status") in ("running", "completed", "error")
+                and state.get("status") == other_state.get("status")
+                and "raw" in state
+                and "raw" not in other_state
+            ):
+                del state["raw"]
+                omitted += 1
+    if imported["info"].get("directory") != data["project"] or actual != expected:
+        raise BoxError(
+            "Imported session verification failed: project, message, or part content differs "
+            f"(source: {len(expected)} messages/{sum(len(m['parts']) for m in expected.values())} parts; "
+            f"container: {len(actual)} messages/{sum(len(m['parts']) for m in actual.values())} parts)."
+        )
+    return omitted
+
+
 def import_host_session(path, data, exported):
     """Import once, verify the full transcript, then select it for resume."""
     ident = exported["info"]["id"]
     validate_session_export(exported, ident)
+    state = session_state(path)
+    backup = path.parent / "imports" / (ident + ".json")
     listed = run(
         exec_command(
             data, [CONTAINER_OPENCODE, "--pure", "session", "list", "--format", "json"]
@@ -1006,13 +1051,56 @@ def import_host_session(path, data, exported):
         capture=True,
         timeout=60,
     )
-    if any(item.get("id") == ident for item in json.loads(listed.stdout or "[]")):
-        raise BoxError(
-            f"Session {ident} already exists in this container; it was not overwritten. Run oc-box normally to resume it."
+    existing = any(
+        item.get("id") == ident for item in json.loads(listed.stdout or "[]")
+    )
+    if existing:
+        if not backup.is_file() or ident in state.get("imported_from_host", {}):
+            raise BoxError(
+                f"Session {ident} already exists in this container; it was not overwritten. Run oc-box normally to resume it."
+            )
+        # A previous mainline import succeeded but our verification was rejected
+        # or interrupted. Recheck its ORIGINAL recovery export without touching
+        # the container DB or replacing it with a newer host conversation.
+        exported = read_json(backup)
+        validate_session_export(exported, ident)
+        if exported["info"].get("directory") != data["project"]:
+            raise BoxError(
+                "Recovery export belongs to another project; nothing was overwritten."
+            )
+        print(
+            "oc-box: Rechecking the previous import; existing container history will not be overwritten.",
+            flush=True,
         )
+    else:
+        transfer_host_session(path, data, exported, backup)
+    imported = export_container_session(data, ident)
+    try:
+        omitted = verify_session_import(data, exported, imported)
+    except BoxError as exc:
+        raise BoxError(
+            f"{exc} OpenCode was not launched. Original host session and recovery export are intact at {backup}. "
+            "No existing container history was overwritten."
+        ) from exc
+    state["sessions"] = list(dict.fromkeys(state.get("sessions", []) + [ident]))
+    state["last"] = ident
+    state.setdefault("imported_from_host", {})[ident] = {"backup": str(backup)}
+    atomic_json(session_file(path), state)
+    if omitted:
+        print(
+            f"oc-box: Verified {omitted} obsolete nonpending tool raw buffer(s) omitted by mainline import.",
+            flush=True,
+        )
+    print(
+        f"oc-box: {'Recovered' if existing else 'Imported'} host session {ident} ({len(exported['messages'])} messages); original host conversation retained.",
+        flush=True,
+    )
+    return state
+
+
+def transfer_host_session(path, data, exported, backup):
     # Keep a private host-side source export for recovery. Never place the
     # transcript in the writable project or pass host filenames to the agent.
-    backup = path.parent / "imports" / (ident + ".json")
     atomic_json(backup, exported)
     transfer = """import pathlib,subprocess,sys,tempfile
 with tempfile.TemporaryDirectory(prefix='oc-box-import-') as directory:
@@ -1035,24 +1123,6 @@ with tempfile.TemporaryDirectory(prefix='oc-box-import-') as directory:
         capture=True,
         timeout=60,
     )
-    imported = export_container_session(data, ident)
-    validate_session_export(imported, ident)
-    expected = {message["info"]["id"]: message for message in exported["messages"]}
-    actual = {message["info"]["id"]: message for message in imported["messages"]}
-    if imported["info"].get("directory") != data["project"] or actual != expected:
-        raise BoxError(
-            f"Imported session verification failed; OpenCode was not launched. Original host session and recovery export are intact at {backup}."
-        )
-    state = session_state(path)
-    state["sessions"] = list(dict.fromkeys(state.get("sessions", []) + [ident]))
-    state["last"] = ident
-    state.setdefault("imported_from_host", {})[ident] = {"backup": str(backup)}
-    atomic_json(session_file(path), state)
-    print(
-        f"oc-box: Imported host session {ident} ({len(expected)} messages); original host conversation retained.",
-        flush=True,
-    )
-    return state
 
 
 def archive_id(workspace_id, ident, prefix):

@@ -150,6 +150,28 @@ an existing session with the same ID is never overwritten or merged, protecting
 work you have continued inside the container. `--import-session` is a start-only
 option and cannot be combined with `--new` or `--resume`.
 
+If import completed but verification failed or was interrupted, update the
+launcher and retry the same `--import-session` command. When a recovery export
+exists and the import has not been marked verified, oc-box compares the existing
+container session against that original export without importing over it. If
+the transcript matches, it records the successful recovery and resumes. If it
+differs, it stops without overwriting either copy. Already verified imports are
+still protected against repeated imports.
+
+Verification checks every message/part and their contents. One mainline schema
+normalization is accepted: stale tool `state.raw` buffers may be removed from
+running, completed, or failed tool calls. `raw` belongs only to pending tool
+states in mainline's import schema. Pending raw buffers, tool inputs/outputs,
+metadata, text, and unrelated fields named `raw` remain strictly checked. The
+private recovery export retains the original buffer as well.
+
+To inspect a failed import from the host without printing conversation content:
+
+```bash
+python3 /home/groo/devel/oc-box/tools/diagnose_import.py \
+  --workspace WORKSPACE_ID --session SESSION_ID
+```
+
 ## MCPs, formatters, language servers, and plugins
 
 Each launch snapshots `~/.config/opencode` (or its XDG equivalent) into the

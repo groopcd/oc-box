@@ -303,9 +303,65 @@ def session_import_regression(root, env, project, ident):
         )
         source = box.export_host_session(registry, data, ident)
         assert len(json.dumps(source)) > 2_000_000
+        host_before = json.loads(json.dumps(source))
+        # Older persisted tool states may retain `raw` after completion. The
+        # real mainline importer strips it for nonpending states, but preserves
+        # pending raw and arbitrary input/metadata fields named raw.
+        owner = next(
+            message
+            for message in source["messages"]
+            if any(
+                part.get("type") == "tool" and part["state"]["status"] == "completed"
+                for part in message["parts"]
+            )
+        )
+        completed = next(
+            part
+            for part in owner["parts"]
+            if part.get("type") == "tool" and part["state"]["status"] == "completed"
+        )
+        completed["state"]["raw"] = "obsolete completed buffer"
+        completed["state"]["metadata"]["raw"] = "metadata must survive"
+        for status in ("error", "pending", "running"):
+            state = {
+                "status": status,
+                "input": {"raw": "input must survive"},
+                "raw": "buffer " + status,
+            }
+            if status != "pending":
+                state["time"] = {"start": 1}
+            if status == "error":
+                state["error"] = "fixture interrupted"
+                state["time"]["end"] = 2
+            owner["parts"].append(
+                {
+                    "id": "prt_zzzz_import_" + status,
+                    "messageID": owner["info"]["id"],
+                    "sessionID": ident,
+                    "type": "tool",
+                    "tool": "fixture",
+                    "callID": "import_" + status,
+                    "state": state,
+                }
+            )
         recorded = box.import_host_session(registry, data, source)
         assert recorded["last"] == ident
         assert box.refresh_sessions(registry, data)["last"] == ident
+        copied = box.export_container_session(data, ident)
+        assert box.verify_session_import(data, source, copied) == 3
+        assert copied["messages"] != source["messages"], (
+            "Fixture did not reproduce raw-field schema stripping"
+        )
+        # Reproduce the user's old verification failure: the import exists and
+        # a source backup is saved, but no successful import record was written.
+        box.session_file(registry).unlink()
+        with patch.object(
+            box,
+            "transfer_host_session",
+            side_effect=AssertionError("Recovery must not reimport"),
+        ):
+            recovered = box.import_host_session(registry, data, source)
+        assert recovered["last"] == ident
         try:
             box.import_host_session(registry, data, source)
         except box.BoxError as exc:
@@ -314,11 +370,9 @@ def session_import_regression(root, env, project, ident):
             raise AssertionError(
                 "Duplicate host import overwrote the container session"
             )
-        assert box.export_host_session(registry, data, ident) == source, (
+        assert box.export_host_session(registry, data, ident) == host_before, (
             "Host source changed during transfer"
         )
-        copied = box.export_container_session(data, ident)
-        assert copied["messages"] == source["messages"]
         bounded(
             [executable, "--pure", "run", "--session", ident, "Finish without tools."],
             env={**env, "XDG_DATA_HOME": isolated["XDG_DATA_HOME"]},
@@ -326,7 +380,7 @@ def session_import_regression(root, env, project, ident):
             timeout=20,
         )
     print(
-        "PASS: host-to-container import (>2 MB), full transcript verification, duplicate protection, and imported-session resume."
+        "PASS: host-to-container import (>2 MB), mainline tool raw normalization, no-write failed-import recovery, duplicate protection, and resume."
     )
 
 
