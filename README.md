@@ -75,7 +75,13 @@ input, queries, window resizing, and normal TUI output are relayed through a
 PTY; no status writer runs over the rendered interface.
 
 The first launch may take substantially longer for plugin/MCP downloads and
-provider discovery. Repeated launches compare the host dependency inputs against
+provider discovery. On a fresh environment, plugin dependency resolution runs
+before the TUI opens, with its own timed `Resolving OpenCode plugin dependencies`
+stage. The copied dependency manifest starts with the container's exact plugin
+SDK version, retaining other declared dependencies; an incompatible host lockfile
+is regenerated inside the container. This avoids starting from an older host SDK.
+It does not eliminate genuine first-run downloads. Repeated launches skip that
+extra resolution stage and compare the host dependency inputs against
 the previous snapshot and retain the container's installed `node_modules` and
 runtime-generated manifest/locks when those inputs and OpenCode's version are
 unchanged. This avoids repeatedly downgrading an older host plugin-SDK manifest
@@ -88,6 +94,18 @@ Your project is mounted **at the same absolute path** inside the container.
 For example, `/home/groo/test` remains `/home/groo/test`. This keeps configuration,
 plugins, and LSP paths consistent. The container's HOME has the same pathname
 as yours but is backed by a **private named volume**, not your host home.
+
+On SELinux hosts, new project bind mounts use Podman's shared `:z` relabeling
+option so the container can access project contents without disabling SELinux.
+This changes labels only under the selected project. Startup checks that the
+mount is readable/writable before importing or launching a session. If an older
+container reports project `Permission denied`, run this from a host terminal:
+
+```bash
+chcon -R -t container_file_t /path/to/project
+```
+
+Then resume normally; no reset, purge, or repeated session import is needed.
 
 Exiting OpenCode syncs conversation history, then stops the container. OS
 packages remain in the stopped container; the private home/session database

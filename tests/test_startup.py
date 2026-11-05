@@ -38,6 +38,37 @@ def archive(files):
 
 
 class ConfigCacheTests(unittest.TestCase):
+    def test_cold_sync_uses_runtime_sdk_and_drops_incompatible_host_lock(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            host = {
+                "package.json": '{"dependencies":{"@opencode-ai/plugin":"1.15.11","custom":"2"}}',
+                "package-lock.json": "old host resolution",
+            }
+            payload = archive(host)
+            self.assertFalse(sync.sync_config(root, payload, "1.19.5"))
+            config = root / ".config/opencode"
+            effective = json.loads((config / "package.json").read_text())
+            self.assertEqual(
+                effective["dependencies"],
+                {"@opencode-ai/plugin": "1.19.5", "custom": "2"},
+            )
+            self.assertFalse((config / "package-lock.json").exists())
+            self.assertIn("1.15.11", host["package.json"])
+
+    def test_cold_sync_keeps_lock_for_matching_sdk(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            host = {
+                "package.json": '{"dependencies":{"@opencode-ai/plugin":"1.19.5"}}',
+                "package-lock.json": "matching resolution",
+            }
+            sync.sync_config(root, archive(host), "1.19.5")
+            self.assertEqual(
+                (root / ".config/opencode/package-lock.json").read_text(),
+                "matching resolution",
+            )
+
     def test_unchanged_dependencies_survive_but_stale_plugins_are_removed(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
@@ -48,7 +79,12 @@ class ConfigCacheTests(unittest.TestCase):
             (config / "package.json").write_text(manifest)
             (modules / "cached").write_text("already installed")
             (config / "stale-plugin.ts").write_text("do not load again")
-            sync.sync_config(root, archive({"package.json": manifest, "plugins/current.ts": "current plugin"}))
+            sync.sync_config(
+                root,
+                archive(
+                    {"package.json": manifest, "plugins/current.ts": "current plugin"}
+                ),
+            )
             self.assertEqual((modules / "cached").read_text(), "already installed")
             self.assertFalse((config / "stale-plugin.ts").exists())
             self.assertTrue((config / "plugins/current.ts").is_file())
@@ -60,7 +96,9 @@ class ConfigCacheTests(unittest.TestCase):
             (config / "node_modules").mkdir(parents=True)
             (config / "package.json").write_text('{"dependencies":{"old":"1"}}')
             (config / "node_modules/cached").write_text("old")
-            sync.sync_config(root, archive({"package.json": '{"dependencies":{"new":"2"}}'}))
+            sync.sync_config(
+                root, archive({"package.json": '{"dependencies":{"new":"2"}}'})
+            )
             self.assertFalse((config / "node_modules").exists())
 
     def test_unsafe_archive_does_not_remove_existing_config(self):
@@ -82,14 +120,22 @@ class ConfigCacheTests(unittest.TestCase):
             (config / "package.json").write_text(manifest)
             (config / "package-lock.json").write_text("old resolution")
             (config / "node_modules/cached").write_text("old")
-            sync.sync_config(root, archive({"package.json": manifest, "package-lock.json": "new resolution"}))
+            sync.sync_config(
+                root,
+                archive(
+                    {"package.json": manifest, "package-lock.json": "new resolution"}
+                ),
+            )
             self.assertFalse((config / "node_modules").exists())
 
     def test_warm_sync_preserves_runtime_generated_sdk_and_lock(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             config = root / ".config/opencode"
-            host = {"package.json": '{"dependencies":{"@opencode-ai/plugin":"1.15.11"}}', "package-lock.json": '{"host":"old sdk lock"}'}
+            host = {
+                "package.json": '{"dependencies":{"@opencode-ai/plugin":"1.15.11"}}',
+                "package-lock.json": '{"host":"old sdk lock"}',
+            }
             self.assertFalse(sync.sync_config(root, archive(host), "1.19.5"))
             # Mainline upgrades the SDK, manifest, and lock after the first sync.
             runtime = '{"dependencies":{"@opencode-ai/plugin":"1.19.5"}}'
@@ -101,7 +147,9 @@ class ConfigCacheTests(unittest.TestCase):
             self.assertTrue(sync.sync_config(root, archive(host), "1.19.5"))
             self.assertEqual((config / "package.json").read_text(), runtime)
             self.assertEqual((config / "package-lock.json").read_text(), lock)
-            self.assertEqual((config / "node_modules/cached").read_text(), "already installed")
+            self.assertEqual(
+                (config / "node_modules/cached").read_text(), "already installed"
+            )
             # Warm sync must remain idempotent over many launches.
             self.assertTrue(sync.sync_config(root, archive(host), "1.19.5"))
 
@@ -112,18 +160,30 @@ class ConfigCacheTests(unittest.TestCase):
             plugin = config / "node_modules/@opencode-ai/plugin"
             plugin.mkdir(parents=True)
             (plugin / "package.json").write_text('{"version":"1.19.5"}')
-            (config / "package.json").write_text('{"dependencies":{"@opencode-ai/plugin":"1.19.5"}}')
+            (config / "package.json").write_text(
+                '{"dependencies":{"@opencode-ai/plugin":"1.19.5"}}'
+            )
             (config / "package-lock.json").write_text('{"container":"generated"}')
-            host = {"package.json": '{"dependencies":{"@opencode-ai/plugin":"1.15.11"}}'}
+            host = {
+                "package.json": '{"dependencies":{"@opencode-ai/plugin":"1.15.11"}}'
+            }
             self.assertTrue(sync.sync_config(root, archive(host), "1.19.5"))
             self.assertTrue(plugin.is_dir())
-            self.assertEqual(json.loads((config / "package.json").read_text())["dependencies"]["@opencode-ai/plugin"], "1.19.5")
+            self.assertEqual(
+                json.loads((config / "package.json").read_text())["dependencies"][
+                    "@opencode-ai/plugin"
+                ],
+                "1.19.5",
+            )
 
     def test_source_lock_change_invalidates_previously_recorded_cache(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
             config = root / ".config/opencode"
-            host = {"package.json": '{"dependencies":{"example":"^1"}}', "package-lock.json": "old resolution"}
+            host = {
+                "package.json": '{"dependencies":{"example":"^1"}}',
+                "package-lock.json": "old resolution",
+            }
             sync.sync_config(root, archive(host), "1.19.5")
             (config / "node_modules").mkdir()
             host["package-lock.json"] = "new resolution"
@@ -133,7 +193,9 @@ class ConfigCacheTests(unittest.TestCase):
     def test_runtime_upgrade_invalidates_previously_recorded_cache(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
-            host = {"package.json": '{"dependencies":{"@opencode-ai/plugin":"1.15.11"}}'}
+            host = {
+                "package.json": '{"dependencies":{"@opencode-ai/plugin":"1.15.11"}}'
+            }
             sync.sync_config(root, archive(host), "1.19.5")
             modules = root / ".config/opencode/node_modules"
             modules.mkdir()
@@ -147,8 +209,12 @@ class ConfigCacheTests(unittest.TestCase):
             plugin = config / "node_modules/@opencode-ai/plugin"
             plugin.mkdir(parents=True)
             (plugin / "package.json").write_text('{"version":"1.19.5"}')
-            (config / "package.json").write_text('{"dependencies":{"@opencode-ai/plugin":"1.19.5","custom":"1"}}')
-            host = {"package.json": '{"dependencies":{"@opencode-ai/plugin":"1.15.11","custom":"2"}}'}
+            (config / "package.json").write_text(
+                '{"dependencies":{"@opencode-ai/plugin":"1.19.5","custom":"1"}}'
+            )
+            host = {
+                "package.json": '{"dependencies":{"@opencode-ai/plugin":"1.15.11","custom":"2"}}'
+            }
             self.assertFalse(sync.sync_config(root, archive(host), "1.19.5"))
             self.assertFalse(plugin.exists())
 
@@ -175,7 +241,14 @@ class StartupProgressTests(unittest.TestCase):
 
     def test_terminal_setup_is_not_mistaken_for_rendered_ui(self):
         detector = ui.VisibleOutput()
-        for chunk in (b"\x1b[?1049h\x1b[", b"2J\x1b[38;2;0;0;0m  \r\n", b"\x1b]0;OpenCode", b"\x07", b"\x1bP+q544e\x1b", b"\\"):
+        for chunk in (
+            b"\x1b[?1049h\x1b[",
+            b"2J\x1b[38;2;0;0;0m  \r\n",
+            b"\x1b]0;OpenCode",
+            b"\x07",
+            b"\x1bP+q544e\x1b",
+            b"\\",
+        ):
             self.assertFalse(detector.feed(chunk))
         self.assertTrue(detector.feed("OpenCode ▀".encode()))
 
@@ -213,7 +286,12 @@ class StartupProgressTests(unittest.TestCase):
             "time.sleep(0.15); os.write(1,b'\\x1b[?1049l')"
         )
         relay = "import sys; sys.path.insert(0,sys.argv[1]); from terminal_ui import run_tui; sys.exit(run_tui([sys.executable,'-c',sys.argv[2]],refresh=0.03))"
-        process = subprocess.Popen([sys.executable, "-B", "-c", relay, str(APP), fixture], stdin=slave, stdout=slave, stderr=slave)
+        process = subprocess.Popen(
+            [sys.executable, "-B", "-c", relay, str(APP), fixture],
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+        )
         output = bytearray()
         sent = False
         try:
@@ -223,7 +301,9 @@ class StartupProgressTests(unittest.TestCase):
                 if ready:
                     output.extend(os.read(master, 65536))
                 if b"UI_READY" in output and not sent:
-                    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0))
+                    fcntl.ioctl(
+                        slave, termios.TIOCSWINSZ, struct.pack("HHHH", 32, 120, 0, 0)
+                    )
                     os.kill(process.pid, signal.SIGWINCH)
                     time.sleep(0.05)
                     os.write(master, b"z")

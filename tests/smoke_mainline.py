@@ -24,19 +24,31 @@ APP = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("oc_box", APP / "oc_box.py")
 box = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(box)
-sync_spec = importlib.util.spec_from_file_location("sync_config", APP / "sync_config.py")
+sync_spec = importlib.util.spec_from_file_location(
+    "sync_config", APP / "sync_config.py"
+)
 sync = importlib.util.module_from_spec(sync_spec)
 sync_spec.loader.exec_module(sync)
 
 
 def bounded(command, *, env, cwd, timeout=45):
-    process = subprocess.Popen(command, env={**env, "PWD": str(cwd)}, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    process = subprocess.Popen(
+        command,
+        env={**env, "PWD": str(cwd)},
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
     try:
         out, err = process.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         os.killpg(process.pid, signal.SIGKILL)
         out, err = process.communicate(timeout=5)
-        raise AssertionError(f"Smoke test stopped after {timeout}s. Last output:\n{out[-2000:]}\n{err[-2000:]}")
+        raise AssertionError(
+            f"Smoke test stopped after {timeout}s. Last output:\n{out[-2000:]}\n{err[-2000:]}"
+        )
     assert process.returncode == 0, out[-4000:] + err[-4000:]
     return out, err
 
@@ -61,13 +73,23 @@ def warm_start_regression(root, env, project):
             archive.addfile(member, io.BytesIO(data))
     payload = incoming.getvalue()
     sync.sync_config(home, payload, version)
+    assert (
+        json.loads((config / "package.json").read_text())["dependencies"][
+            plugin_package
+        ]
+        == version
+    )
     # Simulate the config directory produced after first mainline SDK install.
     package = config / "node_modules" / plugin_package
     package.mkdir(parents=True)
-    (package / "package.json").write_text(json.dumps({"name": plugin_package, "version": version, "type": "module"}))
+    (package / "package.json").write_text(
+        json.dumps({"name": plugin_package, "version": version, "type": "module"})
+    )
     manifest = {"dependencies": {plugin_package: version}}
     (config / "package.json").write_text(json.dumps(manifest))
-    (config / "package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": {"": manifest}}))
+    (config / "package-lock.json").write_text(
+        json.dumps({"lockfileVersion": 3, "packages": {"": manifest}})
+    )
     requests = []
 
     class Registry(BaseHTTPRequestHandler):
@@ -94,15 +116,28 @@ def warm_start_regression(root, env, project):
     try:
         durations = []
         for _ in range(2):
-            assert sync.sync_config(home, payload, version), "Warm startup invalidated the generated SDK cache"
+            assert sync.sync_config(home, payload, version), (
+                "Warm startup invalidated the generated SDK cache"
+            )
             marker.unlink(missing_ok=True)
             started = time.monotonic()
-            bounded(["opencode", "debug", "agent", "build"], env=warm_env, cwd=project, timeout=20)
+            bounded(
+                ["opencode", "debug", "agent", "build"],
+                env=warm_env,
+                cwd=project,
+                timeout=20,
+            )
             durations.append(time.monotonic() - started)
             assert marker.is_file(), "The enabled external plugin did not initialize"
             assert json.loads((config / "package.json").read_text()) == manifest
-        assert not requests, f"Warm mainline startup unexpectedly contacted npm: {requests}"
-        print("PASS: two warm native plugin startups with an older source SDK and zero npm requests (" + ", ".join(f"{seconds:.2f}s" for seconds in durations) + ").")
+        assert not requests, (
+            f"Warm mainline startup unexpectedly contacted npm: {requests}"
+        )
+        print(
+            "PASS: two warm native plugin startups with an older source SDK and zero npm requests ("
+            + ", ".join(f"{seconds:.2f}s" for seconds in durations)
+            + ")."
+        )
     finally:
         server.shutdown()
         server.server_close()
@@ -127,16 +162,35 @@ def session_import_regression(root, env, project, ident):
     def local_exec(_data, command, **_kwargs):
         return [sys.executable, "-c", trampoline, json.dumps(child_env), *command]
 
-    with patch.object(box, "host_cli_env", return_value=host), patch.object(box, "CONTAINER_OPENCODE", executable), patch.object(box, "exec_command", side_effect=local_exec):
+    with (
+        patch.object(box, "host_cli_env", return_value=host),
+        patch.object(box, "CONTAINER_OPENCODE", executable),
+        patch.object(box, "exec_command", side_effect=local_exec),
+    ):
         source = box.export_host_session(registry, data, ident)
         # Exercise the multi-MiB export/transfer path without another model call.
         large = json.loads(json.dumps(source))
-        text = next(part for message in large["messages"] for part in message["parts"] if part.get("type") == "text")
+        text = next(
+            part
+            for message in large["messages"]
+            for part in message["parts"]
+            if part.get("type") == "text"
+        )
         text["text"] += "\n" + "transfer regression " * 140000
         fixture = root / "large-source.json"
         box.atomic_json(fixture, large)
-        bounded(["opencode", "--pure", "session", "delete", ident], env=host, cwd=project, timeout=15)
-        bounded(["opencode", "--pure", "import", str(fixture)], env=host, cwd=project, timeout=15)
+        bounded(
+            ["opencode", "--pure", "session", "delete", ident],
+            env=host,
+            cwd=project,
+            timeout=15,
+        )
+        bounded(
+            ["opencode", "--pure", "import", str(fixture)],
+            env=host,
+            cwd=project,
+            timeout=15,
+        )
         source = box.export_host_session(registry, data, ident)
         assert len(json.dumps(source)) > 2_000_000
         recorded = box.import_host_session(registry, data, source)
@@ -147,12 +201,23 @@ def session_import_regression(root, env, project, ident):
         except box.BoxError as exc:
             assert "not overwritten" in str(exc), exc
         else:
-            raise AssertionError("Duplicate host import overwrote the container session")
-        assert box.export_host_session(registry, data, ident) == source, "Host source changed during transfer"
+            raise AssertionError(
+                "Duplicate host import overwrote the container session"
+            )
+        assert box.export_host_session(registry, data, ident) == source, (
+            "Host source changed during transfer"
+        )
         copied = box.export_container_session(data, ident)
         assert copied["messages"] == source["messages"]
-        bounded([executable, "--pure", "run", "--session", ident, "Finish without tools."], env={**env, "XDG_DATA_HOME": isolated["XDG_DATA_HOME"]}, cwd=project, timeout=20)
-    print("PASS: host-to-container import (>2 MB), full transcript verification, duplicate protection, and imported-session resume.")
+        bounded(
+            [executable, "--pure", "run", "--session", ident, "Finish without tools."],
+            env={**env, "XDG_DATA_HOME": isolated["XDG_DATA_HOME"]},
+            cwd=project,
+            timeout=20,
+        )
+    print(
+        "PASS: host-to-container import (>2 MB), full transcript verification, duplicate protection, and imported-session resume."
+    )
 
 
 def main():
@@ -160,7 +225,11 @@ def main():
         root = Path(directory)
         project = root / "project"
         project.mkdir()
-        env = {key: value for key, value in os.environ.items() if not key.startswith(("OPENCODE_", "OC_BOX_"))}
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if not key.startswith(("OPENCODE_", "OC_BOX_"))
+        }
         for kind in ("config", "data", "cache", "state"):
             env["XDG_" + kind.upper() + "_HOME"] = str(root / kind)
         env["OPENCODE_TEST_HOME"] = str(root / "empty-home")
@@ -180,34 +249,86 @@ def main():
 
             def do_POST(self):
                 try:
-                    request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                    request = json.loads(
+                        self.rfile.read(int(self.headers["Content-Length"]))
+                    )
                     requests.append(request)
-                    tools = {item["function"]["name"]: item["function"] for item in request.get("tools", [])}
-                    completed = sum(item.get("role") == "tool" for item in request.get("messages", []))
+                    tools = {
+                        item["function"]["name"]: item["function"]
+                        for item in request.get("tools", [])
+                    }
+                    completed = sum(
+                        item.get("role") == "tool"
+                        for item in request.get("messages", [])
+                    )
                     # Every response completes successfully; no assertion causes
                     # a dropped connection/retry loop in the fake provider.
                     delta, finish = {"content": "Smoke test complete"}, "stop"
                     if tools and len(requests) <= 10 and completed < 3:
                         if completed == 0:
-                            name, args = "write", {"filePath": str(target), "content": "hello formatter\n"}
+                            name, args = (
+                                "write",
+                                {
+                                    "filePath": str(target),
+                                    "content": "hello formatter\n",
+                                },
+                            )
                         elif completed == 1:
                             name, args = "read", {"filePath": str(target)}
                         else:
-                            name = next((name for name in tools if name.endswith("_ping")), "MISSING_MCP")
+                            name = next(
+                                (name for name in tools if name.endswith("_ping")),
+                                "MISSING_MCP",
+                            )
                             args = {}
                         if name not in tools:
-                            failures.append(f"Native tool {name} missing from catalog: {list(tools)}")
+                            failures.append(
+                                f"Native tool {name} missing from catalog: {list(tools)}"
+                            )
                         else:
-                            delta = {"tool_calls": [{"index": 0, "id": f"call_smoke_{completed}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]}
+                            delta = {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": f"call_smoke_{completed}",
+                                        "type": "function",
+                                        "function": {
+                                            "name": name,
+                                            "arguments": json.dumps(args),
+                                        },
+                                    }
+                                ]
+                            }
                             finish = "tool_calls"
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
                     self.end_headers()
                     for value in (
-                        {"id": "chatcmpl-smoke", "object": "chat.completion.chunk", "model": "gpt-4-smoke", "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
-                        {"id": "chatcmpl-smoke", "object": "chat.completion.chunk", "model": "gpt-4-smoke", "choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+                        {
+                            "id": "chatcmpl-smoke",
+                            "object": "chat.completion.chunk",
+                            "model": "gpt-4-smoke",
+                            "choices": [
+                                {"index": 0, "delta": delta, "finish_reason": None}
+                            ],
+                        },
+                        {
+                            "id": "chatcmpl-smoke",
+                            "object": "chat.completion.chunk",
+                            "model": "gpt-4-smoke",
+                            "choices": [
+                                {"index": 0, "delta": {}, "finish_reason": finish}
+                            ],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2,
+                            },
+                        },
                     ):
-                        self.wfile.write(("data: " + json.dumps(value) + "\n\n").encode())
+                        self.wfile.write(
+                            ("data: " + json.dumps(value) + "\n\n").encode()
+                        )
                     self.wfile.write(b"data: [DONE]\n\n")
                 except (BrokenPipeError, ConnectionResetError):
                     pass
@@ -217,22 +338,73 @@ def main():
         thread.start()
         config = {
             "$schema": "https://opencode.ai/config.json",
-            "model": "oc-box-smoke/gpt-4-smoke", "permission": "allow",
+            "model": "oc-box-smoke/gpt-4-smoke",
+            "permission": "allow",
             "snapshot": False,
-            "provider": {"oc-box-smoke": {
-                "npm": "@ai-sdk/openai-compatible", "name": "Smoke",
-                "options": {"baseURL": f"http://127.0.0.1:{server.server_port}/v1", "apiKey": "test"},
-                "models": {"gpt-4-smoke": {"name": "Smoke", "limit": {"context": 32000, "output": 2000}}},
-            }},
-            "mcp": {"fixture": {"type": "local", "command": ["python3", service, "mcp", str(logs["mcp"])]}},
-            "formatter": {"fixture": {"command": ["python3", service, "format", str(logs["formatter"]), "$FILE"], "extensions": [".py"]}},
-            "lsp": {"pyright": {"disabled": True}, "fixture": {"command": ["python3", service, "lsp", str(logs["lsp"])], "extensions": [".py"]}},
+            "provider": {
+                "oc-box-smoke": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "Smoke",
+                    "options": {
+                        "baseURL": f"http://127.0.0.1:{server.server_port}/v1",
+                        "apiKey": "test",
+                    },
+                    "models": {
+                        "gpt-4-smoke": {
+                            "name": "Smoke",
+                            "limit": {"context": 32000, "output": 2000},
+                        }
+                    },
+                }
+            },
+            "mcp": {
+                "fixture": {
+                    "type": "local",
+                    "command": ["python3", service, "mcp", str(logs["mcp"])],
+                }
+            },
+            "formatter": {
+                "fixture": {
+                    "command": [
+                        "python3",
+                        service,
+                        "format",
+                        str(logs["formatter"]),
+                        "$FILE",
+                    ],
+                    "extensions": [".py"],
+                }
+            },
+            "lsp": {
+                "pyright": {"disabled": True},
+                "fixture": {
+                    "command": ["python3", service, "lsp", str(logs["lsp"])],
+                    "extensions": [".py"],
+                },
+            },
         }
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
         try:
-            resolved, _ = bounded(["opencode", "--pure", "debug", "config"], env=env, cwd=project, timeout=15)
+            resolved, _ = bounded(
+                ["opencode", "--pure", "debug", "config"],
+                env=env,
+                cwd=project,
+                timeout=15,
+            )
             assert "fixture" in json.loads(resolved)["lsp"], resolved[-3000:]
-            out, err = bounded(["opencode", "--pure", "run", "--model", "oc-box-smoke/gpt-4-smoke", "Write and read example.py, then call fixture ping."], env=env, cwd=project, timeout=50)
+            out, err = bounded(
+                [
+                    "opencode",
+                    "--pure",
+                    "run",
+                    "--model",
+                    "oc-box-smoke/gpt-4-smoke",
+                    "Write and read example.py, then call fixture ping.",
+                ],
+                env=env,
+                cwd=project,
+                timeout=50,
+            )
             assert not failures, failures
             assert target.is_file(), out[-2000:] + err[-2000:]
             assert target.read_text() == "HELLO FORMATTER\n", target.read_text()
@@ -240,31 +412,82 @@ def main():
             mcp = [json.loads(line) for line in logs["mcp"].read_text().splitlines()]
             assert any(item.get("method") == "tools/call" for item in mcp), mcp
             if not logs["lsp"].exists():
-                recent = "\n".join(file.read_text()[-5000:] for file in (root / "data/opencode/log").glob("*"))
-                raise AssertionError("LSP fixture did not start. CLI output:\n" + out[-2000:] + err[-2000:] + "\nLogs:\n" + recent[-7000:])
+                recent = "\n".join(
+                    file.read_text()[-5000:]
+                    for file in (root / "data/opencode/log").glob("*")
+                )
+                raise AssertionError(
+                    "LSP fixture did not start. CLI output:\n"
+                    + out[-2000:]
+                    + err[-2000:]
+                    + "\nLogs:\n"
+                    + recent[-7000:]
+                )
             lsp = [json.loads(line) for line in logs["lsp"].read_text().splitlines()]
             assert any(item.get("method") == "initialize" for item in lsp), lsp
-            assert any(item.get("method") == "textDocument/didOpen" for item in lsp), lsp
-            print("PASS: native file write/read, automatic formatter, LSP initialize/didOpen, and MCP tool call.")
-            listing, _ = bounded(["opencode", "--pure", "session", "list", "--format", "json"], env=env, cwd=project, timeout=15)
+            assert any(item.get("method") == "textDocument/didOpen" for item in lsp), (
+                lsp
+            )
+            print(
+                "PASS: native file write/read, automatic formatter, LSP initialize/didOpen, and MCP tool call."
+            )
+            listing, _ = bounded(
+                ["opencode", "--pure", "session", "list", "--format", "json"],
+                env=env,
+                cwd=project,
+                timeout=15,
+            )
             sessions = json.loads(listing)
             ident = sessions[0]["id"]
-            exported, _ = bounded(["opencode", "--pure", "export", ident], env=env, cwd=project, timeout=15)
-            archived = box.archive_session(json.loads(exported), {"id": "a" * 32, "project": str(project)})
+            exported, _ = bounded(
+                ["opencode", "--pure", "export", ident],
+                env=env,
+                cwd=project,
+                timeout=15,
+            )
+            archived = box.archive_session(
+                json.loads(exported), {"id": "a" * 32, "project": str(project)}
+            )
             archive = root / "archive.json"
             box.atomic_json(archive, archived)
             host = dict(env)
             host.pop("OPENCODE_CONFIG_CONTENT")
             host["XDG_DATA_HOME"] = str(root / "host-data")
-            bounded(["opencode", "--pure", "import", str(archive)], env=host, cwd=project, timeout=15)
-            copied, _ = bounded(["opencode", "--pure", "export", archived["info"]["id"]], env=host, cwd=project, timeout=15)
+            bounded(
+                ["opencode", "--pure", "import", str(archive)],
+                env=host,
+                cwd=project,
+                timeout=15,
+            )
+            copied, _ = bounded(
+                ["opencode", "--pure", "export", archived["info"]["id"]],
+                env=host,
+                cwd=project,
+                timeout=15,
+            )
             assert len(json.loads(copied)["messages"]) == len(archived["messages"])
             # Resume the same native session without requiring another tool call.
-            bounded(["opencode", "--pure", "run", "--session", ident, "Finish without tools."], env=env, cwd=project, timeout=20)
-            print("PASS: session export/import into a separate host-style database, and exact-session resume.")
+            bounded(
+                [
+                    "opencode",
+                    "--pure",
+                    "run",
+                    "--session",
+                    ident,
+                    "Finish without tools.",
+                ],
+                env=env,
+                cwd=project,
+                timeout=20,
+            )
+            print(
+                "PASS: session export/import into a separate host-style database, and exact-session resume."
+            )
             session_import_regression(root, env, project, ident)
             warm_start_regression(root, env, project)
-            print("All app data was temporary. Live Podman isolation remains a separate host-terminal check.")
+            print(
+                "All app data was temporary. Live Podman isolation remains a separate host-terminal check."
+            )
         finally:
             server.shutdown()
             server.server_close()

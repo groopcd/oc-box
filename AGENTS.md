@@ -43,3 +43,8 @@ the automated integration checks use offline fixtures.
 
 The host-terminal warm-start test is now effectively instant after retaining
 the container-generated plugin SDK manifest, lockfiles, and dependency cache.
+
+This development conversation has been imported into its project container.
+The initial SELinux project-label issue was repaired from the host. A native
+warm plugin-initialization probe in the container completed in under one second.
+New mounts use `:z`, and cold plugin resolution is timed before opening the TUI.
