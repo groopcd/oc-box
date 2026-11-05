@@ -93,6 +93,7 @@ oc-box --status                     # CPU, RAM, storage, state, limits, sessions
 oc-box --status --project ~/devel/demo --json
 oc-box distros                      # Supported images and host default
 oc-box stop --project ~/devel/demo
+oc-box terminal --project ~/devel/demo # Maintenance shell, without OpenCode
 oc-box sync --project ~/devel/demo   # Retry host history sync after a crash
 oc-box repair --project ~/devel/demo # Accept a verified directory identity change
 oc-box reset --project ~/devel/demo --cpus 8 --memory 16g
@@ -110,6 +111,7 @@ or stop containers and can run while OpenCode is active.
 | --- | --- | --- | --- |
 | Exit or `stop` | Kept | Kept | Kept, stopped |
 | `sync` | Kept | Kept; host archive refreshed | Kept, stopped |
+| `terminal` | Kept | Kept; no history sync | Kept, prior run state restored |
 | `reset` | Kept | Kept | Rebuilt |
 | `purge` | Kept | Deleted | Deleted |
 | `purge --all` | **Deleted** | **Deleted** | Deleted |
@@ -123,6 +125,29 @@ not reservations. Defaults are 4 CPU cores, 8 GiB RAM, and 2048 processes.
 Purge asks for an ID-prefix confirmation. `--delete-sessions` additionally
 deletes recorded host archive copies; `--all` includes that action and deletes
 the project directory. Shared image caches and unrelated resources remain.
+
+### Maintenance and debugging
+
+After exiting the workspace's OpenCode client, enter its existing container:
+
+```sh
+oc-box terminal --project ~/devel/demo
+# Or, from another directory:
+oc-box terminal --workspace WORKSPACE_ID
+```
+
+This opens a clean interactive shell at the project path, with the same mounts,
+devices, limits, and rootless permissions. Type `exit` or Ctrl-D to leave. A
+container started by this command is stopped on exit; one already running is
+left running. No OpenCode launch, configuration refresh, dependency install,
+session import/sync, or environment recreation occurs.
+
+Host tokens, API keys, custom `pass_env`, proxies, and agent variables are not
+forwarded. The shell's environment is cleared, startup files are skipped, and
+history persistence is disabled. Credentials already stored in the container's
+files or held by its other processes remain accessible: a maintenance shell is
+not isolation from the existing container. It requires a real terminal and the
+workspace's exclusive lock, so exit an active OpenCode launcher first.
 
 ### Directory recovery and duplicate detection
 

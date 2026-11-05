@@ -229,12 +229,18 @@ def podman(*args, **kwargs):
     return run(["podman", *args], **kwargs)
 
 
-def check_backend():
+def check_backend(*, env=None):
     if os.geteuid() == 0:
         raise BoxError(
             "Run oc-box as your regular user, without sudo (rootless Podman is required)."
         )
-    result = podman("info", "--format", "{{.Host.Security.Rootless}}", capture=True)
+    result = podman(
+        "info",
+        "--format",
+        "{{.Host.Security.Rootless}}",
+        capture=True,
+        **({"env": env} if env is not None else {}),
+    )
     if result.stdout.strip() != "true":
         raise BoxError("Podman is not operating rootlessly.")
 
@@ -466,13 +472,19 @@ def repair_workspace(path, data):
     )
 
 
-def inspect_owned(data):
+def inspect_owned(data, *, env=None):
+    options = {"env": env} if env is not None else {}
     result = podman(
-        "container", "inspect", data["container"], capture=True, check=False
+        "container", "inspect", data["container"], capture=True, check=False, **options
     )
     if result.returncode:
         exists = podman(
-            "container", "exists", data["container"], capture=True, check=False
+            "container",
+            "exists",
+            data["container"],
+            capture=True,
+            check=False,
+            **options,
         )
         if exists.returncode == 1:
             return None
@@ -779,10 +791,11 @@ def start_container(path, data):
         )
 
 
-def stop_container(data):
-    info = inspect_owned(data)
+def stop_container(data, *, env=None):
+    options = {"env": env} if env is not None else {}
+    info = inspect_owned(data, **options)
     if info and info["State"]["Running"]:
-        podman("stop", "--time", "10", data["container"], capture=True)
+        podman("stop", "--time", "10", data["container"], capture=True, **options)
 
 
 def session_file(path):
@@ -908,6 +921,117 @@ class ContainerCommand(list):
     def __init__(self, arguments, environment):
         super().__init__(arguments)
         self.environment = environment
+
+
+def maintenance_host_env():
+    """Only host runtime/storage discovery settings needed by rootless Podman.
+
+    Do not copy the whole host environment and subtract known token names:
+    custom secrets, shell/loader hooks, proxies, and pass_env must be excluded.
+    """
+    names = (
+        "HOME",
+        "PATH",
+        "USER",
+        "LOGNAME",
+        "XDG_RUNTIME_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "TMPDIR",
+    )
+    return {key: os.environ[key] for key in names if key in os.environ}
+
+
+def maintenance_command(data):
+    # env -i also clears secrets stored in the container's create-time Env.
+    # HOME is the private volume, not host storage. No shell/profile hooks run.
+    term = os.environ.get("TERM", "xterm-256color")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9+_.-]{0,63}", term):
+        term = "xterm-256color"
+    variables = {
+        "HOME": data["home"],
+        "PWD": data["project"],
+        "TERM": term,
+        "PATH": "/opt/oc-box/runtime/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SHELL": "/bin/bash",
+        "LANG": "C.UTF-8",
+        "OC_BOX_CONTAINER": "1",
+        "HISTFILE": "/dev/null",
+        "HISTSIZE": "0",
+        "HISTFILESIZE": "0",
+    }
+    shell = r"if [ -x /bin/bash ]; then PS1='[oc-box \u@\h \W] \$ '; export PS1; exec /bin/bash --noprofile --norc -i; else PS1='[oc-box] $ '; export PS1; exec /bin/sh -i; fi"
+    return ContainerCommand(
+        [
+            "podman",
+            "exec",
+            "-i",
+            "-t",
+            "--workdir",
+            data["project"],
+            data["container"],
+            "/usr/bin/env",
+            "-i",
+            *(f"{key}={value}" for key, value in variables.items()),
+            "/bin/sh",
+            "-c",
+            shell,
+        ],
+        maintenance_host_env(),
+    )
+
+
+def maintenance_terminal(path, data):
+    """Hold the workspace lock; start only an existing container, not setup."""
+    from terminal_ui import run_tui as relay
+
+    project = validate_project(data["project"])
+    selected, _ = find_workspace(project)
+    if selected != path:
+        raise BoxError(
+            "Project marker does not match the selected workspace; refusing maintenance access to a stale environment."
+        )
+    environment = maintenance_host_env()
+    info = inspect_owned(data, env=environment)
+    if info is None:
+        raise BoxError(
+            "Workspace container is missing. 'oc-box terminal' never creates a replacement; use a normal oc-box launch to recreate it explicitly."
+        )
+    if not any(
+        mount.get("Destination") == data["project"]
+        and mount.get("Source") == data["project"]
+        for mount in info.get("Mounts", [])
+    ):
+        raise BoxError("Container workspace mount does not match the host registry.")
+    if info["State"].get("Paused"):
+        raise BoxError(
+            "Container is paused; unpause it from the host before opening a terminal."
+        )
+    was_running = bool(info["State"]["Running"])
+    try:
+        if not was_running:
+            with loading_stage("Starting existing container for maintenance"):
+                podman(
+                    "start",
+                    data["container"],
+                    capture=True,
+                    env=environment,
+                    timeout=60,
+                )
+        print(
+            f"oc-box: Maintenance terminal in {data['container']} at {data['project']}.\n"
+            "Host credentials are not forwarded; startup files and shell history are disabled. Type 'exit' to leave.",
+            flush=True,
+        )
+        command = maintenance_command(data)
+        return relay(command, env=command.environment, show_loading=False)
+    finally:
+        if not was_running:
+            with loading_stage("Stopping maintenance container"):
+                stop_container(data, env=environment)
 
 
 def exec_command(data, command, *, interactive=False):
@@ -1775,6 +1899,7 @@ def parser():
             "sync",
             "reset",
             "repair",
+            "terminal",
             "purge",
             "list",
             "distros",
@@ -1968,7 +2093,7 @@ def main(argv=None):
             )
         return report_status(args)
     args.project = args.project or Path.cwd()
-    if args.command == "repair" and (
+    if args.command in ("repair", "terminal") and (
         args.new
         or args.resume
         or args.import_session
@@ -1982,7 +2107,16 @@ def main(argv=None):
         or args.clear_devices
         or args.clear_podman_args
     ):
-        raise BoxError("Repair accepts only --project or --workspace selectors.")
+        raise BoxError(
+            f"{args.command.capitalize()} accepts only --project or --workspace selectors."
+        )
+    if args.command == "terminal":
+        if args.all or args.delete_sessions or args.yes:
+            raise BoxError("Terminal accepts only --project or --workspace selectors.")
+        if not sys.stdin.isatty() or not sys.stdout.isatty():
+            raise BoxError(
+                "'oc-box terminal' requires an interactive host terminal (TTY); redirected or piped input/output is not accepted."
+            )
     if args.device or args.podman_arg or args.clear_devices or args.clear_podman_args:
         if args.command not in ("start", "reset"):
             raise BoxError("Device and Podman options apply only to start/reset.")
@@ -2040,7 +2174,9 @@ def main(argv=None):
     if args.command != "purge" and (args.all or args.delete_sessions or args.yes):
         raise BoxError("--all, --delete-sessions, and --yes apply only to purge.")
     with loading_stage("Checking rootless Podman"):
-        check_backend()
+        check_backend(
+            **({"env": maintenance_host_env()} if args.command == "terminal" else {})
+        )
     state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
     path, data = find_workspace(
         args.project, args.workspace, allow_identity_change=args.command == "repair"
@@ -2067,6 +2203,8 @@ def main(argv=None):
         print("Container stopped; files, packages, and conversations retained.")
         return 0
     with workspace_lock(path):
+        if args.command == "terminal":
+            return maintenance_terminal(path, data)
         if args.command == "repair":
             repair_workspace(path, data)
             return 0

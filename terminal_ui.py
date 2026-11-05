@@ -66,7 +66,9 @@ def write_all(fd, content):
         view = view[count:]
 
 
-def run_tui(command, *, env=None, input_fd=None, output_fd=None, refresh=1.0):
+def run_tui(
+    command, *, env=None, input_fd=None, output_fd=None, refresh=1.0, show_loading=True
+):
     """Preserve terminal queries/input/resize; stop drawing at first UI text.
 
     No background writer ever touches a running OpenCode screen. The relay is
@@ -116,7 +118,7 @@ def run_tui(command, *, env=None, input_fd=None, output_fd=None, refresh=1.0):
             return process.wait()
 
         detector = VisibleOutput()
-        loading = True
+        loading = show_loading
         banner_drawn = False
         started = time.monotonic()
         next_update = started

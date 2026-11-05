@@ -31,6 +31,17 @@ quota, so project, image, and volume growth can exhaust host disk space.
 
 ## Host-side operations
 
+`oc-box terminal` opens a maintenance shell without copying auth/config or
+forwarding host tokens, API keys, custom `pass_env`, proxies, or agent sockets.
+Only allowlisted Podman runtime/storage environment names reach the host client.
+The shell uses `env -i`, skips startup profiles, and disables history persistence;
+it receives no additional mounts or capabilities. It holds the workspace lock,
+requires a real TTY and valid ownership/identity, and never creates a replacement
+container. Terminal restores the stopped/running state it observed on entry.
+This does not hide credentials previously stored in container files or held by
+other processes, and starting its existing entrypoint can retain create-time
+secrets. Treat that shell as the same trust domain as the container itself.
+
 Lifecycle commands run as the host user and manage only resources with the
 workspace's ownership label. Registry metadata and directory identities are
 stored outside the project. Directory replacement or marker copying must not

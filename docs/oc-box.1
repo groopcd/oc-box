@@ -13,6 +13,7 @@ oc\-box stop [\-\-project PATH | \-\-workspace ID]
 oc\-box sync [\-\-project PATH | \-\-workspace ID]
 oc\-box reset [\-\-project PATH | \-\-workspace ID] [RESET\-OPTIONS]
 oc\-box repair [\-\-project PATH | \-\-workspace ID]
+oc\-box terminal [\-\-project PATH | \-\-workspace ID]
 oc\-box purge [\-\-project PATH | \-\-workspace ID] [\-\-delete\-sessions | \-\-all] [\-y]
 oc\-box list
 oc\-box distros
@@ -69,6 +70,39 @@ An active oc\-box launcher holds a workspace lock, so exit it before syncing. Us
 .fam C
 oc\-box sync \-\-project ~/devel/demo
 oc\-box sync \-\-workspace WORKSPACE_ID
+.fam T
+.fi
+.SS terminal
+.PP
+Open an interactive maintenance shell in an existing workspace container instead of starting OpenCode. Select the current project, \fB\-\-project PATH\fR, or \fB\-\-workspace ID\fR\&. Only these selectors and help are accepted. Run from a real host terminal with TTY input/output; piped or redirected input/output is refused.
+.PP
+.nf
+.fam C
+oc\-box terminal
+oc\-box terminal \-\-project ~/devel/demo
+oc\-box terminal \-\-workspace WORKSPACE_ID
+.fam T
+.fi
+.PP
+Exit the active OpenCode launcher first: maintenance holds the same exclusive workspace lock as other lifecycle operations. This prevents a concurrent reset, purge, or normal launch. It verifies the original project identity, matching marker, container ownership, and project mount. It never creates a new workspace or container, reinstalls tools, refreshes configuration/auth, calls OpenCode, or synchronizes history. If the container is missing, use a normal launch to recreate it explicitly. A partially initialized but existing container can be entered for debugging without rerunning baseline downloads.
+.PP
+If the container is stopped, terminal starts it and stops it again on shell exit (including error/interrupt cleanup). If already running without an active launcher, it is left running. A paused container must be unpaused by the host operator first. Type \fBexit\fR or press Ctrl\-D to leave. Ctrl\-C interrupts shell commands; terminal sizing, input, and resize events are relayed normally. The command returns the maintenance shell/Podman exit code. The session IDs, source files, and private home are not changed by the launcher; your own shell commands can change them. Packages installed in the OS layer survive stop/start but not reset, just as when the AI installs them.
+.PP
+The shell runs with the container's existing user, devices, resource limits, mounts, and privileges; terminal adds no mounts or capabilities. Container root is still rootless on the host. It opens Bash with \fB\-\-noprofile \-\-norc \-i\fR, or \fB/\:bin/\:sh \-i\fR when Bash is unavailable. Shell startup files are not loaded, and history persistence is disabled (\fBHISTFILE=/\:dev/\:null\fR, history sizes zero).
+.PP
+Unlike a normal OpenCode launch, terminal does not forward API keys, tokens, custom \fBpass_env\fR, proxy variables, agent sockets, or shell/loader hooks. The Podman client receives only allowlisted host runtime/storage discovery settings; its child shell starts with \fBenv \-i\fR and a small fixed environment: the private HOME, project PWD, container PATH, validated TERM, Bash SHELL, \fBC.UTF\-8\fR locale, container marker, and history controls. Credentials are not put in arguments, printed, or copied into the container by this command.
+.PP
+This is maintenance access to the existing environment, not a second security boundary inside it. Previously copied auth/config files, secrets deliberately written to disk, and environments of other processes already in the container remain accessible under normal container permissions. To inspect environment variables, avoid posting unredacted output from unrelated running processes. Starting an existing container also resumes its configured entrypoint unchanged; terminal does not change create\-time environment or undo earlier exposure.
+.PP
+For example, after mapping an NPU in an earlier reset:
+.PP
+.nf
+.fam C
+oc\-box terminal \-\-project ~/devel/npu
+ls \-l /dev/accel/accel0
+prlimit \-\-pid $$ \-\-memlock
+xrt\-smi examine
+exit
 .fam T
 .fi
 .SS reset
@@ -301,6 +335,7 @@ Operation              Project   Private home/sessions   Container OS
 Exit OpenCode          kept      kept; archive sync     kept; stopped
 stop                   kept      kept                   kept; stopped
 sync                   kept      kept; archive sync     kept; stopped
+terminal               kept      kept; no archive sync  kept; prior run state
 reset                  kept      kept, same session ID  rebuilt
 purge                  kept      deleted                deleted
 purge \-\-delete\-sessions kept      deleted                deleted
@@ -310,7 +345,7 @@ purge \-\-all            deleted   deleted                deleted
 .PP
 Default purge retains host archive copies; \fB\-\-delete\-sessions\fR and \fB\-\-all\fR remove recorded host archive copies. Imported source host conversations remain. Shared base images are retained by all operations. Stop/reset do not checkpoint running processes. Packages installed in the private home survive reset; system\-wide packages do not. No command currently manages Btrfs snapshots.
 .PP
-CPU, RAM, process, distro, and mapping changes require reset for existing containers. A stop/start alone reuses the old create\-time settings. Avoid changing resources directly through Podman if metadata consistency is required. An active launcher holds a nonblocking workspace lock; start, sync, reset, repair, and purge require that launcher to exit. Read\-only list/status and explicit stop can run from a second terminal. A crash releases the lock when its process exits; an orphan still running can retain it.
+CPU, RAM, process, distro, and mapping changes require reset for existing containers. A stop/start alone reuses the old create\-time settings. Avoid changing resources directly through Podman if metadata consistency is required. An active launcher holds a nonblocking workspace lock; start, sync, reset, repair, terminal, and purge require that launcher to exit. Read\-only list/status and explicit stop can run from a second terminal. A crash releases the lock when its process exits; an orphan still running can retain it.
 .SH DISTRIBUTION IMAGES
 .PP
 .nf
@@ -457,7 +492,7 @@ HTTP endpoint keys in global config using localhost, 127.0.0.1, or ::1 are rewri
 .PP
 \fBXDG_CONFIG_HOME\fR selects the source global OpenCode/oc\-box configuration; default \fB~/\:.config\fR\&. \fBXDG_DATA_HOME\fR selects the normal host OpenCode data root; default \fB~/\:.local/\:share\fR\&. The installer itself uses fixed \fB~/\:.local\fR paths. Container XDG paths use the private home, not host XDG directories.
 .PP
-Variables ending \fB_API_KEY\fR or \fB_TOKEN\fR, plus \fBGH_TOKEN\fR, \fBGITHUB_TOKEN\fR, terminal color/language settings, and \fBLEMONADE_BASE_URL\fR are passed when set. Add other uppercase environment names in host configuration:
+Variables ending \fB_API_KEY\fR or \fB_TOKEN\fR, plus \fBGH_TOKEN\fR, \fBGITHUB_TOKEN\fR, terminal color/language settings, and \fBLEMONADE_BASE_URL\fR are passed when set. These forwarding rules apply to normal OpenCode launches, not \fBterminal\fR\&. Add other uppercase environment names in host configuration:
 .PP
 .nf
 .fam C
@@ -629,7 +664,10 @@ Resume normally; no session reimport/reset is needed. Device\-node labeling is s
 Cold creation performs package and plugin downloads. Timed stage output and the temporary TUI loading line indicate progress. Warm starts retain compatible dependency state. Host SDK manifests older than runtime are normalized inside the copied config, not by modifying host configuration. Preserve the environment when diagnosing a wait; reset discards the OS cache and can repeat cold setup.
 .SS Active workspace lock or failed import
 .PP
-Exit the active launcher before start/sync/reset/purge. Status and stop remain available in another terminal. Do not delete the lock file to bypass a live process. For a failed import, retry the same flag with an updated launcher; recovery uses the saved export without overwriting existing container work. For a failed archive sync, use \fBsync\fR; the original live DB remains in its volume. A deleted private volume cannot be recovered from session metadata alone.
+Exit the active launcher before start/sync/reset/repair/terminal/purge. Status and stop remain available in another terminal. Do not delete the lock file to bypass a live process. For a failed import, retry the same flag with an updated launcher; recovery uses the saved export without overwriting existing container work. For a failed archive sync, use \fBsync\fR; the original live DB remains in its volume. A deleted private volume cannot be recovered from session metadata alone.
+.SS Maintenance shell environment
+.PP
+Use \fBoc\-box terminal\fR to debug an existing container without launching OpenCode or supplying host tokens. A missing command may need installing in that container; terminal does not install baseline tools automatically. Its shell deliberately skips user profiles, shell history, and normal credential forwarding. A missing project marker or changed identity still requires explicit \fBrepair\fR; terminal cannot bypass those checks. If it reports an active launcher, exit OpenCode and wait for its history sync/stop before retrying. Do not remove the workspace lock file to bypass the running process.
 .SH INSTALLATION AND MANUALS
 .PP
 Requires Linux, Python 3.10 or later, rootless Podman with pasta networking, delegated cgroup CPU/memory/PIDs controllers, and host OpenCode 1.x. Session import/export compatibility was checked with OpenCode 1.19.5. Other major OpenCode versions are rejected rather than assuming database/CLI compatibility. Podman must work from the regular host user, not through sudo. Network access is needed for initial distribution, runtime, and dependency downloads.

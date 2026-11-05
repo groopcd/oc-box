@@ -54,6 +54,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box sync [--project PATH | --workspace ID]
      oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS]
      oc-box repair [--project PATH | --workspace ID]
+     oc-box terminal [--project PATH | --workspace ID]
      oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
      oc-box list
      oc-box distros
@@ -169,7 +170,75 @@ resolving the error.
      oc-box sync --project ~/devel/demo
      oc-box sync --workspace WORKSPACE_ID
 
-4.4 reset
+4.4 terminal
+============
+
+Open an interactive maintenance shell in an existing workspace container
+instead of starting OpenCode.  Select the current project, ‘--project
+PATH’, or ‘--workspace ID’.  Only these selectors and help are accepted.
+Run from a real host terminal with TTY input/output; piped or redirected
+input/output is refused.
+
+     oc-box terminal
+     oc-box terminal --project ~/devel/demo
+     oc-box terminal --workspace WORKSPACE_ID
+
+Exit the active OpenCode launcher first: maintenance holds the same
+exclusive workspace lock as other lifecycle operations.  This prevents a
+concurrent reset, purge, or normal launch.  It verifies the original
+project identity, matching marker, container ownership, and project
+mount.  It never creates a new workspace or container, reinstalls tools,
+refreshes configuration/auth, calls OpenCode, or synchronizes history.
+If the container is missing, use a normal launch to recreate it
+explicitly.  A partially initialized but existing container can be
+entered for debugging without rerunning baseline downloads.
+
+If the container is stopped, terminal starts it and stops it again on
+shell exit (including error/interrupt cleanup).  If already running
+without an active launcher, it is left running.  A paused container must
+be unpaused by the host operator first.  Type ‘exit’ or press Ctrl-D to
+leave.  Ctrl-C interrupts shell commands; terminal sizing, input, and
+resize events are relayed normally.  The command returns the maintenance
+shell/Podman exit code.  The session IDs, source files, and private home
+are not changed by the launcher; your own shell commands can change
+them.  Packages installed in the OS layer survive stop/start but not
+reset, just as when the AI installs them.
+
+The shell runs with the container's existing user, devices, resource
+limits, mounts, and privileges; terminal adds no mounts or capabilities.
+Container root is still rootless on the host.  It opens Bash with
+‘--noprofile --norc -i’, or ‘/bin/sh -i’ when Bash is unavailable.
+Shell startup files are not loaded, and history persistence is disabled
+(‘HISTFILE=/dev/null’, history sizes zero).
+
+Unlike a normal OpenCode launch, terminal does not forward API keys,
+tokens, custom ‘pass_env’, proxy variables, agent sockets, or
+shell/loader hooks.  The Podman client receives only allowlisted host
+runtime/storage discovery settings; its child shell starts with ‘env -i’
+and a small fixed environment: the private HOME, project PWD, container
+PATH, validated TERM, Bash SHELL, ‘C.UTF-8’ locale, container marker,
+and history controls.  Credentials are not put in arguments, printed, or
+copied into the container by this command.
+
+This is maintenance access to the existing environment, not a second
+security boundary inside it.  Previously copied auth/config files,
+secrets deliberately written to disk, and environments of other
+processes already in the container remain accessible under normal
+container permissions.  To inspect environment variables, avoid posting
+unredacted output from unrelated running processes.  Starting an
+existing container also resumes its configured entrypoint unchanged;
+terminal does not change create-time environment or undo earlier
+exposure.
+
+For example, after mapping an NPU in an earlier reset:
+
+     oc-box terminal --project ~/devel/npu
+     ls -l /dev/accel/accel0
+     prlimit --pid $$ --memlock
+     xrt-smi examine
+     exit
+
+4.5 reset
 =========
 
 Recreate the environment's container OS, then launch OpenCode and resume
@@ -191,7 +260,7 @@ distributions, especially to/from Alpine.
      oc-box reset --project ~/devel/demo --distro ubuntu
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
 
-4.5 repair
+4.6 repair
 ==========
 
 Explicitly accept the current directory identity for an existing
@@ -222,7 +291,7 @@ and supply ‘--workspace ID’ explicitly.  With ‘--workspace’, check the
 registered path and restore its missing marker rather than using the
 current directory.
 
-4.6 purge
+4.7 purge
 =========
 
 Remove this workspace's labeled containers, owned volumes, owned
@@ -264,7 +333,7 @@ apply only to purge.
      oc-box purge --project ~/devel/disposable --all
      oc-box purge --workspace WORKSPACE_ID --all --yes
 
-4.7 list
+4.8 list
 ========
 
 List all registered workspaces with aligned headers: WORKSPACE ID,
@@ -288,7 +357,7 @@ machine-readable output.
 
      oc-box list
 
-4.8 distros
+4.9 distros
 ===========
 
 List supported distro names, image references, and the detected host
@@ -299,8 +368,8 @@ workspace.
      oc-box distros
      oc-box --project ~/devel/demo --distro fedora
 
-4.9 status
-==========
+4.10 status
+===========
 
 Alias of ‘--status’.  Report all registered environments unless
 ‘--project’ or ‘--workspace’ selects one.  A selector must refer to an
@@ -565,6 +634,7 @@ File: oc-box.info,  Node: Lifecycle and persistence,  Next: Distribution images,
      Exit OpenCode          kept      kept; archive sync     kept; stopped
      stop                   kept      kept                   kept; stopped
      sync                   kept      kept; archive sync     kept; stopped
+     terminal               kept      kept; no archive sync  kept; prior run state
      reset                  kept      kept, same session ID  rebuilt
      purge                  kept      deleted                deleted
      purge --delete-sessions kept      deleted                deleted
@@ -581,10 +651,10 @@ CPU, RAM, process, distro, and mapping changes require reset for
 existing containers.  A stop/start alone reuses the old create-time
 settings.  Avoid changing resources directly through Podman if metadata
 consistency is required.  An active launcher holds a nonblocking
-workspace lock; start, sync, reset, repair, and purge require that
-launcher to exit.  Read-only list/status and explicit stop can run from
-a second terminal.  A crash releases the lock when its process exits; an
-orphan still running can retain it.
+workspace lock; start, sync, reset, repair, terminal, and purge require
+that launcher to exit.  Read-only list/status and explicit stop can run
+from a second terminal.  A crash releases the lock when its process
+exits; an orphan still running can retain it.
 
 
 File: oc-box.info,  Node: Distribution images,  Next: Sessions and recovery,  Prev: Lifecycle and persistence,  Up: Top
@@ -852,7 +922,8 @@ not host XDG directories.
 
 Variables ending ‘_API_KEY’ or ‘_TOKEN’, plus ‘GH_TOKEN’,
 ‘GITHUB_TOKEN’, terminal color/language settings, and
-‘LEMONADE_BASE_URL’ are passed when set.  Add other uppercase
+‘LEMONADE_BASE_URL’ are passed when set.  These forwarding rules apply
+to normal OpenCode launches, not ‘terminal’.  Add other uppercase
 environment names in host configuration:
 
      {
@@ -1129,13 +1200,26 @@ discards the OS cache and can repeat cold setup.
 15.5 Active workspace lock or failed import
 ===========================================
 
-Exit the active launcher before start/sync/reset/purge.  Status and stop
-remain available in another terminal.  Do not delete the lock file to
-bypass a live process.  For a failed import, retry the same flag with an
-updated launcher; recovery uses the saved export without overwriting
-existing container work.  For a failed archive sync, use ‘sync’; the
-original live DB remains in its volume.  A deleted private volume cannot
-be recovered from session metadata alone.
+Exit the active launcher before start/sync/reset/repair/terminal/purge.
+Status and stop remain available in another terminal.  Do not delete the
+lock file to bypass a live process.  For a failed import, retry the same
+flag with an updated launcher; recovery uses the saved export without
+overwriting existing container work.  For a failed archive sync, use
+‘sync’; the original live DB remains in its volume.  A deleted private
+volume cannot be recovered from session metadata alone.
+
+15.6 Maintenance shell environment
+==================================
+
+Use ‘oc-box terminal’ to debug an existing container without launching
+OpenCode or supplying host tokens.  A missing command may need
+installing in that container; terminal does not install baseline tools
+automatically.  Its shell deliberately skips user profiles, shell
+history, and normal credential forwarding.  A missing project marker or
+changed identity still requires explicit ‘repair’; terminal cannot
+bypass those checks.  If it reports an active launcher, exit OpenCode
+and wait for its history sync/stop before retrying.  Do not remove the
+workspace lock file to bypass the running process.
 
 
 File: oc-box.info,  Node: Installation and manuals,  Next: Authors and license,  Prev: Troubleshooting,  Up: Top
@@ -1208,22 +1292,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description1875
-Node: Commands3706
-Node: Options13096
-Node: Lifecycle and persistence22561
-Node: Distribution images24221
-Node: Sessions and recovery25116
-Node: Devices and host permissions30404
-Node: Resource reports32750
-Node: Configuration and environment34852
-Node: Files38425
-Node: Exit status41565
-Node: Examples42376
-Node: Troubleshooting44462
-Node: Installation and manuals49086
-Node: Authors and license50860
-Node: See also51467
+Node: Description1930
+Node: Commands3761
+Node: Options16601
+Node: Lifecycle and persistence26066
+Node: Distribution images27819
+Node: Sessions and recovery28714
+Node: Devices and host permissions34002
+Node: Resource reports36348
+Node: Configuration and environment38450
+Node: Files42102
+Node: Exit status45242
+Node: Examples46053
+Node: Troubleshooting48139
+Node: Installation and manuals53460
+Node: Authors and license55234
+Node: See also55841
 
 End Tag Table
 

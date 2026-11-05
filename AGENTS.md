@@ -83,3 +83,7 @@ create a replacement workspace. Look up registered canonical paths, direct the
 host operator to explicit `repair`, and never overwrite another workspace's
 marker. Plain stale-workspace purge preserves project files, host history, and
 private archive-origin evidence under `retired/`; keep that recovery path tested.
+
+`terminal` is maintenance-only: no host credential/pass_env forwarding, no
+OpenCode/auth/config refresh, startup profiles, or persistent shell history.
+Keep its environment allowlisted and preserve the original container run state.
