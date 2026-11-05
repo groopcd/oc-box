@@ -1489,14 +1489,24 @@ def main(argv=None):
             )
         return 0
     if args.command == "list":
+        headers = ("WORKSPACE ID", "DISTRO", "PROJECT", "STATUS", "SESSION ID")
+        rows = []
         for path in workspace_paths():
             data = read_json(path)
             exists = (
                 "present" if Path(data["project"]).is_dir() else "missing directory"
             )
             latest = session_state(path).get("last") or "none"
+            rows.append((data["id"], data["distro"], data["project"], exists, latest))
+        widths = [
+            max(len(row[column]) for row in [headers, *rows])
+            for column in range(len(headers))
+        ]
+        for row in [headers, *rows]:
             print(
-                f"{data['id']}  {data['distro']:12} {data['project']}  ({exists})  session={latest}"
+                "  ".join(
+                    value.ljust(width) for value, width in zip(row, widths)
+                ).rstrip()
             )
         return 0
     if args.command != "purge" and (args.all or args.delete_sessions or args.yes):

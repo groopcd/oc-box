@@ -296,8 +296,11 @@ oc-box purge --delete-sessions # Also delete host archive conversations
 oc-box purge --all             # Also DELETE THE PROJECT DIRECTORY
 ```
 
-`oc-box list` includes `session=ses_...` for each workspace's latest recorded
-container OpenCode session, or `session=none` if no session has been recorded.
+`oc-box list` prints a header and space-aligned columns: `WORKSPACE ID`, `DISTRO`,
+`PROJECT`, `STATUS`, and `SESSION ID`. Column widths expand to fit complete IDs
+and paths. `STATUS` indicates whether the project directory is present, not
+whether its container is running. `SESSION ID` shows the latest recorded
+container OpenCode session, or `none` if no session has been recorded.
 This is the original session used for resume, not the host archive's separate
 ID. The listing reads local metadata without starting containers; its session
 ID is refreshed at startup and history sync, so a newly created conversation in

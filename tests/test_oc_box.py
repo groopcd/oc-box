@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import subprocess
 import tarfile
@@ -66,9 +67,70 @@ class WorkspaceTests(unittest.TestCase):
                     self.assertEqual(box.main(["list"]), 0)
                 self.assertIn(self.data["id"], output.getvalue())
                 self.assertIn(str(self.project), output.getvalue())
-                self.assertIn(f"session={expected}", output.getvalue())
+                lines = output.getvalue().splitlines()
+                self.assertEqual(
+                    re.split(r" {2,}", lines[0].strip()),
+                    ["WORKSPACE ID", "DISTRO", "PROJECT", "STATUS", "SESSION ID"],
+                )
+                self.assertEqual(
+                    re.split(r" {2,}", lines[1].strip()),
+                    [
+                        self.data["id"],
+                        "tumbleweed",
+                        str(self.project),
+                        "present",
+                        expected,
+                    ],
+                )
                 self.assertNotIn("ses_host_archive", output.getvalue())
                 podman.assert_not_called()
+
+    def test_list_aligns_columns_for_different_path_lengths_and_missing_directories(
+        self,
+    ):
+        other = self.root / "a much longer project directory"
+        other.mkdir()
+        other_path, other_data = box.create_workspace(other, "ubuntu")
+        (other / box.MARKER).unlink()
+        other.rmdir()
+        box.atomic_json(
+            box.session_file(other_path),
+            {"last": "ses_latest", "sessions": ["ses_latest"]},
+        )
+        output = io.StringIO()
+        with patch("sys.stdout", output), patch.object(box, "podman") as podman:
+            self.assertEqual(box.main(["list"]), 0)
+        lines = output.getvalue().splitlines()
+        positions = [
+            lines[0].index(header)
+            for header in ("WORKSPACE ID", "DISTRO", "PROJECT", "STATUS", "SESSION ID")
+        ]
+        expected = {
+            self.data["id"]: ("tumbleweed", str(self.project), "present", "none"),
+            other_data["id"]: ("ubuntu", str(other), "missing directory", "ses_latest"),
+        }
+        self.assertEqual(len(lines), 3)
+        for line in lines[1:]:
+            ident = line[: positions[1]].strip()
+            values = [ident, *expected[ident]]
+            for position, value in zip(positions, values):
+                self.assertEqual(line[position : position + len(value)], value)
+            self.assertEqual(line, line.rstrip())
+        podman.assert_not_called()
+
+    def test_empty_list_still_shows_headers(self):
+        output = io.StringIO()
+        with (
+            patch("sys.stdout", output),
+            patch.object(box, "workspace_paths", return_value=[]),
+            patch.object(box, "podman") as podman,
+        ):
+            self.assertEqual(box.main(["list"]), 0)
+        self.assertEqual(
+            re.split(r" {2,}", output.getvalue().strip()),
+            ["WORKSPACE ID", "DISTRO", "PROJECT", "STATUS", "SESSION ID"],
+        )
+        podman.assert_not_called()
 
     def controller_fixture(self, controllers):
         root = self.root / "cgroup"
