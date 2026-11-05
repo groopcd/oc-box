@@ -37,6 +37,26 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaises(box.BoxError):
             box.distro_name("ubuntu; touch /host")
 
+    def test_list_shows_latest_recorded_container_session_without_podman(self):
+        cases = (
+            (None, "none"),
+            ({"sessions": [], "last": None}, "none"),
+            ({"sessions": ["ses_old", "ses_latest"], "last": "ses_latest", "host_sessions": {"ses_latest": "ses_host_archive"}}, "ses_latest"),
+        )
+        for saved, expected in cases:
+            with self.subTest(saved=saved):
+                box.session_file(self.path).unlink(missing_ok=True)
+                if saved is not None:
+                    box.atomic_json(box.session_file(self.path), saved)
+                output = io.StringIO()
+                with patch("sys.stdout", output), patch.object(box, "podman") as podman:
+                    self.assertEqual(box.main(["list"]), 0)
+                self.assertIn(self.data["id"], output.getvalue())
+                self.assertIn(str(self.project), output.getvalue())
+                self.assertIn(f"session={expected}", output.getvalue())
+                self.assertNotIn("ses_host_archive", output.getvalue())
+                podman.assert_not_called()
+
     def controller_fixture(self, controllers):
         root = self.root / "cgroup"
         service = root / "user.slice/user-1000.slice/user@1000.service/cgroup.controllers"

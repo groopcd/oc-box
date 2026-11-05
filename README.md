@@ -196,7 +196,7 @@ oc-box --resume                # Explicit resume (requires an existing workspace
 oc-box --new                   # New conversation, same environment
 oc-box --model provider/model  # Select model
 oc-box status                  # Workspace/container and recorded session
-oc-box list                    # All workspaces, including deleted directories
+oc-box list                    # All workspaces and latest recorded session IDs
 oc-box stop                    # Stop, including from another terminal
 oc-box sync                    # Retry history sync without opening the TUI
 oc-box reset                   # Rebuild OS, keep home volume/project/history
@@ -204,6 +204,14 @@ oc-box purge                   # Remove sandbox/home volume and oc-box metadata
 oc-box purge --delete-sessions # Also delete host archive conversations
 oc-box purge --all             # Also DELETE THE PROJECT DIRECTORY
 ```
+
+`oc-box list` includes `session=ses_...` for each workspace's latest recorded
+container OpenCode session, or `session=none` if no session has been recorded.
+This is the original session used for resume, not the host archive's separate
+ID. The listing reads local metadata without starting containers; its session
+ID is refreshed at startup and history sync, so a newly created conversation in
+an active session may not appear until the next sync or launch. Missing project
+directories are still listed.
 
 Purge asks for the first eight characters of its workspace ID; `--yes` skips
 confirmation. `--project PATH` works from another directory. After deleting a

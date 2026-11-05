@@ -768,7 +768,8 @@ def main(argv=None):
         for path in workspace_paths():
             data = read_json(path)
             exists = "present" if Path(data["project"]).is_dir() else "missing directory"
-            print(f"{data['id']}  {data['distro']:12} {data['project']}  ({exists})")
+            latest = session_state(path).get("last") or "none"
+            print(f"{data['id']}  {data['distro']:12} {data['project']}  ({exists})  session={latest}")
         return 0
     if args.command != "purge" and (args.all or args.delete_sessions or args.yes):
         raise BoxError("--all, --delete-sessions, and --yes apply only to purge.")
