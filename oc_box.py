@@ -591,6 +591,27 @@ def host_cli_env(path):
     return env
 
 
+def container_build_config():
+    """Override only Build permissions in the container's final config scope."""
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "agent": {"build": {"permission": "allow"}},
+    }
+
+
+def container_build_plugin():
+    # Config sources deep-merge permission objects, so a later wildcard alone
+    # can leave inherited tool-specific denials after it. Normalize Build only
+    # after mainline has finished loading project configs and agent files.
+    return """export default async () => ({
+  config: async (config) => {
+    config.agent ??= {}
+    config.agent.build = { ...config.agent.build, permission: { "*": "allow" } }
+  },
+})
+"""
+
+
 def container_env(data):
     home = data["home"]
     env = {
@@ -637,6 +658,8 @@ def container_env(data):
                 raise BoxError("Invalid pass_env entry in oc-box/config.json")
             if key in os.environ:
                 env[key] = os.environ[key]
+    # Apply after project/agent files, without lifting Plan or subagent rules.
+    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(container_build_config())
     return {key: rewrite_localhost(value) for key, value in env.items()}
 
 
@@ -736,11 +759,14 @@ def config_archive(data):
             file = source / filename
             if file.is_file():
                 merged.update(parse_jsonc(file.read_text()))
-        overlay = {"$schema": "https://opencode.ai/config.json", "shell": "/bin/bash"}
+        overlay = {**container_build_config(), "shell": "/bin/bash"}
         for key in ("lsp", "formatter"):
             if key not in merged:
                 overlay[key] = True
         add_bytes("oc-box-profile.json", json.dumps(overlay).encode())
+        add_bytes(
+            "plugins/oc-box-build-permissions.js", container_build_plugin().encode()
+        )
     return buffer.getvalue()
 
 

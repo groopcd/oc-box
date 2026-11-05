@@ -187,6 +187,9 @@ class WorkspaceTests(unittest.TestCase):
             env = box.container_env(self.data)
         self.assertEqual(env["BRAVE_API_KEY"], "test-key")
         self.assertEqual(env["OPENCODE_DISABLE_SANDBOX"], "1")
+        self.assertEqual(
+            json.loads(env["OPENCODE_CONFIG_CONTENT"]), box.container_build_config()
+        )
         for key in (
             "SSH_AUTH_SOCK",
             "DOCKER_HOST",
@@ -386,6 +389,7 @@ class WorkspaceTests(unittest.TestCase):
         )
         self.assertEqual(env["OPENCODE_PURE"], "1")
         self.assertEqual(env["OPENCODE_DISABLE_PROJECT_CONFIG"], "1")
+        self.assertNotIn("agent", json.loads(env["OPENCODE_CONFIG_CONTENT"]))
 
     def test_scoped_config_enables_native_lsp_formatter_when_unspecified(self):
         config = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode"
@@ -398,6 +402,8 @@ class WorkspaceTests(unittest.TestCase):
         self.assertIs(copied["lsp"], True)
         self.assertIs(copied["formatter"], True)
         self.assertEqual(copied["shell"], "/bin/bash")
+        self.assertEqual(copied["agent"]["build"]["permission"], "allow")
+        self.assertNotIn("permission", copied)
 
     def test_endpoint_rewrite_leaves_oauth_callbacks_and_shell_commands_intact(self):
         original = {

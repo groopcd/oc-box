@@ -5,6 +5,7 @@ path used inside Podman, with temporary config/data and local fixture services.
 """
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import fnmatch
 import importlib.util
 import io
 import json
@@ -51,6 +52,115 @@ def bounded(command, *, env, cwd, timeout=45):
         )
     assert process.returncode == 0, out[-4000:] + err[-4000:]
     return out, err
+
+
+def build_permission_regression(root, env, project):
+    """Use mainline's resolved rules to verify container-only Build override."""
+    source = root / "permission-host-config/opencode"
+    source.mkdir(parents=True)
+    inherited = {
+        "$schema": "https://opencode.ai/config.json",
+        "permission": {"bash": "ask", "external_directory": "ask"},
+        "agent": {"build": {"permission": {"bash": "deny", "edit": "ask"}}},
+    }
+    original = json.dumps(inherited)
+    (source / "opencode.json").write_text(original)
+    home = root / "permission-container-home"
+    with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(source.parent)}):
+        payload = box.config_archive({"home": str(home)})
+    with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
+        archive.extractall(home / ".config/opencode", filter="data")
+    profile = home / ".config/opencode/oc-box-profile.json"
+    scoped = dict(env)
+    scoped["XDG_CONFIG_HOME"] = str(home / ".config")
+    scoped["OPENCODE_TEST_HOME"] = str(home)
+    scoped["OPENCODE_CONFIG"] = str(profile)
+    scoped["OPENCODE_DISABLE_PROJECT_CONFIG"] = "0"
+    settings = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    scoped["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+        {
+            **box.container_build_config(),
+            "provider": settings["provider"],
+            "model": settings["model"],
+        }
+    )
+    local = project / "opencode.json"
+    local.write_text(
+        json.dumps(
+            {
+                "$schema": "https://opencode.ai/config.json",
+                "agent": {
+                    "build": {
+                        "permission": {
+                            "bash": "deny",
+                            "external_directory": "deny",
+                            "fixture_ping": "ask",
+                        }
+                    }
+                },
+            }
+        )
+    )
+
+    def effective(agent, permission, pattern):
+        matching = [
+            rule
+            for rule in agent["permission"]
+            if fnmatch.fnmatchcase(permission, rule["permission"])
+            and fnmatch.fnmatchcase(pattern, rule["pattern"])
+        ]
+        return matching[-1]["action"] if matching else "ask"
+
+    try:
+        agents = {}
+        for name in ("build", "plan", "general"):
+            output, _ = bounded(
+                ["opencode", "debug", "agent", name],
+                env=scoped,
+                cwd=project,
+                timeout=15,
+            )
+            agents[name] = json.loads(output)
+        for permission, pattern in (
+            ("bash", "zypper install git"),
+            ("edit", "/etc/example"),
+            ("external_directory", "/etc/*"),
+            ("read", "settings.env"),
+            ("fixture_ping", "*"),
+            ("doom_loop", "*"),
+        ):
+            assert effective(agents["build"], permission, pattern) == "allow", (
+                permission,
+                agents["build"],
+            )
+        assert effective(agents["plan"], "edit", "source.py") == "deny", agents["plan"]
+        assert effective(agents["plan"], "bash", "echo test") == "ask", agents["plan"]
+        assert effective(agents["general"], "bash", "echo test") == "ask", agents[
+            "general"
+        ]
+        # Without the container profile the original host-style restrictions win.
+        host = {
+            **scoped,
+            "XDG_CONFIG_HOME": str(source.parent),
+            "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        }
+        host.pop("OPENCODE_CONFIG")
+        host["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+            {"provider": settings["provider"], "model": settings["model"]}
+        )
+        output, _ = bounded(
+            ["opencode", "--pure", "debug", "agent", "build"],
+            env=host,
+            cwd=project,
+            timeout=15,
+        )
+        assert effective(json.loads(output), "bash", "echo test") == "deny"
+        assert (source / "opencode.json").read_text() == original
+        print(
+            "PASS: container Build allows all tools over inherited/project restrictions; Plan and host permissions remain effective."
+        )
+    finally:
+        local.unlink(missing_ok=True)
 
 
 def warm_start_regression(root, env, project):
@@ -339,7 +449,8 @@ def main():
         config = {
             "$schema": "https://opencode.ai/config.json",
             "model": "oc-box-smoke/gpt-4-smoke",
-            "permission": "allow",
+            "permission": "ask",
+            "agent": box.container_build_config()["agent"],
             "snapshot": False,
             "provider": {
                 "oc-box-smoke": {
@@ -385,6 +496,7 @@ def main():
         }
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
         try:
+            build_permission_regression(root, env, project)
             resolved, _ = bounded(
                 ["opencode", "--pure", "debug", "config"],
                 env=env,

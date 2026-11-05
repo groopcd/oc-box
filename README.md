@@ -158,6 +158,17 @@ and formatters/LSP configuration. This is a **copy**, not a writable host mount.
 The global host configuration is not changed. The AI can also use project-level
 configuration natively, since it executes inside the container.
 
+Build mode in `oc-box` allows all OpenCode tool permissions, including shell
+commands, file edits/reads throughout the container, MCP tools, and external
+directories. A container-only profile and local plugin normalize Build's final
+permission rules after loading inherited and project configuration, overriding
+Build permission prompts and denials. Plan mode and subagents retain their
+existing permission rules. Plain host OpenCode retains its usual permissions.
+This changes OpenCode approvals, not Podman's mounts or isolation: the selected
+host project remains fully writable, and the rest of the host filesystem is
+not exposed. Copied plugins can still enforce their own checks independently.
+Quit and restart OpenCode after updating the launcher to activate this profile.
+
 * MCP servers run inside the container; remote MCPs connect normally.
 * Node/npm and uv/uvx are provided for your Brave Search and DuckDuckGo MCPs.
 * `BRAVE_API_KEY` and environment names ending in `_API_KEY` or `_TOKEN` are

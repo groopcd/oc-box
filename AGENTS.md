@@ -48,3 +48,7 @@ This development conversation has been imported into its project container.
 The initial SELinux project-label issue was repaired from the host. A native
 warm plugin-initialization probe in the container completed in under one second.
 New mounts use `:z`, and cold plugin resolution is timed before opening the TUI.
+
+Container launches give Build mode allow-all OpenCode permissions through a
+generated private config/plugin. Keep Plan/subagent rules and plain host
+OpenCode permissions unchanged.
