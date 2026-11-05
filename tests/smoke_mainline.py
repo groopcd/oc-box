@@ -386,6 +386,73 @@ def session_import_regression(root, env, project, ident):
     )
 
 
+def archive_import_regression(root, env, project, exported):
+    """Round-trip production archives through mainline's controller-directory import."""
+    host = {**env, "XDG_DATA_HOME": str(root / "archive-host-data")}
+    host.pop("OPENCODE_CONFIG_CONTENT", None)
+    isolated = {**host, "XDG_DATA_HOME": str(root / "archive-container-data")}
+    executable = shutil.which("opencode")
+    trampoline = "import os,sys; os.chdir(os.environ['PWD']); os.execvpe(sys.argv[1],sys.argv[1:],os.environ)"
+
+    def local_exec(_data, command, **_kwargs):
+        return box.ContainerCommand(
+            [sys.executable, "-c", trampoline, *command],
+            {**isolated, "PWD": str(project)},
+        )
+
+    with patch.dict(os.environ, {"OC_BOX_STATE_HOME": str(root / "archive-registry")}):
+        origin_path, origin = box.create_workspace(project, "tumbleweed")
+        # A fresh workspace after the marker was removed must import old archives.
+        (project / box.MARKER).unlink()
+        target_path, target = box.create_workspace(project, "tumbleweed")
+        (project / box.MARKER).unlink()
+        archive = box.archive_session(exported, origin)
+        ident = archive["info"]["id"]
+        saved = origin_path.parent / "history" / (ident + ".json")
+        box.atomic_json(saved, archive)
+        bounded(
+            [executable, "--pure", "import", str(saved)],
+            env=host,
+            cwd=origin_path.parent / "controller",
+            timeout=15,
+        )
+        raw, _ = bounded(
+            [executable, "--pure", "export", ident],
+            env=host,
+            cwd=target_path.parent / "controller",
+            timeout=15,
+        )
+        host_before = json.loads(raw)
+        assert host_before["info"]["directory"] == str(
+            origin_path.parent / "controller"
+        )
+        with (
+            patch.object(box, "host_cli_env", return_value=host),
+            patch.object(box, "CONTAINER_OPENCODE", executable),
+            patch.object(box, "exec_command", side_effect=local_exec),
+        ):
+            recovered = box.export_host_session(target_path, target, ident)
+            assert recovered["info"]["directory"] == str(project)
+            assert recovered["messages"] == host_before["messages"]
+            state = box.import_host_session(target_path, target, recovered)
+            assert state["last"] == ident
+            copied = box.export_container_session(target, ident)
+            box.verify_session_import(target, recovered, copied)
+            assert box.refresh_sessions(target_path, target)["last"] == ident
+        raw, _ = bounded(
+            [executable, "--pure", "export", ident],
+            env=host,
+            cwd=target_path.parent / "controller",
+            timeout=15,
+        )
+        assert json.loads(raw) == host_before, (
+            "Archive recovery changed the host session"
+        )
+    print(
+        "PASS: controller-directory host archive recovery into a fresh workspace, verified transcript, and unchanged host archive."
+    )
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="oc-box-native-") as directory:
         root = Path(directory)
@@ -653,6 +720,7 @@ def main():
                 "PASS: session export/import into a separate host-style database, and exact-session resume."
             )
             session_import_regression(root, env, project, ident)
+            archive_import_regression(root, env, project, json.loads(exported))
             warm_start_regression(root, env, project)
             print(
                 "All app data was temporary. Live Podman isolation remains a separate host-terminal check."

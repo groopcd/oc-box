@@ -1129,6 +1129,40 @@ def valid_session_id(value):
     )
 
 
+def restore_archive_directory(exported, project):
+    """Verify a host archive's origin before undoing mainline's import rebinding."""
+    directory = Path(exported["info"]["directory"]).resolve()
+    folder = directory.parent
+    if (
+        directory.name != "controller"
+        or folder.parent != state_root() / "workspaces"
+        or not re.fullmatch(r"[0-9a-f]{32}", folder.name)
+    ):
+        return False
+    ident = exported["info"]["id"]
+    prefix = "ses_" + hashlib.sha256(folder.name.encode()).hexdigest()[:12] + "_"
+    registry = folder / "workspace.json"
+    saved = folder / "history" / (ident + ".json")
+    if not ident.startswith(prefix) or not registry.is_file() or not saved.is_file():
+        return False
+    origin = read_json(registry)
+    archive = read_json(saved)
+    validate_session_export(archive, ident)
+    if origin.get("id") != folder.name or any(
+        not isinstance(value, str) or Path(value).resolve() != Path(project).resolve()
+        for value in (origin.get("project"), archive["info"].get("directory"))
+    ):
+        return False
+    # Keep the current host transcript, including any work after its last sync.
+    # The private registry/export establish the project, not the archive title.
+    exported["info"]["directory"] = str(project)
+    print(
+        "oc-box: Verified oc-box archive origin; restored its project directory for import.",
+        flush=True,
+    )
+    return True
+
+
 def export_host_session(path, data, ident):
     """Export only the selected host conversation; never mount the host DB."""
     if not valid_session_id(ident):
@@ -1153,9 +1187,13 @@ def export_host_session(path, data, ident):
     if (
         not isinstance(directory, str)
         or Path(directory).resolve() != Path(data["project"]).resolve()
+    ) and not (
+        isinstance(directory, str)
+        and restore_archive_directory(exported, data["project"])
     ):
         raise BoxError(
-            f"Host session belongs to {directory!r}, not {data['project']}. Select its original project with --project."
+            f"Host session belongs to {directory!r}, not {data['project']}. Select its original project with --project. "
+            "An oc-box archive also needs its original host registry and history/ export to verify the project."
         )
     return exported
 

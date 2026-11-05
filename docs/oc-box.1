@@ -200,7 +200,7 @@ Start a new root conversation while retaining the same container and files. Use 
 Explicitly request the normal resume behavior. Requires a registered workspace; if one exists but no root session has been recorded, OpenCode can start a new conversation. Use with start/reset. Mutually exclusive with \fB\-\-new\fR and \fB\-\-import\-session\fR\&. Example: \fBoc\-box \-\-project ~/\:devel/\:demo \-\-resume\fR\&.
 .SS \-\-import\-session SESSION_ID
 .PP
-Copy a host conversation from the selected project into the private container database, verify the transcript, select the exact ID, and launch it. Start\-only; mutually exclusive with \fB\-\-new\fR and \fB\-\-resume\fR\&. Quit the source host client first to include its final saved turn. A subagent session cannot be imported as a root. The original host conversation is retained. See Sessions and recovery.
+Copy a host conversation from the selected project into the private container database, verify the transcript, select the exact ID, and launch it. Start\-only; mutually exclusive with \fB\-\-new\fR and \fB\-\-resume\fR\&. Quit the source host client first to include its final saved turn. A subagent session cannot be imported as a root. The original host conversation is retained. See Sessions and recovery. An oc\-box host archive can also be imported into a fresh environment for that same project; the original registry and saved archive verify its project.
 .PP
 .nf
 .fam C
@@ -331,7 +331,7 @@ The live database is private container storage. The normal host database is not 
 .PP
 This is conversation\-history sync, not live replication or a backup against disk loss. Host archives omit snapshot stores, separate subagent transcripts, running processes, installed packages, and files outside the exported transcript. New work in a host archive is not merged back automatically. Container/home storage normally survives a client crash or reboot; the last uncommitted turn can still be lost. Retry missed archival with \fBoc\-box sync\fR\&.
 .PP
-For \fB\-\-import\-session\fR, quit the source client first. Its recorded project must match the selected directory. A private source export is saved in \fBimports/\:SESSION_ID.json\fR under the workspace registry. oc\-box imports into the container, verifies every message/part, then launches that exact ID. Mainline's removal of obsolete nonpending tool \fBstate.raw\fR buffers is accepted, but tool inputs/outputs, pending raw buffers, text, IDs, and metadata remain checked.
+For \fB\-\-import\-session\fR, quit the source client first. Its project must match the selected directory. A private source export is saved in \fBimports/\:SESSION_ID.json\fR under the workspace registry. oc\-box imports into the container, verifies every message/part, then launches that exact ID. Mainline's removal of obsolete nonpending tool \fBstate.raw\fR buffers is accepted, but tool inputs/outputs, pending raw buffers, text, IDs, and metadata remain checked.
 .PP
 Do not routinely repeat the import flag. An already verified ID is not merged or overwritten. If verification was interrupted/rejected, retry the same import after updating the launcher: an existing session may be recovered by comparison with the original saved export, without reimporting over container work. Differences outside the known normalization stop launch and retain both copies.
 .PP
@@ -350,6 +350,20 @@ The source\-tree diagnostic prints counts and differing field names, not text:
 python3 tools/diagnose_import.py \-\-workspace WORKSPACE_ID \-\-session SESSION_ID
 .fam T
 .fi
+.SS Recover history after replacing a workspace marker
+.PP
+Removing \fB\&.oc\-box\-id\fR and starting again creates a fresh environment; it does not delete the old private volume, registry, or host archives. To continue a previously synced conversation in the new environment, exit its active client, find the host archive title prefixed \fB[oc\-box project\-name]\fR, and import its ID:
+.PP
+.nf
+.fam C
+opencode \-\-pure session list
+oc\-box \-\-project ~/devel/demo \-\-import\-session ses_ARCHIVE_ID
+.fam T
+.fi
+.PP
+Mainline records host archive imports against oc\-box's private \fBcontroller\fR directory. oc\-box verifies the archive's namespaced ID against that workspace, its original host registry, and its saved \fBhistory/\:SESSION_ID.json\fR before restoring the project directory for transfer. Both saved records must identify the selected project. The current host transcript is copied, retaining any later host archive work; the host session and saved archive are not changed. The archive title alone cannot authorize a different project.
+.PP
+Use the import flag once, then resume normally. If the original registry or saved export is missing, restore it before retrying. Host history contains only successfully synced turns; the old private volume may contain newer work. Keep the original workspace resources until recovery is complete. Importing history does not copy installed packages, snapshots, or other private\-home files.
 .SH DEVICES AND HOST PERMISSIONS
 .PP
 The host user must be able to access the device. Host supplementary groups are not automatically preserved; where group access is required, use installed crun and \fB\-\-group\-add=keep\-groups\fR\&. A same\-named group inside the container is not the host group. Newly acquired groups require a fresh host login/process with those groups. Driver\-specific SDKs must be installed inside the container.

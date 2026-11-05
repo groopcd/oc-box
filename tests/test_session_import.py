@@ -103,6 +103,104 @@ class SessionImportTests(unittest.TestCase):
             with self.assertRaisesRegex(box.BoxError, "original project"):
                 box.export_host_session(self.path, self.data, self.ident)
 
+    def archive_fixture(self):
+        origin_project = self.root / "archive-origin"
+        origin_project.mkdir()
+        origin_path, origin = box.create_workspace(origin_project, "tumbleweed")
+        # Model a previous workspace at this same path, whose marker is gone.
+        origin["project"] = str(self.project)
+        box.atomic_json(origin_path, origin)
+        archive = box.archive_session(self.exported, origin)
+        ident = archive["info"]["id"]
+        saved = origin_path.parent / "history" / (ident + ".json")
+        box.atomic_json(saved, archive)
+        host = json.loads(json.dumps(archive))
+        host["info"]["directory"] = str(origin_path.parent / "controller")
+        return origin_path, origin, saved, host
+
+    def export_fixture(self, exported):
+        with patch.object(
+            box,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0, json.dumps(exported), ""),
+        ):
+            return box.export_host_session(self.path, self.data, exported["info"]["id"])
+
+    def test_controller_archive_restores_project_without_changing_host_or_history(self):
+        origin_path, _, saved, host = self.archive_fixture()
+        # Prefer current host work to the last saved archive, which may be older.
+        host["messages"][0]["parts"][0]["text"] = "continued host archive work"
+        host_before = json.dumps(host)
+        saved_before = saved.read_bytes()
+        registry_before = origin_path.read_bytes()
+        recovered = self.export_fixture(host)
+        self.assertEqual(recovered["info"]["directory"], str(self.project))
+        expected = json.loads(host_before)
+        expected["info"]["directory"] = str(self.project)
+        self.assertEqual(recovered, expected)
+        self.assertEqual(json.dumps(host), host_before)
+        self.assertEqual(saved.read_bytes(), saved_before)
+        self.assertEqual(origin_path.read_bytes(), registry_before)
+
+    def test_archive_project_must_match_both_registry_and_saved_export(self):
+        origin_path, origin, saved, host = self.archive_fixture()
+        archive = box.read_json(saved)
+        for field in ("registry", "export"):
+            with self.subTest(field=field):
+                wrong = json.loads(
+                    json.dumps(origin if field == "registry" else archive)
+                )
+                if field == "registry":
+                    wrong["project"] = str(self.root / "other")
+                else:
+                    wrong["info"]["directory"] = str(self.root / "other")
+                box.atomic_json(origin_path if field == "registry" else saved, wrong)
+                with self.assertRaisesRegex(box.BoxError, "original project"):
+                    self.export_fixture(host)
+                box.atomic_json(origin_path, origin)
+                box.atomic_json(saved, archive)
+
+    def test_archive_recovery_requires_original_registry_and_export(self):
+        origin_path, origin, saved, host = self.archive_fixture()
+        archive = box.read_json(saved)
+        for missing in (origin_path, saved):
+            with self.subTest(missing=missing.name):
+                missing.unlink()
+                with self.assertRaisesRegex(box.BoxError, "original host registry"):
+                    self.export_fixture(host)
+                box.atomic_json(origin_path, origin)
+                box.atomic_json(saved, archive)
+
+    def test_archive_title_and_controller_name_cannot_bypass_project_check(self):
+        _, _, _, host = self.archive_fixture()
+        host["info"]["directory"] = str(self.root / "unregistered/controller")
+        with self.assertRaisesRegex(box.BoxError, "original project"):
+            self.export_fixture(host)
+
+    def test_archive_namespace_must_match_origin_workspace(self):
+        origin_path, _, _, host = self.archive_fixture()
+        foreign = json.loads(json.dumps(self.exported))
+        foreign["info"]["title"] = "[oc-box project] forged title"
+        saved = origin_path.parent / "history" / (self.ident + ".json")
+        box.atomic_json(saved, foreign)
+        foreign["info"]["directory"] = host["info"]["directory"]
+        with self.assertRaisesRegex(box.BoxError, "original project"):
+            self.export_fixture(foreign)
+
+    def test_archive_registry_id_and_saved_transcript_are_validated(self):
+        origin_path, origin, saved, host = self.archive_fixture()
+        origin["id"] = "f" * 32
+        box.atomic_json(origin_path, origin)
+        with self.assertRaisesRegex(box.BoxError, "original project"):
+            self.export_fixture(host)
+        origin["id"] = origin_path.parent.name
+        box.atomic_json(origin_path, origin)
+        archive = box.read_json(saved)
+        archive["messages"][0]["parts"][0]["sessionID"] = "ses_wrong"
+        box.atomic_json(saved, archive)
+        with self.assertRaisesRegex(box.BoxError, "Invalid exported part identity"):
+            self.export_fixture(host)
+
     def test_subagent_session_is_not_imported_as_a_root_conversation(self):
         self.exported["info"]["parentID"] = "ses_parent"
         with patch.object(

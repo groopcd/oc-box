@@ -320,6 +320,8 @@ database, verify the transcript, select the exact ID, and launch it. Start-only;
 mutually exclusive with `--new` and `--resume`. Quit the source host client first
 to include its final saved turn. A subagent session cannot be imported as a root.
 The original host conversation is retained. See Sessions and recovery.
+An oc-box host archive can also be imported into a fresh environment for that
+same project; the original registry and saved archive verify its project.
 
 ```sh
 oc-box --project ~/devel/demo --import-session ses_HOST_SESSION_ID
@@ -504,8 +506,8 @@ New work in a host archive is not merged back automatically. Container/home
 storage normally survives a client crash or reboot; the last uncommitted turn
 can still be lost. Retry missed archival with `oc-box sync`.
 
-For `--import-session`, quit the source client first. Its recorded project
-must match the selected directory. A private source export is saved in
+For `--import-session`, quit the source client first. Its project must match
+the selected directory. A private source export is saved in
 `imports/SESSION_ID.json` under the workspace registry. oc-box imports into the
 container, verifies every message/part, then launches that exact ID. Mainline's
 removal of obsolete nonpending tool `state.raw` buffers is accepted, but tool
@@ -528,6 +530,32 @@ The source-tree diagnostic prints counts and differing field names, not text:
 ```sh
 python3 tools/diagnose_import.py --workspace WORKSPACE_ID --session SESSION_ID
 ```
+
+### Recover history after replacing a workspace marker
+
+Removing `.oc-box-id` and starting again creates a fresh environment; it does
+not delete the old private volume, registry, or host archives. To continue a
+previously synced conversation in the new environment, exit its active client,
+find the host archive title prefixed `[oc-box project-name]`, and import its ID:
+
+```sh
+opencode --pure session list
+oc-box --project ~/devel/demo --import-session ses_ARCHIVE_ID
+```
+
+Mainline records host archive imports against oc-box's private `controller`
+directory. oc-box verifies the archive's namespaced ID against that workspace,
+its original host registry, and its saved `history/SESSION_ID.json` before
+restoring the project directory for transfer. Both saved records must identify
+the selected project. The current host transcript is copied, retaining any
+later host archive work; the host session and saved archive are not changed.
+The archive title alone cannot authorize a different project.
+
+Use the import flag once, then resume normally. If the original registry or
+saved export is missing, restore it before retrying. Host history contains only
+successfully synced turns; the old private volume may contain newer work. Keep
+the original workspace resources until recovery is complete. Importing history
+does not copy installed packages, snapshots, or other private-home files.
 
 ## Devices and host permissions
 

@@ -136,6 +136,8 @@ The source session must belong to that project. oc-box saves a private recovery
 export, verifies the imported transcript, and resumes the same session ID.
 Your original host conversation is unchanged. Later launches need no import
 flag. See [session recovery](docs/cli.md#sessions-and-recovery) for retry behavior.
+The same flag can recover an oc-box host archive into a fresh environment after
+its marker was replaced; keep the original registry and saved history export.
 
 ### Select a distro or map hardware
 
