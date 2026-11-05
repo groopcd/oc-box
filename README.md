@@ -332,6 +332,55 @@ the crun runtime, installed separately on the host. SELinux/device-driver rules
 may also apply. Device passthrough does not install the driver-specific userland
 SDK in the container; OpenCode can install those dependencies there.
 
+#### Mapped device reports `Permission denied`
+
+A visible device name with `-?????????` in `ls -l` means the path is mapped but
+reading its attributes is denied. In rootless Podman, device bind mounts retain
+the host device's SELinux label. On an enforcing host, check the device policy
+and host permissions from a **host terminal**, as your regular user:
+
+```bash
+ls -ldZ /dev/accel
+ls -lZ /dev/accel/accel0
+id
+/usr/sbin/getenforce
+/usr/sbin/getsebool container_use_devices
+test -r /dev/accel/accel0 && test -w /dev/accel/accel0
+```
+
+On openSUSE the SELinux utilities are under `/usr/sbin`, which may not be on a
+regular user's PATH. Reading these settings does not require sudo. If the host
+user can access the device but SELinux is enforcing with
+`container_use_devices --> off`, Podman's documented device-policy setting is:
+
+```bash
+sudo /usr/sbin/setsebool -P container_use_devices on
+```
+
+This persistent **host-wide SELinux policy setting** allows containers to use
+device labels, subject to their existing mappings and Unix permissions. It
+does not map additional devices or disable SELinux. It applies immediately to
+already running containers: no reset, reboot, reinstall, or session import is
+needed. Retry inside the existing container:
+
+```bash
+ls -l /dev/accel/accel0
+prlimit --pid $$ --memlock
+xrt-smi examine
+```
+
+If the device becomes stat-able but access still fails, check its host ACL and
+supplementary-group access separately. Membership of the host `render` group
+does not automatically carry into a rootless container; use the crun and
+`--group-add=keep-groups` settings above when that group access is required.
+Container group names alone do not preserve host group permissions.
+
+A memlock limit does not cause `ls` to fail reading device attributes. In a
+command joined with `&&`, a failing `ls` prevents the memlock check and hardware
+utility from running at all; diagnose their output after device access works.
+
+See [Podman's device documentation](https://docs.podman.io/en/latest/markdown/podman-run.1.html#device-host-device-container-device-permissions).
+
 oc-box reserves its managed name/ownership labels, user, workdir, entrypoint,
 and lifecycle options, and has dedicated flags for CPU/RAM/process limits. Other
 Podman options are passed through before the image name. Settings that expose
