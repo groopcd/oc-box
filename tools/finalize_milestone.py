@@ -30,6 +30,10 @@ FILES = (
     "terminal_ui.py",
     "status_report.py",
     "version_info.py",
+    "docs/cli.md",
+    "docs/oc-box.1",
+    "docs/oc-box.texi",
+    "docs/oc-box.info",
     "tests/fixture_services.py",
     "tests/test_oc_box.py",
     "tests/test_finalize_milestone.py",
@@ -38,9 +42,11 @@ FILES = (
     "tests/test_status.py",
     "tests/test_version.py",
     "tests/test_podman_options.py",
+    "tests/test_documentation.py",
     "tests/smoke_mainline.py",
     "tools/finalize_milestone.py",
     "tools/diagnose_import.py",
+    "tools/build_docs.py",
 )
 COMMIT = "Initial milestone: rootless Podman environments for OpenCode"
 

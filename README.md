@@ -24,6 +24,37 @@ Requirements: Python 3.10+, rootless Podman with pasta networking, and OpenCode
 `~/.local/share/oc-box`, launcher: `~/.local/bin/oc-box`. Ensure that bin directory
 is on PATH. Start a new `oc-box` process after updates.
 
+## Manuals and complete command reference
+
+The [CLI reference](docs/cli.md) covers every command and option, including
+defaults, applicability, examples, persistence, crash recovery, expected
+failure behavior, environment/configuration, status metrics, and troubleshooting.
+It also states exactly what stop/reset/purge preserve or delete.
+
+The installer includes prebuilt manual and GNU Info pages, with no documentation
+build tools required:
+
+```bash
+man oc-box
+info oc-box
+```
+
+These are installed under `~/.local/share/man/man1/` and `~/.local/share/info/`.
+If the host does not search local manuals automatically:
+
+```bash
+MANPATH="$HOME/.local/share/man:" man oc-box
+INFOPATH="$HOME/.local/share/info:" info oc-box
+man "$HOME/.local/share/man/man1/oc-box.1"
+info --file "$HOME/.local/share/info/oc-box.info"
+```
+
+Readers are separate host packages (`man` and `info` on openSUSE). The reference
+is also copied to `~/.local/share/oc-box/docs/cli.md`. Maintainers edit that
+reference in the source tree and run `python3 tools/build_docs.py` to regenerate
+the man/Texinfo/Info files; this build step requires GNU makeinfo. Use
+`python3 tools/build_docs.py --check` to detect stale generated sources.
+
 ### First-milestone repository relocation
 
 The source was relocated to `/home/groo/devel/oc-box`. If completing the initial
@@ -527,6 +558,11 @@ Defaults: 4 CPUs, 8 GiB RAM, 2048 processes. Override at creation/reset:
 oc-box --cpus 8 --memory 16g --pids-limit 4096
 oc-box reset --cpus 8 --memory 16g
 ```
+
+For an existing container these changes **require reset**, even if it is
+stopped. oc-box does not apply CPU/RAM/process changes on the fly or call
+`podman update`. Reset preserves project files, private home, conversation IDs,
+and unfinished edits but rebuilds system packages; a purge is unnecessary.
 
 ### openSUSE: enable rootless resource-controller delegation
 

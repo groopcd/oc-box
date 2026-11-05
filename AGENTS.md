@@ -14,6 +14,8 @@ This repository lives at `/home/groo/devel/oc-box`. It was moved from
 - `install.py`: copies the launcher to `~/.local/share/oc-box` and creates
   `~/.local/bin/oc-box`.
 - `tests/`: stdlib unit tests and bounded offline mainline integration fixtures.
+- `docs/cli.md`: canonical command reference; `tools/build_docs.py` generates
+  the committed man/Texinfo/Info manuals from it.
 
 OpenCode itself and its integrations run natively inside the container. Preserve
 MCPs, formatters, language servers, and plugins. Do not return to replacing
@@ -32,6 +34,10 @@ Version `0.1.N+gHASH` is derived from the full Git history; every commit advance
 N automatically. The installer embeds the source identity in its private
 `build-info.json`. Original project code/documentation is GPL-3.0-or-later;
 retain LICENSE and NOTICE when distributing/installing it.
+
+Update `docs/cli.md` when command-line behavior changes, then regenerate with
+`python3 tools/build_docs.py` (requires GNU makeinfo). Prebuilt manuals ship in
+the repository; installing oc-box must not require documentation build tools.
 
 ## Checks
 
