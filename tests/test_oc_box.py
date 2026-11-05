@@ -1,0 +1,216 @@
+import argparse
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import runpy
+import subprocess
+import tarfile
+import tempfile
+import unittest
+from unittest.mock import patch
+
+APP = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("oc_box", APP / "oc_box.py")
+box = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(box)
+
+
+class WorkspaceTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="oc-box-test-")
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        self.project = self.root / "project with spaces"
+        self.project.mkdir()
+        self.env = patch.dict(os.environ, {"OC_BOX_STATE_HOME": str(self.root / "state"), "XDG_CONFIG_HOME": str(self.root / "config")})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.path, self.data = box.create_workspace(self.project, "tumbleweed")
+
+    def test_default_and_aliases(self):
+        release = self.root / "os-release"
+        release.write_text('ID="opensuse-tumbleweed"\n')
+        self.assertEqual(box.host_default(release), "tumbleweed")
+        self.assertEqual(box.distro_name("opensuse"), "tumbleweed")
+        with self.assertRaises(box.BoxError):
+            box.distro_name("ubuntu; touch /host")
+
+    def test_copied_and_replaced_directory_identity(self):
+        other = self.root / "other"
+        other.mkdir()
+        (other / box.MARKER).write_text(self.data["id"])
+        with self.assertRaisesRegex(box.BoxError, "another directory"):
+            box.find_workspace(other)
+        self.project.rename(self.root / "old")
+        self.project.mkdir()
+        self.assertEqual(box.find_workspace(self.project), (None, None))
+        (self.project / box.MARKER).write_text(self.data["id"])
+        with self.assertRaisesRegex(box.BoxError, "replaced"):
+            box.find_workspace(self.project)
+
+    def test_config_preserves_mcp_lsp_formatter_and_plugins(self):
+        config = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode"
+        config.mkdir(parents=True)
+        original = {"mcp": {"search": {"type": "local", "command": ["/usr/bin/uvx", "duckduckgo-mcp-server"]}}, "lsp": {"custom": {"command": ["server"], "extensions": [".py"]}}, "formatter": {"custom": {"command": ["format", "$FILE"], "extensions": [".py"]}}, "plugin": ["opencode-sandbox", "some-auth-plugin"], "provider": {"local": {"options": {"baseURL": "http://localhost:13305/api/v1"}}}}
+        (config / "opencode.jsonc").write_text(json.dumps(original))
+        (config / "plugins").mkdir()
+        (config / "plugins/my-plugin.ts").write_text("export default async () => ({})")
+        with tarfile.open(fileobj=io.BytesIO(box.config_archive(self.data)), mode="r:gz") as archive:
+            copied = json.load(archive.extractfile("opencode.jsonc"))
+            self.assertIn("plugins/my-plugin.ts", archive.getnames())
+        for key in ("mcp", "lsp", "formatter", "plugin"):
+            if key == "mcp":
+                self.assertEqual(copied[key]["search"]["command"], original[key]["search"]["command"])
+                self.assertEqual(copied[key]["search"]["timeout"], 120000)
+            else:
+                self.assertEqual(copied[key], original[key])
+        self.assertEqual(copied["provider"]["local"]["options"]["baseURL"], "http://host.containers.internal:13305/api/v1")
+        self.assertTrue(copied["lsp"])
+        self.assertEqual(json.loads((config / "opencode.jsonc").read_text()), original)
+
+    def test_container_env_passes_mcp_credentials_not_host_sockets(self):
+        with patch.dict(os.environ, {"BRAVE_API_KEY": "test-key", "OPENCODE_AUTH_CONTENT": '{"secret":"host-auth"}', "SSH_AUTH_SOCK": "/host/ssh", "DOCKER_HOST": "unix:///host/docker", "HTTP_PROXY": "http://localhost:3128"}):
+            env = box.container_env(self.data)
+        self.assertEqual(env["BRAVE_API_KEY"], "test-key")
+        self.assertEqual(env["OPENCODE_DISABLE_SANDBOX"], "1")
+        for key in ("SSH_AUTH_SOCK", "DOCKER_HOST", "HTTP_PROXY", "OPENCODE_AUTH_CONTENT"):
+            self.assertNotIn(key, env)
+
+    def test_container_binds_only_project_and_private_named_home(self):
+        calls = []
+
+        def fake(*args, **kwargs):
+            calls.append(args)
+            if args[:2] == ("volume", "exists"):
+                return subprocess.CompletedProcess([], 1, "", "")
+            if args[:2] == ("volume", "inspect"):
+                return subprocess.CompletedProcess([], 0, json.dumps([{"Labels": {box.LABEL: self.data["id"]}}]), "")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with patch.object(box, "podman", side_effect=fake):
+            box.create_container(self.path, self.data)
+        command = next(call for call in calls if call[0] == "create")
+        volumes = [command[i + 1] for i, item in enumerate(command) if item == "--volume"]
+        self.assertEqual(len(volumes), 2)
+        self.assertIn(f"{self.project}:{self.project}:rw,rprivate,nosuid,nodev", volumes)
+        self.assertIn(f"{self.data['home_volume']}:{self.data['home']}:rw", volumes)
+        self.assertNotIn("--privileged", command)
+        self.assertNotIn(f"{Path.home()}:{Path.home()}:rw", volumes)
+
+    def test_exec_runs_native_opencode_in_container(self):
+        command = box.exec_command(self.data, ["opencode", self.data["project"], "--session", "ses_test"])
+        self.assertEqual(command[:3], ["podman", "exec", "-i"])
+        self.assertEqual(command[-5:], [self.data["container"], "opencode", self.data["project"], "--session", "ses_test"])
+
+    def test_installer_creates_working_standalone_launcher(self):
+        home = self.root / "install-home"
+        with patch.object(Path, "home", return_value=home):
+            runpy.run_path(str(APP / "install.py"))
+        binary = home / ".local/bin/oc-box"
+        self.assertTrue(os.access(binary, os.X_OK))
+        result = subprocess.run([str(binary), "distros"], capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("registry.opensuse.org/opensuse/tumbleweed:latest", result.stdout)
+
+    def test_sync_replaces_only_namespaced_archive_and_keeps_source_id(self):
+        source = {"info": {"id": "ses_source", "title": "Work"}, "messages": []}
+        old = box.archive_id(self.data["id"], "ses_source", "ses")
+        state = {"last": "ses_source", "sessions": ["ses_source"], "host_sessions": {"ses_source": old}, "synced": {"ses_source": "previous"}}
+        calls = []
+
+        def fake(command, **kwargs):
+            calls.append(command)
+            exporting = "python3" in command and command[-1] == "ses_source"
+            return subprocess.CompletedProcess(command, 0, json.dumps(source) if exporting else "", "")
+
+        with patch.object(box, "refresh_sessions", return_value=state), patch.object(box, "run", side_effect=fake):
+            box.sync_sessions(self.path, self.data)
+        deletion = next(command for command in calls if "delete" in command)
+        self.assertEqual(deletion[-1], old)
+        self.assertNotEqual(deletion[-1], "ses_source")
+        self.assertEqual(box.session_state(self.path)["last"], "ses_source")
+
+    def test_host_sync_profile_keeps_default_data_location(self):
+        env = box.host_cli_env(self.path)
+        self.assertEqual(env["XDG_DATA_HOME"], os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
+        self.assertEqual(env["OPENCODE_PURE"], "1")
+        self.assertEqual(env["OPENCODE_DISABLE_PROJECT_CONFIG"], "1")
+
+    def test_scoped_config_enables_native_lsp_formatter_when_unspecified(self):
+        config = Path(os.environ["XDG_CONFIG_HOME"]) / "opencode"
+        config.mkdir(parents=True)
+        (config / "opencode.json").write_text('{"mcp": {}, "shell": "/host/zsh"}')
+        with tarfile.open(fileobj=io.BytesIO(box.config_archive(self.data)), mode="r:gz") as archive:
+            copied = json.load(archive.extractfile("oc-box-profile.json"))
+        self.assertIs(copied["lsp"], True)
+        self.assertIs(copied["formatter"], True)
+        self.assertEqual(copied["shell"], "/bin/bash")
+
+    def test_endpoint_rewrite_leaves_oauth_callbacks_and_shell_commands_intact(self):
+        original = {"url": "http://localhost:9000/mcp", "oauth": {"redirectUri": "http://127.0.0.1:19876/callback"}, "command": ["curl", "http://localhost:3000"]}
+        changed = box.rewrite_config(original)
+        self.assertEqual(changed["url"], "http://host.containers.internal:9000/mcp")
+        self.assertEqual(changed["oauth"], original["oauth"])
+        self.assertEqual(changed["command"], original["command"])
+
+    def test_namespace_preserves_message_order_and_relationships(self):
+        export = {"info": {"id": "ses_source", "title": "Work", "permission": ["ignored"]}, "messages": [
+            {"info": {"id": "msg_001", "sessionID": "ses_source", "role": "user"}, "parts": [{"id": "prt_001", "sessionID": "ses_source", "messageID": "msg_001", "type": "text", "text": "ses_source"}]},
+            {"info": {"id": "msg_002", "sessionID": "ses_source", "parentID": "msg_001", "role": "assistant"}, "parts": []},
+        ]}
+        archived = box.archive_session(export, self.data)
+        self.assertNotEqual(archived["info"]["id"], "ses_source")
+        self.assertNotIn("permission", archived["info"])
+        self.assertLess(archived["messages"][0]["info"]["id"], archived["messages"][1]["info"]["id"])
+        self.assertEqual(archived["messages"][1]["info"]["parentID"], archived["messages"][0]["info"]["id"])
+        self.assertEqual(archived["messages"][0]["parts"][0]["text"], "ses_source")
+
+    def test_reset_retains_home_but_purge_removes_it(self):
+        calls = []
+
+        def fake(*args, **kwargs):
+            calls.append(args)
+            if "--filter" in args:
+                self.assertIn(f"label={box.LABEL}={self.data['id']}", args)
+                return subprocess.CompletedProcess([], 0, "owned\n", "")
+            if "inspect" in args:
+                return subprocess.CompletedProcess([], 0, json.dumps([{"Labels": {box.LABEL: self.data["id"]}}]), "")
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        with patch.object(box, "podman", side_effect=fake):
+            box.remove_resources(self.data, keep_home=True)
+            self.assertFalse(any(call[:2] == ("volume", "rm") for call in calls))
+            box.remove_resources(self.data)
+        self.assertTrue(any(call[:2] == ("volume", "rm") for call in calls))
+        self.assertFalse(any("prune" in call for call in calls))
+
+    def test_sync_failure_keeps_container_data_and_stops(self):
+        args = argparse.Namespace(command="start", new=False, model=None)
+        proc = unittest.mock.Mock()
+        proc.wait.return_value = 0
+        proc.poll.return_value = 0
+        with patch.object(box, "run", return_value=subprocess.CompletedProcess([], 0, "1.19.5\n", "")), \
+             patch.object(box, "start_container"), patch.object(box, "prepare_runtime"), \
+             patch.object(box, "refresh_sessions", return_value={"last": "ses_existing"}), \
+             patch.object(box, "sync_sessions", side_effect=box.BoxError("offline")), \
+             patch.object(box, "stop_container") as stop, \
+             patch.object(box.subprocess, "Popen", return_value=proc) as popen:
+            self.assertEqual(box.launch(self.path, self.data, args), 1)
+        self.assertEqual(popen.call_args.args[0][-2:], ["--session", "ses_existing"])
+        stop.assert_called_once()
+        self.assertTrue(self.path.exists())
+
+    def test_purge_default_keeps_project_files(self):
+        source = self.project / "code.py"
+        source.write_text("work")
+        args = argparse.Namespace(yes=True, delete_sessions=False, all=False)
+        with patch.object(box, "inspect_owned", return_value=None), patch.object(box, "stop_container"), patch.object(box, "remove_resources"):
+            box.purge(self.path, self.data, args)
+        self.assertEqual(source.read_text(), "work")
+        self.assertFalse((self.project / box.MARKER).exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

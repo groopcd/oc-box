@@ -1,0 +1,150 @@
+"""Bounded offline smoke test of native OpenCode tools, MCP, formatter, and LSP.
+
+This does not simulate container isolation. It validates the mainline execution
+path used inside Podman, with temporary config/data and local fixture services.
+"""
+
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import importlib.util
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import tempfile
+import threading
+
+APP = Path(__file__).resolve().parents[1]
+spec = importlib.util.spec_from_file_location("oc_box", APP / "oc_box.py")
+box = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(box)
+
+
+def bounded(command, *, env, cwd, timeout=45):
+    process = subprocess.Popen(command, env={**env, "PWD": str(cwd)}, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True)
+    try:
+        out, err = process.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        out, err = process.communicate(timeout=5)
+        raise AssertionError(f"Smoke test stopped after {timeout}s. Last output:\n{out[-2000:]}\n{err[-2000:]}")
+    assert process.returncode == 0, out[-4000:] + err[-4000:]
+    return out, err
+
+
+def main():
+    with tempfile.TemporaryDirectory(prefix="oc-box-native-") as directory:
+        root = Path(directory)
+        project = root / "project"
+        project.mkdir()
+        env = {key: value for key, value in os.environ.items() if not key.startswith(("OPENCODE_", "OC_BOX_"))}
+        for kind in ("config", "data", "cache", "state"):
+            env["XDG_" + kind.upper() + "_HOME"] = str(root / kind)
+        env["OPENCODE_TEST_HOME"] = str(root / "empty-home")
+        env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+        env["OPENCODE_DISABLE_MODELS_FETCH"] = "1"
+        env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+        env["GIT_CONFIG_GLOBAL"] = "/dev/null"
+        bounded(["git", "init", "--quiet"], env=env, cwd=project, timeout=5)
+        service = str(APP / "tests/fixture_services.py")
+        target = project / "example.py"
+        logs = {name: root / (name + ".jsonl") for name in ("mcp", "lsp", "formatter")}
+        requests, failures = [], []
+
+        class Model(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_POST(self):
+                try:
+                    request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                    requests.append(request)
+                    tools = {item["function"]["name"]: item["function"] for item in request.get("tools", [])}
+                    completed = sum(item.get("role") == "tool" for item in request.get("messages", []))
+                    # Every response completes successfully; no assertion causes
+                    # a dropped connection/retry loop in the fake provider.
+                    delta, finish = {"content": "Smoke test complete"}, "stop"
+                    if tools and len(requests) <= 10 and completed < 3:
+                        if completed == 0:
+                            name, args = "write", {"filePath": str(target), "content": "hello formatter\n"}
+                        elif completed == 1:
+                            name, args = "read", {"filePath": str(target)}
+                        else:
+                            name = next((name for name in tools if name.endswith("_ping")), "MISSING_MCP")
+                            args = {}
+                        if name not in tools:
+                            failures.append(f"Native tool {name} missing from catalog: {list(tools)}")
+                        else:
+                            delta = {"tool_calls": [{"index": 0, "id": f"call_smoke_{completed}", "type": "function", "function": {"name": name, "arguments": json.dumps(args)}}]}
+                            finish = "tool_calls"
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    for value in (
+                        {"id": "chatcmpl-smoke", "object": "chat.completion.chunk", "model": "gpt-4-smoke", "choices": [{"index": 0, "delta": delta, "finish_reason": None}]},
+                        {"id": "chatcmpl-smoke", "object": "chat.completion.chunk", "model": "gpt-4-smoke", "choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}},
+                    ):
+                        self.wfile.write(("data: " + json.dumps(value) + "\n\n").encode())
+                    self.wfile.write(b"data: [DONE]\n\n")
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Model)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        config = {
+            "$schema": "https://opencode.ai/config.json",
+            "model": "oc-box-smoke/gpt-4-smoke", "permission": "allow",
+            "snapshot": False,
+            "provider": {"oc-box-smoke": {
+                "npm": "@ai-sdk/openai-compatible", "name": "Smoke",
+                "options": {"baseURL": f"http://127.0.0.1:{server.server_port}/v1", "apiKey": "test"},
+                "models": {"gpt-4-smoke": {"name": "Smoke", "limit": {"context": 32000, "output": 2000}}},
+            }},
+            "mcp": {"fixture": {"type": "local", "command": ["python3", service, "mcp", str(logs["mcp"])]}},
+            "formatter": {"fixture": {"command": ["python3", service, "format", str(logs["formatter"]), "$FILE"], "extensions": [".py"]}},
+            "lsp": {"pyright": {"disabled": True}, "fixture": {"command": ["python3", service, "lsp", str(logs["lsp"])], "extensions": [".py"]}},
+        }
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(config)
+        try:
+            resolved, _ = bounded(["opencode", "--pure", "debug", "config"], env=env, cwd=project, timeout=15)
+            assert "fixture" in json.loads(resolved)["lsp"], resolved[-3000:]
+            out, err = bounded(["opencode", "--pure", "run", "--model", "oc-box-smoke/gpt-4-smoke", "Write and read example.py, then call fixture ping."], env=env, cwd=project, timeout=50)
+            assert not failures, failures
+            assert target.is_file(), out[-2000:] + err[-2000:]
+            assert target.read_text() == "HELLO FORMATTER\n", target.read_text()
+            assert logs["formatter"].is_file(), "Native formatter was not invoked"
+            mcp = [json.loads(line) for line in logs["mcp"].read_text().splitlines()]
+            assert any(item.get("method") == "tools/call" for item in mcp), mcp
+            if not logs["lsp"].exists():
+                recent = "\n".join(file.read_text()[-5000:] for file in (root / "data/opencode/log").glob("*"))
+                raise AssertionError("LSP fixture did not start. CLI output:\n" + out[-2000:] + err[-2000:] + "\nLogs:\n" + recent[-7000:])
+            lsp = [json.loads(line) for line in logs["lsp"].read_text().splitlines()]
+            assert any(item.get("method") == "initialize" for item in lsp), lsp
+            assert any(item.get("method") == "textDocument/didOpen" for item in lsp), lsp
+            print("PASS: native file write/read, automatic formatter, LSP initialize/didOpen, and MCP tool call.")
+            listing, _ = bounded(["opencode", "--pure", "session", "list", "--format", "json"], env=env, cwd=project, timeout=15)
+            sessions = json.loads(listing)
+            ident = sessions[0]["id"]
+            exported, _ = bounded(["opencode", "--pure", "export", ident], env=env, cwd=project, timeout=15)
+            archived = box.archive_session(json.loads(exported), {"id": "a" * 32, "project": str(project)})
+            archive = root / "archive.json"
+            box.atomic_json(archive, archived)
+            host = dict(env)
+            host.pop("OPENCODE_CONFIG_CONTENT")
+            host["XDG_DATA_HOME"] = str(root / "host-data")
+            bounded(["opencode", "--pure", "import", str(archive)], env=host, cwd=project, timeout=15)
+            copied, _ = bounded(["opencode", "--pure", "export", archived["info"]["id"]], env=host, cwd=project, timeout=15)
+            assert len(json.loads(copied)["messages"]) == len(archived["messages"])
+            # Resume the same native session without requiring another tool call.
+            bounded(["opencode", "--pure", "run", "--session", ident, "Finish without tools."], env=env, cwd=project, timeout=20)
+            print("PASS: session export/import into a separate host-style database, and exact-session resume.")
+            print("All app data was temporary. Live Podman isolation remains a separate host-terminal check.")
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+
+if __name__ == "__main__":
+    main()
