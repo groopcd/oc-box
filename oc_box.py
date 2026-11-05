@@ -548,6 +548,101 @@ def valid_session_id(value):
     return isinstance(value, str) and re.fullmatch(r"ses[A-Za-z0-9_-]+", value) is not None
 
 
+def export_host_session(path, data, ident):
+    """Export only the selected host conversation; never mount the host DB."""
+    if not valid_session_id(ident):
+        raise BoxError("Invalid host session ID.")
+    result = run(["opencode", "--pure", "export", ident], env=host_cli_env(path), cwd=path.parent / "controller", capture=True, timeout=60)
+    try:
+        exported = json.loads(result.stdout)
+    except ValueError as exc:
+        raise BoxError("Host session export is invalid/incomplete; nothing was imported.") from exc
+    validate_session_export(exported, ident)
+    if exported["info"].get("parentID"):
+        raise BoxError("Import the parent conversation, not a subagent session.")
+    directory = exported["info"].get("directory")
+    if not isinstance(directory, str) or Path(directory).resolve() != Path(data["project"]).resolve():
+        raise BoxError(f"Host session belongs to {directory!r}, not {data['project']}. Select its original project with --project.")
+    return exported
+
+
+def validate_session_export(exported, ident):
+    """Check transcript identities before copying or accepting an import."""
+    if not isinstance(exported, dict) or not isinstance(exported.get("info"), dict) or exported["info"].get("id") != ident or not isinstance(exported.get("messages"), list):
+        raise BoxError("Invalid session export.")
+    messages, parts = set(), set()
+    for message in exported["messages"]:
+        if not isinstance(message, dict) or not isinstance(message.get("info"), dict):
+            raise BoxError("Invalid exported message.")
+        info = message.get("info", {})
+        mid = info.get("id")
+        if not isinstance(mid, str) or not re.fullmatch(r"msg[A-Za-z0-9_-]+", mid) or mid in messages or info.get("sessionID") != ident or not isinstance(message.get("parts"), list):
+            raise BoxError("Invalid exported message identity.")
+        messages.add(mid)
+        for part in message["parts"]:
+            if not isinstance(part, dict):
+                raise BoxError("Invalid exported part.")
+            pid = part.get("id")
+            if not isinstance(pid, str) or not re.fullmatch(r"prt[A-Za-z0-9_-]+", pid) or pid in parts or part.get("sessionID") != ident or part.get("messageID") != mid:
+                raise BoxError("Invalid exported part identity.")
+            parts.add(pid)
+
+
+def export_container_session(data, ident):
+    # Podman gives the child a pipe even when host output is a regular file.
+    # Spool in-container too to avoid mainline's large-stdout truncation.
+    spool = """import shutil,subprocess,sys,tempfile
+with tempfile.TemporaryFile() as output:
+    result=subprocess.run([sys.argv[2],'--pure','export',sys.argv[1]],stdout=output)
+    if result.returncode: sys.exit(result.returncode)
+    output.seek(0)
+    shutil.copyfileobj(output,sys.stdout.buffer)
+    sys.stdout.buffer.flush()
+"""
+    result = run(exec_command(data, ["python3", "-c", spool, ident, CONTAINER_OPENCODE]), capture=True, timeout=60)
+    return json.loads(result.stdout)
+
+
+def import_host_session(path, data, exported):
+    """Import once, verify the full transcript, then select it for resume."""
+    ident = exported["info"]["id"]
+    validate_session_export(exported, ident)
+    listed = run(exec_command(data, [CONTAINER_OPENCODE, "--pure", "session", "list", "--format", "json"]), capture=True, timeout=60)
+    if any(item.get("id") == ident for item in json.loads(listed.stdout or "[]")):
+        raise BoxError(f"Session {ident} already exists in this container; it was not overwritten. Run oc-box normally to resume it.")
+    # Keep a private host-side source export for recovery. Never place the
+    # transcript in the writable project or pass host filenames to the agent.
+    backup = path.parent / "imports" / (ident + ".json")
+    atomic_json(backup, exported)
+    transfer = """import pathlib,subprocess,sys,tempfile
+with tempfile.TemporaryDirectory(prefix='oc-box-import-') as directory:
+    target=pathlib.Path(directory)/'session.json'
+    with target.open('x') as output:
+        target.chmod(0o600)
+        output.write(sys.stdin.read())
+    result=subprocess.run([sys.argv[1],'--pure','import',str(target)])
+    sys.exit(result.returncode)
+"""
+    payload = json.loads(json.dumps(exported))
+    # Import is workspace activity: otherwise a newer pre-existing conversation
+    # would immediately displace this older imported session on the next launch.
+    payload["info"].setdefault("time", {})["updated"] = max(int(time.time() * 1000), payload["info"].get("time", {}).get("updated", 0))
+    run(exec_command(data, ["python3", "-c", transfer, CONTAINER_OPENCODE]), input=json.dumps(payload), capture=True, timeout=60)
+    imported = export_container_session(data, ident)
+    validate_session_export(imported, ident)
+    expected = {message["info"]["id"]: message for message in exported["messages"]}
+    actual = {message["info"]["id"]: message for message in imported["messages"]}
+    if imported["info"].get("directory") != data["project"] or actual != expected:
+        raise BoxError(f"Imported session verification failed; OpenCode was not launched. Original host session and recovery export are intact at {backup}.")
+    state = session_state(path)
+    state["sessions"] = list(dict.fromkeys(state.get("sessions", []) + [ident]))
+    state["last"] = ident
+    state.setdefault("imported_from_host", {})[ident] = {"backup": str(backup)}
+    atomic_json(session_file(path), state)
+    print(f"oc-box: Imported host session {ident} ({len(expected)} messages); original host conversation retained.", flush=True)
+    return state
+
+
 def archive_id(workspace_id, ident, prefix):
     # OpenCode orders messages/parts by ID. Keep the original sortable suffix.
     return prefix + "_" + hashlib.sha256(workspace_id.encode()).hexdigest()[:12] + "_" + ident.split("_", 1)[-1]
@@ -595,19 +690,7 @@ def sync_sessions(path, data):
     for ident in state.get("sessions", []):
         if not valid_session_id(ident):
             raise BoxError("Invalid stored session ID")
-        # A regular host output file is not enough: podman exec still puts the
-        # child's stdout on a pipe. Spool inside the container too; Python then
-        # streams the completed file and flushes before exiting.
-        spool = """import shutil,subprocess,sys,tempfile
-with tempfile.TemporaryFile() as output:
-    result=subprocess.run([sys.argv[2],'--pure','export',sys.argv[1]],stdout=output)
-    if result.returncode: sys.exit(result.returncode)
-    output.seek(0)
-    shutil.copyfileobj(output,sys.stdout.buffer)
-    sys.stdout.buffer.flush()
-"""
-        result = run(exec_command(data, ["python3", "-c", spool, ident, CONTAINER_OPENCODE]), capture=True, timeout=60)
-        archived = archive_session(json.loads(result.stdout), data)
+        archived = archive_session(export_container_session(data, ident), data)
         target = archives / (archived["info"]["id"] + ".json")
         atomic_json(target, archived)
         digest = hashlib.sha256(target.read_bytes()).hexdigest()
@@ -643,6 +726,10 @@ def launch(path, data, args):
         version = run(["opencode", "--version"], capture=True).stdout.strip()
     if not re.fullmatch(r"1\.\d+\.\d+(?:[-+].*)?", version):
         raise BoxError(f"OpenCode {version} session import/export has not been checked (supported: 1.x).")
+    exported = None
+    if args.import_session:
+        with loading_stage("Exporting host session"):
+            exported = export_host_session(path, data, args.import_session)
     code = 1
     try:
         with loading_stage(f"Starting {data['distro']} container"):
@@ -653,8 +740,12 @@ def launch(path, data, args):
             with loading_stage("Syncing session history"):
                 sync_sessions(path, data)
             return 0
-        with loading_stage("Finding workspace session"):
-            sessions = refresh_sessions(path, data)
+        if exported is not None:
+            with loading_stage("Importing and verifying host session"):
+                sessions = import_host_session(path, data, exported)
+        else:
+            with loading_stage("Finding workspace session"):
+                sessions = refresh_sessions(path, data)
         command = [CONTAINER_OPENCODE, data["project"]]
         if not args.new and sessions.get("last"):
             command.extend(["--session", sessions["last"]])
@@ -745,6 +836,7 @@ def parser():
     group = result.add_mutually_exclusive_group()
     group.add_argument("--new", action="store_true", help="start a new conversation in this environment")
     group.add_argument("--resume", action="store_true", help="explicitly resume the recorded conversation")
+    group.add_argument("--import-session", metavar="SESSION_ID", help="copy a host conversation from this project into the container and resume it")
     result.add_argument("--model", help="OpenCode provider/model")
     result.add_argument("--cpus", help="CPU limit (default: 4)")
     result.add_argument("--memory", help="memory limit (default: 8g)")
@@ -757,6 +849,11 @@ def parser():
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    if args.import_session:
+        if args.command != "start":
+            raise BoxError("--import-session applies only to start.")
+        if not valid_session_id(args.import_session):
+            raise BoxError("Invalid host session ID.")
     if args.distro:
         args.distro = distro_name(args.distro)
     if args.command == "distros":

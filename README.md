@@ -95,6 +95,43 @@ remains in its named volume. Running processes need restarting next time.
 Run `oc-box` again in the folder to resume the last root conversation. A second
 active launcher for that workspace is rejected.
 
+### Continue a host conversation inside the container
+
+Exit the host OpenCode client first so the last turn is saved, then run:
+
+```bash
+oc-box --project /path/to/project --import-session ses_YOUR_HOST_SESSION_ID
+```
+
+For this repository's original conversation:
+
+```bash
+oc-box --project /home/groo/devel/oc-box \
+  --import-session ses_e539b6040ffeg5O1sOQugbB2N6
+```
+
+This creates/starts the environment, exports the selected conversation from your
+normal host database, imports it into the private container database, verifies
+all exported messages/parts, and launches that exact session. The source session
+must belong to the selected project directory. Files are already available via
+the project bind mount, including `.git`, untracked files, and unfinished edits;
+no separate project copy is needed.
+
+The original host conversation remains untouched. A private recovery export is
+saved in the workspace registry's `imports/` directory, outside the project.
+Container-to-host history sync still creates its separate namespaced archive,
+so later container progress does not overwrite your original host conversation.
+Import transfers exported conversation/tool history, not running processes,
+installed host packages, separate subagent transcripts, attached files outside
+the project, or snapshot/undo storage. Reverted sessions that rely on host-only
+snapshots cannot restore those snapshots inside the container.
+
+The import is selected as the latest workspace conversation. On later visits,
+just use `oc-box --project /path/to/project`. Do not repeat `--import-session`:
+an existing session with the same ID is never overwritten or merged, protecting
+work you have continued inside the container. `--import-session` is a start-only
+option and cannot be combined with `--new` or `--resume`.
+
 ## MCPs, formatters, language servers, and plugins
 
 Each launch snapshots `~/.config/opencode` (or its XDG equivalent) into the
@@ -150,7 +187,9 @@ session, including snapshots and other container-local data.
 This is conversation-history synchronization, not live database replication:
 host archives do not include snapshot stores, running processes, or separate
 subagent transcripts. Conversations subsequently edited in plain host OpenCode
-are not synchronized back into the container.
+are not synchronized back into the container automatically. The one-time
+`--import-session` option above brings an existing host conversation into a
+workspace; it does not merge an ID that already exists in the container.
 
 If the launcher is killed or sync fails, container data survives. Retry with:
 
@@ -194,6 +233,7 @@ may also need reinstalling when switching distributions, especially Alpine.
 oc-box                         # Create or resume
 oc-box --resume                # Explicit resume (requires an existing workspace)
 oc-box --new                   # New conversation, same environment
+oc-box --import-session ID     # Import a host conversation and continue it here
 oc-box --model provider/model  # Select model
 oc-box status                  # Workspace/container and recorded session
 oc-box list                    # All workspaces and latest recorded session IDs
@@ -297,8 +337,10 @@ python3 -B /home/groo/devel/oc-box/tests/smoke_mainline.py
 The mainline smoke test has bounded subprocess timeouts and an offline fake
 model/MCP/LSP/formatter. It verifies real OpenCode file tools, automatic
 formatting, LSP startup/document notifications, MCP invocation, session
-export/import, and resume with temporary app data. It does **not** substitute
-for a live Podman check. OpenCode's current outer Bubblewrap sandbox prevents
+export/import, and resume with temporary app data. Host-to-container import is
+also checked with a multi-megabyte transcript, duplicate protection, and exact
+imported-session resume. It does **not** substitute for a live Podman check.
+OpenCode's current outer Bubblewrap sandbox prevents
 that check in this editing session.
 
 From a normal host terminal, launch a fresh dedicated test folder with `oc-box`

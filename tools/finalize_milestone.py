@@ -19,7 +19,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 FILES = (
     ".gitignore", "AGENTS.md", "README.md", "bootstrap.py", "install.py", "oc_box.py", "sync_config.py", "terminal_ui.py",
-    "tests/fixture_services.py", "tests/test_oc_box.py", "tests/test_finalize_milestone.py", "tests/test_startup.py", "tests/smoke_mainline.py",
+    "tests/fixture_services.py", "tests/test_oc_box.py", "tests/test_finalize_milestone.py", "tests/test_startup.py", "tests/test_session_import.py", "tests/smoke_mainline.py",
     "tools/finalize_milestone.py",
 )
 COMMIT = "Initial milestone: rootless Podman environments for OpenCode"

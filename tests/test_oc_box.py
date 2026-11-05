@@ -272,7 +272,7 @@ class WorkspaceTests(unittest.TestCase):
         self.assertFalse(any("prune" in call for call in calls))
 
     def test_sync_failure_keeps_container_data_and_stops(self):
-        args = argparse.Namespace(command="start", new=False, model=None)
+        args = argparse.Namespace(command="start", new=False, model=None, import_session=None)
         with patch.object(box, "run", return_value=subprocess.CompletedProcess([], 0, "1.19.5\n", "")), \
              patch.object(box, "start_container"), patch.object(box, "prepare_runtime"), \
              patch.object(box, "refresh_sessions", return_value={"last": "ses_existing"}), \

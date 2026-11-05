@@ -11,11 +11,14 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
+import sys
 import tempfile
 import tarfile
 import threading
 import time
+from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("oc_box", APP / "oc_box.py")
@@ -104,6 +107,52 @@ def warm_start_regression(root, env, project):
         server.shutdown()
         server.server_close()
         worker.join(timeout=3)
+
+
+def session_import_regression(root, env, project, ident):
+    """Use production export/transfer/verify code with two real temporary DBs."""
+    host = dict(env)
+    host.pop("OPENCODE_CONFIG_CONTENT", None)
+    isolated = {**host, "XDG_DATA_HOME": str(root / "import-container-data")}
+    registry = root / "import-registry/workspace.json"
+    registry.parent.mkdir(parents=True)
+    (registry.parent / "controller").mkdir()
+    data = {"id": "b" * 32, "project": str(project)}
+    executable = shutil.which("opencode")
+    child_env = {**isolated, "PWD": str(project)}
+    # Substitute process transport only; run the production transfer and actual
+    # mainline export/import/verification code without modification.
+    trampoline = "import json,os,sys; env=json.loads(sys.argv[1]); os.chdir(env['PWD']); os.execvpe(sys.argv[2],sys.argv[2:],env)"
+
+    def local_exec(_data, command, **_kwargs):
+        return [sys.executable, "-c", trampoline, json.dumps(child_env), *command]
+
+    with patch.object(box, "host_cli_env", return_value=host), patch.object(box, "CONTAINER_OPENCODE", executable), patch.object(box, "exec_command", side_effect=local_exec):
+        source = box.export_host_session(registry, data, ident)
+        # Exercise the multi-MiB export/transfer path without another model call.
+        large = json.loads(json.dumps(source))
+        text = next(part for message in large["messages"] for part in message["parts"] if part.get("type") == "text")
+        text["text"] += "\n" + "transfer regression " * 140000
+        fixture = root / "large-source.json"
+        box.atomic_json(fixture, large)
+        bounded(["opencode", "--pure", "session", "delete", ident], env=host, cwd=project, timeout=15)
+        bounded(["opencode", "--pure", "import", str(fixture)], env=host, cwd=project, timeout=15)
+        source = box.export_host_session(registry, data, ident)
+        assert len(json.dumps(source)) > 2_000_000
+        recorded = box.import_host_session(registry, data, source)
+        assert recorded["last"] == ident
+        assert box.refresh_sessions(registry, data)["last"] == ident
+        try:
+            box.import_host_session(registry, data, source)
+        except box.BoxError as exc:
+            assert "not overwritten" in str(exc), exc
+        else:
+            raise AssertionError("Duplicate host import overwrote the container session")
+        assert box.export_host_session(registry, data, ident) == source, "Host source changed during transfer"
+        copied = box.export_container_session(data, ident)
+        assert copied["messages"] == source["messages"]
+        bounded([executable, "--pure", "run", "--session", ident, "Finish without tools."], env={**env, "XDG_DATA_HOME": isolated["XDG_DATA_HOME"]}, cwd=project, timeout=20)
+    print("PASS: host-to-container import (>2 MB), full transcript verification, duplicate protection, and imported-session resume.")
 
 
 def main():
@@ -213,6 +262,7 @@ def main():
             # Resume the same native session without requiring another tool call.
             bounded(["opencode", "--pure", "run", "--session", ident, "Finish without tools."], env=env, cwd=project, timeout=20)
             print("PASS: session export/import into a separate host-style database, and exact-session resume.")
+            session_import_regression(root, env, project, ident)
             warm_start_regression(root, env, project)
             print("All app data was temporary. Live Podman isolation remains a separate host-terminal check.")
         finally:
