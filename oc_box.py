@@ -484,6 +484,74 @@ def configure_podman_options(data, args):
     data["podman_args"] = options
 
 
+def selinux_query(command, *args):
+    # openSUSE keeps these tools in /usr/sbin, often absent from a user's PATH.
+    executable = shutil.which(command) or shutil.which(command, path="/usr/sbin:/sbin")
+    if executable is None:
+        return None
+    try:
+        result = run([executable, *args], capture=True, check=False, timeout=5)
+    except (BoxError, OSError):
+        return None
+    return result.stdout.strip() if result.returncode == 0 else None
+
+
+def warn_device_access(data):
+    """Check device prerequisites without changing host policy or permissions."""
+    mappings = list(data.get("devices", []))
+    options = data.get("podman_args", [])
+    mappings.extend(
+        option.split("=", 1)[1] for option in options if option.startswith("--device=")
+    )
+    if not mappings:
+        return
+
+    for mapping in dict.fromkeys(mappings):
+        if not mapping.startswith("/"):
+            continue  # CDI names are resolved by Podman, not host paths.
+        source, *rest = mapping.split(":")
+        permissions = rest[-1] if rest and re.fullmatch(r"[rwm]+", rest[-1]) else "rw"
+        mode = (os.R_OK if "r" in permissions else 0) | (
+            os.W_OK if "w" in permissions else 0
+        )
+        if mode and not os.access(source, mode):
+            print(
+                f"oc-box: warning: Host device {source!r} is missing or your user lacks the requested {permissions} access. "
+                f"Check 'ls -l {shlex.quote(source)}', host ACLs, and group membership. "
+                "Group-based access may require --podman-arg=--runtime=crun and --podman-arg=--group-add=keep-groups.",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    if any(
+        option in ("--security-opt=label=disable", "--privileged", "--privileged=true")
+        for option in options
+    ):
+        return  # The explicitly requested container configuration bypasses labeling.
+    if selinux_query("getenforce") != "Enforcing":
+        return
+    setting = selinux_query("getsebool", "container_use_devices")
+    if setting and re.fullmatch(r"container_use_devices\s+-->\s+on", setting):
+        return
+    disabled = bool(
+        setting and re.fullmatch(r"container_use_devices\s+-->\s+off", setting)
+    )
+    reason = (
+        "container_use_devices is off"
+        if disabled
+        else "the container_use_devices setting could not be verified"
+    )
+    print(
+        f"oc-box: warning: SELinux is enforcing and {reason}; mapped devices may report Permission denied.\n"
+        "Check from the host: /usr/sbin/getsebool container_use_devices\n"
+        "To allow mapped devices: sudo /usr/sbin/setsebool -P container_use_devices on\n"
+        "This is a persistent host-wide SELinux policy setting; oc-box does not change it automatically. "
+        "It does not expose extra devices and takes effect immediately, without a reset or reboot.",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def create_container(path, data):
     project = validate_project(data["project"])
     if [project.stat().st_dev, project.stat().st_ino] != data["project_identity"]:
@@ -494,6 +562,7 @@ def create_container(path, data):
         validate_device(device)
     for option in data.get("podman_args", []):
         validate_podman_arg(option)
+    warn_device_access(data)
     print(f"Creating {data['distro']} environment ({data['image']})", flush=True)
     # The named home is container-only storage, not a bind of the user's home.
     volume = podman("volume", "exists", data["home_volume"], capture=True, check=False)

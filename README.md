@@ -332,6 +332,18 @@ the crun runtime, installed separately on the host. SELinux/device-driver rules
 may also apply. Device passthrough does not install the driver-specific userland
 SDK in the container; OpenCode can install those dependencies there.
 
+When creating or recreating a container with devices, oc-box automatically
+checks the host user's requested read/write access and queries SELinux policy.
+If SELinux is enforcing with `container_use_devices` off, it prints a warning
+and the exact host command below before creating the container or downloading
+its baseline tools. The same check covers devices supplied through
+`--podman-arg=--device=...` and SELinux policy for CDI devices. It also finds the
+SELinux tools under `/usr/sbin` when that directory is absent from PATH.
+Warnings are advisory: they do not change host permissions/policy or prevent
+creation. Hosts with enabled device policy, non-enforcing SELinux, or no device
+mappings do not receive that policy warning. An enforcing host whose device
+boolean cannot be queried is reported as unverified, not incorrectly as off.
+
 #### Mapped device reports `Permission denied`
 
 A visible device name with `-?????????` in `ls -l` means the path is mapped but

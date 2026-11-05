@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 APP = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("oc_box_options", APP / "oc_box.py")
@@ -49,8 +49,12 @@ class PodmanOptionsTests(unittest.TestCase):
                 )
             return subprocess.CompletedProcess(args, 0, "", "")
 
-        with patch.object(box, "podman", side_effect=fake):
+        with (
+            patch.object(box, "podman", side_effect=fake),
+            patch.object(box, "warn_device_access") as preflight,
+        ):
             box.create_container(self.path, self.data)
+        preflight.assert_called_once_with(self.data)
         command = next(command for command in calls if command[0] == "create")
         for value in (
             "--device=/dev/accel/accel0",
@@ -154,6 +158,178 @@ class PodmanOptionsTests(unittest.TestCase):
         ):
             with self.subTest(value=value), self.assertRaises(box.BoxError):
                 box.validate_device(value)
+
+    def test_device_warning_reports_enforcing_policy_off_without_modifying_host(self):
+        self.data["devices"] = ["/dev/accel/accel0"]
+        output = io.StringIO()
+        with (
+            patch.object(box.os, "access", return_value=True),
+            patch.object(
+                box,
+                "selinux_query",
+                side_effect=["Enforcing", "container_use_devices --> off"],
+            ) as query,
+            contextlib.redirect_stderr(output),
+            patch.object(box, "podman") as podman,
+        ):
+            box.warn_device_access(self.data)
+        self.assertEqual(
+            query.call_args_list,
+            [
+                call("getenforce"),
+                call("getsebool", "container_use_devices"),
+            ],
+        )
+        text = output.getvalue()
+        self.assertIn("warning: SELinux", text)
+        self.assertIn("sudo /usr/sbin/setsebool -P container_use_devices on", text)
+        self.assertIn("host-wide", text)
+        self.assertIn("without a reset or reboot", text)
+        podman.assert_not_called()
+
+    def test_no_selinux_warning_with_enabled_policy_or_non_enforcing_host(self):
+        self.data["devices"] = ["/dev/accel/accel0"]
+        for responses in (
+            ["Enforcing", "container_use_devices --> on"],
+            ["Permissive"],
+            ["Disabled"],
+            [None],
+        ):
+            with (
+                self.subTest(responses=responses),
+                patch.object(box.os, "access", return_value=True),
+                patch.object(box, "selinux_query", side_effect=responses),
+                contextlib.redirect_stderr(io.StringIO()) as output,
+            ):
+                box.warn_device_access(self.data)
+                self.assertEqual(output.getvalue(), "")
+
+    def test_device_warning_covers_cdi_and_podman_arg_but_not_unrelated_containers(
+        self,
+    ):
+        for settings in (
+            {"devices": ["vendor.example/npu=all"]},
+            {"podman_args": ["--device=/dev/accel/accel0"]},
+        ):
+            with (
+                self.subTest(settings=settings),
+                patch.object(box.os, "access", return_value=True),
+                patch.object(
+                    box,
+                    "selinux_query",
+                    side_effect=["Enforcing", "container_use_devices --> off"],
+                ),
+                contextlib.redirect_stderr(io.StringIO()) as output,
+            ):
+                box.warn_device_access(settings)
+                self.assertIn("SELinux", output.getvalue())
+        with (
+            patch.object(box, "selinux_query") as query,
+            patch.object(box.os, "access") as access,
+        ):
+            box.warn_device_access({"podman_args": ["--shm-size=1g"]})
+        query.assert_not_called()
+        access.assert_not_called()
+
+    def test_missing_policy_query_is_reported_as_unverified_not_off(self):
+        self.data["devices"] = ["/dev/accel/accel0"]
+        with (
+            patch.object(box.os, "access", return_value=True),
+            patch.object(box, "selinux_query", side_effect=["Enforcing", None]),
+            contextlib.redirect_stderr(io.StringIO()) as output,
+        ):
+            box.warn_device_access(self.data)
+        self.assertIn("could not be verified", output.getvalue())
+        self.assertNotIn("is off", output.getvalue())
+
+    def test_requested_device_permissions_are_checked_without_opening_device(self):
+        settings = {
+            "devices": [
+                "/dev/accel/accel0:r",
+                "/dev/other:/dev/mapped:w",
+                "/dev/mknod:m",
+            ]
+        }
+        with (
+            patch.object(box.os, "access", return_value=False) as access,
+            patch.object(box, "selinux_query", return_value="Disabled"),
+            contextlib.redirect_stderr(io.StringIO()) as output,
+        ):
+            box.warn_device_access(settings)
+        self.assertEqual(
+            access.call_args_list,
+            [
+                call("/dev/accel/accel0", os.R_OK),
+                call("/dev/other", os.W_OK),
+            ],
+        )
+        self.assertIn("Host device", output.getvalue())
+        self.assertIn("keep-groups", output.getvalue())
+
+    def test_explicit_label_bypass_suppresses_selinux_warning_not_unix_access_check(
+        self,
+    ):
+        for option in (
+            "--security-opt=label=disable",
+            "--privileged",
+            "--privileged=true",
+        ):
+            with (
+                self.subTest(option=option),
+                patch.object(box.os, "access", return_value=False) as access,
+                patch.object(box, "selinux_query") as query,
+                contextlib.redirect_stderr(io.StringIO()) as output,
+            ):
+                box.warn_device_access(
+                    {"devices": ["/dev/accel/accel0"], "podman_args": [option]}
+                )
+                self.assertIn("Host device", output.getvalue())
+                self.assertNotIn("SELinux", output.getvalue())
+                access.assert_called_once()
+                query.assert_not_called()
+
+    def test_selinux_helpers_are_found_outside_path_and_queries_are_bounded(self):
+        result = subprocess.CompletedProcess([], 0, "Enforcing\n", "")
+        with (
+            patch.object(
+                box.shutil, "which", side_effect=[None, "/usr/sbin/getenforce"]
+            ) as which,
+            patch.object(box, "run", return_value=result) as run,
+        ):
+            self.assertEqual(box.selinux_query("getenforce"), "Enforcing")
+        self.assertEqual(which.call_args_list[1].kwargs["path"], "/usr/sbin:/sbin")
+        self.assertEqual(run.call_args.args[0], ["/usr/sbin/getenforce"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 5)
+        self.assertFalse(run.call_args.kwargs["check"])
+
+    def test_failed_or_unavailable_selinux_tools_do_not_block_creation(self):
+        with (
+            patch.object(box.shutil, "which", return_value=None),
+            patch.object(box, "run") as run,
+        ):
+            self.assertIsNone(box.selinux_query("getenforce"))
+        run.assert_not_called()
+        for failure in (
+            box.BoxError("timed out"),
+            PermissionError("access denied"),
+        ):
+            with (
+                self.subTest(failure=failure),
+                patch.object(box.shutil, "which", return_value="/usr/sbin/getsebool"),
+            ):
+                with patch.object(box, "run", side_effect=failure):
+                    self.assertIsNone(
+                        box.selinux_query("getsebool", "container_use_devices")
+                    )
+        with (
+            patch.object(box.shutil, "which", return_value="/usr/sbin/getsebool"),
+            patch.object(
+                box,
+                "run",
+                return_value=subprocess.CompletedProcess([], 1, "", "unavailable"),
+            ),
+        ):
+            self.assertIsNone(box.selinux_query("getsebool", "container_use_devices"))
 
     def test_device_flags_are_not_silently_ignored_by_other_commands(self):
         for args in (
