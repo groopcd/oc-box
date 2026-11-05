@@ -10,6 +10,37 @@ Copyright (C) 2026 Paulo Dias <paulo.miguel.dias@gmail.com>.
 Licensed [GPL-3.0-or-later](LICENSE); see [NOTICE](NOTICE) for attribution and
 the acknowledgment of OpenAI coding-assistant contributions through OpenCode.
 
+## Why oc-box?
+
+oc-box grew out of wanting OpenCode to have more freedom without giving it
+unrestricted access to the host. A Bubblewrap-based host sandbox is useful for
+restricting commands, but installing system packages and experimenting with
+services can mean working around host restrictions. **oc-box gives OpenCode its
+own persistent Linux development environment**, where it can install tools,
+change system configuration, run services, and experiment.
+
+The practical advantages for that workflow are:
+
+- **Install what the project needs:** compilers, SDKs, databases, and distro
+  packages live inside the container rather than changing the host system.
+- **Keep integrations working:** OpenCode itself, MCP servers, formatters,
+  language servers, and plugins run together inside the same environment.
+- **Choose the project's distro:** Tumbleweed, Leap, Ubuntu, Debian, Fedora,
+  Arch, or Alpine, with dependencies specific to that project.
+- **Pick up where you left off:** installed tools, project files, and
+  conversations persist. Run `oc-box` again to resume, or import an existing
+  host OpenCode conversation and continue it inside the container.
+- **Recover a broken environment:** rebuild the container OS while retaining
+  your project, private home, conversation history, and session IDs.
+- **Control resources and hardware:** set CPU/RAM/process ceilings and
+  explicitly pass through GPU/NPU devices when the project needs them.
+
+OpenCode stays on mainline without patches, and the container matches the
+host's installed OpenCode version. The goal is a more capable, replaceable
+development environment. Rootless containers still share the host kernel, and
+the mounted project remains fully writable; see [SECURITY.md](SECURITY.md) for
+the boundary and tradeoffs.
+
 ## Requirements and installation
 
 - Linux, Python 3.10+, rootless Podman with pasta networking.
