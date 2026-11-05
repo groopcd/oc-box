@@ -110,7 +110,7 @@ def run_tui(command):
     # Lazy import also keeps noninteractive CLI/library consumers lightweight.
     from terminal_ui import run_tui as relay
 
-    return relay(command)
+    return relay(command, env=getattr(command, "environment", None))
 
 
 def state_root():
@@ -188,6 +188,8 @@ def distro_name(name):
 
 
 def run(argv, *, capture=False, check=True, **kwargs):
+    if getattr(argv, "environment", None) is not None:
+        kwargs.setdefault("env", argv.environment)
     if kwargs.get("cwd"):
         kwargs["env"] = {
             **kwargs.get("env", os.environ),
@@ -818,13 +820,44 @@ def container_env(data):
     return {key: rewrite_localhost(value) for key, value in env.items()}
 
 
+class ContainerCommand(list):
+    """Keep forwarded values out of argv/process listings and error messages."""
+
+    def __init__(self, arguments, environment):
+        super().__init__(arguments)
+        self.environment = environment
+
+
 def exec_command(data, command, *, interactive=False):
-    result = ["podman", "exec", "-i"]
+    forwarded = container_env(data)
+    environment = os.environ.copy()
+    result = ContainerCommand(["podman", "exec", "-i"], environment)
     if interactive and sys.stdin.isatty() and sys.stdout.isatty():
         result.append("-t")
     result.extend(["--workdir", data["project"]])
-    for key, value in container_env(data).items():
-        result.extend(["--env", f"{key}={value}"])
+    # Keep container HOME/XDG/config settings from changing the host Podman
+    # process's storage/config discovery. Only these non-secret settings belong
+    # in argv; credentials/custom forwarded values use inherited environment.
+    container_only = {
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+        "SHELL",
+        "PWD",
+        "OPENCODE_DISABLE_SANDBOX",
+        "OC_BOX_CONTAINER",
+        "OPENCODE_CONFIG",
+        "OPENCODE_DISABLE_AUTOUPDATE",
+        "OPENCODE_CONFIG_CONTENT",
+    }
+    for key, value in forwarded.items():
+        if key in container_only:
+            result.extend(["--env", f"{key}={value}"])
+        else:
+            environment[key] = value
+            result.extend(["--env", key])
     result.extend([data["container"], *command])
     return result
 
@@ -968,10 +1001,12 @@ def prepare_runtime(path, data, version):
     ensure_opencode_version(data, version)
     archive = config_archive(data)
     unpack = (APP / "sync_config.py").read_text()
+    copy_command = exec_command(data, ["python3", "-c", unpack, version])
     # binary input requires the binary subprocess mode here.
     try:
         proc = subprocess.run(
-            exec_command(data, ["python3", "-c", unpack, version]),
+            copy_command,
+            env=copy_command.environment,
             input=archive,
             capture_output=True,
             timeout=60,

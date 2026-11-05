@@ -47,6 +47,8 @@ unchanged. Build mode permits all OpenCode tool permissions inside oc-box;
 Plan mode and subagents retain their own rules.
 
 The default resource limits are 4 CPU cores, 8 GiB RAM, and 2048 processes.
+These are ceilings, not reservations: resources are consumed dynamically up to
+those limits, and OpenCode itself has no fixed 4/8 GiB minimum requirement.
 There is no disk quota. Containers share the host kernel and can reach network
 services, including configured host services at `host.containers.internal`.
 The project is intentionally writable and can be deleted by container commands.
@@ -633,6 +635,12 @@ mapped to the host-service name. The default `LEMONADE_BASE_URL` is
 `xterm-256color`. Host PATH, shell startup scripts, proxy variables, engine
 sockets, and SSH agents are not forwarded by default.
 
+Forwarded credential/custom environment values are passed through the Podman
+client's environment, not embedded in its process arguments. They are still
+accessible to container processes and same-user environment inspection. Copied
+configuration and auth can also contain secrets; only supply credentials the
+agent should use. See SECURITY.md for the documented trust boundary.
+
 `OPENCODE_AUTH_CONTENT` can supply provider auth to copy into the container.
 The launcher sets `OC_BOX_CONTAINER=1`, `OPENCODE_DISABLE_SANDBOX=1`, and
 `OPENCODE_DISABLE_AUTOUPDATE=1` inside it, plus its private profile/config.
@@ -664,9 +672,10 @@ canonical path and directory device/inode. Deleting and recreating the same
 path produces a new workspace rather than silently reusing the old environment.
 
 The normal host OpenCode database, usually under `~/.local/share/opencode/`,
-contains archive copies. Migration backups created by the original milestone
-helper live under `~/.local/state/oc-box/migrations/`; they are not workspace
-resources and are not removed by a later workspace purge.
+contains archive copies. Old installations may retain one-time relocation
+backups under `~/.local/state/oc-box/migrations/`; these are private data, not
+workspace resources or release artifacts, and later workspace purge leaves
+them intact. The original development-only relocation helper is retired.
 
 ### Container data
 

@@ -1,7 +1,7 @@
 # oc-box development
 
-This repository lives at `/home/groo/devel/oc-box`. It was moved from
-`/home/groo/lixo/oc-box` at the first milestone.
+Run development commands from the repository root. Keep public documentation
+portable: use example project paths and synthetic session IDs, not local data.
 
 ## Architecture
 
@@ -28,7 +28,11 @@ history is synchronized with supported CLI export/import commands on exit.
 Commit completed changes after reviewing the diff and running the relevant
 checks. The user explicitly requests automatic commits for work in this
 repository. Stage intended source files explicitly; sandbox-generated empty
-placeholder dotfiles are not project source. Do not push unless requested.
+placeholder dotfiles are not project source. The user authorizes automatic
+pushes of reviewed commits to an explicitly configured upstream, provided the
+hosting service permits this AI-assisted project. Do not create a remote or
+push to a service with incompatible policies. Do not store credentials in Git
+URLs, config, source files, or command-line arguments.
 
 Version `0.1.N+gHASH` is derived from the full Git history; every commit advances
 N automatically. The installer embeds the source identity in its private
@@ -48,7 +52,7 @@ python3 -B tests/smoke_mainline.py
 
 The smoke test uses temporary databases and offline fixture services, with
 bounded timeouts. It does not verify actual Podman isolation. Live Podman
-verification must run outside the existing OpenCode Bubblewrap sandbox.
+verification must run on the host, outside another container/sandbox.
 
 A host-terminal Tumbleweed container/OpenCode launch has succeeded. Full live
 MCP, formatter, language-server, and stop/resume verification is still pending;
@@ -57,9 +61,8 @@ the automated integration checks use offline fixtures.
 The host-terminal warm-start test is now effectively instant after retaining
 the container-generated plugin SDK manifest, lockfiles, and dependency cache.
 
-This development conversation has been imported into its project container.
-The initial SELinux project-label issue was repaired from the host. A native
-warm plugin-initialization probe in the container completed in under one second.
+Host-session import and mapped NPU access have been exercised on Tumbleweed.
+A native warm plugin-initialization probe completed in under one second.
 New mounts use `:z`, and cold plugin resolution is timed before opening the TUI.
 
 Container launches give Build mode allow-all OpenCode permissions through a

@@ -130,7 +130,7 @@ def sync_config(home, payload, runtime_version=None):
                     config.unlink()
                 elif config.exists():
                     shutil.rmtree(config)
-                config.mkdir()
+                config.mkdir(mode=0o700)
                 for member in members:
                     if preserve and member.name in DEPENDENCY_FILES:
                         continue

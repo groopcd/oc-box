@@ -1,4 +1,8 @@
 __pycache__/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
 *.py[cod]
 .venv/
 .env
@@ -6,3 +10,8 @@ __pycache__/
 !.env.example
 .oc-box-id
 build-info.json
+*.pem
+*.key
+auth.json
+mcp-auth.json
+session-before-relocation.json

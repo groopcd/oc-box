@@ -66,7 +66,7 @@ def write_all(fd, content):
         view = view[count:]
 
 
-def run_tui(command, *, input_fd=None, output_fd=None, refresh=1.0):
+def run_tui(command, *, env=None, input_fd=None, output_fd=None, refresh=1.0):
     """Preserve terminal queries/input/resize; stop drawing at first UI text.
 
     No background writer ever touches a running OpenCode screen. The relay is
@@ -94,16 +94,24 @@ def run_tui(command, *, input_fd=None, output_fd=None, refresh=1.0):
             # A separate session provides the same terminal semantics as a
             # directly attached podman exec. Acquire a controlling terminal.
             child_code = "import fcntl,os,sys,termios; os.setsid(); fcntl.ioctl(0,termios.TIOCSCTTY,0); os.execvp(sys.argv[1],sys.argv[1:])"
-            process = subprocess.Popen([sys.executable, "-c", child_code, *command], stdin=slave, stdout=slave, stderr=slave)
+            process = subprocess.Popen(
+                [sys.executable, "-c", child_code, *command],
+                stdin=slave,
+                stdout=slave,
+                stderr=slave,
+                env=env,
+            )
             os.close(slave)
             slave = None
             old_terminal = termios.tcgetattr(input_fd)
             tty.setraw(input_fd)
             handlers[signal.SIGWINCH] = signal.signal(signal.SIGWINCH, resize)
         else:
-            process = subprocess.Popen(command)
+            process = subprocess.Popen(command, env=env)
         handlers[signal.SIGINT] = signal.signal(signal.SIGINT, signal.SIG_IGN)
-        handlers[signal.SIGTERM] = signal.signal(signal.SIGTERM, lambda *_: process.terminate())
+        handlers[signal.SIGTERM] = signal.signal(
+            signal.SIGTERM, lambda *_: process.terminate()
+        )
         if not interactive:
             return process.wait()
 
@@ -120,11 +128,18 @@ def run_tui(command, *, input_fd=None, output_fd=None, refresh=1.0):
                 size = os.get_terminal_size(output_fd)
             except OSError:
                 return
-            text = "" if clear else f"oc-box: Loading OpenCode, plugins and MCPs... {int(time.monotonic() - started)}s"
-            text = text[:max(size.columns - 1, 0)]
+            text = (
+                ""
+                if clear
+                else f"oc-box: Loading OpenCode, plugins and MCPs... {int(time.monotonic() - started)}s"
+            )
+            text = text[: max(size.columns - 1, 0)]
             # DECSC/DECRC save and restore cursor and rendition. This runs only
             # before the first nonblank text from the app, never over its UI.
-            write_all(output_fd, f"\x1b7\x1b[{max(size.lines, 1)};1H\x1b[0m\x1b[2K{text}\x1b8".encode())
+            write_all(
+                output_fd,
+                f"\x1b7\x1b[{max(size.lines, 1)};1H\x1b[0m\x1b[2K{text}\x1b8".encode(),
+            )
             banner_drawn = not clear
 
         while True:

@@ -89,6 +89,19 @@ class DocumentationTests(unittest.TestCase):
         ):
             self.assertIn(phrase, text)
 
+    def test_public_examples_do_not_publish_development_session_ids_or_home_paths(self):
+        for name in (
+            "README.md",
+            "AGENTS.md",
+            "CONTRIBUTING.md",
+            "SECURITY.md",
+            "docs/cli.md",
+        ):
+            with self.subTest(name=name):
+                text = (APP / name).read_text()
+                self.assertNotRegex(text, r"ses_[0-9a-f]{12,}")
+                self.assertNotRegex(text, r"/home/[a-zA-Z0-9_.-]+/")
+
     def test_converters_escape_terminal_source_syntax(self):
         text = "# Test\n\n## Name\n\nUse `--flag` with user@example.org and {braces}.\n\n```sh\n.hidden\\file\n'quoted\n```\n"
         man = build.render_man(text)
@@ -167,6 +180,11 @@ class DocumentationTests(unittest.TestCase):
                 )
             self.assertFalse((home / ".local/share/info/dir").exists())
             self.assertTrue(os.access(home / ".local/bin/oc-box", os.X_OK))
+            for name in ("SECURITY.md", "CONTRIBUTING.md"):
+                self.assertEqual(
+                    (home / ".local/share/oc-box" / name).read_bytes(),
+                    (APP / name).read_bytes(),
+                )
 
     @unittest.skipUnless(
         shutil.which("install-info") or Path("/usr/sbin/install-info").is_file(),

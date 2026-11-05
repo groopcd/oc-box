@@ -267,10 +267,12 @@ def session_import_regression(root, env, project, ident):
     child_env = {**isolated, "PWD": str(project)}
     # Substitute process transport only; run the production transfer and actual
     # mainline export/import/verification code without modification.
-    trampoline = "import json,os,sys; env=json.loads(sys.argv[1]); os.chdir(env['PWD']); os.execvpe(sys.argv[2],sys.argv[2:],env)"
+    trampoline = "import os,sys; os.chdir(os.environ['PWD']); os.execvpe(sys.argv[1],sys.argv[1:],os.environ)"
 
     def local_exec(_data, command, **_kwargs):
-        return [sys.executable, "-c", trampoline, json.dumps(child_env), *command]
+        return box.ContainerCommand(
+            [sys.executable, "-c", trampoline, *command], child_env
+        )
 
     with (
         patch.object(box, "host_cli_env", return_value=host),
@@ -393,6 +395,7 @@ def main():
             key: value
             for key, value in os.environ.items()
             if not key.startswith(("OPENCODE_", "OC_BOX_"))
+            and not key.endswith(("_TOKEN", "_API_KEY"))
         }
         for kind in ("config", "data", "cache", "state"):
             env["XDG_" + kind.upper() + "_HOME"] = str(root / kind)

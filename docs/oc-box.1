@@ -32,7 +32,7 @@ The container HOME has the host user's home pathname but uses a private named vo
 .PP
 On normal exit, oc\-box exports conversation history to separate archive sessions in the normal host OpenCode database, then stops the container. Launching oc\-box again resumes the original container session. Running processes do not survive a stop. Host OpenCode and its configuration are unchanged. Build mode permits all OpenCode tool permissions inside oc\-box; Plan mode and subagents retain their own rules.
 .PP
-The default resource limits are 4 CPU cores, 8 GiB RAM, and 2048 processes. There is no disk quota. Containers share the host kernel and can reach network services, including configured host services at \fBhost.containers.internal\fR\&. The project is intentionally writable and can be deleted by container commands. Additional Podman options and devices explicitly extend these defaults.
+The default resource limits are 4 CPU cores, 8 GiB RAM, and 2048 processes. These are ceilings, not reservations: resources are consumed dynamically up to those limits, and OpenCode itself has no fixed 4/8 GiB minimum requirement. There is no disk quota. Containers share the host kernel and can reach network services, including configured host services at \fBhost.containers.internal\fR\&. The project is intentionally writable and can be deleted by container commands. Additional Podman options and devices explicitly extend these defaults.
 .SH COMMANDS
 .SS start
 .PP
@@ -421,6 +421,8 @@ Variables ending \fB_API_KEY\fR or \fB_TOKEN\fR, plus \fBGH_TOKEN\fR, \fBGITHUB_
 .PP
 Save that as \fB~/\:.config/\:oc\-box/\:config.json\fR (or its XDG equivalent). Only values present in the host environment are copied. Forwarded HTTP localhost URLs are mapped to the host\-service name. The default \fBLEMONADE_BASE_URL\fR is \fBhttp:/\:/\:host.containers.internal:13305/\:api/\:v1\fR\&. \fBTERM\fR defaults to \fBxterm\-256color\fR\&. Host PATH, shell startup scripts, proxy variables, engine sockets, and SSH agents are not forwarded by default.
 .PP
+Forwarded credential/custom environment values are passed through the Podman client's environment, not embedded in its process arguments. They are still accessible to container processes and same\-user environment inspection. Copied configuration and auth can also contain secrets; only supply credentials the agent should use. See SECURITY.md for the documented trust boundary.
+.PP
 \fBOPENCODE_AUTH_CONTENT\fR can supply provider auth to copy into the container. The launcher sets \fBOC_BOX_CONTAINER=1\fR, \fBOPENCODE_DISABLE_SANDBOX=1\fR, and \fBOPENCODE_DISABLE_AUTOUPDATE=1\fR inside it, plus its private profile/config. OpenCode's existing Bubblewrap plugin is disabled only for this launch; Podman is the environment boundary. No OpenCode fork is installed.
 .SH FILES
 .SS Host installation
@@ -432,7 +434,7 @@ Save that as \fB~/\:.config/\:oc\-box/\:config.json\fR (or its XDG equivalent). 
 .PP
 \fB\&.oc\-box\-id\fR in the project associates the directory with its registry. Do not edit or copy it to authorize a different mount. Identity checks include the canonical path and directory device/inode. Deleting and recreating the same path produces a new workspace rather than silently reusing the old environment.
 .PP
-The normal host OpenCode database, usually under \fB~/\:.local/\:share/\:opencode/\:\fR, contains archive copies. Migration backups created by the original milestone helper live under \fB~/\:.local/\:state/\:oc\-box/\:migrations/\:\fR; they are not workspace resources and are not removed by a later workspace purge.
+The normal host OpenCode database, usually under \fB~/\:.local/\:share/\:opencode/\:\fR, contains archive copies. Old installations may retain one\-time relocation backups under \fB~/\:.local/\:state/\:oc\-box/\:migrations/\:\fR; these are private data, not workspace resources or release artifacts, and later workspace purge leaves them intact. The original development\-only relocation helper is retired.
 .SS Container data
 .PP
 The home volume is \fBoc\-box\-home\-ID\fR, mounted at the host user's home pathname. OpenCode data lives under its \fB\&.local/\:share/\:opencode/\:\fR\&. Copied configuration and generated \fBoc\-box\-profile.json\fR live under \fB\&.config/\:opencode/\:\fR\&. The matching OpenCode executable is \fB/\:opt/\:oc\-box/\:runtime/\:bin/\:opencode\fR; Node/npm, Python/uv, Bash, Git, ripgrep, curl, archive tools, and PDF tools are provided by baseline setup. Additional system tools belong to the container OS layer.

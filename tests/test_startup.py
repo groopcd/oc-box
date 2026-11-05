@@ -111,6 +111,12 @@ class ConfigCacheTests(unittest.TestCase):
                 sync.sync_config(root, archive({"../../escaped": "bad"}))
             self.assertEqual((config / "keep").read_text(), "original")
 
+    def test_copied_config_directory_is_private(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            sync.sync_config(root, archive({"opencode.json": "{}"}))
+            self.assertEqual((root / ".config/opencode").stat().st_mode & 0o777, 0o700)
+
     def test_changed_lockfile_invalidates_cached_dependencies(self):
         with tempfile.TemporaryDirectory() as name:
             root = Path(name)
@@ -278,14 +284,14 @@ class StartupProgressTests(unittest.TestCase):
         before = termios.tcgetattr(slave)
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 24, 100, 0, 0))
         fixture = (
-            "import os,sys,time,tty; tty.setraw(0); "
+            "import os,sys,time,tty; assert os.environ['OC_BOX_RELAY_CHECK']=='present'; tty.setraw(0); "
             "os.write(1,b'\\x1b[?1049h\\x1b[2J\\x1b]0;Booting\\x07'); "
             "time.sleep(0.2); os.write(1,b'UI_READY'); "
             "key=os.read(0,1); size=os.get_terminal_size(0); "
             "os.write(1,b'KEY='+key+(' SIZE=%dx%d'%(size.columns,size.lines)).encode()); "
             "time.sleep(0.15); os.write(1,b'\\x1b[?1049l')"
         )
-        relay = "import sys; sys.path.insert(0,sys.argv[1]); from terminal_ui import run_tui; sys.exit(run_tui([sys.executable,'-c',sys.argv[2]],refresh=0.03))"
+        relay = "import os,sys; sys.path.insert(0,sys.argv[1]); from terminal_ui import run_tui; sys.exit(run_tui([sys.executable,'-c',sys.argv[2]],env={**os.environ,'OC_BOX_RELAY_CHECK':'present'},refresh=0.03))"
         process = subprocess.Popen(
             [sys.executable, "-B", "-c", relay, str(APP), fixture],
             stdin=slave,

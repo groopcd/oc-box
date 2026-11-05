@@ -22,6 +22,8 @@ for name in (
     "status_report.py",
     "version_info.py",
     "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
     "LICENSE",
     "NOTICE",
 ):

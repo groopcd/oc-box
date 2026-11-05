@@ -350,6 +350,54 @@ class WorkspaceTests(unittest.TestCase):
             ],
         )
 
+    def test_forwarded_credentials_never_appear_in_process_arguments(self):
+        with patch.dict(
+            os.environ, {"CODEBERG_TOKEN": "synthetic-credential-for-argv-test"}
+        ):
+            command = box.exec_command(self.data, ["opencode", "--version"])
+        self.assertIn("CODEBERG_TOKEN", command)
+        self.assertNotIn("synthetic-credential-for-argv-test", " ".join(command))
+        self.assertEqual(
+            command.environment["CODEBERG_TOKEN"], "synthetic-credential-for-argv-test"
+        )
+        self.assertIn("HOME=" + self.data["home"], command)
+        self.assertEqual(
+            command.environment["LEMONADE_BASE_URL"],
+            "http://host.containers.internal:13305/api/v1",
+        )
+        completed = subprocess.CompletedProcess([], 0, "", "")
+        with patch.object(box.subprocess, "run", return_value=completed) as execute:
+            box.run(command)
+        self.assertEqual(
+            execute.call_args.kwargs["env"]["CODEBERG_TOKEN"],
+            "synthetic-credential-for-argv-test",
+        )
+
+    def test_container_settings_do_not_change_host_podman_storage_environment(self):
+        host = {
+            "HOME": "/host/home",
+            "XDG_DATA_HOME": "/host/podman-data",
+            "XDG_CONFIG_HOME": "/host/config",
+        }
+        with patch.dict(os.environ, host):
+            command = box.exec_command(self.data, ["opencode", "--version"])
+        for key, value in host.items():
+            self.assertEqual(command.environment[key], value)
+        self.assertIn("XDG_DATA_HOME=" + self.data["home"] + "/.local/share", command)
+
+    def test_tui_receives_forwarded_environment_without_secret_arguments(self):
+        with patch.dict(os.environ, {"CODEBERG_TOKEN": "synthetic-relay-credential"}):
+            command = box.exec_command(self.data, ["opencode"])
+        with patch("terminal_ui.run_tui", return_value=0) as relay:
+            self.assertEqual(box.run_tui(command), 0)
+        self.assertEqual(
+            relay.call_args.kwargs["env"]["CODEBERG_TOKEN"],
+            "synthetic-relay-credential",
+        )
+        self.assertNotIn(
+            "synthetic-relay-credential", " ".join(relay.call_args.args[0])
+        )
+
     def test_installer_creates_working_standalone_launcher(self):
         home = self.root / "install-home"
         with patch.object(Path, "home", return_value=home):
