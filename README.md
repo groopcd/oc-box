@@ -1,5 +1,8 @@
 # oc-box
 
+Copyright (C) 2026 Paulo Dias <paulo.miguel.dias@gmail.com>. Licensed under
+**GPL-3.0-or-later**; see [LICENSE](LICENSE) and [NOTICE](NOTICE).
+
 Run **full, unmodified OpenCode inside a persistent rootless Podman container**.
 MCPs, formatters, language servers, plugins, file tools, and shell commands all
 use OpenCode's normal implementations in that same development environment.
@@ -278,6 +281,67 @@ Reset rebuilds the OS and retains the project and private home/session volume.
 System packages need reinstalling. Cached home tools with native dependencies
 may also need reinstalling when switching distributions, especially Alpine.
 
+### Devices and additional Podman settings
+
+Add device mappings or additional Podman **create** options from the host
+terminal when creating an environment:
+
+```bash
+oc-box --project /path/to/project --device /dev/accel/accel0
+oc-box --project /path/to/project \
+  --device /dev/dri/renderD128 \
+  --podman-arg=--shm-size=1g
+```
+
+For an existing environment, exit its OpenCode client first and rebuild the
+container with the new mapping:
+
+```bash
+oc-box reset --project /path/to/project --device /dev/accel/accel0
+```
+
+**Reset retains the session IDs, conversation history, private home, project
+files, unfinished edits, and Git history.** It replaces the writable OS layer,
+so system packages/files outside the private home and project need reinstalling;
+running processes stop. The container's home caches remain available.
+
+Both options are repeatable and saved in host-side workspace metadata. Later
+launches and resets reuse them automatically. Repeating an identical setting
+does not add duplicates; new settings append to the saved list. Remove or replace
+saved settings explicitly:
+
+```bash
+oc-box reset --project /path/to/project --clear-devices
+oc-box reset --project /path/to/project --clear-podman-args
+oc-box reset --project /path/to/project --clear-devices --device /dev/accel/accel1
+```
+
+`--device` accepts Podman's `/host/device[:/container/device][:rwm]` syntax and
+CDI names. `--podman-arg` takes **one literal long-option token per occurrence**,
+including its value after `=`. It is not shell-parsed. For example:
+
+```bash
+oc-box reset --project /path/to/project \
+  --device /dev/accel/accel0 \
+  --podman-arg=--group-add=keep-groups \
+  --podman-arg=--runtime=crun
+```
+
+The host user must have permission to access the device. `keep-groups` requires
+the crun runtime, installed separately on the host. SELinux/device-driver rules
+may also apply. Device passthrough does not install the driver-specific userland
+SDK in the container; OpenCode can install those dependencies there.
+
+oc-box reserves its managed name/ownership labels, user, workdir, entrypoint,
+and lifecycle options, and has dedicated flags for CPU/RAM/process limits. Other
+Podman options are passed through before the image name. Settings that expose
+more host resources (devices, extra mounts, networking, capabilities, security
+options) change the container's boundary as explicitly requested by that host
+command; they are not automatically requested by the AI. Extra bind-mounted host
+files and externally supplied volumes are not deleted by `purge` unless they
+are explicitly labeled as owned by that workspace. `--status` shows the saved
+device mappings and additional Podman options.
+
 ## Lifecycle commands
 
 ```bash
@@ -286,7 +350,12 @@ oc-box --resume                # Explicit resume (requires an existing workspace
 oc-box --new                   # New conversation, same environment
 oc-box --import-session ID     # Import a host conversation and continue it here
 oc-box --model provider/model  # Select model
-oc-box status                  # Workspace/container and recorded session
+oc-box --status                # Resource snapshot for all managed workspaces
+oc-box status                  # Alias for --status
+oc-box --status --project PATH # Resource snapshot for one project
+oc-box --status --json         # Machine-readable metrics and storage in bytes
+oc-box --about                 # Version, author, AI contribution, and license
+oc-box --version               # Commit-derived oc-box version
 oc-box list                    # All workspaces and latest recorded session IDs
 oc-box stop                    # Stop, including from another terminal
 oc-box sync                    # Retry history sync without opening the TUI
@@ -306,6 +375,70 @@ ID. The listing reads local metadata without starting containers; its session
 ID is refreshed at startup and history sync, so a newly created conversation in
 an active session may not appear until the next sync or launch. Missing project
 directories are still listed.
+
+### Resource status
+
+Run the status command from a host terminal as your regular user:
+
+```bash
+oc-box --status
+oc-box --status --workspace WORKSPACE_ID
+oc-box --status --project /path/to/project
+oc-box --status --json
+```
+
+Without a selector, both `--status` and `status` report all registered
+workspaces. A project/workspace selector limits the snapshot to one environment.
+The report includes:
+
+* State, sampled CPU percentage, RAM usage/limit, process count, and uptime.
+* Configured CPU/process limits, image, storage driver, last exit code,
+  out-of-memory state, and health status when present.
+* Separate disk sizes for the writable container OS layer, private home volume,
+  and project directory; the private home contains session history and caches.
+* Filesystem used/free space, block-I/O counters, and the latest recorded
+  container session and synced host archive IDs.
+
+It does not start, stop, or execute commands inside managed containers, and it
+can run while OpenCode is active. Stopped containers retain storage information
+but have no live CPU/RAM sample. Missing resources or unavailable metrics are
+shown explicitly rather than as zero usage. `--json` emits a single JSON object
+with numeric byte values, `null` for unavailable measurements, and per-workspace
+notes; progress is sent only to stderr.
+
+CPU is a short snapshot, with 100% representing one CPU core. Rootless pasta
+network counters are omitted because Podman cannot reliably report them. Disk
+scans use allocated blocks, do not follow symlinks or cross filesystems, and are
+bounded to 15 seconds per directory. Private-volume scans enter the rootless
+user namespace to read container-owned files without needing sudo. They can take
+longer for very large projects or caches. Writable OS size excludes shared base
+image layers; rootfs-with-image size is shown separately and should not be added
+across workspaces as unique storage. Btrfs compression, reflinks, snapshots, and
+shared blocks mean these sizes are estimates, not exclusive physical disk use.
+
+### About and automatic versions
+
+```bash
+oc-box --about
+oc-box --version
+```
+
+`--about` credits Paulo Dias <paulo.miguel.dias@gmail.com> as the author and
+acknowledges implementation, debugging, test, and documentation assistance from
+OpenAI's coding assistant through OpenCode. It includes the license and source
+commit, and works without Podman or a registered workspace.
+
+The version format is `0.1.N+gHASH`, where `N` is `git rev-list --count HEAD` and
+`HASH` identifies the source commit. Each new commit automatically advances the
+count on that history; no version-bump commit or Git hook is needed. Tracked
+uncommitted changes add `.dirty`; untracked sandbox placeholders do not. Keep
+the full Git history for accurate counts. The installer records the current
+version/commit in an installed `build-info.json`, so installed copies report
+their own build even without Git. Reinstall after new commits to update that
+installed version. This is oc-box's version, independent of the exact host
+OpenCode version matched inside containers.
+
+### Purge and workspace identity
 
 Purge asks for the first eight characters of its workspace ID; `--yes` skips
 confirmation. `--project PATH` works from another directory. After deleting a
@@ -374,12 +507,23 @@ reset is needed. Do not edit the vendor file under `/usr/lib`.
 
 The agent can change its entire container OS/private home and everything in
 the mounted project. The host home/database/oc-box registry are not mounted.
-Rootless Podman uses normal namespace/seccomp controls without privileged mode,
-engine socket, host devices, or host PID/network namespace sharing.
+By default, rootless Podman uses normal namespace/seccomp controls without
+privileged mode, engine sockets, host devices, or host PID/network namespace
+sharing. Explicit `--device`/`--podman-arg` settings can extend those defaults.
 
 Containers share the host kernel. Network access includes configured host APIs
 and LAN services. There is no disk quota in this version: project and image/
 volume growth can fill the host filesystem. Resource isolation is not a VM.
+
+## License and credits
+
+The original oc-box code and documentation are free software under the GNU
+General Public License, version 3 or (at your option) any later version
+(`GPL-3.0-or-later`). Copyright (C) 2026 Paulo Dias. The full license and
+attribution notice are included in source and installed copies. There is no
+warranty. OpenCode, Podman, distribution images, MCPs, and other separately
+installed tools retain their respective copyrights and licenses; oc-box does
+not relicense or modify them.
 
 ## Verification
 

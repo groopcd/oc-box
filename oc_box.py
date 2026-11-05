@@ -404,12 +404,96 @@ def inspect_owned(data):
     return info
 
 
+def validate_podman_arg(value):
+    """One literal long-option token, never a shell command or image/command."""
+    if not re.fullmatch(r"--[a-z][a-z0-9-]*(?:=[^\x00\r\n]*)?", value):
+        raise BoxError(
+            "Each --podman-arg must be one long option, e.g. --podman-arg=--group-add=keep-groups. Include option values with '='."
+        )
+    name = value.split("=", 1)[0]
+    protected = {
+        "--name",
+        "--label",
+        "--label-file",
+        "--cidfile",
+        "--replace",
+        "--rm",
+        "--entrypoint",
+        "--workdir",
+        "--user",
+        "--rootfs",
+        "--pod",
+        "--pod-id-file",
+    }
+    dedicated = {
+        "--cpus": "--cpus",
+        "--memory": "--memory",
+        "--pids-limit": "--pids-limit",
+    }
+    if name in protected:
+        raise BoxError(
+            f"{name} is managed by oc-box and cannot be passed through --podman-arg."
+        )
+    if name in dedicated:
+        raise BoxError(
+            f"Use oc-box's {dedicated[name]} option instead of --podman-arg={value}."
+        )
+
+
+def validate_device(value):
+    if not value or any(char in value for char in ("\x00", "\r", "\n")):
+        raise BoxError("Invalid --device mapping.")
+    if value.startswith("/"):
+        parts = value.split(":")
+        if len(parts) > 3 or any(not part for part in parts):
+            raise BoxError("Use --device /host/device[:/container/device][:rwm].")
+        if (
+            len(parts) >= 2
+            and not parts[1].startswith("/")
+            and not re.fullmatch(r"[rwm]+", parts[1])
+        ):
+            raise BoxError("Invalid --device destination or permissions.")
+        if len(parts) == 3 and (
+            not parts[1].startswith("/") or not re.fullmatch(r"[rwm]+", parts[2])
+        ):
+            raise BoxError("Invalid --device destination or permissions.")
+    elif not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+=[A-Za-z0-9_.-]+", value):
+        raise BoxError(
+            "--device requires an absolute host device path or CDI name (vendor/class=name)."
+        )
+
+
+def configure_podman_options(data, args):
+    """Append explicit settings, or clear them, without erasing saved defaults."""
+    devices = [] if args.clear_devices else list(data.get("devices", []))
+    options = [] if args.clear_podman_args else list(data.get("podman_args", []))
+    for value in args.device or []:
+        if value not in devices:
+            devices.append(value)
+    for value in args.podman_arg or []:
+        if value not in options:
+            options.append(value)
+    changed = devices != data.get("devices", []) or options != data.get(
+        "podman_args", []
+    )
+    if changed and args.command != "reset" and inspect_owned(data) is not None:
+        raise BoxError(
+            "Changing saved devices or Podman arguments requires 'oc-box reset' with the requested options. Project files and the private home/session volume are retained; OS packages are rebuilt."
+        )
+    data["devices"] = devices
+    data["podman_args"] = options
+
+
 def create_container(path, data):
     project = validate_project(data["project"])
     if [project.stat().st_dev, project.stat().st_ino] != data["project_identity"]:
         raise BoxError(
             "Project directory identity changed; refusing to mount a replacement."
         )
+    for device in data.get("devices", []):
+        validate_device(device)
+    for option in data.get("podman_args", []):
+        validate_podman_arg(option)
     print(f"Creating {data['distro']} environment ({data['image']})", flush=True)
     # The named home is container-only storage, not a bind of the user's home.
     volume = podman("volume", "exists", data["home_volume"], capture=True, check=False)
@@ -456,6 +540,8 @@ def create_container(path, data):
         f"{data['home_volume']}:{data['home']}:rw",
         "--volume",
         f"{project}:{project}:rw,z,rprivate,nosuid,nodev",
+        *("--device=" + device for device in data.get("devices", [])),
+        *data.get("podman_args", []),
         "--env",
         f"HOME={data['home']}",
         "--env",
@@ -1425,8 +1511,26 @@ def parser():
     result.add_argument(
         "--project",
         type=Path,
-        default=Path.cwd(),
-        help="project directory (default: current directory)",
+        help="project directory (default: current directory; --status defaults to all workspaces)",
+    )
+    info = result.add_mutually_exclusive_group()
+    info.add_argument(
+        "--status",
+        action="store_true",
+        help="report workspace CPU, RAM, storage, and session details without starting containers",
+    )
+    info.add_argument(
+        "--about",
+        action="store_true",
+        help="show version, author, and contributor information",
+    )
+    info.add_argument(
+        "--version", action="store_true", help="show the commit-derived oc-box version"
+    )
+    result.add_argument(
+        "--json",
+        action="store_true",
+        help="emit --status as JSON with numeric byte values",
     )
     result.add_argument(
         "--workspace",
@@ -1457,6 +1561,28 @@ def parser():
     result.add_argument("--memory", help="memory limit (default: 8g)")
     result.add_argument("--pids-limit", type=int, help="process limit (default: 2048)")
     result.add_argument(
+        "--device",
+        action="append",
+        metavar="MAPPING",
+        help="add a persistent Podman device mapping; repeat for multiple devices",
+    )
+    result.add_argument(
+        "--podman-arg",
+        action="append",
+        metavar="--OPTION[=VALUE]",
+        help="add one persistent Podman create option, e.g. --podman-arg=--group-add=keep-groups",
+    )
+    result.add_argument(
+        "--clear-devices",
+        action="store_true",
+        help="clear saved device mappings during reset",
+    )
+    result.add_argument(
+        "--clear-podman-args",
+        action="store_true",
+        help="clear saved additional Podman options during reset",
+    )
+    result.add_argument(
         "--delete-sessions",
         action="store_true",
         help="purge associated conversations too",
@@ -1472,8 +1598,109 @@ def parser():
     return result
 
 
+def report_status(args):
+    from status_report import collect_reports, print_report
+
+    if args.workspace or args.project is not None:
+        path, data = find_workspace(args.project, args.workspace)
+        if data is None:
+            raise BoxError(
+                "No oc-box workspace registered here. Use 'oc-box list' or '--workspace ID'."
+            )
+        workspaces = [(path, data)]
+    else:
+        workspaces = [(path, read_json(path)) for path in workspace_paths()]
+
+    def metrics_podman(*command, **kwargs):
+        try:
+            return podman(*command, **kwargs)
+        except BoxError as exc:
+            raise RuntimeError(str(exc)) from exc
+
+    if workspaces:
+        check_backend()
+    with loading_stage("Collecting workspace resource usage"):
+        report = collect_reports(
+            workspaces, podman=metrics_podman, session_state=session_state
+        )
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print_report(report)
+    return 0
+
+
 def main(argv=None):
     args = parser().parse_args(argv)
+    if args.about or args.version:
+        if (
+            args.command != "start"
+            or args.json
+            or args.import_session
+            or args.new
+            or args.resume
+            or args.all
+            or args.delete_sessions
+            or args.yes
+            or args.device
+            or args.podman_arg
+            or args.clear_devices
+            or args.clear_podman_args
+            or args.project is not None
+            or args.workspace
+            or args.distro
+            or args.cpus
+            or args.memory
+            or args.pids_limit is not None
+            or args.model
+        ):
+            raise BoxError(
+                "--about and --version cannot be combined with workspace commands."
+            )
+        from version_info import about_text, get_version_info
+
+        print(
+            about_text(APP)
+            if args.about
+            else "oc-box " + get_version_info(APP)["version"]
+        )
+        return 0
+    if args.status:
+        if args.command not in ("start", "status"):
+            raise BoxError("--status cannot be combined with another command.")
+        args.command = "status"
+    if args.json and args.command != "status":
+        raise BoxError("--json applies only to --status/status.")
+    if args.command == "status":
+        if (
+            args.new
+            or args.resume
+            or args.import_session
+            or args.distro
+            or args.cpus
+            or args.memory
+            or args.pids_limit is not None
+            or args.all
+            or args.delete_sessions
+            or args.yes
+            or args.model
+            or args.device
+            or args.podman_arg
+            or args.clear_devices
+            or args.clear_podman_args
+        ):
+            raise BoxError(
+                "Status accepts only --project, --workspace, and --json selectors."
+            )
+        return report_status(args)
+    args.project = args.project or Path.cwd()
+    if args.device or args.podman_arg or args.clear_devices or args.clear_podman_args:
+        if args.command not in ("start", "reset"):
+            raise BoxError("Device and Podman options apply only to start/reset.")
+        for value in args.device or []:
+            validate_device(value)
+        for value in args.podman_arg or []:
+            validate_podman_arg(value)
     if args.import_session:
         if args.command != "start":
             raise BoxError("--import-session applies only to start.")
@@ -1530,24 +1757,11 @@ def main(argv=None):
         raise BoxError(
             "This workspace uses the retired experimental tool-routing design. Purge it with the older launcher before creating a new environment."
         )
-    # Status and explicit stop are usable from a second terminal. Tool calls
+    # Explicit stop is usable from a second terminal. Tool calls
     # never auto-restart a stopped container; the running TUI can then be exited.
     if args.command == "stop":
         stop_container(data)
         print("Container stopped; files, packages, and conversations retained.")
-        return 0
-    if args.command == "status":
-        info = inspect_owned(data)
-        print(
-            json.dumps(
-                {
-                    **data,
-                    "running": bool(info and info["State"]["Running"]),
-                    "session": session_state(path).get("last"),
-                },
-                indent=2,
-            )
-        )
         return 0
     with workspace_lock(path):
         if args.command in ("start", "reset", "sync"):
@@ -1559,6 +1773,7 @@ def main(argv=None):
                 raise BoxError(
                     f"Existing workspace uses {data['distro']}. Use 'oc-box reset --distro {args.distro}' to switch."
                 )
+            configure_podman_options(data, args)
             if args.command == "reset":
                 check_resource_controllers(data)
                 remove_resources(data, keep_home=True)

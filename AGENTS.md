@@ -9,6 +9,8 @@ This repository lives at `/home/groo/devel/oc-box`. It was moved from
 - `bootstrap.py`: baseline tools installed inside the container.
 - `sync_config.py`: container-only config refresh with dependency-cache reuse.
 - `terminal_ui.py`: native TUI relay and startup loading indicator.
+- `status_report.py`: read-only host resource and storage reporting.
+- `version_info.py`: commit-derived version and author/license information.
 - `install.py`: copies the launcher to `~/.local/share/oc-box` and creates
   `~/.local/bin/oc-box`.
 - `tests/`: stdlib unit tests and bounded offline mainline integration fixtures.
@@ -25,6 +27,11 @@ Commit completed changes after reviewing the diff and running the relevant
 checks. The user explicitly requests automatic commits for work in this
 repository. Stage intended source files explicitly; sandbox-generated empty
 placeholder dotfiles are not project source. Do not push unless requested.
+
+Version `0.1.N+gHASH` is derived from the full Git history; every commit advances
+N automatically. The installer embeds the source identity in its private
+`build-info.json`. Original project code/documentation is GPL-3.0-or-later;
+retain LICENSE and NOTICE when distributing/installing it.
 
 ## Checks
 

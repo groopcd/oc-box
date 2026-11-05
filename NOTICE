@@ -1,0 +1,19 @@
+oc-box — rootless Podman development environments for mainline OpenCode
+Copyright (C) 2026 Paulo Dias <paulo.miguel.dias@gmail.com>
+
+Unless a file states otherwise, this repository's original code and
+documentation are licensed under the GNU General Public License as published
+by the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version (SPDX-License-Identifier: GPL-3.0-or-later).
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See LICENSE for the full terms.
+
+Developed by Paulo Dias with AI-assisted implementation, debugging, testing,
+and documentation from an OpenAI coding assistant accessed through OpenCode.
+This acknowledgment does not imply endorsement by OpenAI or OpenCode.
+
+OpenCode, Podman, distribution images, MCP servers, plugins, and other tools
+installed or invoked by oc-box are separate programs. Their authors retain
+their copyrights and their respective licenses apply to those programs.
