@@ -13,17 +13,18 @@ import os
 from pathlib import Path
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 import uuid
 
 APP = Path(__file__).resolve().parent
 LABEL = "io.oc-box.workspace"
 MARKER = ".oc-box-id"
+CONTAINER_OPENCODE = "/opt/oc-box/runtime/bin/opencode"
 DISTROS = {
     "tumbleweed": ("registry.opensuse.org/opensuse/tumbleweed:latest", "zypper -n refresh && zypper -n install bash ca-certificates curl git python3 ripgrep tar gzip nodejs npm poppler-tools"),
     "leap": ("registry.opensuse.org/opensuse/leap:latest", "zypper -n refresh && zypper -n install bash ca-certificates curl git python3 ripgrep tar gzip nodejs npm poppler-tools"),
@@ -38,6 +39,38 @@ ALIASES = {"opensuse": "tumbleweed", "opensuse-tumbleweed": "tumbleweed", "opens
 
 class BoxError(Exception):
     pass
+
+
+@contextlib.contextmanager
+def loading_stage(label, *, interval=5.0, stream=None):
+    stream = sys.stderr if stream is None else stream
+    started = time.monotonic()
+    stopped = threading.Event()
+    print(f"oc-box: {label}...", file=stream, flush=True)
+
+    def heartbeat():
+        while not stopped.wait(interval):
+            print(f"oc-box: {label}... ({int(time.monotonic() - started)}s elapsed)", file=stream, flush=True)
+
+    worker = threading.Thread(target=heartbeat, daemon=True)
+    worker.start()
+    try:
+        yield
+    except BaseException:
+        stopped.set()
+        worker.join()
+        print(f"oc-box: {label} failed after {time.monotonic() - started:.1f}s", file=stream, flush=True)
+        raise
+    else:
+        stopped.set()
+        worker.join()
+        print(f"oc-box: {label} done ({time.monotonic() - started:.1f}s)", file=stream, flush=True)
+
+
+def run_tui(command):
+    # Lazy import also keeps noninteractive CLI/library consumers lightweight.
+    from terminal_ui import run_tui as relay
+    return relay(command)
 
 
 def state_root():
@@ -124,6 +157,44 @@ def check_backend():
     result = podman("info", "--format", "{{.Host.Security.Rootless}}", capture=True)
     if result.stdout.strip() != "true":
         raise BoxError("Podman is not operating rootlessly.")
+
+
+def check_resource_controllers(data, *, cgroup_root=Path("/sys/fs/cgroup"), uid=None):
+    """Check the user manager, not kernel-global controller availability.
+
+    On openSUSE the kernel supports memory/cpu but a vendor drop-in clears
+    systemd delegation. runc then reports a misleading missing executable when
+    it cannot open memory.swap.max in the newly created container cgroup.
+    """
+    uid = os.getuid() if uid is None else uid
+    service = cgroup_root / f"user.slice/user-{uid}.slice/user@{uid}.service/cgroup.controllers"
+    try:
+        available = set(service.read_text().split())
+    except FileNotFoundError:
+        # Non-systemd layouts: ask Podman about its effective controllers.
+        result = podman("info", "--format", "{{json .Host.CgroupControllers}}", capture=True)
+        controllers = json.loads(result.stdout)
+        if not isinstance(controllers, list) or not all(isinstance(item, str) for item in controllers):
+            raise BoxError("Cannot determine delegated cgroup controllers from Podman.")
+        available = set(controllers)
+    required = {"pids"}
+    if data.get("cpus") not in (None, "0", 0):
+        required.add("cpu")
+    if data.get("memory") not in (None, "0", 0):
+        required.add("memory")
+    missing = required - available
+    if missing:
+        raise BoxError(
+            "Rootless Podman is missing delegated cgroup controllers: " + ", ".join(sorted(missing))
+            + ". Available: " + (", ".join(sorted(available)) or "none") + ".\n"
+            "On openSUSE, a vendor user@.service drop-in clears delegation. Run in a host terminal:\n"
+            f"  sudo systemctl edit user@{uid}.service --drop-in=90-oc-box-delegate.conf\n"
+            "Add these two lines to the override:\n"
+            "  [Service]\n"
+            "  Delegate=cpu cpuset io memory pids\n"
+            "Then run 'sudo systemctl daemon-reload' and reboot (or fully end and restart the user manager).\n"
+            "Retry the same oc-box command afterward; no reset/purge is needed. Resource limits remain enabled."
+        )
 
 
 def workspace_paths():
@@ -259,6 +330,7 @@ def start_container(path, data):
     project = validate_project(data["project"])
     if [project.stat().st_dev, project.stat().st_ino] != data["project_identity"]:
         raise BoxError("Project directory identity changed; refusing to reuse the environment.")
+    check_resource_controllers(data)
     info = inspect_owned(data)
     if info is None:
         if data.get("ready"):
@@ -419,36 +491,32 @@ def config_archive(data):
     return buffer.getvalue()
 
 
+def ensure_opencode_version(data, version):
+    """Use exactly the host release, including downgrades; never fall back."""
+    current = run(exec_command(data, [CONTAINER_OPENCODE, "--version"]), capture=True, check=False, timeout=30)
+    if current.returncode or current.stdout.strip() != version:
+        run(exec_command(data, ["npm", "install", "--global", "--prefix", "/opt/oc-box/runtime", "--no-audit", "--no-fund", f"opencode-ai@{version}"]), timeout=600)
+        installed = run(exec_command(data, [CONTAINER_OPENCODE, "--version"]), capture=True, timeout=30).stdout.strip()
+        if installed != version:
+            raise BoxError(f"OpenCode version mismatch: host is {version}, container reports {installed!r}. Refusing to launch a different version.")
+    print(f"oc-box: OpenCode {version} matches the host version.", flush=True)
+
+
 def prepare_runtime(path, data, version):
     # Install the unmodified upstream version currently installed on the host.
     # Node/npm/uv are also used by the user's ordinary MCP/LSP setup.
-    current = run(exec_command(data, ["opencode", "--version"]), capture=True, check=False, timeout=30)
-    if current.returncode or current.stdout.strip() != version:
-        run(exec_command(data, ["npm", "install", "--global", "--prefix", "/opt/oc-box/runtime", f"opencode-ai@{version}"]), timeout=600)
+    ensure_opencode_version(data, version)
     archive = config_archive(data)
-    unpack = """import io,os,pathlib,shutil,sys,tarfile
-home=pathlib.Path(os.environ['HOME'])
-config=home/'.config/opencode'
-if config.is_symlink(): config.unlink()
-if config.exists(): shutil.rmtree(config)
-config.mkdir(parents=True)
-with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read()),mode='r:gz') as archive:
-    for member in archive.getmembers():
-        target=config/member.name
-        if not member.isfile() or pathlib.PurePosixPath(member.name).is_absolute() or '..' in pathlib.PurePosixPath(member.name).parts:
-            raise ValueError('Unsafe config archive entry')
-        target.parent.mkdir(parents=True,exist_ok=True)
-        with archive.extractfile(member) as source, target.open('wb') as destination:
-            shutil.copyfileobj(source,destination)
-        target.chmod(member.mode & 0o777)
-"""
+    unpack = (APP / "sync_config.py").read_text()
     # binary input requires the binary subprocess mode here.
     try:
-        proc = subprocess.run(exec_command(data, ["python3", "-c", unpack]), input=archive, capture_output=True, timeout=60)
+        proc = subprocess.run(exec_command(data, ["python3", "-c", unpack, version]), input=archive, capture_output=True, timeout=60)
     except subprocess.TimeoutExpired as exc:
         raise BoxError("Copying configuration into the container timed out.") from exc
     if proc.returncode:
         raise BoxError("Cannot copy OpenCode config into container: " + proc.stderr.decode(errors="replace"))
+    if proc.stdout:
+        print("oc-box: " + proc.stdout.decode(errors="replace").strip(), flush=True)
     auth = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share"))) / "opencode/auth.json"
     auth_content = os.environ.get("OPENCODE_AUTH_CONTENT") or (auth.read_text() if auth.is_file() else None)
     if auth_content:
@@ -461,11 +529,10 @@ with tarfile.open(fileobj=io.BytesIO(sys.stdin.buffer.read()),mode='r:gz') as ar
         run(exec_command(data, ["python3", "-c", target]), input=json.dumps(rewrite_config(read_json(mcp_auth))), capture=True, timeout=30)
     # Also support OpenCode versions that store auth separately from data.
     # Config-directory auth is already part of the config snapshot.
-    run(exec_command(data, ["opencode", "--version"]), capture=True, timeout=30)
 
 
 def refresh_sessions(path, data):
-    result = run(exec_command(data, ["opencode", "--pure", "session", "list", "--format", "json"]), capture=True, timeout=60)
+    result = run(exec_command(data, [CONTAINER_OPENCODE, "--pure", "session", "list", "--format", "json"]), capture=True, timeout=60)
     values = json.loads(result.stdout or "[]")
     roots = [item for item in values if item.get("directory") == data["project"] and valid_session_id(item.get("id"))]
     roots.sort(key=lambda item: item.get("updated", 0), reverse=True)
@@ -533,13 +600,13 @@ def sync_sessions(path, data):
         # streams the completed file and flushes before exiting.
         spool = """import shutil,subprocess,sys,tempfile
 with tempfile.TemporaryFile() as output:
-    result=subprocess.run(['opencode','--pure','export',sys.argv[1]],stdout=output)
+    result=subprocess.run([sys.argv[2],'--pure','export',sys.argv[1]],stdout=output)
     if result.returncode: sys.exit(result.returncode)
     output.seek(0)
     shutil.copyfileobj(output,sys.stdout.buffer)
     sys.stdout.buffer.flush()
 """
-        result = run(exec_command(data, ["python3", "-c", spool, ident]), capture=True, timeout=60)
+        result = run(exec_command(data, ["python3", "-c", spool, ident, CONTAINER_OPENCODE]), capture=True, timeout=60)
         archived = archive_session(json.loads(result.stdout), data)
         target = archives / (archived["info"]["id"] + ".json")
         atomic_json(target, archived)
@@ -572,48 +639,40 @@ def parse_jsonc(text):
 
 
 def launch(path, data, args):
-    version = run(["opencode", "--version"], capture=True).stdout.strip()
+    with loading_stage("Checking OpenCode version"):
+        version = run(["opencode", "--version"], capture=True).stdout.strip()
     if not re.fullmatch(r"1\.\d+\.\d+(?:[-+].*)?", version):
         raise BoxError(f"OpenCode {version} session import/export has not been checked (supported: 1.x).")
-    process = None
     code = 1
     try:
-        start_container(path, data)
-        prepare_runtime(path, data, version)
+        with loading_stage(f"Starting {data['distro']} container"):
+            start_container(path, data)
+        with loading_stage("Preparing OpenCode and syncing configuration"):
+            prepare_runtime(path, data, version)
         if args.command == "sync":
-            sync_sessions(path, data)
+            with loading_stage("Syncing session history"):
+                sync_sessions(path, data)
             return 0
-        sessions = refresh_sessions(path, data)
-        command = ["opencode", data["project"]]
+        with loading_stage("Finding workspace session"):
+            sessions = refresh_sessions(path, data)
+        command = [CONTAINER_OPENCODE, data["project"]]
         if not args.new and sessions.get("last"):
             command.extend(["--session", sessions["last"]])
         if args.model:
             command.extend(["--model", args.model])
         print(f"oc-box: {data['distro']} | {data['project']} | {'new session' if args.new or not sessions.get('last') else 'resuming ' + sessions['last']}", flush=True)
-        process = subprocess.Popen(exec_command(data, command, interactive=True))
-        # Podman receives the terminal signals; always sync before stopping.
-        old_int = signal.signal(signal.SIGINT, signal.SIG_IGN)
-        old_term = signal.signal(signal.SIGTERM, lambda *_: process.terminate())
+        print("oc-box: Opening OpenCode; plugins and MCP servers may need time to initialize.", flush=True)
+        code = run_tui(exec_command(data, command, interactive=True))
         try:
-            code = process.wait()
-        finally:
-            signal.signal(signal.SIGINT, old_int)
-            signal.signal(signal.SIGTERM, old_term)
-        try:
-            sync_sessions(path, data)
+            with loading_stage("Syncing session history"):
+                sync_sessions(path, data)
         except (BoxError, ValueError, KeyError) as exc:
             print(f"oc-box: history sync pending: {exc}\nContainer data retained. Retry with 'oc-box sync'.", file=sys.stderr)
             return code or 1
         return code
     finally:
-        if process and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
-        stop_container(data)
+        with loading_stage("Stopping container"):
+            stop_container(data)
 
 
 def resource_ids(kind, ident):
@@ -713,7 +772,8 @@ def main(argv=None):
         return 0
     if args.command != "purge" and (args.all or args.delete_sessions or args.yes):
         raise BoxError("--all, --delete-sessions, and --yes apply only to purge.")
-    check_backend()
+    with loading_stage("Checking rootless Podman"):
+        check_backend()
     state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
     path, data = find_workspace(args.project, args.workspace)
     if data is None:
@@ -740,6 +800,7 @@ def main(argv=None):
             if args.command == "start" and args.distro and distro_name(args.distro) != data["distro"]:
                 raise BoxError(f"Existing workspace uses {data['distro']}. Use 'oc-box reset --distro {args.distro}' to switch.")
             if args.command == "reset":
+                check_resource_controllers(data)
                 remove_resources(data, keep_home=True)
                 data["ready"] = False
                 if args.distro:

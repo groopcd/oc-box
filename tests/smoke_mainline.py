@@ -6,18 +6,24 @@ path used inside Podman, with temporary config/data and local fixture services.
 
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
 import signal
 import subprocess
 import tempfile
+import tarfile
 import threading
+import time
 
 APP = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("oc_box", APP / "oc_box.py")
 box = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(box)
+sync_spec = importlib.util.spec_from_file_location("sync_config", APP / "sync_config.py")
+sync = importlib.util.module_from_spec(sync_spec)
+sync_spec.loader.exec_module(sync)
 
 
 def bounded(command, *, env, cwd, timeout=45):
@@ -30,6 +36,74 @@ def bounded(command, *, env, cwd, timeout=45):
         raise AssertionError(f"Smoke test stopped after {timeout}s. Last output:\n{out[-2000:]}\n{err[-2000:]}")
     assert process.returncode == 0, out[-4000:] + err[-4000:]
     return out, err
+
+
+def warm_start_regression(root, env, project):
+    """SDK-version drift must not make mainline re-resolve npm on warm start."""
+    version, _ = bounded(["opencode", "--version"], env=env, cwd=project, timeout=10)
+    version = version.strip()
+    home = root / "warm-home"
+    config = home / ".config/opencode"
+    plugin_package = "@opencode-ai/plugin"
+    incoming = io.BytesIO()
+    source_files = {
+        "package.json": json.dumps({"dependencies": {plugin_package: "1.0.0"}}),
+        "plugins/warm-fixture.js": "import fs from 'node:fs'; export default async()=>({config:async()=>{fs.writeFileSync(process.env.OC_BOX_WARM_MARKER,'loaded')}})",
+    }
+    with tarfile.open(fileobj=incoming, mode="w:gz") as archive:
+        for name, value in source_files.items():
+            data = value.encode()
+            member = tarfile.TarInfo(name)
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+    payload = incoming.getvalue()
+    sync.sync_config(home, payload, version)
+    # Simulate the config directory produced after first mainline SDK install.
+    package = config / "node_modules" / plugin_package
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(json.dumps({"name": plugin_package, "version": version, "type": "module"}))
+    manifest = {"dependencies": {plugin_package: version}}
+    (config / "package.json").write_text(json.dumps(manifest))
+    (config / "package-lock.json").write_text(json.dumps({"lockfileVersion": 3, "packages": {"": manifest}}))
+    requests = []
+
+    class Registry(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_GET(self):
+            requests.append(self.path)
+            self.send_response(503)
+            self.end_headers()
+
+        do_POST = do_GET
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Registry)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    warm_env = dict(env)
+    warm_env.pop("OPENCODE_CONFIG_CONTENT", None)
+    warm_env["XDG_CONFIG_HOME"] = str(home / ".config")
+    warm_env["npm_config_registry"] = f"http://127.0.0.1:{server.server_port}"
+    warm_env["npm_config_fetch_retries"] = "0"
+    marker = root / "warm-plugin-loaded"
+    warm_env["OC_BOX_WARM_MARKER"] = str(marker)
+    try:
+        durations = []
+        for _ in range(2):
+            assert sync.sync_config(home, payload, version), "Warm startup invalidated the generated SDK cache"
+            marker.unlink(missing_ok=True)
+            started = time.monotonic()
+            bounded(["opencode", "debug", "agent", "build"], env=warm_env, cwd=project, timeout=20)
+            durations.append(time.monotonic() - started)
+            assert marker.is_file(), "The enabled external plugin did not initialize"
+            assert json.loads((config / "package.json").read_text()) == manifest
+        assert not requests, f"Warm mainline startup unexpectedly contacted npm: {requests}"
+        print("PASS: two warm native plugin startups with an older source SDK and zero npm requests (" + ", ".join(f"{seconds:.2f}s" for seconds in durations) + ").")
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=3)
 
 
 def main():
@@ -139,6 +213,7 @@ def main():
             # Resume the same native session without requiring another tool call.
             bounded(["opencode", "--pure", "run", "--session", ident, "Finish without tools."], env=env, cwd=project, timeout=20)
             print("PASS: session export/import into a separate host-style database, and exact-session resume.")
+            warm_start_regression(root, env, project)
             print("All app data was temporary. Live Podman isolation remains a separate host-terminal check.")
         finally:
             server.shutdown()

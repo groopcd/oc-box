@@ -10,7 +10,7 @@ target = Path.home() / ".local/share/oc-box"
 binary = Path.home() / ".local/bin/oc-box"
 target.mkdir(parents=True, exist_ok=True)
 binary.parent.mkdir(parents=True, exist_ok=True)
-for name in ("oc_box.py", "bootstrap.py", "README.md"):
+for name in ("oc_box.py", "bootstrap.py", "sync_config.py", "terminal_ui.py", "README.md"):
     if source != target:
         shutil.copy2(source / name, target / name)
 binary.write_text("#!/bin/sh\nexec python3 " + shlex.quote(str(target / "oc_box.py")) + ' "$@"\n')

@@ -60,8 +60,29 @@ registry.opensuse.org/opensuse/tumbleweed:latest
 The first launch downloads the image and installs Node/npm, Python/uv, Bash,
 Git, ripgrep, curl, PDF text tools, and the same upstream OpenCode version as
 your host. Project-specific dependencies can be installed by the AI inside the
-container. Subsequent launches use the existing environment. Updating host
-OpenCode causes the container version to be updated on its next launch.
+container. Subsequent launches use the existing environment. Every launch checks
+the exact host OpenCode version and installs that specific upstream npm release
+inside the container if needed, including downgrades. The installed version is
+verified before continuing; an unavailable or mismatched release stops startup
+rather than selecting `latest` or keeping a different version. The TUI and
+history commands use the verified installation's absolute executable path.
+
+Startup prints named stages with elapsed times, with an update every five
+seconds while a stage is waiting. Once the terminal is handed to OpenCode, a
+temporary `Loading OpenCode, plugins and MCPs... Ns` line remains visible during
+blank startup frames. It disappears when OpenCode first renders text. Terminal
+input, queries, window resizing, and normal TUI output are relayed through a
+PTY; no status writer runs over the rendered interface.
+
+The first launch may take substantially longer for plugin/MCP downloads and
+provider discovery. Repeated launches compare the host dependency inputs against
+the previous snapshot and retain the container's installed `node_modules` and
+runtime-generated manifest/locks when those inputs and OpenCode's version are
+unchanged. This avoids repeatedly downgrading an older host plugin-SDK manifest
+and reinstalling the container's newer SDK on every launch. Changes to the host
+dependency manifest, lockfiles, or runtime version invalidate that cache.
+Configuration/plugins removed on the host are still removed from the copy.
+This does not skip any enabled MCP, formatter, language server, or plugin.
 
 Your project is mounted **at the same absolute path** inside the container.
 For example, `/home/groo/test` remains `/home/groo/test`. This keeps configuration,
@@ -210,6 +231,44 @@ Defaults: 4 CPUs, 8 GiB RAM, 2048 processes. Override at creation/reset:
 oc-box --cpus 8 --memory 16g --pids-limit 4096
 oc-box reset --cpus 8 --memory 16g
 ```
+
+### openSUSE: enable rootless resource-controller delegation
+
+Some openSUSE installations ship
+`/usr/lib/systemd/system/user@.service.d/20-defaults-SUSE.conf` with an empty
+`Delegate=` setting. The user manager may then have only `pids` delegated even
+though the kernel supports memory and CPU controllers. With limits enabled,
+container startup can fail with `memory.swap.max: no such file or directory`
+and the misleading trailing message `OCI runtime attempted to invoke a command
+that was not found`. This does not mean an executable is missing from the image.
+
+oc-box checks effective delegation before creating/starting its environment and
+retains the configured resource limits. To repair delegation for your own user,
+run from your ordinary host terminal (substitute your numeric UID if not 1000):
+
+```bash
+sudo systemctl edit user@1000.service --drop-in=90-oc-box-delegate.conf
+```
+
+In the editable override area, save:
+
+```ini
+[Service]
+Delegate=cpu cpuset io memory pids
+```
+
+The `90-` ordering overrides the vendor's `20-` defaults. Then run
+`sudo systemctl daemon-reload` and reboot so the user manager is recreated with
+the new delegation. From the new login, the following file should include
+`cpu memory pids` (it may list additional controllers):
+
+```text
+/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/cgroup.controllers
+```
+
+Retry the same `oc-box --project /path/to/project` command. The failed container,
+downloaded image, private home volume, and project can be reused; no purge or
+reset is needed. Do not edit the vendor file under `/usr/lib`.
 
 The agent can change its entire container OS/private home and everything in
 the mounted project. The host home/database/oc-box registry are not mounted.

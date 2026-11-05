@@ -37,6 +37,40 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaises(box.BoxError):
             box.distro_name("ubuntu; touch /host")
 
+    def controller_fixture(self, controllers):
+        root = self.root / "cgroup"
+        service = root / "user.slice/user-1000.slice/user@1000.service/cgroup.controllers"
+        service.parent.mkdir(parents=True)
+        service.write_text(controllers + "\n")
+        return root
+
+    def test_suse_missing_delegation_fails_before_container_start(self):
+        root = self.controller_fixture("pids")
+        checker = box.check_resource_controllers
+        with patch.object(box, "check_resource_controllers", side_effect=lambda data: checker(data, cgroup_root=root, uid=1000)), \
+             patch.object(box, "inspect_owned") as inspect:
+            with self.assertRaisesRegex(box.BoxError, "missing delegated cgroup controllers"):
+                box.start_container(self.path, self.data)
+        inspect.assert_not_called()
+
+    def test_kernel_support_does_not_substitute_for_user_delegation(self):
+        root = self.controller_fixture("pids")
+        (root / "cgroup.controllers").write_text("cpu memory pids\n")
+        with self.assertRaisesRegex(box.BoxError, "missing delegated cgroup controllers: cpu, memory") as raised:
+            box.check_resource_controllers(self.data, cgroup_root=root, uid=1000)
+        self.assertIn("90-oc-box-delegate.conf", str(raised.exception))
+        self.assertIn("no reset/purge", str(raised.exception))
+
+    def test_delegated_controllers_allow_existing_limits(self):
+        root = self.controller_fixture("cpuset cpu io memory pids")
+        box.check_resource_controllers(self.data, cgroup_root=root, uid=1000)
+
+    def test_non_systemd_layout_uses_podman_effective_controllers(self):
+        result = subprocess.CompletedProcess([], 0, '["cpu", "memory", "pids"]', "")
+        with patch.object(box, "podman", return_value=result) as podman:
+            box.check_resource_controllers(self.data, cgroup_root=self.root / "missing", uid=1000)
+        self.assertIn("{{json .Host.CgroupControllers}}", podman.call_args.args)
+
     def test_copied_and_replaced_directory_identity(self):
         other = self.root / "other"
         other.mkdir()
@@ -122,7 +156,7 @@ class WorkspaceTests(unittest.TestCase):
 
         def fake(command, **kwargs):
             calls.append(command)
-            exporting = "python3" in command and command[-1] == "ses_source"
+            exporting = "python3" in command and "ses_source" in command
             return subprocess.CompletedProcess(command, 0, json.dumps(source) if exporting else "", "")
 
         with patch.object(box, "refresh_sessions", return_value=state), patch.object(box, "run", side_effect=fake):
@@ -131,6 +165,37 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(deletion[-1], old)
         self.assertNotEqual(deletion[-1], "ses_source")
         self.assertEqual(box.session_state(self.path)["last"], "ses_source")
+
+    def test_exact_host_opencode_is_reused_without_installing(self):
+        current = subprocess.CompletedProcess([], 0, "1.19.5\n", "")
+        with patch.object(box, "run", return_value=current) as run:
+            box.ensure_opencode_version(self.data, "1.19.5")
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][-2:], [box.CONTAINER_OPENCODE, "--version"])
+
+    def test_opencode_install_uses_exact_host_version_in_both_directions(self):
+        for existing, expected in (("1.19.4", "1.19.5"), ("1.19.6", "1.19.5")):
+            with self.subTest(existing=existing, expected=expected):
+                results = [subprocess.CompletedProcess([], 0, existing, ""), subprocess.CompletedProcess([], 0, "", ""), subprocess.CompletedProcess([], 0, expected, "")]
+                with patch.object(box, "run", side_effect=results) as run:
+                    box.ensure_opencode_version(self.data, expected)
+                install = run.call_args_list[1].args[0]
+                self.assertEqual(install[-1], "opencode-ai@" + expected)
+                self.assertIn("--prefix", install)
+                self.assertEqual(run.call_args_list[2].args[0][-2:], [box.CONTAINER_OPENCODE, "--version"])
+
+    def test_incorrect_install_version_prevents_launch(self):
+        results = [subprocess.CompletedProcess([], 0, "1.19.4", ""), subprocess.CompletedProcess([], 0, "", ""), subprocess.CompletedProcess([], 0, "1.19.6", "")]
+        with patch.object(box, "run", side_effect=results), patch.object(box, "config_archive") as config:
+            with self.assertRaisesRegex(box.BoxError, "Refusing to launch a different version"):
+                box.prepare_runtime(self.path, self.data, "1.19.5")
+        config.assert_not_called()
+
+    def test_missing_opencode_is_installed_at_the_exact_host_version(self):
+        results = [subprocess.CompletedProcess([], 127, "", "missing"), subprocess.CompletedProcess([], 0, "", ""), subprocess.CompletedProcess([], 0, "1.19.5", "")]
+        with patch.object(box, "run", side_effect=results) as run:
+            box.ensure_opencode_version(self.data, "1.19.5")
+        self.assertEqual(run.call_args_list[1].args[0][-1], "opencode-ai@1.19.5")
 
     def test_host_sync_profile_keeps_default_data_location(self):
         env = box.host_cli_env(self.path)
@@ -188,17 +253,15 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_sync_failure_keeps_container_data_and_stops(self):
         args = argparse.Namespace(command="start", new=False, model=None)
-        proc = unittest.mock.Mock()
-        proc.wait.return_value = 0
-        proc.poll.return_value = 0
         with patch.object(box, "run", return_value=subprocess.CompletedProcess([], 0, "1.19.5\n", "")), \
              patch.object(box, "start_container"), patch.object(box, "prepare_runtime"), \
              patch.object(box, "refresh_sessions", return_value={"last": "ses_existing"}), \
              patch.object(box, "sync_sessions", side_effect=box.BoxError("offline")), \
              patch.object(box, "stop_container") as stop, \
-             patch.object(box.subprocess, "Popen", return_value=proc) as popen:
+             patch.object(box, "run_tui", return_value=0) as tui:
             self.assertEqual(box.launch(self.path, self.data, args), 1)
-        self.assertEqual(popen.call_args.args[0][-2:], ["--session", "ses_existing"])
+        self.assertEqual(tui.call_args.args[0][-2:], ["--session", "ses_existing"])
+        self.assertIn(box.CONTAINER_OPENCODE, tui.call_args.args[0])
         stop.assert_called_once()
         self.assertTrue(self.path.exists())
 
