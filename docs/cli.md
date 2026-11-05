@@ -11,6 +11,7 @@ oc-box [start] [--project PATH | --workspace ID] [START-OPTIONS]
 oc-box stop [--project PATH | --workspace ID]
 oc-box sync [--project PATH | --workspace ID]
 oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS]
+oc-box repair [--project PATH | --workspace ID]
 oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
 oc-box list
 oc-box distros
@@ -132,6 +133,30 @@ oc-box reset --project ~/devel/demo --cpus 8 --memory 16g
 oc-box reset --project ~/devel/demo --distro ubuntu
 oc-box reset --project ~/devel/demo --device /dev/accel/accel0
 ```
+
+### repair
+
+Explicitly accept the current directory identity for an existing workspace at
+its original canonical path. Use this after a filesystem identity change or a
+deliberate project restore when you want to retain the existing environment.
+Only run it after checking that the directory is the project you intend to use.
+The original matching regular `.oc-box-id` and host registry must still exist;
+repair cannot relocate a workspace or reconstruct missing registry/session data.
+
+Exit the active launcher and stop its container first. Repair takes the workspace
+lock, checks container ownership, and refuses a running container. It updates
+only the registry's directory device/inode; project files, marker, container OS,
+private home, sessions, and saved settings are retained. It does not start or
+reset the container. An already matching identity needs no change.
+
+```sh
+oc-box repair --project ~/devel/demo
+oc-box --project ~/devel/demo --resume
+```
+
+Accepts only `--project` or `--workspace` selectors, besides help. With neither,
+use the current directory. With `--workspace`, check the registered path and
+matching marker rather than the current directory.
 
 ### purge
 
@@ -441,10 +466,10 @@ system-wide packages do not. No command currently manages Btrfs snapshots.
 CPU, RAM, process, distro, and mapping changes require reset for existing
 containers. A stop/start alone reuses the old create-time settings. Avoid
 changing resources directly through Podman if metadata consistency is required.
-An active launcher holds a nonblocking workspace lock; start, sync, reset, and
-purge require that launcher to exit. Read-only list/status and explicit stop can
-run from a second terminal. A crash releases the lock when its process exits;
-an orphan still running can retain it.
+An active launcher holds a nonblocking workspace lock; start, sync, reset,
+repair, and purge require that launcher to exit. Read-only list/status and
+explicit stop can run from a second terminal. A crash releases the lock when
+its process exits; an orphan still running can retain it.
 
 ## Distribution images
 
@@ -670,6 +695,8 @@ not mounted into the container. Transcript files may contain private content.
 edit or copy it to authorize a different mount. Identity checks include the
 canonical path and directory device/inode. Deleting and recreating the same
 path produces a new workspace rather than silently reusing the old environment.
+An explicitly requested `repair` can accept the current identity at the same
+path with the original matching marker, retaining the existing environment.
 
 The normal host OpenCode database, usually under `~/.local/share/opencode/`,
 contains archive copies. Old installations may retain one-time relocation
@@ -767,6 +794,33 @@ The last command deletes its remaining managed resources and recorded host
 archives; an unrelated replacement directory will not be deleted.
 
 ## Troubleshooting
+
+### Directory identity changed after cleanup or a filesystem change
+
+Deleting host `~/.cache` alone does not remove oc-box's registry or private
+session volume and should not change the project directory identity. The
+"Project directory identity changed" error means its recorded device/inode
+differs from the current directory. Older launchers describe this as
+"This directory replaced the original workspace" and recommend removing the
+marker. A device number can change after a filesystem remount; a restored or
+recreated directory can have a different inode.
+
+Keep the marker to retain the association with the existing environment.
+Update/reinstall the launcher, check that the project at the registered path
+is correct, and exit its active client. Then run from a host terminal:
+
+```sh
+oc-box repair --project ~/devel/demo
+oc-box --project ~/devel/demo --resume
+```
+
+If the container is still running, use `oc-box stop --workspace WORKSPACE_ID`
+and retry repair. Repair preserves the container, private volume, and session
+IDs. It does not recover storage that was deleted separately.
+
+If the marker has no matching host registry, check `OC_BOX_STATE_HOME` and
+`XDG_STATE_HOME` and restore the original registry before resuming. The default
+registry is `~/.local/state/oc-box`, separate from `~/.cache`.
 
 ### Missing delegated CPU or memory controllers
 

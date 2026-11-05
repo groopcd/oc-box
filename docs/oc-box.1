@@ -12,6 +12,7 @@ oc\-box [start] [\-\-project PATH | \-\-workspace ID] [START\-OPTIONS]
 oc\-box stop [\-\-project PATH | \-\-workspace ID]
 oc\-box sync [\-\-project PATH | \-\-workspace ID]
 oc\-box reset [\-\-project PATH | \-\-workspace ID] [RESET\-OPTIONS]
+oc\-box repair [\-\-project PATH | \-\-workspace ID]
 oc\-box purge [\-\-project PATH | \-\-workspace ID] [\-\-delete\-sessions | \-\-all] [\-y]
 oc\-box list
 oc\-box distros
@@ -83,6 +84,20 @@ oc\-box reset \-\-project ~/devel/demo \-\-distro ubuntu
 oc\-box reset \-\-project ~/devel/demo \-\-device /dev/accel/accel0
 .fam T
 .fi
+.SS repair
+.PP
+Explicitly accept the current directory identity for an existing workspace at its original canonical path. Use this after a filesystem identity change or a deliberate project restore when you want to retain the existing environment. Only run it after checking that the directory is the project you intend to use. The original matching regular \fB\&.oc\-box\-id\fR and host registry must still exist; repair cannot relocate a workspace or reconstruct missing registry/session data.
+.PP
+Exit the active launcher and stop its container first. Repair takes the workspace lock, checks container ownership, and refuses a running container. It updates only the registry's directory device/inode; project files, marker, container OS, private home, sessions, and saved settings are retained. It does not start or reset the container. An already matching identity needs no change.
+.PP
+.nf
+.fam C
+oc\-box repair \-\-project ~/devel/demo
+oc\-box \-\-project ~/devel/demo \-\-resume
+.fam T
+.fi
+.PP
+Accepts only \fB\-\-project\fR or \fB\-\-workspace\fR selectors, besides help. With neither, use the current directory. With \fB\-\-workspace\fR, check the registered path and matching marker rather than the current directory.
 .SS purge
 .PP
 Remove this workspace's labeled containers, owned volumes, owned networks, resume metadata, private recovery exports, and matching project marker. Exit its active launcher first. Shared base\-image caches and unrelated Podman resources are retained; cleanup does not use a global prune.
@@ -293,7 +308,7 @@ purge \-\-all            deleted   deleted                deleted
 .PP
 Default purge retains host archive copies; \fB\-\-delete\-sessions\fR and \fB\-\-all\fR remove recorded host archive copies. Imported source host conversations remain. Shared base images are retained by all operations. Stop/reset do not checkpoint running processes. Packages installed in the private home survive reset; system\-wide packages do not. No command currently manages Btrfs snapshots.
 .PP
-CPU, RAM, process, distro, and mapping changes require reset for existing containers. A stop/start alone reuses the old create\-time settings. Avoid changing resources directly through Podman if metadata consistency is required. An active launcher holds a nonblocking workspace lock; start, sync, reset, and purge require that launcher to exit. Read\-only list/status and explicit stop can run from a second terminal. A crash releases the lock when its process exits; an orphan still running can retain it.
+CPU, RAM, process, distro, and mapping changes require reset for existing containers. A stop/start alone reuses the old create\-time settings. Avoid changing resources directly through Podman if metadata consistency is required. An active launcher holds a nonblocking workspace lock; start, sync, reset, repair, and purge require that launcher to exit. Read\-only list/status and explicit stop can run from a second terminal. A crash releases the lock when its process exits; an orphan still running can retain it.
 .SH DISTRIBUTION IMAGES
 .PP
 .nf
@@ -432,7 +447,7 @@ Forwarded credential/custom environment values are passed through the Podman cli
 .PP
 \fB~/\:.local/\:state/\:oc\-box/\:workspaces/\:ID/\:workspace.json\fR holds directory identity, container/volume names, distro, limits, and saved Podman/device settings. \fBsessions.json\fR holds session IDs and archive associations. \fBimports/\:\fR holds private source exports; \fBhistory/\:\fR holds private host archive JSON files. \fBlock\fR serializes mutating commands. These files are outside the project and not mounted into the container. Transcript files may contain private content.
 .PP
-\fB\&.oc\-box\-id\fR in the project associates the directory with its registry. Do not edit or copy it to authorize a different mount. Identity checks include the canonical path and directory device/inode. Deleting and recreating the same path produces a new workspace rather than silently reusing the old environment.
+\fB\&.oc\-box\-id\fR in the project associates the directory with its registry. Do not edit or copy it to authorize a different mount. Identity checks include the canonical path and directory device/inode. Deleting and recreating the same path produces a new workspace rather than silently reusing the old environment. An explicitly requested \fBrepair\fR can accept the current identity at the same path with the original matching marker, retaining the existing environment.
 .PP
 The normal host OpenCode database, usually under \fB~/\:.local/\:share/\:opencode/\:\fR, contains archive copies. Old installations may retain one\-time relocation backups under \fB~/\:.local/\:state/\:oc\-box/\:migrations/\:\fR; these are private data, not workspace resources or release artifacts, and later workspace purge leaves them intact. The original development\-only relocation helper is retired.
 .SS Container data
@@ -515,6 +530,22 @@ oc\-box purge \-\-workspace WORKSPACE_ID \-\-all
 .PP
 The last command deletes its remaining managed resources and recorded host archives; an unrelated replacement directory will not be deleted.
 .SH TROUBLESHOOTING
+.SS Directory identity changed after cleanup or a filesystem change
+.PP
+Deleting host \fB~/\:.cache\fR alone does not remove oc\-box's registry or private session volume and should not change the project directory identity. The "Project directory identity changed" error means its recorded device/inode differs from the current directory. Older launchers describe this as "This directory replaced the original workspace" and recommend removing the marker. A device number can change after a filesystem remount; a restored or recreated directory can have a different inode.
+.PP
+Keep the marker to retain the association with the existing environment. Update/reinstall the launcher, check that the project at the registered path is correct, and exit its active client. Then run from a host terminal:
+.PP
+.nf
+.fam C
+oc\-box repair \-\-project ~/devel/demo
+oc\-box \-\-project ~/devel/demo \-\-resume
+.fam T
+.fi
+.PP
+If the container is still running, use \fBoc\-box stop \-\-workspace WORKSPACE_ID\fR and retry repair. Repair preserves the container, private volume, and session IDs. It does not recover storage that was deleted separately.
+.PP
+If the marker has no matching host registry, check \fBOC_BOX_STATE_HOME\fR and \fBXDG_STATE_HOME\fR and restore the original registry before resuming. The default registry is \fB~/\:.local/\:state/\:oc\-box\fR, separate from \fB~/\:.cache\fR\&.
 .SS Missing delegated CPU or memory controllers
 .PP
 On some openSUSE hosts a vendor user\-manager drop\-in clears delegation. Startup then fails on \fBmemory.swap.max\fR or missing cgroup controllers despite kernel support. The launcher reports this before starting the container. From a host terminal, substitute your numeric UID for 1000:

@@ -36,6 +36,9 @@ workspace's ownership label. Registry metadata and directory identities are
 stored outside the project. Directory replacement or marker copying must not
 authorize another mount or project deletion. This does not defend against an
 attacker who already controls the host user's registry or launcher installation.
+The host operator can explicitly accept a changed identity with `oc-box repair`;
+this requires the original canonical path, matching regular marker, workspace
+lock, and a stopped container. Normal launch and purge retain identity checks.
 
 Session exports are treated as container data. Host archives use namespaced IDs
 and mainline import/export, without running project plugins in the host archive

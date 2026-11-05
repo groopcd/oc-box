@@ -94,6 +94,7 @@ oc-box --status --project ~/devel/demo --json
 oc-box distros                      # Supported images and host default
 oc-box stop --project ~/devel/demo
 oc-box sync --project ~/devel/demo   # Retry host history sync after a crash
+oc-box repair --project ~/devel/demo # Accept a verified directory identity change
 oc-box reset --project ~/devel/demo --cpus 8 --memory 16g
 oc-box purge --project ~/devel/demo  # Remove environment; retain source files
 oc-box --about

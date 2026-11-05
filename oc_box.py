@@ -314,7 +314,7 @@ def validate_project(path):
     return project
 
 
-def find_workspace(project=None, workspace_id=None):
+def find_workspace(project=None, workspace_id=None, *, allow_identity_change=False):
     if workspace_id:
         if not re.fullmatch(r"[0-9a-f]{32}", workspace_id):
             raise BoxError("Invalid workspace ID.")
@@ -332,16 +332,23 @@ def find_workspace(project=None, workspace_id=None):
     path = state_root() / "workspaces" / ident / "workspace.json"
     if not path.exists():
         raise BoxError(
-            "Workspace marker has no matching host registry. Remove the stale .oc-box-id to create a new workspace."
+            f"Workspace marker has no matching host registry at {path}. "
+            "Restore the registry or check OC_BOX_STATE_HOME/XDG_STATE_HOME before creating a new workspace."
         )
     data = read_json(path)
     if data["project"] != str(project):
         raise BoxError(
             "Workspace marker belongs to another directory; copied markers cannot authorize mounts."
         )
-    if data["project_identity"] != [project.stat().st_dev, project.stat().st_ino]:
+    stat = project.stat()
+    identity = [stat.st_dev, stat.st_ino]
+    if not allow_identity_change and data["project_identity"] != identity:
         raise BoxError(
-            "This directory replaced the original workspace. Remove .oc-box-id to start fresh."
+            "Project directory identity changed; it may have been replaced or its filesystem identity changed.\n"
+            f"Recorded device/inode: {data['project_identity']}; current: {identity}.\n"
+            "To reconnect this directory to its existing environment and sessions, run in a host terminal:\n"
+            f"  oc-box repair --project {shlex.quote(str(project))}\n"
+            "Then retry the original command."
         )
     return path, data
 
@@ -387,6 +394,32 @@ def workspace_lock(path):
                 "This workspace already has an active oc-box process. Exit it before changing its environment."
             ) from exc
         yield
+
+
+def repair_workspace(path, data):
+    project = validate_project(data["project"])
+    marker_path, _ = find_workspace(project, allow_identity_change=True)
+    if marker_path != path:
+        raise BoxError(
+            "Project marker does not match the selected workspace; refusing to repair."
+        )
+    stat = project.stat()
+    identity = [stat.st_dev, stat.st_ino]
+    if data["project_identity"] == identity:
+        print("Project directory identity already matches; no repair needed.")
+        return
+    info = inspect_owned(data)
+    if info and info["State"]["Running"]:
+        raise BoxError(
+            "Container is running. Exit its launcher or run "
+            f"'oc-box stop --workspace {data['id']}' before repairing."
+        )
+    data["project_identity"] = identity
+    atomic_json(path, data)
+    print(
+        "Workspace identity repaired; existing environment and sessions retained.\n"
+        f"Resume with: oc-box --project {shlex.quote(str(project))} --resume"
+    )
 
 
 def inspect_owned(data):
@@ -1605,6 +1638,7 @@ def parser():
             "stop",
             "sync",
             "reset",
+            "repair",
             "purge",
             "list",
             "distros",
@@ -1798,6 +1832,21 @@ def main(argv=None):
             )
         return report_status(args)
     args.project = args.project or Path.cwd()
+    if args.command == "repair" and (
+        args.new
+        or args.resume
+        or args.import_session
+        or args.distro
+        or args.cpus
+        or args.memory
+        or args.pids_limit is not None
+        or args.model
+        or args.device
+        or args.podman_arg
+        or args.clear_devices
+        or args.clear_podman_args
+    ):
+        raise BoxError("Repair accepts only --project or --workspace selectors.")
     if args.device or args.podman_arg or args.clear_devices or args.clear_podman_args:
         if args.command not in ("start", "reset"):
             raise BoxError("Device and Podman options apply only to start/reset.")
@@ -1845,7 +1894,9 @@ def main(argv=None):
     with loading_stage("Checking rootless Podman"):
         check_backend()
     state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
-    path, data = find_workspace(args.project, args.workspace)
+    path, data = find_workspace(
+        args.project, args.workspace, allow_identity_change=args.command == "repair"
+    )
     if data is None:
         if args.command != "start":
             raise BoxError(
@@ -1868,6 +1919,9 @@ def main(argv=None):
         print("Container stopped; files, packages, and conversations retained.")
         return 0
     with workspace_lock(path):
+        if args.command == "repair":
+            repair_workspace(path, data)
+            return 0
         if args.command in ("start", "reset", "sync"):
             if (
                 args.command == "start"

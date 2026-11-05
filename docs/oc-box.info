@@ -53,6 +53,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box stop [--project PATH | --workspace ID]
      oc-box sync [--project PATH | --workspace ID]
      oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS]
+     oc-box repair [--project PATH | --workspace ID]
      oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
      oc-box list
      oc-box distros
@@ -190,7 +191,32 @@ distributions, especially to/from Alpine.
      oc-box reset --project ~/devel/demo --distro ubuntu
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
 
-4.5 purge
+4.5 repair
+==========
+
+Explicitly accept the current directory identity for an existing
+workspace at its original canonical path.  Use this after a filesystem
+identity change or a deliberate project restore when you want to retain
+the existing environment.  Only run it after checking that the directory
+is the project you intend to use.  The original matching regular
+‘.oc-box-id’ and host registry must still exist; repair cannot relocate
+a workspace or reconstruct missing registry/session data.
+
+Exit the active launcher and stop its container first.  Repair takes the
+workspace lock, checks container ownership, and refuses a running
+container.  It updates only the registry's directory device/inode;
+project files, marker, container OS, private home, sessions, and saved
+settings are retained.  It does not start or reset the container.  An
+already matching identity needs no change.
+
+     oc-box repair --project ~/devel/demo
+     oc-box --project ~/devel/demo --resume
+
+Accepts only ‘--project’ or ‘--workspace’ selectors, besides help.  With
+neither, use the current directory.  With ‘--workspace’, check the
+registered path and matching marker rather than the current directory.
+
+4.6 purge
 =========
 
 Remove this workspace's labeled containers, owned volumes, owned
@@ -221,7 +247,7 @@ apply only to purge.
      oc-box purge --project ~/devel/disposable --all
      oc-box purge --workspace WORKSPACE_ID --all --yes
 
-4.6 list
+4.7 list
 ========
 
 List all registered workspaces with aligned headers: WORKSPACE ID,
@@ -239,7 +265,7 @@ machine-readable output.
 
      oc-box list
 
-4.7 distros
+4.8 distros
 ===========
 
 List supported distro names, image references, and the detected host
@@ -250,7 +276,7 @@ workspace.
      oc-box distros
      oc-box --project ~/devel/demo --distro fedora
 
-4.8 status
+4.9 status
 ==========
 
 Alias of ‘--status’.  Report all registered environments unless
@@ -530,10 +556,10 @@ CPU, RAM, process, distro, and mapping changes require reset for
 existing containers.  A stop/start alone reuses the old create-time
 settings.  Avoid changing resources directly through Podman if metadata
 consistency is required.  An active launcher holds a nonblocking
-workspace lock; start, sync, reset, and purge require that launcher to
-exit.  Read-only list/status and explicit stop can run from a second
-terminal.  A crash releases the lock when its process exits; an orphan
-still running can retain it.
+workspace lock; start, sync, reset, repair, and purge require that
+launcher to exit.  Read-only list/status and explicit stop can run from
+a second terminal.  A crash releases the lock when its process exits; an
+orphan still running can retain it.
 
 
 File: oc-box.info,  Node: Distribution images,  Next: Sessions and recovery,  Prev: Lifecycle and persistence,  Up: Top
@@ -793,7 +819,9 @@ Transcript files may contain private content.
 Do not edit or copy it to authorize a different mount.  Identity checks
 include the canonical path and directory device/inode.  Deleting and
 recreating the same path produces a new workspace rather than silently
-reusing the old environment.
+reusing the old environment.  An explicitly requested ‘repair’ can
+accept the current identity at the same path with the original matching
+marker, retaining the existing environment.
 
 The normal host OpenCode database, usually under
 ‘~/.local/share/opencode/’, contains archive copies.  Old installations
@@ -903,7 +931,37 @@ File: oc-box.info,  Node: Troubleshooting,  Next: Installation and manuals,  Pre
 15 Troubleshooting
 ******************
 
-15.1 Missing delegated CPU or memory controllers
+15.1 Directory identity changed after cleanup or a filesystem change
+====================================================================
+
+Deleting host ‘~/.cache’ alone does not remove oc-box's registry or
+private session volume and should not change the project directory
+identity.  The "Project directory identity changed" error means its
+recorded device/inode differs from the current directory.  Older
+launchers describe this as "This directory replaced the original
+workspace" and recommend removing the marker.  A device number can
+change after a filesystem remount; a restored or recreated directory can
+have a different inode.
+
+Keep the marker to retain the association with the existing environment.
+Update/reinstall the launcher, check that the project at the registered
+path is correct, and exit its active client.  Then run from a host
+terminal:
+
+     oc-box repair --project ~/devel/demo
+     oc-box --project ~/devel/demo --resume
+
+If the container is still running, use ‘oc-box stop --workspace
+WORKSPACE_ID’ and retry repair.  Repair preserves the container, private
+volume, and session IDs.  It does not recover storage that was deleted
+separately.
+
+If the marker has no matching host registry, check ‘OC_BOX_STATE_HOME’
+and ‘XDG_STATE_HOME’ and restore the original registry before resuming.
+The default registry is ‘~/.local/state/oc-box’, separate from
+‘~/.cache’.
+
+15.2 Missing delegated CPU or memory controllers
 ================================================
 
 On some openSUSE hosts a vendor user-manager drop-in clears delegation.
@@ -926,7 +984,7 @@ Check effective delegation in
 Retry the existing workspace without reset or purge.  Do not edit vendor
 files.
 
-15.2 Project mount denied by SELinux
+15.3 Project mount denied by SELinux
 ====================================
 
 New mounts use Podman's shared ‘:z’ project relabeling.  Older mounts
@@ -938,7 +996,7 @@ Resume normally; no session reimport/reset is needed.  Device-node
 labeling is separate: use the device-policy diagnostics in Devices and
 host permissions.
 
-15.3 Slow first launch or blank terminal
+15.4 Slow first launch or blank terminal
 ========================================
 
 Cold creation performs package and plugin downloads.  Timed stage output
@@ -948,7 +1006,7 @@ runtime are normalized inside the copied config, not by modifying host
 configuration.  Preserve the environment when diagnosing a wait; reset
 discards the OS cache and can repeat cold setup.
 
-15.4 Active workspace lock or failed import
+15.5 Active workspace lock or failed import
 ===========================================
 
 Exit the active launcher before start/sync/reset/purge.  Status and stop
@@ -1030,22 +1088,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description1822
-Node: Commands3653
-Node: Options10298
-Node: Lifecycle and persistence19610
-Node: Distribution images21262
-Node: Sessions and recovery22157
-Node: Devices and host permissions24354
-Node: Resource reports26700
-Node: Configuration and environment28154
-Node: Files31727
-Node: Exit status34091
-Node: Examples34902
-Node: Troubleshooting36988
-Node: Installation and manuals39561
-Node: Authors and license41335
-Node: See also41942
+Node: Description1875
+Node: Commands3706
+Node: Options11557
+Node: Lifecycle and persistence20869
+Node: Distribution images22529
+Node: Sessions and recovery23424
+Node: Devices and host permissions25621
+Node: Resource reports27967
+Node: Configuration and environment29421
+Node: Files32994
+Node: Exit status35516
+Node: Examples36327
+Node: Troubleshooting38413
+Node: Installation and manuals42397
+Node: Authors and license44171
+Node: See also44778
 
 End Tag Table
 
