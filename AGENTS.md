@@ -34,6 +34,15 @@ hosting service permits this AI-assisted project. Do not create a remote or
 push to a service with incompatible policies. Do not store credentials in Git
 URLs, config, source files, or command-line arguments.
 
+The public upstream is `https://github.com/groopcd/oc-box.git`. Use only the
+explicit `PERSONAL_GITHUB_TOKEN` for publication. Inherited `GITHUB_TOKEN` and
+`GH_TOKEN` belong to a separate Microsoft/Copilot account and must not be used
+for repository management or pushes. Give publishing subprocesses an isolated
+GitHub CLI config and set their local `GH_TOKEN` from `PERSONAL_GITHUB_TOKEN`,
+without modifying the parent environment. Verify `gh api user` reports
+`groopcd` before publishing. Pass Git credential helpers per command rather
+than storing tokens or changing global authentication settings.
+
 Version `0.1.N+gHASH` is derived from the full Git history; every commit advances
 N automatically. The installer embeds the source identity in its private
 `build-info.json`. Original project code/documentation is GPL-3.0-or-later;

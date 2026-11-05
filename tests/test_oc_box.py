@@ -352,13 +352,14 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_forwarded_credentials_never_appear_in_process_arguments(self):
         with patch.dict(
-            os.environ, {"CODEBERG_TOKEN": "synthetic-credential-for-argv-test"}
+            os.environ, {"PERSONAL_GITHUB_TOKEN": "synthetic-credential-for-argv-test"}
         ):
             command = box.exec_command(self.data, ["opencode", "--version"])
-        self.assertIn("CODEBERG_TOKEN", command)
+        self.assertIn("PERSONAL_GITHUB_TOKEN", command)
         self.assertNotIn("synthetic-credential-for-argv-test", " ".join(command))
         self.assertEqual(
-            command.environment["CODEBERG_TOKEN"], "synthetic-credential-for-argv-test"
+            command.environment["PERSONAL_GITHUB_TOKEN"],
+            "synthetic-credential-for-argv-test",
         )
         self.assertIn("HOME=" + self.data["home"], command)
         self.assertEqual(
@@ -369,7 +370,7 @@ class WorkspaceTests(unittest.TestCase):
         with patch.object(box.subprocess, "run", return_value=completed) as execute:
             box.run(command)
         self.assertEqual(
-            execute.call_args.kwargs["env"]["CODEBERG_TOKEN"],
+            execute.call_args.kwargs["env"]["PERSONAL_GITHUB_TOKEN"],
             "synthetic-credential-for-argv-test",
         )
 
@@ -386,12 +387,14 @@ class WorkspaceTests(unittest.TestCase):
         self.assertIn("XDG_DATA_HOME=" + self.data["home"] + "/.local/share", command)
 
     def test_tui_receives_forwarded_environment_without_secret_arguments(self):
-        with patch.dict(os.environ, {"CODEBERG_TOKEN": "synthetic-relay-credential"}):
+        with patch.dict(
+            os.environ, {"PERSONAL_GITHUB_TOKEN": "synthetic-relay-credential"}
+        ):
             command = box.exec_command(self.data, ["opencode"])
         with patch("terminal_ui.run_tui", return_value=0) as relay:
             self.assertEqual(box.run_tui(command), 0)
         self.assertEqual(
-            relay.call_args.kwargs["env"]["CODEBERG_TOKEN"],
+            relay.call_args.kwargs["env"]["PERSONAL_GITHUB_TOKEN"],
             "synthetic-relay-credential",
         )
         self.assertNotIn(

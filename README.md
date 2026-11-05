@@ -20,6 +20,8 @@ the acknowledgment of OpenAI coding-assistant contributions through OpenCode.
 From a source checkout, run on the **host as your regular user**, without sudo:
 
 ```sh
+git clone https://github.com/groopcd/oc-box.git
+cd oc-box
 python3 install.py
 oc-box --version
 ```
