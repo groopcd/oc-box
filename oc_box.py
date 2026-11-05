@@ -291,6 +291,31 @@ def workspace_paths():
     return sorted((state_root() / "workspaces").glob("*/workspace.json"))
 
 
+def registered_projects(project):
+    project = str(Path(project).resolve())
+    return [
+        (path, data)
+        for path in workspace_paths()
+        if (data := read_json(path)).get("project") == project
+    ]
+
+
+def missing_marker_error(project, matches):
+    choices = "\n".join(
+        f"  {data['id']}  session={session_state(path).get('last') or 'none'}"
+        for path, data in matches
+    )
+    commands = "\n".join(
+        f"  oc-box repair --workspace {data['id']}" for _, data in matches
+    )
+    return BoxError(
+        f"Project marker is missing, but existing workspace(s) already reference {project}:\n{choices}\n"
+        "Refusing to create a duplicate environment. Check 'oc-box --status' and choose the workspace to recover.\n"
+        f"Exit/stop its launcher and restore its marker explicitly with:\n{commands}\n"
+        "If this is deliberately a different project, preserve any needed history and purge the old workspace by ID first (without --all)."
+    )
+
+
 def validate_project(path):
     project = Path(path).expanduser().resolve(strict=True)
     protected = {Path("/"), Path("/home"), Path.home().resolve(), state_root()}
@@ -324,8 +349,19 @@ def find_workspace(project=None, workspace_id=None, *, allow_identity_change=Fal
         return path, read_json(path)
     project = Path(project or Path.cwd()).resolve()
     marker = project / MARKER
-    if not marker.is_file() or marker.is_symlink():
+    if marker.is_symlink():
+        raise BoxError(
+            f"Workspace marker must be a regular file, not a symlink: {marker}"
+        )
+    if not marker.exists():
+        matches = registered_projects(project)
+        if matches:
+            if allow_identity_change and len(matches) == 1:
+                return matches[0]
+            raise missing_marker_error(project, matches)
         return None, None
+    if not marker.is_file():
+        raise BoxError(f"Workspace marker must be a regular file: {marker}")
     ident = marker.read_text().strip()
     if not re.fullmatch(r"[0-9a-f]{32}", ident):
         raise BoxError(f"Invalid workspace marker: {marker}")
@@ -398,14 +434,17 @@ def workspace_lock(path):
 
 def repair_workspace(path, data):
     project = validate_project(data["project"])
-    marker_path, _ = find_workspace(project, allow_identity_change=True)
-    if marker_path != path:
-        raise BoxError(
-            "Project marker does not match the selected workspace; refusing to repair."
-        )
+    marker = project / MARKER
+    missing = not marker.exists() and not marker.is_symlink()
+    if not missing:
+        marker_path, _ = find_workspace(project, allow_identity_change=True)
+        if marker_path != path:
+            raise BoxError(
+                "Project marker does not match the selected workspace; refusing to repair."
+            )
     stat = project.stat()
     identity = [stat.st_dev, stat.st_ino]
-    if data["project_identity"] == identity:
+    if not missing and data["project_identity"] == identity:
         print("Project directory identity already matches; no repair needed.")
         return
     info = inspect_owned(data)
@@ -414,10 +453,15 @@ def repair_workspace(path, data):
             "Container is running. Exit its launcher or run "
             f"'oc-box stop --workspace {data['id']}' before repairing."
         )
+    if missing:
+        with marker.open("x") as stream:
+            stream.write(data["id"] + "\n")
     data["project_identity"] = identity
     atomic_json(path, data)
     print(
-        "Workspace identity repaired; existing environment and sessions retained.\n"
+        "Workspace identity repaired"
+        + (" and missing marker restored" if missing else "")
+        + "; existing environment and sessions retained.\n"
         f"Resume with: oc-box --project {shlex.quote(str(project))} --resume"
     )
 
@@ -662,6 +706,11 @@ def create_container(path, data):
 
 def start_container(path, data):
     project = validate_project(data["project"])
+    current_path, _ = find_workspace(project)
+    if current_path != path:
+        raise BoxError(
+            "Project marker does not match the selected workspace; refusing to start another environment for this directory. Use 'oc-box --status' to select the current workspace."
+        )
     if [project.stat().st_dev, project.stat().st_ino] != data["project_identity"]:
         raise BoxError(
             "Project directory identity changed; refusing to reuse the environment."
@@ -1141,6 +1190,10 @@ def restore_archive_directory(exported, project):
         return False
     ident = exported["info"]["id"]
     prefix = "ses_" + hashlib.sha256(folder.name.encode()).hexdigest()[:12] + "_"
+    # Plain purge retains minimal archive provenance outside the active registry
+    # so a host archive remains recoverable after retiring its old workspace.
+    if not (folder / "workspace.json").is_file():
+        folder = state_root() / "retired" / folder.name
     registry = folder / "workspace.json"
     saved = folder / "history" / (ident + ".json")
     if not ident.startswith(prefix) or not registry.is_file() or not saved.is_file():
@@ -1193,7 +1246,7 @@ def export_host_session(path, data, ident):
     ):
         raise BoxError(
             f"Host session belongs to {directory!r}, not {data['project']}. Select its original project with --project. "
-            "An oc-box archive also needs its original host registry and history/ export to verify the project."
+            "An oc-box archive also needs its original host registry and history/ export, or the retired archive provenance retained by plain purge, to verify the project."
         )
     return exported
 
@@ -1594,7 +1647,52 @@ def remove_resources(data, *, keep_home=False):
     # Base images are shared cache. Never prune them globally.
 
 
+def retain_archive_provenance(path, data):
+    """Keep private, verified recovery evidence, not an active workspace entry."""
+    prefix = "ses_" + hashlib.sha256(data["id"].encode()).hexdigest()[:12] + "_"
+    retired = state_root() / "retired" / data["id"]
+    count = 0
+    for source in sorted((path.parent / "history").glob("*.json")):
+        archive = read_json(source)
+        ident = source.stem
+        validate_session_export(archive, ident)
+        if (
+            not ident.startswith(prefix)
+            or archive["info"].get("directory") != data["project"]
+        ):
+            raise BoxError(
+                "Archive provenance does not match the selected workspace; refusing cleanup before history can be retained."
+            )
+        retired.mkdir(parents=True, exist_ok=True, mode=0o700)
+        atomic_json(retired / "history" / source.name, archive)
+        count += 1
+    if count:
+        atomic_json(
+            retired / "workspace.json", {"id": data["id"], "project": data["project"]}
+        )
+        print(f"Private archive recovery provenance retained at {retired}.")
+
+
 def purge(path, data, args):
+    project = Path(data["project"])
+    marker = project / MARKER
+    same = (
+        project.is_dir()
+        and not project.is_symlink()
+        and [project.stat().st_dev, project.stat().st_ino] == data["project_identity"]
+    )
+    marker_matches = (
+        same
+        and marker.is_file()
+        and not marker.is_symlink()
+        and marker.read_text().strip() == data["id"]
+    )
+    if args.all and (project.exists() or project.is_symlink()) and not marker_matches:
+        raise BoxError(
+            "Project identity or marker belongs to another workspace; refusing --all before deleting any history or resources. For stale duplicate cleanup use plain 'oc-box purge --workspace "
+            + data["id"]
+            + "' to retain project files and host history."
+        )
     if not args.yes:
         summary = "sandbox resources and oc-box metadata"
         if args.delete_sessions or args.all:
@@ -1629,9 +1727,9 @@ def purge(path, data, args):
                 cwd=path.parent / "controller",
                 timeout=60,
             )
+    else:
+        retain_archive_provenance(path, data)
     remove_resources(data)
-    project = Path(data["project"])
-    marker = project / MARKER
     same = (
         project.is_dir()
         and not project.is_symlink()
@@ -1907,13 +2005,13 @@ def main(argv=None):
             )
         return 0
     if args.command == "list":
+        from status_report import project_condition
+
         headers = ("WORKSPACE ID", "DISTRO", "PROJECT", "STATUS", "SESSION ID")
         rows = []
         for path in workspace_paths():
             data = read_json(path)
-            exists = (
-                "present" if Path(data["project"]).is_dir() else "missing directory"
-            )
+            exists, _ = project_condition(data)
             latest = session_state(path).get("last") or "none"
             rows.append((data["id"], data["distro"], data["project"], exists, latest))
         widths = [
@@ -1926,6 +2024,18 @@ def main(argv=None):
                     value.ljust(width) for value, width in zip(row, widths)
                 ).rstrip()
             )
+        for row in rows:
+            ident, _, project, condition, _ = row
+            if condition in ("identity changed", "marker missing"):
+                print(
+                    f"oc-box: {ident}: {condition}. Exit/stop its launcher, then use 'oc-box repair --workspace {ident}' to retain its environment and history.",
+                    file=sys.stderr,
+                )
+            elif condition == "marker mismatch":
+                print(
+                    f"oc-box: {ident}: another workspace owns the marker for {project}. Inspect 'oc-box --status' before stale cleanup with plain 'oc-box purge --workspace {ident}' (no --all or --delete-sessions).",
+                    file=sys.stderr,
+                )
         return 0
     if args.command != "purge" and (args.all or args.delete_sessions or args.yes):
         raise BoxError("--all, --delete-sessions, and --yes apply only to purge.")
@@ -1971,6 +2081,11 @@ def main(argv=None):
                 )
             configure_podman_options(data, args)
             if args.command == "reset":
+                current_path, _ = find_workspace(data["project"])
+                if current_path != path:
+                    raise BoxError(
+                        "Project marker does not match the selected workspace; refusing to reset it. Use 'oc-box --status' to select the current workspace."
+                    )
                 check_resource_controllers(data)
                 remove_resources(data, keep_home=True)
                 data["ready"] = False

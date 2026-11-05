@@ -124,6 +124,32 @@ Purge asks for an ID-prefix confirmation. `--delete-sessions` additionally
 deletes recorded host archive copies; `--all` includes that action and deletes
 the project directory. Shared image caches and unrelated resources remain.
 
+### Directory recovery and duplicate detection
+
+Clearing host `~/.cache` does not delete workspace registrations or private
+session volumes. If directory device/inode changes, keep the marker and use
+`oc-box repair` after checking the project and stopping its launcher. If the
+marker is missing, the launcher detects existing registrations instead of
+silently creating a duplicate:
+
+```sh
+oc-box --status
+oc-box repair --workspace WORKSPACE_ID
+oc-box --workspace WORKSPACE_ID --resume
+```
+
+Repair restores a missing marker or accepts the current identity while retaining
+the container, settings, and session IDs. It never replaces another workspace's
+marker. If several records reference the same path, select the intended ID.
+`list`/`status` distinguish identity changes, missing markers, and marker
+mismatches, with specific recovery or cleanup guidance.
+
+For a stale duplicate left by an older launcher, first recover any needed work,
+then run **plain** `oc-box purge --workspace STALE_ID`, without `--all` or
+`--delete-sessions`. It leaves the current project/marker and host histories
+intact and retains private archive provenance under the state directory's
+`retired/` folder. This is saved recovery data, not a third active workspace.
+
 ### Continue an existing host session
 
 Exit the host OpenCode client first, then import once:
@@ -138,6 +164,9 @@ Your original host conversation is unchanged. Later launches need no import
 flag. See [session recovery](docs/cli.md#sessions-and-recovery) for retry behavior.
 The same flag can recover an oc-box host archive into a fresh environment after
 its marker was replaced; keep the original registry and saved history export.
+After plain purge with a current launcher, the retained private `retired/`
+provenance can verify the old host archive instead. Older already-purged records
+cannot be reconstructed automatically; the imported live session is unaffected.
 
 ### Select a distro or map hardware
 

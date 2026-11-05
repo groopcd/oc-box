@@ -86,6 +86,9 @@ class DocumentationTests(unittest.TestCase):
             "container_use_devices",
             "not live updates",
             "GPL-3.0-or-later",
+            "marker missing",
+            "marker mismatch",
+            "retired/ID/",
         ):
             self.assertIn(phrase, text)
 

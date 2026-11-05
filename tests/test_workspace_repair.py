@@ -132,7 +132,7 @@ class WorkspaceRepairTests(unittest.TestCase):
     def test_repair_by_id_requires_matching_regular_marker(self):
         self.change_identity()
         marker = self.project / box.MARKER
-        for kind in ("missing", "symlink", "different workspace"):
+        for kind in ("symlink", "different workspace"):
             with self.subTest(kind=kind):
                 marker.unlink(missing_ok=True)
                 if kind == "symlink":
@@ -153,10 +153,106 @@ class WorkspaceRepairTests(unittest.TestCase):
         with self.assertRaisesRegex(box.BoxError, "Restore the registry"):
             self.run_repair("--project", str(self.project))
 
-    def test_repair_does_not_create_workspace_without_marker(self):
+    def test_repair_restores_missing_marker_without_creating_a_workspace(self):
         (self.project / box.MARKER).unlink()
-        with self.assertRaisesRegex(box.BoxError, "No oc-box workspace"):
+        sessions = {"last": "ses_keep", "sessions": ["ses_keep"]}
+        box.atomic_json(box.session_file(self.path), sessions)
+        self.assertEqual(self.run_repair("--project", str(self.project)), self.data)
+        self.assertEqual(
+            (self.project / box.MARKER).read_text().strip(), self.data["id"]
+        )
+        self.assertEqual(box.session_state(self.path), sessions)
+        self.assertEqual(box.workspace_paths(), [self.path])
+
+    def test_missing_marker_and_changed_identity_recover_together_by_id(self):
+        self.change_identity(device=True)
+        (self.project / box.MARKER).unlink()
+        updated = self.run_repair("--workspace", self.data["id"])
+        stat = self.project.stat()
+        self.assertEqual(updated["project_identity"], [stat.st_dev, stat.st_ino])
+        self.assertEqual(box.find_workspace(self.project), (self.path, updated))
+
+    def test_start_with_missing_marker_reports_existing_id_without_duplicate(self):
+        (self.project / box.MARKER).unlink()
+        with (
+            patch.object(box, "check_backend"),
+            patch.object(box, "create_workspace") as create,
+            patch.object(box, "launch") as launch,
+        ):
+            with self.assertRaisesRegex(
+                box.BoxError, "Refusing to create a duplicate"
+            ) as raised:
+                box.main(["--project", str(self.project)])
+        self.assertIn(
+            "oc-box repair --workspace " + self.data["id"], str(raised.exception)
+        )
+        create.assert_not_called()
+        launch.assert_not_called()
+        self.assertEqual(box.workspace_paths(), [self.path])
+
+    def test_repair_requires_selection_when_multiple_workspaces_lack_marker(self):
+        marker = self.project / box.MARKER
+        marker.unlink()
+        other_path, other = box.create_workspace(self.project, "ubuntu")
+        marker.unlink()
+        with self.assertRaisesRegex(
+            box.BoxError, "Refusing to create a duplicate"
+        ) as raised:
             self.run_repair("--project", str(self.project))
+        for data in (self.data, other):
+            self.assertIn(data["id"], str(raised.exception))
+        self.assertEqual(self.run_repair("--workspace", self.data["id"]), self.data)
+        self.assertEqual(marker.read_text().strip(), self.data["id"])
+        self.assertEqual(box.read_json(other_path), other)
+
+    def test_missing_marker_repair_refuses_running_container_without_writing(self):
+        marker = self.project / box.MARKER
+        marker.unlink()
+        with self.assertRaisesRegex(box.BoxError, "Container is running"):
+            self.run_repair(
+                "--workspace", self.data["id"], info={"State": {"Running": True}}
+            )
+        self.assertFalse(marker.exists())
+        self.assertEqual(box.read_json(self.path), self.data)
+
+    def test_missing_marker_repair_needs_registered_project(self):
+        fresh = self.root / "unregistered"
+        fresh.mkdir()
+        with self.assertRaisesRegex(box.BoxError, "No oc-box workspace"):
+            self.run_repair("--project", str(fresh))
+        self.assertFalse((fresh / box.MARKER).exists())
+
+    def test_symlink_marker_is_rejected_without_new_registration(self):
+        marker = self.project / box.MARKER
+        marker.unlink()
+        marker.symlink_to(self.root / "missing-target")
+        with (
+            patch.object(box, "check_backend"),
+            patch.object(box, "create_workspace") as create,
+        ):
+            with self.assertRaisesRegex(box.BoxError, "not a symlink"):
+                box.main(["--project", str(self.project)])
+        create.assert_not_called()
+
+    def test_stale_workspace_id_cannot_start_or_reset_replacement(self):
+        (self.project / box.MARKER).unlink()
+        other_path, other = box.create_workspace(self.project, "ubuntu")
+        for action in ("start", "reset"):
+            with (
+                self.subTest(action=action),
+                patch.object(box, "check_backend"),
+                patch.object(box, "check_resource_controllers"),
+                patch.object(box, "inspect_owned", return_value=None),
+                patch.object(box, "remove_resources") as remove,
+            ):
+                with self.assertRaisesRegex(box.BoxError, "marker does not match"):
+                    if action == "start":
+                        box.start_container(self.path, self.data)
+                    else:
+                        box.main([action, "--workspace", self.data["id"]])
+                remove.assert_not_called()
+        self.assertEqual(box.read_json(other_path), other)
+        self.assertEqual((self.project / box.MARKER).read_text().strip(), other["id"])
 
     def test_repair_refuses_running_container(self):
         self.change_identity()

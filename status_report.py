@@ -107,6 +107,34 @@ def filesystem_usage(path):
         return None
 
 
+def project_condition(data):
+    """Use both the directory identity and marker, without starting Podman."""
+    project = Path(data["project"])
+    try:
+        stat = project.stat()
+        if not project.is_dir() or project.is_symlink():
+            return "replaced directory", None
+        marker = project / ".oc-box-id"
+        if marker.is_symlink() or (marker.exists() and not marker.is_file()):
+            return "invalid marker", None
+        selected = marker.read_text().strip() if marker.is_file() else None
+        if selected is not None and not re.fullmatch(r"[0-9a-f]{32}", selected):
+            return "invalid marker", None
+        if selected is not None and selected != data["id"]:
+            return "marker mismatch", selected
+        if selected is None:
+            return "marker missing", None
+        if [stat.st_dev, stat.st_ino] != data.get("project_identity"):
+            return "identity changed", selected
+        return "present", selected
+    except FileNotFoundError:
+        return "missing directory", None
+    except UnicodeError:
+        return "invalid marker", None
+    except OSError:
+        return "inaccessible", None
+
+
 def inspect_resource(podman, kind, name, owner, notes, *, size=False):
     command = [kind, "inspect", *(["--size"] if size else []), name]
     result = podman(*command, capture=True, check=False, timeout=20)
@@ -176,29 +204,28 @@ def collect_workspace(path, data, *, podman, session_state, now):
         "notes": notes,
     }
     project = Path(data["project"])
-    try:
-        stat = project.stat()
-        if (
-            project.is_dir()
-            and not project.is_symlink()
-            and [stat.st_dev, stat.st_ino] == data.get("project_identity")
-        ):
-            report["project_status"] = "present"
-            size, error = directory_bytes(project)
-            report["storage"]["project_bytes"] = size
-            report["storage"]["project_filesystem"] = filesystem_usage(project)
-            if error:
-                notes.append("Project: " + error)
-        else:
-            report["project_status"] = "replaced directory"
-            notes.append(
-                "Project identity changed; replacement directory not measured."
-            )
-    except FileNotFoundError:
-        pass
-    except OSError:
-        report["project_status"] = "inaccessible"
-        notes.append("Project directory cannot be inspected.")
+    condition, selected = project_condition(data)
+    report["project_status"] = condition
+    report["project_marker_workspace"] = selected
+    report["related_workspace_ids"] = []
+    if condition == "present":
+        size, error = directory_bytes(project)
+        report["storage"]["project_bytes"] = size
+        report["storage"]["project_filesystem"] = filesystem_usage(project)
+        if error:
+            notes.append("Project: " + error)
+    elif condition in ("identity changed", "marker missing"):
+        notes.append(
+            f"Project {condition}; directory not measured. Exit/stop this workspace and run: oc-box repair --workspace {data['id']}. Do not delete the marker or create a new workspace."
+        )
+    elif condition == "marker mismatch":
+        notes.append(
+            f"Project marker selects workspace {selected}; this entry may be stale. Review its sessions before plain 'oc-box purge --workspace {data['id']}' to retain project files and host history. Do not use --all or --delete-sessions for duplicate cleanup."
+        )
+    elif condition not in ("missing directory",):
+        notes.append(
+            "Project identity/marker cannot be trusted; directory not measured. Check the original project and registry before repair."
+        )
 
     try:
         info = inspect_resource(
@@ -275,6 +302,22 @@ def collect_reports(workspaces, *, podman, session_state):
         )
         for path, data in workspaces
     ]
+    for item in reports:
+        related = [
+            other["workspace_id"]
+            for other in reports
+            if other["project"] == item["project"]
+            and other["workspace_id"] != item["workspace_id"]
+        ]
+        item["related_workspace_ids"] = related
+        if related:
+            item["notes"].append(
+                "Multiple workspaces reference this project: "
+                + ", ".join(related)
+                + ". The project marker selects "
+                + (item["project_marker_workspace"] or "none")
+                + "; no entries were automatically deleted."
+            )
     running = [
         item for item in reports if item["state"] == "running" and item["container_id"]
     ]

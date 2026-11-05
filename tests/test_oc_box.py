@@ -188,7 +188,8 @@ class WorkspaceTests(unittest.TestCase):
             box.find_workspace(other)
         self.project.rename(self.root / "old")
         self.project.mkdir()
-        self.assertEqual(box.find_workspace(self.project), (None, None))
+        with self.assertRaisesRegex(box.BoxError, "Refusing to create a duplicate"):
+            box.find_workspace(self.project)
         (self.project / box.MARKER).write_text(self.data["id"])
         with self.assertRaisesRegex(box.BoxError, "replaced"):
             box.find_workspace(self.project)

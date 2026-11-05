@@ -224,10 +224,56 @@ class StatusTests(unittest.TestCase):
                 podman=self.podman,
                 session_state=box.session_state,
             )
-        self.assertEqual(
-            report["workspaces"][0]["project_status"], "replaced directory"
-        )
+        self.assertEqual(report["workspaces"][0]["project_status"], "identity changed")
         self.assertTrue(all(call.kwargs.get("private") for call in scan.call_args_list))
+
+    def test_missing_marker_and_duplicates_include_specific_recovery_notes(self):
+        (self.project / box.MARKER).unlink()
+        with patch.object(status, "directory_bytes", return_value=(4096, None)):
+            missing = status.collect_reports(
+                [(self.path, self.data)],
+                podman=self.podman,
+                session_state=box.session_state,
+            )["workspaces"][0]
+        self.assertEqual(missing["project_status"], "marker missing")
+        self.assertIn(
+            "repair --workspace " + self.data["id"], " ".join(missing["notes"])
+        )
+        other_path, other = box.create_workspace(self.project, "ubuntu")
+        with patch.object(status, "directory_bytes", return_value=(4096, None)):
+            reports = status.collect_reports(
+                [(self.path, self.data), (other_path, other)],
+                podman=self.podman,
+                session_state=box.session_state,
+            )["workspaces"]
+        self.assertEqual(reports[0]["project_status"], "marker mismatch")
+        self.assertEqual(reports[0]["project_marker_workspace"], other["id"])
+        self.assertEqual(reports[0]["related_workspace_ids"], [other["id"]])
+        self.assertIsNone(reports[0]["storage"]["project_bytes"])
+        self.assertIn(
+            "Do not use --all or --delete-sessions", " ".join(reports[0]["notes"])
+        )
+        self.assertEqual(reports[1]["project_status"], "present")
+        self.assertIn(self.data["id"], reports[1]["related_workspace_ids"])
+
+    def test_invalid_marker_types_do_not_crash_or_authorize_a_project_scan(self):
+        marker = self.project / box.MARKER
+        for kind in ("invalid id", "binary", "symlink", "directory"):
+            with self.subTest(kind=kind):
+                marker.unlink(missing_ok=True)
+                if kind == "invalid id":
+                    marker.write_text("not-a-workspace")
+                elif kind == "binary":
+                    marker.write_bytes(b"\xff\xfe")
+                elif kind == "symlink":
+                    marker.symlink_to(self.root / "nonexistent")
+                else:
+                    marker.mkdir()
+                self.assertEqual(
+                    status.project_condition(self.data), ("invalid marker", None)
+                )
+                if marker.is_dir() and not marker.is_symlink():
+                    marker.rmdir()
 
     def test_text_report_distinguishes_storage_and_limits(self):
         report = self.collect()

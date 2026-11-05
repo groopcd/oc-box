@@ -198,23 +198,29 @@ Explicitly accept the current directory identity for an existing
 workspace at its original canonical path.  Use this after a filesystem
 identity change or a deliberate project restore when you want to retain
 the existing environment.  Only run it after checking that the directory
-is the project you intend to use.  The original matching regular
-‘.oc-box-id’ and host registry must still exist; repair cannot relocate
-a workspace or reconstruct missing registry/session data.
+is the project you intend to use.  The host registry must still exist.
+A matching regular ‘.oc-box-id’ is retained; if the marker is missing,
+repair can restore it from that registry.  Symlink, invalid, or another
+workspace's markers are never overwritten.  Repair cannot relocate a
+workspace or reconstruct missing registry/session data.
 
 Exit the active launcher and stop its container first.  Repair takes the
 workspace lock, checks container ownership, and refuses a running
-container.  It updates only the registry's directory device/inode;
-project files, marker, container OS, private home, sessions, and saved
-settings are retained.  It does not start or reset the container.  An
-already matching identity needs no change.
+container.  It updates the registry's directory device/inode and
+restores a missing marker; project files, container OS, private home,
+sessions, and saved settings are retained.  It does not start or reset
+the container.  An already matching identity needs no change.
 
      oc-box repair --project ~/devel/demo
      oc-box --project ~/devel/demo --resume
 
 Accepts only ‘--project’ or ‘--workspace’ selectors, besides help.  With
-neither, use the current directory.  With ‘--workspace’, check the
-registered path and matching marker rather than the current directory.
+neither, use the current directory.  If a missing marker has exactly one
+registered workspace for this path, ‘--project’ selects it.  If several
+records reference the path, repair refuses to choose: inspect ‘--status’
+and supply ‘--workspace ID’ explicitly.  With ‘--workspace’, check the
+registered path and restore its missing marker rather than using the
+current directory.
 
 4.6 purge
 =========
@@ -231,12 +237,23 @@ that sync fails, the private volume is retained for recovery.  If the
 project was already deleted, there is no final sync; the last host
 archives remain.
 
+Before removing the active registry, plain purge also retains its
+verified archive JSON files and minimal workspace/project provenance
+privately under ‘~/.local/state/oc-box/retired/ID/’ (or the configured
+state root).  These are not active workspaces and do not appear in
+list/status.  They allow a host archive that still names the old
+controller directory to be imported later.  They may contain private
+conversation content, just like host archives.  The explicit
+‘--delete-sessions’ and ‘--all’ variants do not create this recovery
+copy.
+
 ‘--delete-sessions’ additionally deletes the recorded host archive
 copies, not an original host conversation imported into oc-box.  ‘--all’
 additionally deletes the entire project directory.  Project deletion
-requires the original directory identity and matching marker.  Extra
-externally supplied mounts/volumes are not owned resources unless they
-bear this workspace's ownership label.
+requires the original directory identity and matching marker; if either
+belongs to another workspace, ‘--all’ is rejected before deleting any
+history or resources.  Extra externally supplied mounts/volumes are not
+owned resources unless they bear this workspace's ownership label.
 
 By default, enter the first eight characters of the workspace ID to
 confirm.  ‘-y’ or ‘--yes’ skips this confirmation.  These deletion flags
@@ -253,8 +270,14 @@ apply only to purge.
 List all registered workspaces with aligned headers: WORKSPACE ID,
 DISTRO, PROJECT, STATUS, and SESSION ID. No Podman invocation or
 container start is needed.  Missing project directories remain listed so
-they can be purged by ID. STATUS means directory presence, not whether
-the container is running.
+they can be purged by ID. STATUS describes directory identity/marker
+health, not container running state: ‘present’, ‘identity changed’,
+‘marker missing’, ‘marker mismatch’, ‘invalid marker’, ‘missing
+directory’, ‘replaced directory’ (not a regular directory), or
+‘inaccessible’.  Identity changes are not assumed to mean replacement: a
+remount can change device identity.  A marker mismatch means another
+workspace is selected for that path.  Recovery/cleanup hints go to
+stderr and never delete or repair records automatically.
 
 SESSION ID is the original container session used for resume, or ‘none’.
 Local metadata is refreshed at startup/sync; a new conversation in a
@@ -632,11 +655,14 @@ text:
 8.1 Recover history after replacing a workspace marker
 ======================================================
 
-Removing ‘.oc-box-id’ and starting again creates a fresh environment; it
-does not delete the old private volume, registry, or host archives.  To
-continue a previously synced conversation in the new environment, exit
-its active client, find the host archive title prefixed ‘[oc-box
-project-name]’, and import its ID:
+Older launchers allowed removing ‘.oc-box-id’ and starting again to
+create a fresh environment.  Current launchers detect the registered
+path and refuse to create a duplicate; run ‘repair’ to reconnect the
+existing environment instead.  Removing the marker does not delete the
+old private volume, registry, or host archives.  If an older launcher
+already created a replacement, to continue a previously synced
+conversation in the new environment, exit its active client, find the
+host archive title prefixed ‘[oc-box project-name]’, and import its ID:
 
      opencode --pure session list
      oc-box --project ~/devel/demo --import-session ses_ARCHIVE_ID
@@ -650,12 +676,39 @@ current host transcript is copied, retaining any later host archive
 work; the host session and saved archive are not changed.  The archive
 title alone cannot authorize a different project.
 
+After a plain purge with a current launcher, the same checks use its
+private ‘retired/ID/’ recovery records if the original active registry
+is gone.  Older purges that removed those records cannot be
+reconstructed automatically: use a retained backup or a newer archive
+from the live workspace.  Existing container sessions remain usable
+without the retired registry; that registry is needed only for verifying
+a host archive's old controller-directory origin.
+
 Use the import flag once, then resume normally.  If the original
 registry or saved export is missing, restore it before retrying.  Host
 history contains only successfully synced turns; the old private volume
 may contain newer work.  Keep the original workspace resources until
 recovery is complete.  Importing history does not copy installed
 packages, snapshots, or other private-home files.
+
+8.2 Retire a stale duplicate without deleting the current project
+=================================================================
+
+Inspect the marker association and recorded sessions before cleanup:
+
+     oc-box list
+     oc-box --status
+     oc-box purge --workspace STALE_WORKSPACE_ID
+
+Keep the workspace selected by the current project marker.  Plain purge
+final-syncs the stale workspace's history and removes only its owned
+container/volume/network and active registry.  It leaves the replacement
+workspace, project files, current marker, and host conversation archives
+intact.  If the final sync or recovery-copy write fails, cleanup stops
+before removing resources.  Do not use ‘--all’ or ‘--delete-sessions’
+for this history-preserving duplicate cleanup.  oc-box never chooses and
+deletes duplicates automatically.  If the old workspace has newer
+unsynced work, recover it before retiring its private home.
 
 
 File: oc-box.info,  Node: Devices and host permissions,  Next: Resource reports,  Prev: Sessions and recovery,  Up: Top
@@ -724,6 +777,17 @@ limits, image, storage driver, restart/exit/OOM/health information when
 available, and the latest saved session and archive IDs.  Device
 mappings and saved raw Podman options are included.  No container
 commands run during collection.
+
+It also checks the project's regular marker as well as device/inode,
+identifies multiple registered workspaces for the same project in an
+all-workspace report, and includes specific repair or history-preserving
+cleanup instructions.  JSON fields ‘project_marker_workspace’ and
+‘related_workspace_ids’ expose those associations.  Suspicious/missing
+projects are not scanned for storage usage.  ‘Host archive: not
+recorded’ means this workspace has not recorded a successful sync of its
+selected session yet; the live volume/session remains intact.  Exit
+normally or, after the launcher exits, run ‘sync’ to create the host
+archive.
 
 Storage is split into writable OS layer, private home volume, and
 project.  The rootfs size including shared image layers is separate.
@@ -847,11 +911,22 @@ Transcript files may contain private content.
 
 ‘.oc-box-id’ in the project associates the directory with its registry.
 Do not edit or copy it to authorize a different mount.  Identity checks
-include the canonical path and directory device/inode.  Deleting and
-recreating the same path produces a new workspace rather than silently
-reusing the old environment.  An explicitly requested ‘repair’ can
-accept the current identity at the same path with the original matching
-marker, retaining the existing environment.
+include the canonical path and directory device/inode.
+Deleting/recreating the same path or losing its marker does not silently
+select the old environment or create a duplicate while an active
+registration remains.  An explicitly requested ‘repair’ can accept the
+current identity at the same path and restore a missing marker,
+retaining the existing environment.  With several registrations, select
+the intended workspace by ID; never copy markers between unrelated
+directories.
+
+Plain purge retains verified archive recovery evidence under
+‘~/.local/state/oc-box/retired/ID/’, outside the active workspace
+registry.  It contains only minimal ID/project provenance and private
+‘history/’ JSON files, not container storage, auth, installed
+dependencies, or the full live database.  Keep it while those host
+archives may need importing; it is private saved data, not a project
+file or active environment.  It has no automatic expiry.
 
 The normal host OpenCode database, usually under
 ‘~/.local/share/opencode/’, contains archive copies.  Old installations
@@ -985,6 +1060,21 @@ If the container is still running, use ‘oc-box stop --workspace
 WORKSPACE_ID’ and retry repair.  Repair preserves the container, private
 volume, and session IDs.  It does not recover storage that was deleted
 separately.
+
+If the marker was already deleted, current launchers search the registry
+by canonical project path and print existing IDs/session information
+instead of creating a fresh environment.  To restore a selected
+association:
+
+     oc-box --status
+     oc-box repair --workspace WORKSPACE_ID
+     oc-box --workspace WORKSPACE_ID --resume
+
+If multiple records share the path, a path-only repair does not guess.
+Choose the intended workspace by ID; another workspace's existing marker
+is not overwritten.  If a replacement is already in use, retain it and
+remove the stale record with plain ID-selected purge as described in
+Sessions and recovery.
 
 If the marker has no matching host registry, check ‘OC_BOX_STATE_HOME’
 and ‘XDG_STATE_HOME’ and restore the original registry before resuming.
@@ -1120,20 +1210,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description1875
 Node: Commands3706
-Node: Options11557
-Node: Lifecycle and persistence21022
-Node: Distribution images22682
-Node: Sessions and recovery23577
-Node: Devices and host permissions27232
-Node: Resource reports29578
-Node: Configuration and environment31032
-Node: Files34605
-Node: Exit status37127
-Node: Examples37938
-Node: Troubleshooting40024
-Node: Installation and manuals44008
-Node: Authors and license45782
-Node: See also46389
+Node: Options13096
+Node: Lifecycle and persistence22561
+Node: Distribution images24221
+Node: Sessions and recovery25116
+Node: Devices and host permissions30404
+Node: Resource reports32750
+Node: Configuration and environment34852
+Node: Files38425
+Node: Exit status41565
+Node: Examples42376
+Node: Troubleshooting44462
+Node: Installation and manuals49086
+Node: Authors and license50860
+Node: See also51467
 
 End Tag Table
 

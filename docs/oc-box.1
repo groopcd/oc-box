@@ -86,9 +86,9 @@ oc\-box reset \-\-project ~/devel/demo \-\-device /dev/accel/accel0
 .fi
 .SS repair
 .PP
-Explicitly accept the current directory identity for an existing workspace at its original canonical path. Use this after a filesystem identity change or a deliberate project restore when you want to retain the existing environment. Only run it after checking that the directory is the project you intend to use. The original matching regular \fB\&.oc\-box\-id\fR and host registry must still exist; repair cannot relocate a workspace or reconstruct missing registry/session data.
+Explicitly accept the current directory identity for an existing workspace at its original canonical path. Use this after a filesystem identity change or a deliberate project restore when you want to retain the existing environment. Only run it after checking that the directory is the project you intend to use. The host registry must still exist. A matching regular \fB\&.oc\-box\-id\fR is retained; if the marker is missing, repair can restore it from that registry. Symlink, invalid, or another workspace's markers are never overwritten. Repair cannot relocate a workspace or reconstruct missing registry/session data.
 .PP
-Exit the active launcher and stop its container first. Repair takes the workspace lock, checks container ownership, and refuses a running container. It updates only the registry's directory device/inode; project files, marker, container OS, private home, sessions, and saved settings are retained. It does not start or reset the container. An already matching identity needs no change.
+Exit the active launcher and stop its container first. Repair takes the workspace lock, checks container ownership, and refuses a running container. It updates the registry's directory device/inode and restores a missing marker; project files, container OS, private home, sessions, and saved settings are retained. It does not start or reset the container. An already matching identity needs no change.
 .PP
 .nf
 .fam C
@@ -97,14 +97,16 @@ oc\-box \-\-project ~/devel/demo \-\-resume
 .fam T
 .fi
 .PP
-Accepts only \fB\-\-project\fR or \fB\-\-workspace\fR selectors, besides help. With neither, use the current directory. With \fB\-\-workspace\fR, check the registered path and matching marker rather than the current directory.
+Accepts only \fB\-\-project\fR or \fB\-\-workspace\fR selectors, besides help. With neither, use the current directory. If a missing marker has exactly one registered workspace for this path, \fB\-\-project\fR selects it. If several records reference the path, repair refuses to choose: inspect \fB\-\-status\fR and supply \fB\-\-workspace ID\fR explicitly. With \fB\-\-workspace\fR, check the registered path and restore its missing marker rather than using the current directory.
 .SS purge
 .PP
 Remove this workspace's labeled containers, owned volumes, owned networks, resume metadata, private recovery exports, and matching project marker. Exit its active launcher first. Shared base\-image caches and unrelated Podman resources are retained; cleanup does not use a global prune.
 .PP
 Default purge retains project files and host archive conversations. It attempts a final history sync while the project and container exist. If that sync fails, the private volume is retained for recovery. If the project was already deleted, there is no final sync; the last host archives remain.
 .PP
-\fB\-\-delete\-sessions\fR additionally deletes the recorded host archive copies, not an original host conversation imported into oc\-box. \fB\-\-all\fR additionally deletes the entire project directory. Project deletion requires the original directory identity and matching marker. Extra externally supplied mounts/volumes are not owned resources unless they bear this workspace's ownership label.
+Before removing the active registry, plain purge also retains its verified archive JSON files and minimal workspace/project provenance privately under \fB~/\:.local/\:state/\:oc\-box/\:retired/\:ID/\:\fR (or the configured state root). These are not active workspaces and do not appear in list/status. They allow a host archive that still names the old controller directory to be imported later. They may contain private conversation content, just like host archives. The explicit \fB\-\-delete\-sessions\fR and \fB\-\-all\fR variants do not create this recovery copy.
+.PP
+\fB\-\-delete\-sessions\fR additionally deletes the recorded host archive copies, not an original host conversation imported into oc\-box. \fB\-\-all\fR additionally deletes the entire project directory. Project deletion requires the original directory identity and matching marker; if either belongs to another workspace, \fB\-\-all\fR is rejected before deleting any history or resources. Extra externally supplied mounts/volumes are not owned resources unless they bear this workspace's ownership label.
 .PP
 By default, enter the first eight characters of the workspace ID to confirm. \fB\-y\fR or \fB\-\-yes\fR skips this confirmation. These deletion flags apply only to purge.
 .PP
@@ -118,7 +120,7 @@ oc\-box purge \-\-workspace WORKSPACE_ID \-\-all \-\-yes
 .fi
 .SS list
 .PP
-List all registered workspaces with aligned headers: WORKSPACE ID, DISTRO, PROJECT, STATUS, and SESSION ID. No Podman invocation or container start is needed. Missing project directories remain listed so they can be purged by ID. STATUS means directory presence, not whether the container is running.
+List all registered workspaces with aligned headers: WORKSPACE ID, DISTRO, PROJECT, STATUS, and SESSION ID. No Podman invocation or container start is needed. Missing project directories remain listed so they can be purged by ID. STATUS describes directory identity/marker health, not container running state: \fBpresent\fR, \fBidentity changed\fR, \fBmarker missing\fR, \fBmarker mismatch\fR, \fBinvalid marker\fR, \fBmissing directory\fR, \fBreplaced directory\fR (not a regular directory), or \fBinaccessible\fR\&. Identity changes are not assumed to mean replacement: a remount can change device identity. A marker mismatch means another workspace is selected for that path. Recovery/cleanup hints go to stderr and never delete or repair records automatically.
 .PP
 SESSION ID is the original container session used for resume, or \fBnone\fR\&. Local metadata is refreshed at startup/sync; a new conversation in a running client may not be reflected until the next sync or launch. With no workspaces, the headers are still printed. The list is global, not filtered by selectors; use \fB\-\-status\fR for a selected environment and machine\-readable output.
 .PP
@@ -352,7 +354,7 @@ python3 tools/diagnose_import.py \-\-workspace WORKSPACE_ID \-\-session SESSION_
 .fi
 .SS Recover history after replacing a workspace marker
 .PP
-Removing \fB\&.oc\-box\-id\fR and starting again creates a fresh environment; it does not delete the old private volume, registry, or host archives. To continue a previously synced conversation in the new environment, exit its active client, find the host archive title prefixed \fB[oc\-box project\-name]\fR, and import its ID:
+Older launchers allowed removing \fB\&.oc\-box\-id\fR and starting again to create a fresh environment. Current launchers detect the registered path and refuse to create a duplicate; run \fBrepair\fR to reconnect the existing environment instead. Removing the marker does not delete the old private volume, registry, or host archives. If an older launcher already created a replacement, to continue a previously synced conversation in the new environment, exit its active client, find the host archive title prefixed \fB[oc\-box project\-name]\fR, and import its ID:
 .PP
 .nf
 .fam C
@@ -363,7 +365,22 @@ oc\-box \-\-project ~/devel/demo \-\-import\-session ses_ARCHIVE_ID
 .PP
 Mainline records host archive imports against oc\-box's private \fBcontroller\fR directory. oc\-box verifies the archive's namespaced ID against that workspace, its original host registry, and its saved \fBhistory/\:SESSION_ID.json\fR before restoring the project directory for transfer. Both saved records must identify the selected project. The current host transcript is copied, retaining any later host archive work; the host session and saved archive are not changed. The archive title alone cannot authorize a different project.
 .PP
+After a plain purge with a current launcher, the same checks use its private \fBretired/\:ID/\:\fR recovery records if the original active registry is gone. Older purges that removed those records cannot be reconstructed automatically: use a retained backup or a newer archive from the live workspace. Existing container sessions remain usable without the retired registry; that registry is needed only for verifying a host archive's old controller\-directory origin.
+.PP
 Use the import flag once, then resume normally. If the original registry or saved export is missing, restore it before retrying. Host history contains only successfully synced turns; the old private volume may contain newer work. Keep the original workspace resources until recovery is complete. Importing history does not copy installed packages, snapshots, or other private\-home files.
+.SS Retire a stale duplicate without deleting the current project
+.PP
+Inspect the marker association and recorded sessions before cleanup:
+.PP
+.nf
+.fam C
+oc\-box list
+oc\-box \-\-status
+oc\-box purge \-\-workspace STALE_WORKSPACE_ID
+.fam T
+.fi
+.PP
+Keep the workspace selected by the current project marker. Plain purge final\-syncs the stale workspace's history and removes only its owned container/volume/network and active registry. It leaves the replacement workspace, project files, current marker, and host conversation archives intact. If the final sync or recovery\-copy write fails, cleanup stops before removing resources. Do not use \fB\-\-all\fR or \fB\-\-delete\-sessions\fR for this history\-preserving duplicate cleanup. oc\-box never chooses and deletes duplicates automatically. If the old workspace has newer unsynced work, recover it before retiring its private home.
 .SH DEVICES AND HOST PERMISSIONS
 .PP
 The host user must be able to access the device. Host supplementary groups are not automatically preserved; where group access is required, use installed crun and \fB\-\-group\-add=keep\-groups\fR\&. A same\-named group inside the container is not the host group. Newly acquired groups require a fresh host login/process with those groups. Driver\-specific SDKs must be installed inside the container.
@@ -415,6 +432,8 @@ Requested memlock limits are still subject to the host user's hard limit and ker
 .PP
 Status collects running state, CPU, RAM/limit, PIDs, uptime, configured limits, image, storage driver, restart/exit/OOM/health information when available, and the latest saved session and archive IDs. Device mappings and saved raw Podman options are included. No container commands run during collection.
 .PP
+It also checks the project's regular marker as well as device/inode, identifies multiple registered workspaces for the same project in an all\-workspace report, and includes specific repair or history\-preserving cleanup instructions. JSON fields \fBproject_marker_workspace\fR and \fBrelated_workspace_ids\fR expose those associations. Suspicious/missing projects are not scanned for storage usage. \fBHost archive: not recorded\fR means this workspace has not recorded a successful sync of its selected session yet; the live volume/session remains intact. Exit normally or, after the launcher exits, run \fBsync\fR to create the host archive.
+.PP
 Storage is split into writable OS layer, private home volume, and project. The rootfs size including shared image layers is separate. Filesystem used/free space and block\-I/O counters are shown. CPU is a short sample where 100% is one core; stopped containers have no live sample. Missing/unavailable values are not reported as zero. Rootless pasta network counters are omitted as unreliable.
 .PP
 Directory scans count allocated blocks without following symlinks or crossing filesystems, with a 15\-second timeout per directory. Private\-volume scans use \fBpodman unshare\fR on the host, not container exec. Very large caches may take time or report unavailable size. Shared image layers must not be summed as unique storage. Btrfs compression, reflinks, snapshots, and shared extents make these estimates different from exclusive physical usage. There is no disk quota.
@@ -461,7 +480,9 @@ Forwarded credential/custom environment values are passed through the Podman cli
 .PP
 \fB~/\:.local/\:state/\:oc\-box/\:workspaces/\:ID/\:workspace.json\fR holds directory identity, container/volume names, distro, limits, and saved Podman/device settings. \fBsessions.json\fR holds session IDs and archive associations. \fBimports/\:\fR holds private source exports; \fBhistory/\:\fR holds private host archive JSON files. \fBlock\fR serializes mutating commands. These files are outside the project and not mounted into the container. Transcript files may contain private content.
 .PP
-\fB\&.oc\-box\-id\fR in the project associates the directory with its registry. Do not edit or copy it to authorize a different mount. Identity checks include the canonical path and directory device/inode. Deleting and recreating the same path produces a new workspace rather than silently reusing the old environment. An explicitly requested \fBrepair\fR can accept the current identity at the same path with the original matching marker, retaining the existing environment.
+\fB\&.oc\-box\-id\fR in the project associates the directory with its registry. Do not edit or copy it to authorize a different mount. Identity checks include the canonical path and directory device/inode. Deleting/recreating the same path or losing its marker does not silently select the old environment or create a duplicate while an active registration remains. An explicitly requested \fBrepair\fR can accept the current identity at the same path and restore a missing marker, retaining the existing environment. With several registrations, select the intended workspace by ID; never copy markers between unrelated directories.
+.PP
+Plain purge retains verified archive recovery evidence under \fB~/\:.local/\:state/\:oc\-box/\:retired/\:ID/\:\fR, outside the active workspace registry. It contains only minimal ID/project provenance and private \fBhistory/\:\fR JSON files, not container storage, auth, installed dependencies, or the full live database. Keep it while those host archives may need importing; it is private saved data, not a project file or active environment. It has no automatic expiry.
 .PP
 The normal host OpenCode database, usually under \fB~/\:.local/\:share/\:opencode/\:\fR, contains archive copies. Old installations may retain one\-time relocation backups under \fB~/\:.local/\:state/\:oc\-box/\:migrations/\:\fR; these are private data, not workspace resources or release artifacts, and later workspace purge leaves them intact. The original development\-only relocation helper is retired.
 .SS Container data
@@ -558,6 +579,18 @@ oc\-box \-\-project ~/devel/demo \-\-resume
 .fi
 .PP
 If the container is still running, use \fBoc\-box stop \-\-workspace WORKSPACE_ID\fR and retry repair. Repair preserves the container, private volume, and session IDs. It does not recover storage that was deleted separately.
+.PP
+If the marker was already deleted, current launchers search the registry by canonical project path and print existing IDs/session information instead of creating a fresh environment. To restore a selected association:
+.PP
+.nf
+.fam C
+oc\-box \-\-status
+oc\-box repair \-\-workspace WORKSPACE_ID
+oc\-box \-\-workspace WORKSPACE_ID \-\-resume
+.fam T
+.fi
+.PP
+If multiple records share the path, a path\-only repair does not guess. Choose the intended workspace by ID; another workspace's existing marker is not overwritten. If a replacement is already in use, retain it and remove the stale record with plain ID\-selected purge as described in Sessions and recovery.
 .PP
 If the marker has no matching host registry, check \fBOC_BOX_STATE_HOME\fR and \fBXDG_STATE_HOME\fR and restore the original registry before resuming. The default registry is \fB~/\:.local/\:state/\:oc\-box\fR, separate from \fB~/\:.cache\fR\&.
 .SS Missing delegated CPU or memory controllers

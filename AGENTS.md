@@ -77,3 +77,9 @@ New mounts use `:z`, and cold plugin resolution is timed before opening the TUI.
 Container launches give Build mode allow-all OpenCode permissions through a
 generated private config/plugin. Keep Plan/subagent rules and plain host
 OpenCode permissions unchanged.
+
+Do not treat a lost marker or changed filesystem device/inode as permission to
+create a replacement workspace. Look up registered canonical paths, direct the
+host operator to explicit `repair`, and never overwrite another workspace's
+marker. Plain stale-workspace purge preserves project files, host history, and
+private archive-origin evidence under `retired/`; keep that recovery path tested.

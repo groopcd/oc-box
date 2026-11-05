@@ -426,6 +426,10 @@ def archive_import_regression(root, env, project, exported):
         assert host_before["info"]["directory"] == str(
             origin_path.parent / "controller"
         )
+        # Retiring a duplicate must not make its host archive unrecoverable.
+        box.retain_archive_provenance(origin_path, origin)
+        shutil.rmtree(origin_path.parent)
+        assert origin_path not in box.workspace_paths()
         with (
             patch.object(box, "host_cli_env", return_value=host),
             patch.object(box, "CONTAINER_OPENCODE", executable),
@@ -449,7 +453,7 @@ def archive_import_regression(root, env, project, exported):
             "Archive recovery changed the host session"
         )
     print(
-        "PASS: controller-directory host archive recovery into a fresh workspace, verified transcript, and unchanged host archive."
+        "PASS: controller-directory archive recovery after workspace retirement, verified transcript, and unchanged host archive."
     )
 
 

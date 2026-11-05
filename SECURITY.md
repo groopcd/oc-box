@@ -37,8 +37,11 @@ stored outside the project. Directory replacement or marker copying must not
 authorize another mount or project deletion. This does not defend against an
 attacker who already controls the host user's registry or launcher installation.
 The host operator can explicitly accept a changed identity with `oc-box repair`;
-this requires the original canonical path, matching regular marker, workspace
-lock, and a stopped container. Normal launch and purge retain identity checks.
+this requires the original canonical path, private registry, workspace lock,
+and a stopped container. An existing regular marker must match; a missing
+marker can be restored by that explicit repair. Ambiguous registrations require
+a selected workspace ID, and other markers are never overwritten. Normal launch
+checks both marker and identity; stale `purge --all` is refused before deletion.
 
 Session exports are treated as container data. Host archives use namespaced IDs
 and mainline import/export, without running project plugins in the host archive
@@ -46,6 +49,10 @@ controller. Transcript files may contain commands, source, paths, or secrets;
 they are private, not release artifacts. Synchronization is not live replication
 or an independent backup. Version compatibility is tested against specific
 mainline versions; accepting 1.x does not prove every future release compatible.
+Plain purge retains private archive JSON and minimal origin metadata under the
+state root's `retired/` directory, without retaining an active workspace or
+container storage. Those files may contain sensitive history, have no automatic
+expiry, and should be handled like the host session archives they help recover.
 
 Images, OS repositories, npm packages, uv release artifacts, provider APIs,
 plugins, and MCPs are upstream dependencies. Baseline downloads use HTTPS where
