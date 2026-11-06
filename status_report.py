@@ -8,6 +8,8 @@ import re
 import shutil
 import subprocess
 
+import workspace_identity
+
 LABEL = "io.oc-box.workspace"
 
 
@@ -111,7 +113,7 @@ def project_condition(data):
     """Use both the directory identity and marker, without starting Podman."""
     project = Path(data["project"])
     try:
-        stat = project.stat()
+        project.stat()
         if not project.is_dir() or project.is_symlink():
             return "replaced directory", None
         marker = project / ".oc-box-id"
@@ -124,7 +126,7 @@ def project_condition(data):
             return "marker mismatch", selected
         if selected is None:
             return "marker missing", None
-        if [stat.st_dev, stat.st_ino] != data.get("project_identity"):
+        if not workspace_identity.same_project(data, project):
             return "identity changed", selected
         return "present", selected
     except FileNotFoundError:

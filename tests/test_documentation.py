@@ -89,6 +89,10 @@ class DocumentationTests(unittest.TestCase):
             "marker missing",
             "marker mismatch",
             "retired/ID/",
+            "name_to_handle_at",
+            "project_filesystem_identity",
+            "capability-based",
+            "filesystem-independent",
         ):
             self.assertIn(phrase, text)
 

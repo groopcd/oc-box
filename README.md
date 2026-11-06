@@ -152,7 +152,28 @@ workspace's exclusive lock, so exit an active OpenCode launcher first.
 ### Directory recovery and duplicate detection
 
 Clearing host `~/.cache` does not delete workspace registrations or private
-session volumes. If directory device/inode changes, keep the marker and use
+session volumes. Workspace identity uses **generic Linux VFS interfaces**, not
+filesystem-specific tools or branches: the canonical path and marker select the
+workspace, while the filesystem ID, opaque persistent directory handle, and
+inode verify its identity. Device numbers can change after reboot without
+changing the directory; a matching recorded stable baseline accepts that change
+automatically. The same algorithm is used for ext4, XFS, Btrfs, bcachefs, ZFS,
+and other drivers that expose these capabilities. It also works when the private
+oc-box registry is on a different filesystem from the project.
+
+Existing registrations are upgraded at a normal verified launch, or by repair.
+If an old registration already has a device-number mismatch and no stable
+baseline, it needs one explicit repair: an unchanged inode alone cannot prove
+the filesystem is the same. Driver/kernel support varies: filesystems that do
+not provide a usable persistent handle/filesystem ID retain the conservative
+device/inode check and explicit repair when it changes. There is no universal
+physical-directory identifier on every Linux filesystem. Relying on only a UUID
+marker would accept copied/restored directories indistinguishably, so oc-box
+does not claim that as replacement detection. Install the updated launcher before
+the next reboot, then normally resume each healthy workspace to record its
+baseline. No container reset or session import is needed.
+
+For a genuine or unverifiable identity change, keep the marker and use
 `oc-box repair` after checking the project and stopping its launcher. If the
 marker is missing, the launcher detects existing registrations instead of
 silently creating a duplicate:

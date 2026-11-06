@@ -11,6 +11,8 @@ portable: use example project paths and synthetic session IDs, not local data.
 - `terminal_ui.py`: native TUI relay and startup loading indicator.
 - `status_report.py`: read-only host resource and storage reporting.
 - `version_info.py`: commit-derived version and author/license information.
+- `workspace_identity.py`: generic Linux VFS directory identity, capability-based
+  persistent handles and strict fallback; shared by lifecycle/status checks.
 - `install.py`: copies the launcher to `~/.local/share/oc-box` and creates
   `~/.local/bin/oc-box`.
 - `tests/`: stdlib unit tests and bounded offline mainline integration fixtures.
@@ -81,7 +83,13 @@ OpenCode permissions unchanged.
 Do not treat a lost marker or changed filesystem device/inode as permission to
 create a replacement workspace. Look up registered canonical paths, direct the
 host operator to explicit `repair`, and never overwrite another workspace's
-marker. Plain stale-workspace purge preserves project files, host history, and
+marker. Device-number changes may be accepted only against a recorded matching
+filesystem ID, persistent directory handle, and inode; never infer a baseline
+from an old device number and unchanged inode alone. Upgrade legacy records
+under the workspace lock only after verification or explicit repair.
+Use the common VFS APIs without filesystem-name branches. Do not promise
+physical identity on unsupported drivers or replace it with a copyable marker.
+Plain stale-workspace purge preserves project files, host history, and
 private archive-origin evidence under `retired/`; keep that recovery path tested.
 
 `terminal` is maintenance-only: no host credential/pass_env forwarding, no

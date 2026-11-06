@@ -210,9 +210,15 @@ if the marker is missing, repair can restore it from that registry. Symlink,
 invalid, or another workspace's markers are never overwritten. Repair cannot
 relocate a workspace or reconstruct missing registry/session data.
 
+Ordinary device-number reassignment after reboot does not need repair
+once a stable filesystem/handle baseline has been recorded. Old registrations
+that already mismatch and lack that baseline still need one explicit repair;
+matching legacy registrations are upgraded by the next normal launch.
+
 Exit the active launcher and stop its container first. Repair takes the workspace
 lock, checks container ownership, and refuses a running container. It updates
-the registry's directory device/inode and restores a missing marker; project
+the registry's directory device/inode and supported filesystem-handle baseline,
+and restores a missing marker; project
 files, container OS,
 private home, sessions, and saved settings are retained. It does not start or
 reset the container. An already matching identity needs no change.
@@ -275,8 +281,10 @@ needed. Missing project directories remain listed so they can be purged by ID.
 STATUS describes directory identity/marker health, not container running state:
 `present`, `identity changed`, `marker missing`, `marker mismatch`,
 `invalid marker`, `missing directory`, `replaced directory` (not a regular
-directory), or `inaccessible`. Identity changes are not assumed
-to mean replacement: a remount can change device identity. A marker mismatch
+directory), or `inaccessible`. Device-only changes with a matching recorded
+filesystem ID, persistent handle, and inode remain `present`; status does not
+rewrite the registry. Unverified identity changes are not assumed to mean
+replacement: legacy records may lack a stable baseline. A marker mismatch
 means another workspace is selected for that path. Recovery/cleanup hints go to
 stderr and never delete or repair records automatically.
 
@@ -737,7 +745,8 @@ image, storage driver, restart/exit/OOM/health information when available, and
 the latest saved session and archive IDs. Device mappings and saved raw Podman
 options are included. No container commands run during collection.
 
-It also checks the project's regular marker as well as device/inode, identifies
+It also checks the project's regular marker and recorded filesystem identity,
+identifies
 multiple registered workspaces for the same project in an all-workspace report,
 and includes specific repair or history-preserving cleanup instructions.
 JSON fields `project_marker_workspace` and `related_workspace_ids` expose those
@@ -841,6 +850,13 @@ installed manuals. Installation requires no man/Info build tools.
 
 `~/.local/state/oc-box/workspaces/ID/workspace.json` holds directory identity,
 container/volume names, distro, limits, and saved Podman/device settings.
+`project_identity` retains the last verified device/inode for diagnostics;
+`project_filesystem_identity`, when supported, records `linux-file-handle-v1`
+filesystem ID and opaque persistent directory handle. Driver-provided handles
+can include generation, dataset/subvolume, or other identifying information;
+oc-box neither decodes them nor selects a format by filesystem name. The
+transient mount ID is not recorded. The registry need not share the project's
+filesystem: no hard links or filesystem-specific utilities are used.
 `sessions.json` holds session IDs and archive associations. `imports/` holds
 private source exports; `history/` holds private host archive JSON files.
 `lock` serializes mutating commands. These files are outside the project and
@@ -848,8 +864,10 @@ not mounted into the container. Transcript files may contain private content.
 
 `.oc-box-id` in the project associates the directory with its registry. Do not
 edit or copy it to authorize a different mount. Identity checks include the
-canonical path and directory device/inode. Deleting/recreating the same path or
-losing its marker does not silently select the old environment or create a
+canonical path, inode, and supported filesystem ID/persistent handle; older or
+unsupported filesystems use the conservative device/inode pair. A verified
+device-only change does not by itself invalidate a stable directory baseline.
+Deleting/recreating the same path or losing its marker does not silently select the old environment or create a
 duplicate while an active registration remains. An explicitly requested
 `repair` can accept the current identity at the same path and restore a missing
 marker, retaining the existing environment. With several registrations, select
@@ -959,15 +977,54 @@ archives; an unrelated replacement directory will not be deleted.
 
 ## Troubleshooting
 
-### Directory identity changed after cleanup or a filesystem change
+### Reboot, remount, and directory identity changes
 
-Deleting host `~/.cache` alone does not remove oc-box's registry or private
-session volume and should not change the project directory identity. The
-"Project directory identity changed" error means its recorded device/inode
-differs from the current directory. Older launchers describe this as
-"This directory replaced the original workspace" and recommend removing the
-marker. A device number can change after a filesystem remount; a restored or
-recreated directory can have a different inode.
+Clearing `~/.cache` does not erase the oc-box registry (normally under
+`~/.local/state/oc-box`) or private Podman volumes, and it does not change a
+directory's identity. Linux device numbers can change across reboot/remount;
+Btrfs commonly assigns a different `st_dev` while the directory inode stays
+the same. Those mount-local numbers are not persistent disk identifiers.
+
+The algorithm is capability-based through Linux's common VFS interfaces, not
+Btrfs-specific. It uses no ext4, XFS, Btrfs, bcachefs, or ZFS-specific parser,
+ioctl, tool, or device path. On filesystems exposing `name_to_handle_at`, oc-box
+combines the directory's opaque persistent handle with the `statvfs` filesystem
+ID and inode. Drivers supply their own handle encoding; different formats and
+bounded variable sizes are accepted without a filesystem allowlist. If this stored identity
+matches and only the device number changed, launch/list/status accept the same
+directory automatically. No cache deletion, repair, reset, or session import is
+needed. Normal lifecycle launch updates the last verified device/inode while
+holding the workspace lock; read-only listings do not write metadata. No extra
+command-line tools, mount operations, or elevated capability are required for
+the handle lookup. The private registry and project may be on different
+filesystems, and a project's bind-mount location need not be the filesystem root.
+
+New workspaces record that baseline at creation. Matching old registrations
+are upgraded during the next normal start/sync/reset/terminal, or by explicit
+repair. If an old registry already differs after reboot and lacks the stored
+baseline, run one explicit repair after checking the directory; the launcher
+cannot safely infer the original filesystem from an old device number and
+matching inode. Keeping the same inode on a different filesystem is not enough.
+
+If persistent handles are unsupported (including some overlay/network mounts),
+or the filesystem ID is unavailable/zero, the existing strict device/inode
+check remains. Driver/kernel support, not the filesystem's name, determines
+this behavior. oc-box does not claim zero-repair reboot compatibility with every
+possible filesystem driver. Once a strong baseline is
+recorded, an unavailable or different handle does not downgrade to a weaker
+check: it requires explicit repair. Filesystem/subvolume/snapshot restoration,
+inode/generation changes, copied markers, and mount replacements remain
+recovery decisions for the host operator. Older diagnostics incorrectly treated
+any changed device number as a replaced directory; do not remove the marker.
+
+A filesystem-independent logical ID would be just the canonical path plus a
+marker checked against the host registry. That works for selecting a workspace,
+but it cannot distinguish an exact copy/restore of that path and marker from the
+original directory. A signed marker has the same limitation because copies carry
+the signature too. oc-box deliberately keeps physical replacement checks and
+explicit repair when the OS cannot provide enough evidence, rather than silently
+weakening the trust boundary on an unsupported driver. Clone/migration/restore
+operations are explicit repair cases, not ordinary reboot cases.
 
 Keep the marker to retain the association with the existing environment.
 Update/reinstall the launcher, check that the project at the registered path

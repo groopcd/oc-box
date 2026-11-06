@@ -47,6 +47,27 @@ workspace's ownership label. Registry metadata and directory identities are
 stored outside the project. Directory replacement or marker copying must not
 authorize another mount or project deletion. This does not defend against an
 attacker who already controls the host user's registry or launcher installation.
+Identity probes are filesystem-agnostic: standard Linux VFS interfaces, without
+filesystem-type allowlists, filesystem tools, or reading raw storage. Where
+supported, identity combines the canonical path/marker and inode with an opaque
+persistent file handle and filesystem ID. Driver-specific generation/subvolume
+data stays opaque; transient device/mount numbers are not treated as durable
+identity. A matching strong baseline permits device-number changes after reboot
+without user repair. Changed or unavailable strong identity fails closed, not
+back to an inode-only match. Unsupported filesystems retain device/inode checks.
+Old records are upgraded only after their original identity matches or the host
+operator explicitly repairs; matching inode alone cannot establish a baseline
+for a filesystem whose device already changed. Cloned filesystems/snapshots can
+still require explicit repair; this does not authenticate content against a
+privileged host attacker.
+
+No universal filesystem-independent physical-directory identity exists. Marker
+IDs alone (even signed ones) cannot distinguish an exact copy at the same path.
+On drivers that lack persistent identity capabilities, oc-box retains the strict
+legacy check and explicit repair; it does not claim every filesystem/kernel has
+the same reboot behavior. Support is detected by capability, never guessed from
+ext4/XFS/Btrfs/bcachefs/ZFS names. Physical identity evidence is distinct from
+authenticating the file contents or protection against a host-level clone.
 The host operator can explicitly accept a changed identity with `oc-box repair`;
 this requires the original canonical path, private registry, workspace lock,
 and a stopped container. An existing regular marker must match; a missing

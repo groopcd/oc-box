@@ -22,6 +22,8 @@ import threading
 import time
 import uuid
 
+import workspace_identity
+
 APP = Path(__file__).resolve().parent
 LABEL = "io.oc-box.workspace"
 MARKER = ".oc-box-id"
@@ -382,13 +384,20 @@ def find_workspace(project=None, workspace_id=None, *, allow_identity_change=Fal
         raise BoxError(
             "Workspace marker belongs to another directory; copied markers cannot authorize mounts."
         )
-    stat = project.stat()
-    identity = [stat.st_dev, stat.st_ino]
-    if not allow_identity_change and data["project_identity"] != identity:
+    identity, stable = workspace_identity.snapshot(project)
+    if not allow_identity_change and not workspace_identity.matches(
+        data, identity, stable
+    ):
         raise BoxError(
             "Project directory identity changed; it may have been replaced or its filesystem identity changed.\n"
             f"Recorded device/inode: {data['project_identity']}; current: {identity}.\n"
-            "To reconnect this directory to its existing environment and sessions, run in a host terminal:\n"
+            + (
+                "This older registration has no stable filesystem baseline; one explicit repair will record it when supported.\n"
+                if workspace_identity.STABLE_IDENTITY_KEY not in data
+                and identity[1] == data["project_identity"][1]
+                else ""
+            )
+            + "To reconnect this directory to its existing environment and sessions, run in a host terminal:\n"
             f"  oc-box repair --project {shlex.quote(str(project))}\n"
             "Then retry the original command."
         )
@@ -404,7 +413,6 @@ def create_workspace(project, distro):
         "version": 2,
         "id": ident,
         "project": str(project),
-        "project_identity": [project.stat().st_dev, project.stat().st_ino],
         "distro": distro,
         "image": DISTROS[distro][0],
         "container": "oc-box-" + ident,
@@ -415,6 +423,7 @@ def create_workspace(project, distro):
         "memory": "8g",
         "pids": 2048,
     }
+    workspace_identity.record(data, *workspace_identity.snapshot(project))
     path = folder / "workspace.json"
     atomic_json(path, data)
     try:
@@ -448,9 +457,12 @@ def repair_workspace(path, data):
             raise BoxError(
                 "Project marker does not match the selected workspace; refusing to repair."
             )
-    stat = project.stat()
-    identity = [stat.st_dev, stat.st_ino]
-    if not missing and data["project_identity"] == identity:
+    identity, stable = workspace_identity.snapshot(project)
+    if (
+        not missing
+        and data["project_identity"] == identity
+        and data.get(workspace_identity.STABLE_IDENTITY_KEY) == stable
+    ):
         print("Project directory identity already matches; no repair needed.")
         return
     info = inspect_owned(data)
@@ -462,7 +474,7 @@ def repair_workspace(path, data):
     if missing:
         with marker.open("x") as stream:
             stream.write(data["id"] + "\n")
-    data["project_identity"] = identity
+    workspace_identity.record(data, identity, stable)
     atomic_json(path, data)
     print(
         "Workspace identity repaired"
@@ -470,6 +482,29 @@ def repair_workspace(path, data):
         + "; existing environment and sessions retained.\n"
         f"Resume with: oc-box --project {shlex.quote(str(project))} --resume"
     )
+
+
+def refresh_workspace_identity(path, data):
+    """Migrate diagnostics/legacy metadata only after a fully verified lookup.
+
+    Called under the workspace lock; read-only list/status never rewrite state.
+    A legacy device mismatch cannot be upgraded automatically without a prior
+    stable baseline and is directed to explicit repair instead.
+    """
+    selected, _ = find_workspace(data["project"])
+    if selected != path:
+        raise BoxError("Project marker does not match the selected workspace.")
+    identity, stable = workspace_identity.snapshot(data["project"])
+    if not workspace_identity.matches(data, identity, stable):
+        raise BoxError(
+            "Project identity changed during verification; use explicit repair after checking the project."
+        )
+    if (
+        data["project_identity"] != identity
+        or data.get(workspace_identity.STABLE_IDENTITY_KEY) != stable
+    ):
+        workspace_identity.record(data, identity, stable)
+        atomic_json(path, data)
 
 
 def inspect_owned(data, *, env=None):
@@ -645,7 +680,7 @@ def warn_device_access(data):
 
 def create_container(path, data):
     project = validate_project(data["project"])
-    if [project.stat().st_dev, project.stat().st_ino] != data["project_identity"]:
+    if not workspace_identity.same_project(data, project):
         raise BoxError(
             "Project directory identity changed; refusing to mount a replacement."
         )
@@ -723,7 +758,7 @@ def start_container(path, data):
         raise BoxError(
             "Project marker does not match the selected workspace; refusing to start another environment for this directory. Use 'oc-box --status' to select the current workspace."
         )
-    if [project.stat().st_dev, project.stat().st_ino] != data["project_identity"]:
+    if not workspace_identity.same_project(data, project):
         raise BoxError(
             "Project directory identity changed; refusing to reuse the environment."
         )
@@ -1803,7 +1838,7 @@ def purge(path, data, args):
     same = (
         project.is_dir()
         and not project.is_symlink()
-        and [project.stat().st_dev, project.stat().st_ino] == data["project_identity"]
+        and workspace_identity.same_project(data, project)
     )
     marker_matches = (
         same
@@ -1857,7 +1892,7 @@ def purge(path, data, args):
     same = (
         project.is_dir()
         and not project.is_symlink()
-        and [project.stat().st_dev, project.stat().st_ino] == data["project_identity"]
+        and workspace_identity.same_project(data, project)
     )
     marker_matches = (
         same
@@ -2203,6 +2238,8 @@ def main(argv=None):
         print("Container stopped; files, packages, and conversations retained.")
         return 0
     with workspace_lock(path):
+        if args.command in ("start", "reset", "sync", "terminal"):
+            refresh_workspace_identity(path, data)
         if args.command == "terminal":
             return maintenance_terminal(path, data)
         if args.command == "repair":

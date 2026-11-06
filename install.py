@@ -21,6 +21,7 @@ for name in (
     "terminal_ui.py",
     "status_report.py",
     "version_info.py",
+    "workspace_identity.py",
     "README.md",
     "CONTRIBUTING.md",
     "SECURITY.md",

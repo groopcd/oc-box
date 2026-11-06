@@ -31,6 +31,8 @@ class WorkspaceRepairTests(unittest.TestCase):
         self.path, self.data = box.create_workspace(self.project, "tumbleweed")
 
     def change_identity(self, *, device=False):
+        # Model registrations made before reboot-stable filesystem identity.
+        self.data.pop("project_filesystem_identity", None)
         self.data["project_identity"][0 if device else 1] += 1
         box.atomic_json(self.path, self.data)
 
@@ -91,6 +93,9 @@ class WorkspaceRepairTests(unittest.TestCase):
         expected = dict(self.data)
         stat = self.project.stat()
         expected["project_identity"] = [stat.st_dev, stat.st_ino]
+        stable = box.workspace_identity.snapshot(self.project)[1]
+        if stable is not None:
+            expected["project_filesystem_identity"] = stable
         repaired = self.run_repair(
             "--project", str(self.project), info={"State": {"Running": False}}
         )

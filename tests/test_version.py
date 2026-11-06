@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("version_info", APP / "version_info.py")
+assert spec is not None and spec.loader is not None
 version = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(version)
 
@@ -74,6 +75,10 @@ class VersionTests(unittest.TestCase):
             runpy.run_path(str(APP / "install.py"))
         installed = home / ".local/share/oc-box"
         self.assertEqual(version.get_version_info(installed), expected)
+        self.assertEqual(
+            (installed / "workspace_identity.py").read_bytes(),
+            (APP / "workspace_identity.py").read_bytes(),
+        )
         self.assertEqual(
             (installed / "LICENSE").read_bytes(), (APP / "LICENSE").read_bytes()
         )
