@@ -59,6 +59,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box list
      oc-box distros
      oc-box doctor [--json] [--feature FEATURE ...]
+     oc-box completion bash
      oc-box --status [--project PATH | --workspace ID] [--json]
      oc-box status [--project PATH | --workspace ID] [--json]
      oc-box upgrade [--check | --auto-update on|off]
@@ -119,7 +120,20 @@ File: oc-box.info,  Node: Commands,  Next: Options,  Prev: Description,  Up: Top
 4 Commands
 **********
 
-4.1 doctor
+4.1 completion
+==============
+
+Print the bundled shell completion script to stdout.  Bash is currently
+the only supported shell: ‘oc-box completion bash’.  This informational
+command needs no Podman, OpenCode, network connection, host credential
+access, or workspace and can run inside the container.  ‘oc-box
+completion --help’ describes the syntax.  See Bash completion under
+Installation and manuals for activation and install paths.  It never
+edits shell startup files automatically.
+
+     source <(oc-box completion bash)
+
+4.2 doctor
 ==========
 
 Report prerequisites by feature, missing commands, and installation
@@ -156,7 +170,7 @@ requirements.  Command presence does not establish a compatible version
 or validate every backend/driver configuration.  Normal OpenCode launch
 verifies its host/container versions separately.
 
-4.2 start
+4.3 start
 =========
 
 Create or resume an environment.  This is the default when no command is
@@ -184,7 +198,7 @@ retain compatible caches.  The container OpenCode version is verified
 against the host on every launch; exact upgrades and downgrades are
 supported, with no fallback to another release.
 
-4.3 stop
+4.4 stop
 ========
 
 Stop a registered container without deleting the project, container OS,
@@ -197,7 +211,7 @@ afterward if a final history export was missed.
 
      oc-box stop --project ~/devel/demo
 
-4.4 sync
+4.5 sync
 ========
 
 Refresh host conversation archives without opening the TUI. Requires an
@@ -215,7 +229,7 @@ resolving the error.
      oc-box sync --project ~/devel/demo
      oc-box sync --workspace WORKSPACE_ID
 
-4.5 terminal
+4.6 terminal
 ============
 
 Open an interactive maintenance shell in an existing workspace container
@@ -283,7 +297,7 @@ For example, after mapping an NPU in an earlier reset:
      xrt-smi examine
      exit
 
-4.6 reset
+4.7 reset
 =========
 
 Recreate the environment's container OS, then launch OpenCode and resume
@@ -305,7 +319,7 @@ distributions, especially to/from Alpine.
      oc-box reset --project ~/devel/demo --distro ubuntu
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
 
-4.7 repair
+4.8 repair
 ==========
 
 Explicitly accept the current directory identity for an existing
@@ -343,7 +357,7 @@ and supply ‘--workspace ID’ explicitly.  With ‘--workspace’, check the
 registered path and restore its missing marker rather than using the
 current directory.
 
-4.8 purge
+4.9 purge
 =========
 
 Remove this workspace's labeled containers, owned volumes, owned
@@ -385,8 +399,8 @@ apply only to purge.
      oc-box purge --project ~/devel/disposable --all
      oc-box purge --workspace WORKSPACE_ID --all --yes
 
-4.9 list
-========
+4.10 list
+=========
 
 List all registered workspaces with aligned headers: WORKSPACE ID,
 DISTRO, PROJECT, STATUS, and SESSION ID. No Podman invocation or
@@ -412,7 +426,7 @@ machine-readable output.
 
      oc-box list
 
-4.10 distros
+4.11 distros
 ============
 
 List supported distro names, image references, and the detected host
@@ -423,7 +437,7 @@ workspace.
      oc-box distros
      oc-box --project ~/devel/demo --distro fedora
 
-4.11 status
+4.12 status
 ===========
 
 Alias of ‘--status’.  Report all registered environments unless
@@ -437,7 +451,7 @@ Resource reports for metric interpretation.
      oc-box --status --project ~/devel/demo
      oc-box --status --json
 
-4.12 upgrade
+4.13 upgrade
 ============
 
 Check and update the installed oc-box launcher/modules and prebuilt
@@ -506,7 +520,7 @@ for a reviewed alternate deployment.  Updates inside a container are
 refused because its private HOME is not the host installation.  Git is
 required for public updates; build tools are not.
 
-4.13 secrets
+4.14 secrets
 ============
 
 Manage an optional encrypted credential vault on the host.  This command
@@ -636,7 +650,7 @@ exact active vault values.  This is not a general redaction filter for
 OpenCode, provider logs, tool output, or session archives: an agent can
 still print, save, or transmit a credential it has received.
 
-4.14 credentials
+4.15 credentials
 ================
 
 View or change **names-only** forwarding policy for an existing
@@ -694,7 +708,7 @@ container data.  Selection is reduced forwarding, not an isolation
 boundary from secrets already inside the container.  Delivered keys
 remain readable by the agent/tools with normal container permissions.
 
-4.15 backup
+4.16 backup
 ===========
 
 Create one encrypted ‘.ocbox’ file for an existing workspace (available
@@ -766,7 +780,7 @@ committed image.  Failure leaves no final partial backup; the source
 remains stopped, not reset/deleted.  The temporary capture image is
 removed by its unique tag; shared base images remain.
 
-4.16 backup-info
+4.17 backup-info
 ================
 
 Decrypt/verify a backup's manifest and ciphertext checksums without
@@ -790,7 +804,7 @@ authentication chunk.  Wrong keys, corruption, missing/extra components,
 unsupported versions, or unsafe outer envelope paths are rejected before
 restore activation.
 
-4.17 restore
+4.18 restore
 ============
 
 Restore into a **new, nonexistent** host project destination.  Never
@@ -2024,7 +2038,51 @@ assuming database/CLI compatibility.  Podman must work from the regular
 host user, not through sudo.  Network access is needed for initial
 distribution, runtime, and dependency downloads.
 
-16.1 Python package installations
+16.1 Bash completion
+====================
+
+Enable command/option completion in the current Bash session, for any
+installation channel (including uv and pipx):
+
+     source <(oc-box completion bash)
+
+Add that line to ‘~/.bashrc’ after the PATH setup for oc-box to enable
+it in new interactive Bash shells.  The installer never edits your shell
+startup files.  Alternatively, with the optional bash-completion
+framework enabled, save the script in its per-user autoload directory:
+
+     mkdir -p "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
+     oc-box completion bash > "${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions/oc-box"
+
+The framework's OS package is normally ‘bash-completion’ on all seven
+supported distros.  It must itself be enabled by your distro's Bash
+startup setup for autoloading; directly sourcing the script works
+without that framework.  Reload with the ‘source’ command after an
+upgrade in an already-open shell.  If you saved a copy manually from a
+uv/pipx install, regenerate that copy after upgrading.
+
+GitHub/source installs place it in
+‘~/.local/share/bash-completion/completions/oc-box’ and refresh it on
+upgrades.  They also retain a release-local copy at
+‘completions/oc-box’.  Wheels contain the same package resource and
+install another copy under their Python environment's
+‘share/bash-completion/completions/oc-box’; uv/pipx private environments
+may not be on Bash's autoload search path, so use either activation
+method above.  From a source checkout, ‘source completions/oc-box’ works
+directly in Bash.
+
+Completion suggests commands, context-appropriate options, vault
+actions, distros/aliases, doctor features, auto-update and
+credential-mode choices.  ‘--project’ completes directories; backup
+archive inputs, ‘--output’, and ‘--identity’ complete paths, including
+spaces.  Both ‘--option VALUE’ and ‘--option=VALUE’ are supported.
+Press Tab after ‘oc-box ’ or ‘oc-box backup --’ to see candidates.
+Completion uses only Bash builtins and local pathname expansion: it does
+not run oc-box on each Tab, query Podman, contact providers, read vault
+contents, or guess passwords, credential names, session/workspace IDs,
+or model identifiers.
+
+16.2 Python package installations
 =================================
 
 Selected releases are available at https://pypi.org/project/oc-box/.
@@ -2085,7 +2143,7 @@ wheel.  For building or publishing, see CONTRIBUTING.md: GitHub's
 ‘publish.yml’ workflow uses the ‘pypi’ environment and PyPI Trusted
 Publishing without long-lived upload tokens.
 
-16.2 GitHub/curl installations
+16.3 GitHub/curl installations
 ==============================
 
 One-line installation from the public GitHub branch requires curl, Git,
@@ -2165,22 +2223,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description2410
-Node: Commands4241
-Node: Options43804
-Node: Lifecycle and persistence60261
-Node: Distribution images62014
-Node: Sessions and recovery66882
-Node: Devices and host permissions72170
-Node: Resource reports74516
-Node: Configuration and environment76627
-Node: Files81391
-Node: Exit status85788
-Node: Examples86599
-Node: Troubleshooting88685
-Node: Installation and manuals96756
-Node: Authors and license102084
-Node: See also102691
+Node: Description2438
+Node: Commands4269
+Node: Options44370
+Node: Lifecycle and persistence60827
+Node: Distribution images62580
+Node: Sessions and recovery67448
+Node: Devices and host permissions72736
+Node: Resource reports75082
+Node: Configuration and environment77193
+Node: Files81957
+Node: Exit status86354
+Node: Examples87165
+Node: Troubleshooting89251
+Node: Installation and manuals97322
+Node: Authors and license104918
+Node: See also105525
 
 End Tag Table
 

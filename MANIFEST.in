@@ -2,6 +2,7 @@ include README.md CONTRIBUTING.md SECURITY.md LICENSE NOTICE
 include AGENTS.md pyproject.toml setup.py MANIFEST.in install.sh
 recursive-include .github/workflows *.yml
 recursive-include docs *.md *.1 *.texi *.info
+include completions/oc-box
 recursive-include tests *.py
 recursive-include tools *.py
 global-exclude *.py[cod]

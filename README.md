@@ -157,6 +157,23 @@ Published PyPI releases are selected separately from ordinary GitHub commits.
 Packaged manuals are in the package's `docs/` and the tool environment's
 `share/man`/`share/info`; those directories may need explicit reader paths.
 
+### Bash completion
+
+Enable command and option completion in your current Bash shell:
+
+```bash
+source <(oc-box completion bash)
+```
+
+Add that line to `~/.bashrc` after your PATH setup to enable future shells;
+this works with uv, pipx, and GitHub installations. GitHub/source installs also
+install an autoload file under `~/.local/share/bash-completion/completions/oc-box`
+for hosts with the bash-completion framework enabled. Python packages ship the
+same script in their private environment. See the [completion reference](docs/cli.md#bash-completion)
+for autoload setup and paths. Completion includes command-specific options,
+distros, doctor features, and file/directory paths; it never queries Podman or
+unlocks credentials.
+
 ### GitHub installation layout
 
 The GitHub/curl installer copies the launcher to `~/.local/share/oc-box` and creates

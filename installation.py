@@ -43,6 +43,7 @@ PROGRAM_FILES = (
     "NOTICE",
 )
 MANUAL_FILES = ("cli.md", "oc-box.1", "oc-box.texi", "oc-box.info")
+COMPLETION_FILE = "completions/oc-box"
 
 
 def atomic_file(path, content, mode=0o644):
@@ -114,6 +115,7 @@ def install(source, home=None, *, with_vault=False):
     inputs = [
         *(source / name for name in PROGRAM_FILES),
         *(source / "docs" / name for name in MANUAL_FILES),
+        source / COMPLETION_FILE,
     ]
     for path in inputs:
         if not path.is_file() or path.is_symlink():
@@ -130,6 +132,10 @@ def install(source, home=None, *, with_vault=False):
         destination = target / name
         if destination.is_dir() and not destination.is_symlink():
             raise ValueError(f"Unexpected directory in installation: {name}")
+    if (target / "completions").exists() and not (target / "completions").is_symlink():
+        raise ValueError(
+            "Unexpected completion directory in installation; inspect it before reinstalling."
+        )
     if (
         (target / "docs").is_dir()
         and not (target / "docs").is_symlink()
@@ -154,6 +160,9 @@ def install(source, home=None, *, with_vault=False):
             for name in MANUAL_FILES:
                 shutil.copyfile(source / "docs" / name, release / "docs" / name)
                 (release / "docs" / name).chmod(0o644)
+            (release / "completions").mkdir()
+            shutil.copyfile(source / COMPLETION_FILE, release / COMPLETION_FILE)
+            (release / COMPLETION_FILE).chmod(0o644)
             atomic_file(
                 release / "build-info.json",
                 (json.dumps(build, indent=2) + "\n").encode(),
@@ -173,6 +182,8 @@ def install(source, home=None, *, with_vault=False):
             info = home / ".local/share/info/oc-box.info"
             atomic_file(man, (release / "docs/oc-box.1").read_bytes())
             atomic_file(info, (release / "docs/oc-box.info").read_bytes())
+            completion = home / ".local/share/bash-completion/completions/oc-box"
+            atomic_file(completion, (release / COMPLETION_FILE).read_bytes())
             binary = home / ".local/bin/oc-box"
             # A running launcher keeps this exact immutable release path. It
             # never lazy-loads modules from a half-updated or newer directory.
@@ -188,7 +199,7 @@ def install(source, home=None, *, with_vault=False):
             activated = True
             # Preserve documented/legacy installed paths as pointers into the
             # current release, including build metadata and manual sources.
-            for name in (*PROGRAM_FILES, "build-info.json", "docs"):
+            for name in (*PROGRAM_FILES, "build-info.json", "docs", "completions"):
                 destination = target / name
                 if destination.is_dir() and not destination.is_symlink():
                     # The old installer used a docs directory; keep it intact
@@ -206,7 +217,8 @@ def install(source, home=None, *, with_vault=False):
                 temporary = target / (".next-" + name)
                 temporary.unlink(missing_ok=True)
                 temporary.symlink_to(
-                    "current/" + name, target_is_directory=name == "docs"
+                    "current/" + name,
+                    target_is_directory=name in ("docs", "completions"),
                 )
                 os.replace(temporary, destination)
             atomic_file(binary, wrapper.encode(), 0o755)
@@ -238,6 +250,8 @@ def install(source, home=None, *, with_vault=False):
             )
     print(f"Installed {binary} ({build['version']})")
     print(f"Installed manual pages: {man} and {info}")
+    print(f"Installed Bash completion: {completion}")
+    print("Enable in this Bash shell: source <(oc-box completion bash)")
     print(
         "Read with 'man oc-box' or 'info oc-box'; full reference: "
         + str(target / "docs/cli.md")

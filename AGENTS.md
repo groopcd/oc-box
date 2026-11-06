@@ -26,6 +26,9 @@ portable: use example project paths and synthetic session IDs, not local data.
 - `install.py`: copies the launcher to `~/.local/share/oc-box` and creates
   `~/.local/bin/oc-box`.
 - `installation.py`: staged immutable installed copies and launcher activation.
+- `completions/oc-box`: standalone Bash command/option completion, emitted by
+  `oc-box completion bash` and shipped in both installation channels. Keep Tab
+  handling local and noninteractive; no lifecycle or credential commands.
 - `updater.py` / `install.sh`: public GitHub upgrades and one-line bootstrap.
 - `pyproject.toml` / `setup.py`: Python distributions with an isolated `oc_box`
   namespace, resources, public versions, and source metadata.

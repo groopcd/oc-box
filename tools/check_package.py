@@ -61,6 +61,7 @@ def check(directory, *, with_vault=False):
             "docs/cli.md",
             "docs/oc-box.1",
             "docs/oc-box.info",
+            "completions/oc-box",
             "build-info.json",
             "distribution.json",
         ):
@@ -89,6 +90,7 @@ def check(directory, *, with_vault=False):
             "tests/test_updater.py",
             "tools/check_package.py",
             "docs/oc-box.info",
+            "completions/oc-box",
             "LICENSE",
             "NOTICE",
         ):
@@ -147,6 +149,19 @@ def check(directory, *, with_vault=False):
         assert json.loads(run(cli, "--status", "--json"))["workspaces"] == []
         assert "Python-package managed" in run(cli, "upgrade")
         assert "--import-session" in run(cli, "--help")
+        completion = environment / "share/bash-completion/completions/oc-box"
+        assert completion.is_file()
+        assert run(cli, "completion", "bash") == completion.read_text()
+        assert "complete -F _oc_box oc-box" in completion.read_text()
+        assert "--portable" in run(
+            "bash",
+            "--noprofile",
+            "--norc",
+            "-c",
+            'source "$1"; COMP_WORDS=(oc-box backup --por); COMP_CWORD=2; _oc_box; printf "%s\\n" "${COMPREPLY[@]}"',
+            "completion-check",
+            completion,
+        )
         doctor = json.loads(run(cli, "doctor", "--feature", "github-upgrade", "--json"))
         assert doctor["schema_version"] == 1
         assert doctor["features"][0]["id"] == "github-upgrade"

@@ -54,6 +54,7 @@ oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
 oc-box list
 oc-box distros
 oc-box doctor [--json] [--feature FEATURE ...]
+oc-box completion bash
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
 oc-box upgrade [--check | --auto-update on|off]
@@ -83,6 +84,14 @@ The default resource limits are 4 CPU cores, 8 GiB RAM, and 2048 processes. Thes
 
 @node Commands
 @chapter Commands
+
+@section completion
+
+Print the bundled shell completion script to stdout. Bash is currently the only supported shell: @code{oc-box completion bash}. This informational command needs no Podman, OpenCode, network connection, host credential access, or workspace and can run inside the container. @code{oc-box completion --help} describes the syntax. See Bash completion under Installation and manuals for activation and install paths. It never edits shell startup files automatically.
+
+@example
+source <(oc-box completion bash)
+@end example
 
 @section doctor
 
@@ -961,6 +970,27 @@ Use @code{oc-box terminal} to debug an existing container without launching Open
 @chapter Installation and manuals
 
 Requires Linux, Python 3.10 or later, rootless Podman with pasta networking, delegated cgroup CPU/memory/PIDs controllers, and host OpenCode 1.x. Session import/export compatibility was checked with OpenCode 1.19.5. Other major OpenCode versions are rejected rather than assuming database/CLI compatibility. Podman must work from the regular host user, not through sudo. Network access is needed for initial distribution, runtime, and dependency downloads.
+
+@section Bash completion
+
+Enable command/option completion in the current Bash session, for any installation channel (including uv and pipx):
+
+@example
+source <(oc-box completion bash)
+@end example
+
+Add that line to @code{~/.bashrc} after the PATH setup for oc-box to enable it in new interactive Bash shells. The installer never edits your shell startup files. Alternatively, with the optional bash-completion framework enabled, save the script in its per-user autoload directory:
+
+@example
+mkdir -p "$@{XDG_DATA_HOME:-$HOME/.local/share@}/bash-completion/completions"
+oc-box completion bash > "$@{XDG_DATA_HOME:-$HOME/.local/share@}/bash-completion/completions/oc-box"
+@end example
+
+The framework's OS package is normally @code{bash-completion} on all seven supported distros. It must itself be enabled by your distro's Bash startup setup for autoloading; directly sourcing the script works without that framework. Reload with the @code{source} command after an upgrade in an already-open shell. If you saved a copy manually from a uv/pipx install, regenerate that copy after upgrading.
+
+GitHub/source installs place it in @code{~/.local/share/bash-completion/completions/oc-box} and refresh it on upgrades. They also retain a release-local copy at @code{completions/oc-box}. Wheels contain the same package resource and install another copy under their Python environment's @code{share/bash-completion/completions/oc-box}; uv/pipx private environments may not be on Bash's autoload search path, so use either activation method above. From a source checkout, @code{source completions/oc-box} works directly in Bash.
+
+Completion suggests commands, context-appropriate options, vault actions, distros/aliases, doctor features, auto-update and credential-mode choices. @code{--project} completes directories; backup archive inputs, @code{--output}, and @code{--identity} complete paths, including spaces. Both @code{--option VALUE} and @code{--option=VALUE} are supported. Press Tab after @code{oc-box } or @code{oc-box backup --} to see candidates. Completion uses only Bash builtins and local pathname expansion: it does not run oc-box on each Tab, query Podman, contact providers, read vault contents, or guess passwords, credential names, session/workspace IDs, or model identifiers.
 
 @section Python package installations
 

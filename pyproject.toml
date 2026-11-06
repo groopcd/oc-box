@@ -47,8 +47,10 @@ include-package-data = false
 oc_box = [
   "LICENSE", "NOTICE", "README.md", "CONTRIBUTING.md", "SECURITY.md",
   "install.sh", "docs/cli.md", "docs/oc-box.1", "docs/oc-box.texi", "docs/oc-box.info",
+  "completions/oc-box",
 ]
 
 [tool.setuptools.data-files]
 "share/man/man1" = ["docs/oc-box.1"]
 "share/info" = ["docs/oc-box.info"]
+"share/bash-completion/completions" = ["completions/oc-box"]

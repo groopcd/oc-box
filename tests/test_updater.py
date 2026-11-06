@@ -429,6 +429,7 @@ class UpdateTests(unittest.TestCase):
             )
         )
         shutil.copytree(APP / "docs", remote / "docs")
+        shutil.copytree(APP / "completions", remote / "completions")
         env = {
             **updater.public_git_env(self.root),
             "GIT_AUTHOR_NAME": "Fixture",

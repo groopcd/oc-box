@@ -18,6 +18,7 @@ oc\-box purge [\-\-project PATH | \-\-workspace ID] [\-\-delete\-sessions | \-\-
 oc\-box list
 oc\-box distros
 oc\-box doctor [\-\-json] [\-\-feature FEATURE ...]
+oc\-box completion bash
 oc\-box \-\-status [\-\-project PATH | \-\-workspace ID] [\-\-json]
 oc\-box status [\-\-project PATH | \-\-workspace ID] [\-\-json]
 oc\-box upgrade [\-\-check | \-\-auto\-update on|off]
@@ -44,6 +45,15 @@ On normal exit, oc\-box exports conversation history to separate archive session
 .PP
 The default resource limits are 4 CPU cores, 8 GiB RAM, and 2048 processes. These are ceilings, not reservations: resources are consumed dynamically up to those limits, and OpenCode itself has no fixed 4/8 GiB minimum requirement. There is no disk quota. Containers share the host kernel and can reach network services, including configured host services at \fBhost.containers.internal\fR\&. The project is intentionally writable and can be deleted by container commands. Additional Podman options and devices explicitly extend these defaults.
 .SH COMMANDS
+.SS completion
+.PP
+Print the bundled shell completion script to stdout. Bash is currently the only supported shell: \fBoc\-box completion bash\fR\&. This informational command needs no Podman, OpenCode, network connection, host credential access, or workspace and can run inside the container. \fBoc\-box completion \-\-help\fR describes the syntax. See Bash completion under Installation and manuals for activation and install paths. It never edits shell startup files automatically.
+.PP
+.nf
+.fam C
+source <(oc\-box completion bash)
+.fam T
+.fi
 .SS doctor
 .PP
 Report prerequisites by feature, missing commands, and installation commands for the OS running doctor. It is read\-only: no packages installed, network requests, Podman operations, workspace/config changes, or secret prompts. Run on the host for host advice. Inside oc\-box it explicitly reports \fBcurrent\-container\fR; this cannot inspect host packages. A workspace's selected distro does not determine host package guidance. Unknown hosts list required providers without guessing a package manager from the default workspace image or executing os\-release text.
@@ -944,6 +954,30 @@ Use \fBoc\-box terminal\fR to debug an existing container without launching Open
 .SH INSTALLATION AND MANUALS
 .PP
 Requires Linux, Python 3.10 or later, rootless Podman with pasta networking, delegated cgroup CPU/memory/PIDs controllers, and host OpenCode 1.x. Session import/export compatibility was checked with OpenCode 1.19.5. Other major OpenCode versions are rejected rather than assuming database/CLI compatibility. Podman must work from the regular host user, not through sudo. Network access is needed for initial distribution, runtime, and dependency downloads.
+.SS Bash completion
+.PP
+Enable command/option completion in the current Bash session, for any installation channel (including uv and pipx):
+.PP
+.nf
+.fam C
+source <(oc\-box completion bash)
+.fam T
+.fi
+.PP
+Add that line to \fB~/\:.bashrc\fR after the PATH setup for oc\-box to enable it in new interactive Bash shells. The installer never edits your shell startup files. Alternatively, with the optional bash\-completion framework enabled, save the script in its per\-user autoload directory:
+.PP
+.nf
+.fam C
+mkdir \-p "${XDG_DATA_HOME:\-$HOME/.local/share}/bash\-completion/completions"
+oc\-box completion bash > "${XDG_DATA_HOME:\-$HOME/.local/share}/bash\-completion/completions/oc\-box"
+.fam T
+.fi
+.PP
+The framework's OS package is normally \fBbash\-completion\fR on all seven supported distros. It must itself be enabled by your distro's Bash startup setup for autoloading; directly sourcing the script works without that framework. Reload with the \fBsource\fR command after an upgrade in an already\-open shell. If you saved a copy manually from a uv/pipx install, regenerate that copy after upgrading.
+.PP
+GitHub/source installs place it in \fB~/\:.local/\:share/\:bash\-completion/\:completions/\:oc\-box\fR and refresh it on upgrades. They also retain a release\-local copy at \fBcompletions/\:oc\-box\fR\&. Wheels contain the same package resource and install another copy under their Python environment's \fBshare/\:bash\-completion/\:completions/\:oc\-box\fR; uv/pipx private environments may not be on Bash's autoload search path, so use either activation method above. From a source checkout, \fBsource completions/\:oc\-box\fR works directly in Bash.
+.PP
+Completion suggests commands, context\-appropriate options, vault actions, distros/aliases, doctor features, auto\-update and credential\-mode choices. \fB\-\-project\fR completes directories; backup archive inputs, \fB\-\-output\fR, and \fB\-\-identity\fR complete paths, including spaces. Both \fB\-\-option VALUE\fR and \fB\-\-option=VALUE\fR are supported. Press Tab after \fBoc\-box \fR or \fBoc\-box backup \-\-\fR to see candidates. Completion uses only Bash builtins and local pathname expansion: it does not run oc\-box on each Tab, query Podman, contact providers, read vault contents, or guess passwords, credential names, session/workspace IDs, or model identifiers.
 .SS Python package installations
 .PP
 Selected releases are available at https://pypi.org/project/oc\-box/. Choose one package\-managed CLI installation, not system pip:

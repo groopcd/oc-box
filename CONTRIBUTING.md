@@ -24,6 +24,17 @@ Tests use isolated temporary app data. Mainline model/MCP/LSP/formatter fixtures
 are local and bounded. These checks do not replace live host-side Podman tests.
 Do not run host lifecycle tests from inside the project's running container.
 
+## Bash completion
+
+Bash completion lives in `completions/oc-box`, ships in both distribution
+channels, and can be emitted with `oc-box completion bash`. Keep its static
+commands/options/choices aligned with the parsers. `tests/test_completion.py`
+checks that coverage and exercises real Bash with no external commands on PATH,
+including context, equals syntax, paths with spaces, and installation. Lint with
+`bash -n completions/oc-box` and `shellcheck --shell=bash completions/oc-box`.
+Completion must never invoke lifecycle commands, a secret prompt, or provider
+queries; open-ended identifiers are left for the user to enter.
+
 ## Distro dependency checks
 
 `.github/workflows/distros.yml` tests all seven catalog images in disposable

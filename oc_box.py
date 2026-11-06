@@ -2027,6 +2027,7 @@ def parser():
             "distros",
             "status",
             "doctor",
+            "completion",
         ),
         default="start",
     )
@@ -2187,7 +2188,7 @@ def report_status(args):
     return 0
 
 
-def secrets_command(argv):
+def secrets_parser():
     parser = argparse.ArgumentParser(
         prog="oc-box secrets",
         description="Manage the optional host encrypted vault; values/passphrases use hidden controlling-terminal prompts, never argv/env/stdin.",
@@ -2201,7 +2202,11 @@ def secrets_command(argv):
         type=int,
         help="minimum characters for a new vault passphrase, 8..1024; init/passwd only; overrides host config",
     )
-    args = parser.parse_args(argv)
+    return parser
+
+
+def secrets_command(argv):
+    args = secrets_parser().parse_args(argv)
     if (args.action in ("set", "remove")) != (args.name is not None):
         raise BoxError("Use a credential NAME only with secrets set/remove.")
     if args.min_passphrase_length is not None and args.action not in ("init", "passwd"):
@@ -2265,8 +2270,21 @@ def credentials_command(args):
     return 0
 
 
+def completion_parser():
+    result = argparse.ArgumentParser(
+        prog="oc-box completion",
+        description="Print shell completion for local activation or installation.",
+    )
+    result.add_argument("shell", choices=("bash",))
+    return result
+
+
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "completion":
+        completion_parser().parse_args(arguments[1:])
+        print((APP / "completions/oc-box").read_text(), end="")
+        return 0
     if arguments and arguments[0] == "doctor":
         return dependencies.cli(arguments[1:])
     if arguments and arguments[0] in ("backup", "backup-info", "restore"):
@@ -2281,6 +2299,8 @@ def main(argv=None):
     if arguments and arguments[0] == "secrets":
         return secrets_command(arguments[1:])
     args = parser().parse_args(argv)
+    if args.command == "completion":
+        raise BoxError("Use 'oc-box completion bash' with no workspace options.")
     if args.command == "doctor":
         raise BoxError(
             "Use 'oc-box doctor' first, followed by --json/--feature; see its --help."

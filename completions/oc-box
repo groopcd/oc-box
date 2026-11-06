@@ -1,0 +1,136 @@
+# Bash completion for oc-box. GPL-3.0-or-later.
+# Load with: source <(oc-box completion bash)
+# Completion uses only Bash builtins and local pathname expansion.
+
+_oc_box_words()
+{
+    local word
+    while IFS= read -r word; do
+        COMPREPLY+=("$prefix$word")
+    done < <(compgen -W "$1" -- "$cur")
+}
+
+_oc_box_paths()
+{
+    local word path=$cur
+    # Expand only the current user's home, never arbitrary shell input.
+    if [[ $path == \~/* ]]; then
+        path=$HOME/${path:2}
+    fi
+    compopt -o filenames 2>/dev/null || :
+    while IFS= read -r word; do
+        [[ -d $word ]] && word+=/
+        COMPREPLY+=("$prefix$word")
+    done < <(compgen "$1" -- "$path")
+}
+
+_oc_box()
+{
+    local cur=${COMP_WORDS[COMP_CWORD]} prev='' prefix='' option=''
+    local command='' action='' word skip=0 positional=0 ended=0 i
+    local commands='start stop sync reset repair terminal upgrade secrets credentials backup backup-info restore purge list distros status doctor completion'
+    local selectors='--project --workspace'
+    local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args'
+    local help='-h --help' options
+    COMPREPLY=()
+    (( COMP_CWORD > 0 )) && prev=${COMP_WORDS[COMP_CWORD-1]}
+
+    # Skip option arguments when finding the command; a directory named
+    # "restore" or an option value named "backup" is never a subcommand.
+    for ((i=1; i<COMP_CWORD; i++)); do
+        word=${COMP_WORDS[i]}
+        if (( skip )); then
+            [[ $word == = ]] && continue
+            skip=0
+            continue
+        fi
+        if [[ $word == -- ]]; then
+            ended=1
+            continue
+        fi
+        if (( ! ended )); then
+            case $word in
+                --*=*) continue ;;
+                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--min-passphrase-length|--feature)
+                    skip=1; continue ;;
+                --status) command=status; continue ;;
+                -*) continue ;;
+            esac
+        fi
+        if [[ -z $command ]]; then
+            case " $commands " in
+                *" $word "*) command=$word ;;
+            esac
+        elif [[ $command == secrets && -z $action ]]; then
+            action=$word
+        else
+            ((positional+=1))
+        fi
+    done
+
+    # Bash normally splits '=' into a separate COMP_WORDS entry. Also handle
+    # shells with '=' removed from COMP_WORDBREAKS and inline option=value.
+    if (( ! ended )); then
+        if [[ $cur == --*=* ]]; then
+            option=${cur%%=*}
+            cur=${cur#*=}
+            [[ $COMP_WORDBREAKS != *'='* ]] && prefix=$option=
+        elif [[ $prev == = ]] && (( COMP_CWORD >= 2 )); then
+            option=${COMP_WORDS[COMP_CWORD-2]}
+        elif [[ $cur == = ]]; then
+            option=$prev
+            cur=''
+        else
+            option=$prev
+        fi
+        case $option in
+            --project) _oc_box_paths -d; return 0 ;;
+            --output|--identity) _oc_box_paths -f; return 0 ;;
+            --distro)
+                _oc_box_words 'tumbleweed leap ubuntu debian fedora arch alpine opensuse opensuse-tumbleweed opensuse-leap archlinux'; return 0 ;;
+            --feature)
+                _oc_box_words 'launch maintenance history backup backup-info restore vault github-upgrade bootstrap storage overlay manuals docs-build'; return 0 ;;
+            --auto-update) _oc_box_words 'on off'; return 0 ;;
+            --credential-mode) _oc_box_words 'env selected'; return 0 ;;
+            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length)
+                return 0 ;;
+        esac
+    fi
+
+    case $command in
+        start) options="$help $selectors $launch" ;;
+        reset) options="$help $selectors --distro --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args" ;;
+        sync) options="$help $selectors" ;;
+        stop|repair|terminal) options="$help $selectors" ;;
+        status) options="$help $selectors --json" ;;
+        purge) options="$help $selectors --delete-sessions --all -y --yes" ;;
+        credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;
+        upgrade) options="$help --check --auto-update" ;;
+        doctor) options="$help --json --feature" ;;
+        backup) options="$help $selectors --output --portable --recipient --min-passphrase-length" ;;
+        backup-info) options="$help --identity" ;;
+        restore) options="$help --project --identity" ;;
+        secrets)
+            options=$help
+            if [[ -z $action ]]; then
+                options+=' init set list remove passwd'
+            elif [[ $action == init || $action == passwd ]]; then
+                options+=' --min-passphrase-length'
+            fi ;;
+        completion)
+            options=$help
+            (( positional == 0 )) && options+=' bash' ;;
+        list|distros) options=$help ;;
+        *) options="$commands $help $selectors $launch --status --about --version --json --check --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes" ;;
+    esac
+    if (( ! ended )); then
+        _oc_box_words "$options"
+        [[ $cur == -* ]] && return 0
+    fi
+    if [[ $command == backup-info || $command == restore ]] && (( positional == 0 )); then
+        _oc_box_paths -f
+    fi
+    return 0
+}
+
+complete -F _oc_box oc-box

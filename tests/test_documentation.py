@@ -43,6 +43,8 @@ class DocumentationTests(unittest.TestCase):
         parsers = [
             parser,
             dependencies.parser(),
+            box.secrets_parser(),
+            box.completion_parser(),
             *(
                 backups.parser_for(action)
                 for action in ("backup", "backup-info", "restore")
