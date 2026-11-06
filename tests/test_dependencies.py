@@ -168,6 +168,25 @@ class DependencyTests(unittest.TestCase):
             updater.upgrade(Path("/tmp/example-installation"))
         fetch.assert_not_called()
 
+    def test_purge_checks_history_tools_before_confirmation_or_stopping(self):
+        from types import SimpleNamespace
+
+        with (
+            patch.object(
+                deps, "probe", side_effect=lambda key: (key != "opencode", key)
+            ),
+            patch.object(box, "stop_container") as stop,
+            patch("builtins.input") as confirmation,
+            self.assertRaisesRegex(box.BoxError, "History-preserving purge"),
+        ):
+            box.purge(
+                Path("/tmp/example-registry"),
+                {},
+                SimpleNamespace(all=False, delete_sessions=False),
+            )
+        stop.assert_not_called()
+        confirmation.assert_not_called()
+
     def test_gnu_du_is_required_instead_of_accepting_busybox(self):
         with (
             patch.object(deps, "executable", return_value="/usr/bin/du"),

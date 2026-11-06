@@ -27,12 +27,6 @@ def verify(distro, install=False):
     print("Testing", distro, "providers:", " ".join(packages), flush=True)
     if install:
         assert os.geteuid() == 0, "Use only in a disposable root test container"
-        subprocess.run(
-            ["/bin/sh", "-ec", deps.baseline_install(distro)],
-            check=True,
-            timeout=1200,
-            env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
-        )
         # Execute the same mapped command, with the test-only yes flag and no
         # sudo (minimal images run as root and do not necessarily ship sudo).
         command = deps.install_commands(distro, keys)[0].replace("sudo ", "")
@@ -44,6 +38,15 @@ def verify(distro, install=False):
             command = command.replace("pacman ", "pacman --noconfirm ")
         subprocess.run(
             ["/bin/sh", "-ec", command],
+            check=True,
+            timeout=1200,
+            env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
+        )
+        # Also execute the real workspace command. Install providers together
+        # first so SUSE's solver does not select mutually exclusive BusyBox
+        # pager alternatives before the optional manual tools are requested.
+        subprocess.run(
+            ["/bin/sh", "-ec", deps.baseline_install(distro)],
             check=True,
             timeout=1200,
             env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},

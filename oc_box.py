@@ -1908,6 +1908,11 @@ def retain_archive_provenance(path, data):
 
 
 def purge(path, data, args):
+    if not data.get("restore_incomplete") or args.all or args.delete_sessions:
+        try:
+            dependencies.require("history")
+        except dependencies.DependencyError as exc:
+            raise BoxError(str(exc)) from exc
     project = Path(data["project"])
     marker = project / MARKER
     same = (
@@ -2577,8 +2582,6 @@ def main(argv=None):
             **(
                 {"feature": "launch"}
                 if args.command in ("start", "reset", "sync")
-                else {"feature": "history"}
-                if args.command == "purge"
                 else {}
             ),
         )

@@ -128,7 +128,7 @@ FEATURES = {
     "maintenance": ("Container maintenance, stop, repair and purge", RUNTIME),
     "history": (
         "History-preserving purge and session deletion",
-        (*RUNTIME, "opencode"),
+        ("python", "opencode"),
     ),
     "backup": (
         "Encrypted full/portable backup",
