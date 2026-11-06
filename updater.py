@@ -191,13 +191,17 @@ def upgrade(root, *, check=False):
         # Git credential/config overrides, or inherited provider credentials.
         environment = public_git_env(work)
         environment["HOME"] = str(Path.home())
+        current_root = (Path.home() / ".local/share/oc-box/current").resolve()
+        extra = (
+            ["--with-vault"] if (current_root / "vault-support.json").is_file() else []
+        )
         try:
             subprocess.run(
-                [sys.executable, "-B", str(source / "install.py")],
+                [sys.executable, "-B", str(source / "install.py"), *extra],
                 cwd=work,
                 env=environment,
                 check=True,
-                timeout=60,
+                timeout=240,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise UpdateError(

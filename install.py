@@ -2,6 +2,7 @@
 """Install the external launcher and prebuilt manuals in ~/.local."""
 
 from pathlib import Path
+import argparse
 import sys
 
 if __package__:
@@ -10,7 +11,14 @@ else:
     from installation import install
 
 try:
-    install(Path(__file__).resolve().parent)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--with-vault",
+        action="store_true",
+        help="install optional cryptography into a private per-release runtime (no system/user-site packages)",
+    )
+    args = parser.parse_args([] if __name__ != "__main__" else None)
+    install(Path(__file__).resolve().parent, with_vault=args.with_vault)
 except (OSError, ValueError) as exc:
     print(f"oc-box install: {exc}", file=sys.stderr)
     raise SystemExit(1)

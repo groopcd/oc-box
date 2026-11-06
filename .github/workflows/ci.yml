@@ -2,7 +2,7 @@ name: Package and source checks
 
 on:
   push:
-    branches: [master]
+    branches: [master, 'feature/**']
   pull_request:
 
 permissions:
@@ -25,7 +25,9 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Unit and documentation coverage checks
         run: |
-          python -B -m unittest discover -s tests -v
+          python -m venv "$RUNNER_TEMP/tests"
+          "$RUNNER_TEMP/tests/bin/python" -m pip install 'cryptography>=44'
+          "$RUNNER_TEMP/tests/bin/python" -B -m unittest discover -s tests -v
           python tools/build_docs.py --check
           git diff --check
       - name: Build Python distributions
@@ -34,4 +36,4 @@ jobs:
           "$RUNNER_TEMP/build/bin/python" -m pip install build twine
           "$RUNNER_TEMP/build/bin/python" -m build
           "$RUNNER_TEMP/build/bin/python" -m twine check dist/*
-          python tools/check_package.py dist
+          python tools/check_package.py dist --with-vault

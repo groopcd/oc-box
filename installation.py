@@ -8,6 +8,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import venv
 
 if __package__:
     from .version_info import get_version_info
@@ -16,6 +17,8 @@ else:
 
 PROGRAM_FILES = (
     "oc_box.py",
+    "vault.py",
+    "credentials.py",
     "__init__.py",
     "__main__.py",
     "bootstrap.py",
@@ -51,7 +54,50 @@ def atomic_file(path, content, mode=0o644):
         Path(temporary).unlink(missing_ok=True)
 
 
-def install(source, home=None):
+def optional_crypto_runtime(release):
+    """Install the maintained optional library without touching host Python.
+
+    Resolve dependencies through a throwaway venv, then copy their wheels into
+    this release's private directory. No project/user/system site installation.
+    """
+    environment = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(release),
+        "LANG": "C.UTF-8",
+        "PYTHONNOUSERSITE": "1",
+        "PIP_REQUIRE_VIRTUALENV": "1",
+        "PIP_CONFIG_FILE": "/dev/null",
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    }
+    with tempfile.TemporaryDirectory(prefix="oc-box-crypto-build-") as temporary:
+        tools = Path(temporary) / "venv"
+        venv.EnvBuilder(with_pip=True).create(tools)
+        result = subprocess.run(
+            [
+                str(tools / "bin/python"),
+                "-m",
+                "pip",
+                "install",
+                "--index-url",
+                "https://pypi.org/simple",
+                "--only-binary=:all:",
+                "--no-cache-dir",
+                "--target",
+                str(release / "vault-deps"),
+                "cryptography>=44",
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if result.returncode:
+            raise ValueError(
+                "Optional vault crypto installation failed; no launcher was switched. Install a supported cryptography wheel or use the unchanged env-file workflow."
+            )
+
+
+def install(source, home=None, *, with_vault=False):
     source = Path(source).resolve()
     if (source / "distribution.json").is_file():
         raise ValueError(
@@ -107,6 +153,16 @@ def install(source, home=None):
                 release / "build-info.json",
                 (json.dumps(build, indent=2) + "\n").encode(),
             )
+            if with_vault:
+                try:
+                    optional_crypto_runtime(release)
+                except subprocess.TimeoutExpired as exc:
+                    raise ValueError(
+                        "Optional vault dependency download timed out; existing installation retained."
+                    ) from exc
+                atomic_file(
+                    release / "vault-support.json", b'{"optional_crypto": true}\n'
+                )
             # Readers/install-info are optional: ship prebuilt manuals.
             man = home / ".local/share/man/man1/oc-box.1"
             info = home / ".local/share/info/oc-box.info"
