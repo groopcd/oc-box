@@ -94,7 +94,7 @@ oc-box doctor --feature backup --feature vault
 oc-box doctor --feature backup-info --json
 @end example
 
-Feature selectors: @code{launch}, @code{maintenance}, @code{backup}, @code{backup-info}, @code{restore}, @code{vault}, @code{github-upgrade}, @code{bootstrap}, @code{storage}, @code{overlay}, @code{manuals}, and @code{docs-build}. Without selectors all are reported, but exit status checks only core @code{launch} prerequisites. With selectors, exit 0 means every selected feature's prerequisites are present; exit 1 means at least one is missing or incompatible. JSON schema version 1 includes scope, detected distro, feature availability, dependency details, missing providers, package names, installation commands, and notes. Missing optional features never disable unrelated commands. Feature commands check their prerequisites before secret prompts or destructive workspace changes and include OS-specific fixes.
+Feature selectors: @code{launch}, @code{maintenance}, @code{history}, @code{backup}, @code{backup-info}, @code{restore}, @code{vault}, @code{github-upgrade}, @code{bootstrap}, @code{storage}, @code{overlay}, @code{manuals}, and @code{docs-build}. Without selectors all are reported, but exit status checks only core @code{launch} prerequisites. With selectors, exit 0 means every selected feature's prerequisites are present; exit 1 means at least one is missing or incompatible. JSON schema version 1 includes scope, detected distro, feature availability, dependency details, missing providers, package names, installation commands, and notes. Missing optional features never disable unrelated commands. Feature commands check their prerequisites before secret prompts or destructive workspace changes and include OS-specific fixes.
 
 This checks installed prerequisites, not full runtime certification. Podman still checks rootless mode, subordinate IDs, controller delegation, and mounts; interactive commands check terminal requirements. Command presence does not establish a compatible version or validate every backend/driver configuration. Normal OpenCode launch verifies its host/container versions separately.
 
@@ -427,7 +427,7 @@ Report CPU, RAM, storage, state, limits, and sessions without opening OpenCode. 
 
 Doctor also accepts this flag to emit its versioned feature/dependency report.
 
-Emit status as one JSON object with @code{sampled_at} and @code{workspaces}. Sizes are numeric bytes and unavailable values are @code{null}; notes explain partial results. Progress goes to stderr, not the JSON stream. Applies only to status.
+Emit status as one JSON object with @code{sampled_at} and @code{workspaces}. Sizes are numeric bytes and unavailable values are @code{null}; notes explain partial results. Progress goes to stderr, not the JSON stream. Status uses this schema; doctor uses the feature/dependency schema described under that command.
 
 @example
 oc-box --status --json > status.json

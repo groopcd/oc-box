@@ -82,7 +82,7 @@ oc-box doctor --feature backup --feature vault
 oc-box doctor --feature backup-info --json
 ```
 
-Feature selectors: `launch`, `maintenance`, `backup`, `backup-info`, `restore`,
+Feature selectors: `launch`, `maintenance`, `history`, `backup`, `backup-info`, `restore`,
 `vault`, `github-upgrade`, `bootstrap`, `storage`, `overlay`, `manuals`, and
 `docs-build`. Without selectors all are reported, but exit status checks only
 core `launch` prerequisites. With selectors, exit 0 means every selected
@@ -827,7 +827,8 @@ Doctor also accepts this flag to emit its versioned feature/dependency report.
 
 Emit status as one JSON object with `sampled_at` and `workspaces`. Sizes are
 numeric bytes and unavailable values are `null`; notes explain partial results.
-Progress goes to stderr, not the JSON stream. Applies only to status.
+Progress goes to stderr, not the JSON stream. Status uses this schema; doctor
+uses the feature/dependency schema described under that command.
 
 ```sh
 oc-box --status --json > status.json

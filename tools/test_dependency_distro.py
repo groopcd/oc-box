@@ -27,6 +27,12 @@ def verify(distro, install=False):
     print("Testing", distro, "providers:", " ".join(packages), flush=True)
     if install:
         assert os.geteuid() == 0, "Use only in a disposable root test container"
+        subprocess.run(
+            ["/bin/sh", "-ec", deps.baseline_install(distro)],
+            check=True,
+            timeout=1200,
+            env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
+        )
         # Execute the same mapped command, with the test-only yes flag and no
         # sudo (minimal images run as root and do not necessarily ship sudo).
         command = deps.install_commands(distro, keys)[0].replace("sudo ", "")
@@ -42,6 +48,8 @@ def verify(distro, install=False):
             timeout=1200,
             env={**os.environ, "DEBIAN_FRONTEND": "noninteractive"},
         )
+    # Older Leap may default to an obsolete Python even though packages exist.
+    assert deps.probe("python")[0], sys.version
     for key in keys:
         present, detail = deps.probe(key)
         assert present, (distro, key, detail)

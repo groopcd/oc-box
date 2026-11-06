@@ -37,31 +37,31 @@ CONTAINER_OPENCODE = "/opt/oc-box/runtime/bin/opencode"
 DISTROS = {
     "tumbleweed": (
         "registry.opensuse.org/opensuse/tumbleweed:latest",
-        "zypper -n refresh && zypper -n install bash ca-certificates curl git python3 ripgrep tar gzip nodejs npm poppler-tools",
+        dependencies.baseline_install("tumbleweed"),
     ),
     "leap": (
         "registry.opensuse.org/opensuse/leap:latest",
-        "zypper -n refresh && zypper -n install bash ca-certificates curl git python3 ripgrep tar gzip nodejs npm poppler-tools",
+        dependencies.baseline_install("leap"),
     ),
     "ubuntu": (
         "docker.io/library/ubuntu:24.04",
-        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl git python3 ripgrep tar gzip nodejs npm poppler-utils",
+        dependencies.baseline_install("ubuntu"),
     ),
     "debian": (
         "docker.io/library/debian:stable",
-        "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends bash ca-certificates curl git python3 ripgrep tar gzip nodejs npm poppler-utils",
+        dependencies.baseline_install("debian"),
     ),
     "fedora": (
         "registry.fedoraproject.org/fedora:latest",
-        "dnf install -y bash ca-certificates curl git python3 ripgrep tar gzip nodejs npm poppler-utils",
+        dependencies.baseline_install("fedora"),
     ),
     "arch": (
         "docker.io/library/archlinux:base",
-        "pacman -Syu --noconfirm --needed bash ca-certificates curl git python ripgrep tar gzip nodejs npm poppler",
+        dependencies.baseline_install("arch"),
     ),
     "alpine": (
         "docker.io/library/alpine:latest",
-        "apk add --no-cache bash ca-certificates curl git python3 ripgrep tar gzip nodejs npm poppler-utils libstdc++ libgcc",
+        dependencies.baseline_install("alpine"),
     ),
 }
 ALIASES = {
@@ -2577,6 +2577,8 @@ def main(argv=None):
             **(
                 {"feature": "launch"}
                 if args.command in ("start", "reset", "sync")
+                else {"feature": "history"}
+                if args.command == "purge"
                 else {}
             ),
         )

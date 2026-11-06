@@ -126,6 +126,10 @@ CREATE = (*RUNTIME, "pasta", "catatonit", "conmon", "oci-runtime")
 FEATURES = {
     "launch": ("OpenCode launch/reset and history sync", (*CREATE, "opencode")),
     "maintenance": ("Container maintenance, stop, repair and purge", RUNTIME),
+    "history": (
+        "History-preserving purge and session deletion",
+        (*RUNTIME, "opencode"),
+    ),
     "backup": (
         "Encrypted full/portable backup",
         (*RUNTIME, "age", "age-keygen", "memfd"),
@@ -198,6 +202,25 @@ def install_commands(distro, keys):
     elif distro in ("tumbleweed", "leap"):
         command = "sudo zypper refresh && " + command
     return [command]
+
+
+def baseline_install(distro):
+    """Existing automatic container setup, using the same tested providers."""
+    packages = package_names(distro, BASELINE)
+    if distro in ("tumbleweed", "leap"):
+        prefix = "zypper -n refresh && zypper -n install "
+    elif distro in ("ubuntu", "debian"):
+        prefix = "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "
+    elif distro == "fedora":
+        prefix = "dnf install -y "
+    elif distro == "arch":
+        prefix = "pacman -Syu --noconfirm --needed "
+    elif distro == "alpine":
+        prefix = "apk add --no-cache "
+        packages.extend(["libstdc++", "libgcc"])
+    else:
+        raise ValueError("Unknown container distro")
+    return prefix + shlex.join(packages)
 
 
 def executable(key):

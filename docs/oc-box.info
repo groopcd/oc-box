@@ -136,17 +136,18 @@ os-release text.
      oc-box doctor --feature backup --feature vault
      oc-box doctor --feature backup-info --json
 
-Feature selectors: ‘launch’, ‘maintenance’, ‘backup’, ‘backup-info’,
-‘restore’, ‘vault’, ‘github-upgrade’, ‘bootstrap’, ‘storage’, ‘overlay’,
-‘manuals’, and ‘docs-build’.  Without selectors all are reported, but
-exit status checks only core ‘launch’ prerequisites.  With selectors,
-exit 0 means every selected feature's prerequisites are present; exit 1
-means at least one is missing or incompatible.  JSON schema version 1
-includes scope, detected distro, feature availability, dependency
-details, missing providers, package names, installation commands, and
-notes.  Missing optional features never disable unrelated commands.
-Feature commands check their prerequisites before secret prompts or
-destructive workspace changes and include OS-specific fixes.
+Feature selectors: ‘launch’, ‘maintenance’, ‘history’, ‘backup’,
+‘backup-info’, ‘restore’, ‘vault’, ‘github-upgrade’, ‘bootstrap’,
+‘storage’, ‘overlay’, ‘manuals’, and ‘docs-build’.  Without selectors
+all are reported, but exit status checks only core ‘launch’
+prerequisites.  With selectors, exit 0 means every selected feature's
+prerequisites are present; exit 1 means at least one is missing or
+incompatible.  JSON schema version 1 includes scope, detected distro,
+feature availability, dependency details, missing providers, package
+names, installation commands, and notes.  Missing optional features
+never disable unrelated commands.  Feature commands check their
+prerequisites before secret prompts or destructive workspace changes and
+include OS-specific fixes.
 
 This checks installed prerequisites, not full runtime certification.
 Podman still checks rootless mode, subordinate IDs, controller
@@ -948,8 +949,9 @@ report.
 
 Emit status as one JSON object with ‘sampled_at’ and ‘workspaces’.
 Sizes are numeric bytes and unavailable values are ‘null’; notes explain
-partial results.  Progress goes to stderr, not the JSON stream.  Applies
-only to status.
+partial results.  Progress goes to stderr, not the JSON stream.  Status
+uses this schema; doctor uses the feature/dependency schema described
+under that command.
 
      oc-box --status --json > status.json
 
@@ -2165,20 +2167,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2410
 Node: Commands4241
-Node: Options43788
-Node: Lifecycle and persistence60172
-Node: Distribution images61925
-Node: Sessions and recovery66793
-Node: Devices and host permissions72081
-Node: Resource reports74427
-Node: Configuration and environment76538
-Node: Files81302
-Node: Exit status85699
-Node: Examples86510
-Node: Troubleshooting88596
-Node: Installation and manuals96667
-Node: Authors and license101995
-Node: See also102602
+Node: Options43804
+Node: Lifecycle and persistence60261
+Node: Distribution images62014
+Node: Sessions and recovery66882
+Node: Devices and host permissions72170
+Node: Resource reports74516
+Node: Configuration and environment76627
+Node: Files81391
+Node: Exit status85788
+Node: Examples86599
+Node: Troubleshooting88685
+Node: Installation and manuals96756
+Node: Authors and license102084
+Node: See also102691
 
 End Tag Table
 

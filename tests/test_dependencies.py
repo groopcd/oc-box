@@ -41,6 +41,7 @@ class DependencyTests(unittest.TestCase):
                 self.assertEqual(
                     len(deps.package_names(distro, deps.BASELINE)), len(deps.BASELINE)
                 )
+                self.assertEqual(box.DISTROS[distro][1], deps.baseline_install(distro))
 
     def test_os_release_recognition_never_uses_workspace_default_or_shell_eval(self):
         with tempfile.TemporaryDirectory() as temporary:
