@@ -23,8 +23,10 @@ import time
 import uuid
 
 if __package__:
-    from . import workspace_identity
+    from . import credentials, vault, workspace_identity
 else:
+    import credentials
+    import vault
     import workspace_identity
 
 APP = Path(__file__).resolve().parent
@@ -195,6 +197,24 @@ def distro_name(name):
     return value
 
 
+@contextlib.contextmanager
+def captured_output():
+    if credentials.has_unlocked_values():
+        # Captured subprocess output may contain a delivered credential. An
+        # anonymous in-memory regular file preserves mainline's large-stdout
+        # behavior without spilling that output to a plaintext temp file.
+        if not hasattr(os, "memfd_create"):
+            raise BoxError(
+                "Vault launches require Linux memfd support for private subprocess-output capture."
+            )
+        fd = os.memfd_create("oc-box-private-output", os.MFD_CLOEXEC)
+        with os.fdopen(fd, "w+b") as stream:
+            yield stream
+    else:
+        with tempfile.TemporaryFile() as stream:
+            yield stream
+
+
 def run(argv, *, capture=False, check=True, **kwargs):
     if getattr(argv, "environment", None) is not None:
         kwargs.setdefault("env", argv.environment)
@@ -208,7 +228,7 @@ def run(argv, *, capture=False, check=True, **kwargs):
         if capture:
             # Mainline OpenCode can truncate large exports when stdout is a
             # pipe. Use regular files for captured CLI output instead.
-            with tempfile.TemporaryFile() as output, tempfile.TemporaryFile() as errors:
+            with captured_output() as output, captured_output() as errors:
                 result = subprocess.run(
                     command, text=True, stdout=output, stderr=errors, **kwargs
                 )
@@ -226,6 +246,7 @@ def run(argv, *, capture=False, check=True, **kwargs):
         ) from exc
     if check and result.returncode:
         detail = (result.stderr or result.stdout or "").strip() if capture else ""
+        detail = credentials.redact(detail)
         raise BoxError(
             f"{argv[0]} failed (exit {result.returncode})"
             + (f": {detail}" if detail else "")
@@ -342,6 +363,7 @@ def validate_project(path):
         APP,
         Path.home() / ".config/opencode",
         Path.home() / ".local/share/opencode",
+        vault.vault_path().parent,
     ):
         if private.resolve().is_relative_to(project):
             raise BoxError(
@@ -924,6 +946,7 @@ def container_env(data):
     }
     # Pass provider/MCP credentials and explicit settings, never host PATH,
     # loader settings, Unix agent/engine sockets, or sandbox proxy variables.
+    forwarded = {}
     for key, value in os.environ.items():
         if (
             key.endswith(("_API_KEY", "_TOKEN"))
@@ -939,7 +962,7 @@ def container_env(data):
                 "LEMONADE_BASE_URL",
             )
         ) and "\0" not in value:
-            env[key] = value
+            forwarded[key] = value
     settings = (
         Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
         / "oc-box/config.json"
@@ -950,10 +973,14 @@ def container_env(data):
             if not isinstance(key, str) or not re.fullmatch(r"[A-Z_][A-Z_0-9]*", key):
                 raise BoxError("Invalid pass_env entry in oc-box/config.json")
             if key in os.environ:
-                env[key] = os.environ[key]
+                forwarded[key] = os.environ[key]
+    env.update(credentials.forwarded(data, forwarded))
     # Apply after project/agent files, without lifting Plan or subagent rules.
     env["OPENCODE_CONFIG_CONTENT"] = json.dumps(container_build_config())
-    return {key: rewrite_localhost(value) for key, value in env.items()}
+    result = {key: rewrite_localhost(value) for key, value in env.items()}
+    # Do not rewrite encrypted values that happen to look like localhost URLs.
+    result.update(credentials.active_values(data))
+    return result
 
 
 class ContainerCommand(list):
@@ -1266,7 +1293,7 @@ def prepare_runtime(path, data, version):
     if proc.returncode:
         raise BoxError(
             "Cannot copy OpenCode config into container: "
-            + proc.stderr.decode(errors="replace")
+            + credentials.redact(proc.stderr.decode(errors="replace"))
         )
     if proc.stdout:
         print("oc-box: " + proc.stdout.decode(errors="replace").strip(), flush=True)
@@ -1723,6 +1750,18 @@ def parse_jsonc(text):
 
 
 def launch(path, data, args):
+    # Keep plaintext values out of persisted workspace metadata, os.environ,
+    # and informational/maintenance/sync invocations. Launch unlock is local.
+    try:
+        if args.command == "sync":
+            return launch_environment(path, data, args)
+        with credentials.unlocked(data):
+            return launch_environment(path, data, args)
+    except vault.VaultError as exc:
+        raise BoxError(str(exc)) from exc
+
+
+def launch_environment(path, data, args):
     with loading_stage("Checking OpenCode version"):
         version = run(["opencode", "--version"], capture=True).stdout.strip()
     if not re.fullmatch(r"1\.\d+\.\d+(?:[-+].*)?", version):
@@ -1945,6 +1984,8 @@ def parser():
             "repair",
             "terminal",
             "upgrade",
+            "secrets",
+            "credentials",
             "purge",
             "list",
             "distros",
@@ -2011,6 +2052,28 @@ def parser():
         help="copy a host conversation from this project into the container and resume it",
     )
     result.add_argument("--model", help="OpenCode provider/model")
+    result.add_argument(
+        "--credential-mode",
+        choices=("env", "selected"),
+        help="with credentials, select legacy env forwarding or explicit per-workspace credentials",
+    )
+    result.add_argument(
+        "--env-secret",
+        action="append",
+        metavar="NAME",
+        help="with credentials, allow a named sourced environment credential; repeatable",
+    )
+    result.add_argument(
+        "--vault-secret",
+        action="append",
+        metavar="NAME",
+        help="with credentials, select a named encrypted vault credential; repeatable",
+    )
+    result.add_argument(
+        "--clear-credentials",
+        action="store_true",
+        help="with credentials, clear saved credential-name selections before adding new names",
+    )
     result.add_argument("--cpus", help="CPU limit (default: 4)")
     result.add_argument("--memory", help="memory limit (default: 8g)")
     result.add_argument("--pids-limit", type=int, help="process limit (default: 2048)")
@@ -2087,8 +2150,119 @@ def report_status(args):
     return 0
 
 
+def secrets_command(argv):
+    parser = argparse.ArgumentParser(
+        prog="oc-box secrets",
+        description="Manage the optional host encrypted vault; values/passphrases use hidden controlling-terminal prompts, never argv/env/stdin.",
+    )
+    parser.add_argument("action", choices=("init", "set", "list", "remove", "passwd"))
+    parser.add_argument(
+        "name", nargs="?", help="credential environment name for set/remove"
+    )
+    args = parser.parse_args(argv)
+    if (args.action in ("set", "remove")) != (args.name is not None):
+        raise BoxError("Use a credential NAME only with secrets set/remove.")
+    if os.environ.get("OC_BOX_CONTAINER") == "1":
+        raise BoxError(
+            "Manage the vault from the host, not from a development container."
+        )
+    try:
+        vault.manage(args.action, args.name)
+    except vault.VaultError as exc:
+        raise BoxError(str(exc)) from exc
+    return 0
+
+
+def credentials_command(args):
+    if os.environ.get("OC_BOX_CONTAINER") == "1":
+        raise BoxError(
+            "Configure workspace credentials on the host; the private host registry is not exposed here."
+        )
+    path, data = find_workspace(args.project, args.workspace)
+    if data is None:
+        raise BoxError(
+            "No oc-box workspace registered here. Create it with a normal launch before selecting credentials."
+        )
+    with workspace_lock(path):
+        try:
+            if (
+                args.credential_mode
+                or args.env_secret
+                or args.vault_secret
+                or args.clear_credentials
+            ):
+                selected = credentials.configure(
+                    data,
+                    mode=args.credential_mode,
+                    env=args.env_secret or [],
+                    secrets=args.vault_secret or [],
+                    clear=args.clear_credentials,
+                )
+                atomic_json(path, data)
+            else:
+                selected = credentials.policy(data)
+        except vault.VaultError as exc:
+            raise BoxError(str(exc)) from exc
+    print("Credential forwarding mode: " + selected["mode"])
+    print("Selected environment names: " + (", ".join(selected["env"]) or "none"))
+    print("Selected vault names: " + (", ".join(selected["vault"]) or "none"))
+    if selected["mode"] == "env":
+        print(
+            "Default env-file workflow: automatic token/key and configured pass_env forwarding remains enabled."
+        )
+    print(
+        "No secret values were read. Changes apply to the next normal launch, not terminal; copied config/auth and existing container secrets are independent."
+    )
+    return 0
+
+
 def main(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "secrets":
+        return secrets_command(arguments[1:])
     args = parser().parse_args(argv)
+    if args.command == "secrets":
+        raise BoxError("Use 'oc-box secrets ACTION [NAME]' with no workspace options.")
+    credential_options = bool(
+        args.credential_mode
+        or args.env_secret
+        or args.vault_secret
+        or args.clear_credentials
+    )
+    if credential_options and args.command != "credentials":
+        raise BoxError(
+            "Credential selection options apply only to 'oc-box credentials'."
+        )
+    if args.command == "credentials":
+        if any(
+            (
+                args.status,
+                args.json,
+                args.about,
+                args.version,
+                args.check,
+                args.auto_update is not None,
+                args.distro,
+                args.new,
+                args.resume,
+                args.import_session,
+                args.model,
+                args.cpus,
+                args.memory,
+                args.pids_limit is not None,
+                args.device,
+                args.podman_arg,
+                args.clear_devices,
+                args.clear_podman_args,
+                args.all,
+                args.delete_sessions,
+                args.yes,
+            )
+        ):
+            raise BoxError(
+                "Credentials accepts only workspace selectors and credential-selection options."
+            )
+        return credentials_command(args)
     if (args.check or args.auto_update is not None) and args.command != "upgrade":
         raise BoxError("--check and --auto-update apply only to upgrade.")
     if args.command == "upgrade":
@@ -2363,7 +2537,14 @@ def main(argv=None):
         stop_container(data)
         print("Container stopped; files, packages, and conversations retained.")
         return 0
-    with workspace_lock(path):
+    with workspace_lock(path), contextlib.ExitStack() as launch_context:
+        if args.command == "reset":
+            # Validate/unlock before reset removes the old OS. Wrong/missing
+            # credentials must never destroy an otherwise working environment.
+            try:
+                launch_context.enter_context(credentials.unlocked(data))
+            except vault.VaultError as exc:
+                raise BoxError(str(exc)) from exc
         if args.command in ("start", "reset", "sync", "terminal"):
             refresh_workspace_identity(path, data)
         if args.command == "terminal":
@@ -2414,7 +2595,7 @@ def main(argv=None):
 def entrypoint():
     try:
         return main()
-    except (BoxError, OSError, ValueError) as exc:
+    except (BoxError, vault.VaultError, OSError, ValueError) as exc:
         print(f"oc-box: {exc}", file=sys.stderr)
         return 1
     except KeyboardInterrupt:

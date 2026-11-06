@@ -371,6 +371,97 @@ Read [SECURITY.md](SECURITY.md) for the trust boundary and reporting guidance.
 Rootless containers share the host kernel, have network access, and do not have
 a disk quota. Snapshots/archives are not backups against disk or volume loss.
 
+## Optional encrypted vault and workspace credential selection
+
+**Your existing env-file workflow remains the default.** Continue to source
+your file and launch normally; no vault, new password prompt, or crypto
+dependency is required:
+
+```sh
+source /path/to/private/file.env
+oc-box --project ~/devel/demo
+```
+
+For encrypted storage on the host, enable the optional vault support:
+
+```sh
+# New isolated Python-tool installation:
+pipx install 'oc-box[vault]'
+# Existing pipx installation:
+pipx inject oc-box 'cryptography>=44'
+# Or uv (install/reinstall with the extra):
+uv tool install --force 'oc-box[vault]'
+# GitHub/source installer:
+python3 install.py --with-vault
+# Or one-line GitHub installer:
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --with-vault
+```
+
+The GitHub option installs cryptography in the versioned launcher's private
+runtime directory using a temporary virtual environment; it never installs
+packages into system Python or user site-packages. GitHub upgrades preserve this
+opt-in. There is no password-manager daemon or desktop keyring requirement;
+the host needs a controlling terminal and normal private Unix file permissions,
+including under WSL. Do not put the vault on an exposed project mount or a
+Windows-shared path that cannot enforce those permissions.
+
+Create the vault and store secrets through hidden prompts (names only in argv):
+
+```sh
+oc-box secrets init
+oc-box secrets set PERSONAL_GITHUB_TOKEN
+oc-box secrets set BRAVE_API_KEY
+oc-box secrets list            # Unlocks; prints names, never values
+oc-box secrets remove OLD_TOKEN
+oc-box secrets passwd          # Change the vault passphrase
+```
+
+The host vault is normally `~/.local/share/oc-box/credentials/vault.json`
+(`$XDG_DATA_HOME/oc-box/credentials/vault.json` when set), outside project and
+container storage. Credentials and their names are encrypted with AES-256-GCM;
+Scrypt derives the key from a passphrase (minimum 12 characters). The private
+file is 0600 and its directory 0700. There is no saved key, unlock cache,
+passphrase environment variable, plaintext export, or recovery mechanism for a
+forgotten passphrase. Back up the encrypted vault and keep its passphrase safe.
+
+Select only the credentials an **existing** workspace needs, after exiting its
+active launcher. These commands do not start/reset a container or read values:
+
+```sh
+oc-box credentials --project ~/devel/demo
+oc-box credentials --project ~/devel/demo --credential-mode selected \
+  --env-secret GITHUB_TOKEN \
+  --vault-secret PERSONAL_GITHUB_TOKEN --vault-secret BRAVE_API_KEY
+oc-box --project ~/devel/demo
+```
+
+Selected mode replaces automatic `_TOKEN`/`_API_KEY` and custom `pass_env`
+forwarding with those explicit names. It permits mixing sourced environment
+credentials and selected vault entries, but not selecting the same name from
+both. Normal OpenCode launch/reset prompts once to unlock selected vault names;
+the passphrase and vault file never enter the container. A missing selected env
+variable, wrong passphrase, or missing vault entry aborts before container setup
+or reset deletion. `terminal`, list/status, repair, stop, upgrade, and standalone
+history sync never unlock the vault. Delivered credentials are still environment
+variables accessible to OpenCode, its tools, and other permitted processes.
+
+Selections persist in the host registry as **names only**, independent of the
+project and vault. Repeating options appends names; replace them with
+`--clear-credentials`. To return to the original behavior:
+
+```sh
+oc-box credentials --project ~/devel/demo --credential-mode env --clear-credentials
+```
+
+Env mode can also add selected vault names without restricting existing env
+forwarding. A selected vault value wins over an inherited same-named env value
+in that mode. Switching mode does **not** remove old secrets from the private
+home, copied OpenCode auth/config, raw Podman `--env` settings, other running
+processes, source files, session history, swap, or backups. The vault protects
+storage before delivery; it does not hide a delivered key from the agent.
+See the [complete credential reference](docs/cli.md#credentials) and
+[security notes](SECURITY.md) before migrating sensitive credentials.
+
 ## Documentation
 
 The [complete CLI reference](docs/cli.md) covers **every command and option**,
@@ -405,7 +496,7 @@ model/MCP/LSP/formatter fixtures; it does not prove Podman isolation or certify
 every distro/runtime/device combination.
 
 ```sh
-python3 -B -m unittest discover -s tests -v
+uv run --no-project --with cryptography python -B -m unittest discover -s tests -v
 python3 -B tests/smoke_mainline.py
 python3 -B tools/build_docs.py --check
 ```

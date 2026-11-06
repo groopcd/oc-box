@@ -26,6 +26,9 @@ classifiers = [
   "Topic :: Software Development",
 ]
 
+[project.optional-dependencies]
+vault = ["cryptography>=44"]
+
 [project.urls]
 Homepage = "https://github.com/groopcd/oc-box"
 Documentation = "https://github.com/groopcd/oc-box/blob/master/docs/cli.md"

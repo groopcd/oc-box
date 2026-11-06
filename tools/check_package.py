@@ -18,7 +18,7 @@ import venv
 import zipfile
 
 
-def check(directory):
+def check(directory, *, with_vault=False):
     wheels = list(directory.glob("*.whl"))
     sources = list(directory.glob("*.tar.gz"))
     if len(wheels) != 1 or len(sources) != 1:
@@ -34,10 +34,17 @@ def check(directory):
         assert metadata["Name"] == "oc-box"
         assert metadata["Requires-Python"] == ">=3.10"
         assert metadata["License-Expression"] == "GPL-3.0-or-later"
-        assert not metadata.get_all("Requires-Dist"), "Unexpected runtime dependencies"
+        requirements = metadata.get_all("Requires-Dist") or []
+        assert (
+            len(requirements) == 1
+            and requirements[0].startswith("cryptography>=44")
+            and 'extra == "vault"' in requirements[0]
+        ), requirements
         for name in (
             "oc_box.py",
             "workspace_identity.py",
+            "vault.py",
+            "credentials.py",
             "bootstrap.py",
             "sync_config.py",
             "terminal_ui.py",
@@ -135,6 +142,14 @@ def check(directory):
         assert json.loads(run(cli, "--status", "--json"))["workspaces"] == []
         assert "Python-package managed" in run(cli, "upgrade")
         assert "--import-session" in run(cli, "--help")
+        assert "secrets" in run(cli, "--help")
+        assert "init" in run(cli, "secrets", "--help")
+        # Default package installation keeps crypto optional and never prompts.
+        assert "cryptography" not in run(
+            python,
+            "-c",
+            "import sys; import oc_box.vault; print(' '.join(sys.modules))",
+        )
         data = run(
             python,
             "-c",
@@ -207,6 +222,18 @@ def check(directory):
         repair = run(*backend_cli, "repair", "--workspace", "a" * 32)
         assert "Workspace identity repaired" in repair or "already matches" in repair
         assert marker.exists()
+        assert "Credential forwarding mode: env" in run(
+            cli, "credentials", "--workspace", "a" * 32
+        )
+        assert "Credential forwarding mode: selected" in run(
+            cli,
+            "credentials",
+            "--workspace",
+            "a" * 32,
+            "--credential-mode=selected",
+            "--vault-secret=EXAMPLE_TOKEN",
+        )
+        assert "EXAMPLE_TOKEN" in run(cli, "credentials", "--workspace", "a" * 32)
         assert all(
             call[0] in ("info", "container", "volume")
             for call in map(json.loads, podman_log.read_text().splitlines())
@@ -229,6 +256,38 @@ def check(directory):
         assert not (home / ".local/share/oc-box").exists(), (
             "Package management called the GitHub installer"
         )
+        if with_vault:
+            run(
+                python,
+                "-m",
+                "pip",
+                "install",
+                "--index-url",
+                "https://pypi.org/simple",
+                "--only-binary=:all:",
+                str(wheels[0].resolve()) + "[vault]",
+            )
+            # Prompt mocking is only at the input boundary; exercise real
+            # installed CLI routing, cipher/KDF, persistence, and name selection.
+            exercise = """import contextlib,io,json,os
+from pathlib import Path
+from unittest.mock import patch
+from oc_box import oc_box as box, vault
+phrase='synthetic package test passphrase'
+value='synthetic package test credential'
+with patch.object(vault,'hidden',side_effect=[phrase,phrase]), contextlib.redirect_stdout(io.StringIO()):
+    assert box.main(['secrets','init'])==0
+with patch.object(vault,'hidden',side_effect=[phrase,value,value]), contextlib.redirect_stdout(io.StringIO()):
+    assert box.main(['secrets','set','EXAMPLE_TOKEN'])==0
+raw=vault.vault_path().read_text()
+assert value not in raw and phrase not in raw and 'EXAMPLE_TOKEN' not in raw
+with patch.object(vault,'hidden',return_value=phrase):
+    selected=vault.select(['EXAMPLE_TOKEN'])
+assert selected=={'EXAMPLE_TOKEN':value}
+assert 'EXAMPLE_TOKEN' not in os.environ
+print('PASS: installed vault extra encrypts, unlocks, and selects without exposing values to os.environ or disk.')
+"""
+            print(run(python, "-c", exercise).strip())
     print(
         f"PASS: oc-box {version} wheel/sdist metadata, packaged resources/manuals, isolated CLI, workspace/status tools, and safe package-manager upgrades."
     )
@@ -238,5 +297,10 @@ def check(directory):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("distribution_dir", type=Path)
+    parser.add_argument(
+        "--with-vault",
+        action="store_true",
+        help="also resolve/test the optional crypto extra inside the temporary venv",
+    )
     arguments = parser.parse_args()
-    check(arguments.distribution_dir)
+    check(arguments.distribution_dir, with_vault=arguments.with_vault)

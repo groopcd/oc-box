@@ -143,6 +143,40 @@ class UpdateTests(unittest.TestCase):
                 updater.upgrade(APP)
         install.assert_not_called()
 
+    def test_self_upgrade_preserves_opt_in_vault_dependency_installation(self):
+        current = self.home / ".local/share/oc-box/current"
+        current.mkdir(parents=True)
+        (current / "vault-support.json").write_text('{"optional_crypto":true}')
+        commit = "a" * 40
+        answers = [commit + "\trefs/heads/master", "", "", commit, "2", ""]
+        with (
+            patch.object(updater.os, "geteuid", return_value=1000),
+            patch.object(
+                updater,
+                "current_install",
+                return_value={
+                    "version": "0.1.1",
+                    "commit": "b" * 40,
+                    "commit_count": 1,
+                },
+            ),
+            patch.object(updater, "git", side_effect=answers),
+            patch.object(
+                updater,
+                "get_version_info",
+                return_value={"commit": commit, "dirty": False},
+            ),
+            patch.object(
+                updater.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0),
+            ) as installer,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(updater.upgrade(APP), current.resolve())
+        self.assertIn("--with-vault", installer.call_args.args[0])
+        self.assertNotIn("PERSONAL_GITHUB_TOKEN", installer.call_args.kwargs["env"])
+
     def test_installed_build_ahead_of_published_history_is_not_downgraded(self):
         answers = ["a" * 40 + "\trefs/heads/master", "", "", "a" * 40, "2", ""]
         with (

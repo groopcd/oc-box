@@ -29,6 +29,55 @@ socket, SSH agent, desktop sockets, host PID/network namespaces, and host device
 are not mounted/exposed. The default container has resource ceilings but no disk
 quota, so project, image, and volume growth can exhaust host disk space.
 
+## Optional host credential vault
+
+The original env-file workflow remains the default: no vault initialization,
+password prompt, or crypto dependency is introduced by an ordinary upgrade.
+The opt-in vault uses cryptography's Scrypt KDF and AES-256-GCM; it does not
+implement cryptographic primitives itself. A passphrase is entered only on a
+controlling host terminal with echo disabled. There is no passphrase argument,
+environment variable, plaintext export, key file, daemon, or permanent unlock.
+
+The encrypted vault is outside the project/container at
+`$XDG_DATA_HOME/oc-box/credentials/vault.json` (default
+`~/.local/share/oc-box/credentials/vault.json`). Its directory/file must be
+private and owned by the host user. Operations reject symlinks, extra hard
+links, nonregular files, unknown/modified formats, unbounded KDF parameters, and
+insecure permissions. Read-modify-write uses a file lock, fresh random salt and
+nonce, authenticated format metadata, and fsynced atomic ciphertext replacement.
+No plaintext file is created; names are encrypted along with values. Scrypt's
+fixed n=131072/r=8/p=1 parameters require approximately 128 MiB memory per KDF.
+
+Each workspace stores only its selected env/vault names and `env`/`selected`
+mode in the private host registry. Selected mode replaces auto suffix/pass_env
+forwarding with explicit names. Runtime/loader/shell control names cannot be
+selected as credentials. The vault is unlocked only for a normal workspace
+launch/reset/import, once per launch; missing names or failed unlock prevent
+setup or reset destruction. No vault prompt is made for terminal, information,
+standalone sync, or upgrade operations. The passphrase/vault file never enter
+the container. Decrypted values are passed as process environment values,
+not Podman command arguments or saved registry/config data.
+
+This is **at-rest protection and reduced forwarding, not credential hiding
+from an unrestricted agent**. Delivered secrets remain readable inside the
+container. Previously copied config/auth, Podman create-time Env values, files,
+session exports, other processes, and old backups are independent and are not
+purged merely by switching forwarding mode. Env mode deliberately retains its
+original broad automatic forwarding and can optionally supplement it with vault
+entries. Python cannot guarantee zeroization of secret/key strings. Normal
+launcher core dumps are disabled on secret prompts where permitted, but host
+root/same-user debugging, swap, malicious binaries, terminal compromise, and
+unusual crash collection remain outside the protection.
+
+Use a strong passphrase and keep encrypted backups. A forgotten passphrase has
+no recovery path. Changing it or removing a secret does not revoke a provider
+credential or erase old ciphertext snapshots. WSL must provide private Unix
+permissions and a controlling terminal; do not place the vault in an exposed
+project or assume Windows-shared mounts have the same permission behavior.
+GitHub installs can opt into private crypto wheels using `--with-vault`, staged
+before launcher activation without modifying system/user site-packages. Python
+tool installs use the `vault` extra; default installs remain dependency-free.
+
 ## Host-side operations
 
 `oc-box terminal` opens a maintenance shell without copying auth/config or

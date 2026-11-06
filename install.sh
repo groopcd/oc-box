@@ -3,6 +3,10 @@
 set -eu
 
 main() {
+    if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --with-vault ]; }; then
+        printf '%s\n' 'Usage: sh install.sh [--with-vault]' >&2
+        exit 2
+    fi
     if [ "$(id -u)" = 0 ]; then
         printf '%s\n' 'Run the oc-box installer as your regular host user, without sudo.' >&2
         exit 1
@@ -25,7 +29,7 @@ main() {
         https://github.com/groopcd/oc-box.git "$work/source"
     env -i PATH="$PATH" HOME="$HOME" LANG=C.UTF-8 PYTHONNOUSERSITE=1 \
         GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null \
-        python3 -B "$work/source/install.py"
+        python3 -B "$work/source/install.py" "$@"
 }
 
 # Keep actions in main so a truncated pipeline does not execute a partial script.

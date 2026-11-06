@@ -19,3 +19,6 @@ build/
 dist/
 *.egg-info/
 uv.lock
+vault.json
+.vault.lock
+.vault-*

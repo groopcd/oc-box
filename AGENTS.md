@@ -13,6 +13,8 @@ portable: use example project paths and synthetic session IDs, not local data.
 - `version_info.py`: commit-derived version and author/license information.
 - `workspace_identity.py`: generic Linux VFS directory identity, capability-based
   persistent handles and strict fallback; shared by lifecycle/status checks.
+- `vault.py` / `credentials.py`: optional encrypted host vault and names-only
+  per-workspace credential policy. Legacy env-file forwarding remains default.
 - `install.py`: copies the launcher to `~/.local/share/oc-box` and creates
   `~/.local/bin/oc-box`.
 - `installation.py`: staged immutable installed copies and launcher activation.
@@ -65,7 +67,7 @@ the repository; installing oc-box must not require documentation build tools.
 ## Checks
 
 ```bash
-python3 -B -m unittest discover -s tests -v
+uv run --no-project --with cryptography python -B -m unittest discover -s tests -v
 python3 -B tests/smoke_mainline.py
 ```
 
@@ -108,3 +110,8 @@ Updates fetch the fixed public HTTPS upstream anonymously with sanitized Git
 configuration/environment. Never reuse publishing/provider credentials for
 downloads. Keep automatic updating opt-in, preserve running release copies,
 workspaces and source checkouts, and do not self-update from inside a container.
+
+Vault values/passphrases never belong in argv, logs, project files, registry
+metadata, plaintext temporary files, or host os.environ. Keep the optional crypto
+dependency lazy for default installs. Maintenance and informational commands
+never unlock. Wrong/missing selected credentials must abort before reset deletion.

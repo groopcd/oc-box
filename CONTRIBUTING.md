@@ -10,7 +10,7 @@ Python 3.10+ and stdlib are sufficient for unit tests. The mainline smoke test
 also needs Git and OpenCode (integration checked with 1.19.5):
 
 ```sh
-python3 -B -m unittest discover -s tests -v
+uv run --no-project --with cryptography python -B -m unittest discover -s tests -v
 python3 -B tests/smoke_mainline.py
 python3 -B tools/build_docs.py --check
 git diff --check
@@ -56,8 +56,11 @@ Original contributions are licensed GPL-3.0-or-later. Retain LICENSE and NOTICE.
 ## Python packages and PyPI releases
 
 The wheel contains a namespaced `oc_box` package, runtime helper scripts,
-prebuilt manuals, license/notice, and immutable source metadata. It has no
-third-party runtime Python dependencies. GitHub source/curl installations stay
+prebuilt manuals, license/notice, and immutable source metadata. Its default
+env workflow has no third-party runtime Python dependencies. The optional
+`vault` extra adds maintained cryptography for Scrypt/AES-GCM; full CI/security
+tests install that extra in an isolated environment, while plain installs still
+test that no crypto dependency is required to launch. GitHub source/curl installations stay
 supported in parallel. Do not make a pip-managed launcher install through the
 GitHub self-updater or write a global wrapper as an installation side effect.
 
@@ -67,7 +70,7 @@ install is needed):
 ```sh
 uv run --no-project --with build --with twine python -m build
 uv run --no-project --with twine python -m twine check dist/*
-python3 tools/check_package.py dist
+python3 tools/check_package.py dist --with-vault
 ```
 
 The last check installs only the wheel into a temporary virtual environment,

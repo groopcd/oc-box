@@ -36,6 +36,7 @@ class PackagingTests(unittest.TestCase):
         self.assertIn('oc-box = "oc_box.oc_box:entrypoint"', metadata)
         self.assertIn('license = "GPL-3.0-or-later"', metadata)
         self.assertIn('requires-python = ">=3.10"', metadata)
+        self.assertIn('vault = ["cryptography>=44"]', metadata)
         workflow = (APP / ".github/workflows/publish.yml").read_text()
         self.assertIn("name: pypi", workflow)
         self.assertIn("id-token: write", workflow)

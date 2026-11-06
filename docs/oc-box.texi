@@ -56,6 +56,9 @@ oc-box distros
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
 oc-box upgrade [--check | --auto-update on|off]
+oc-box secrets init|list|passwd
+oc-box secrets set|remove NAME
+oc-box credentials [--project PATH | --workspace ID] [CREDENTIAL-OPTIONS]
 oc-box --about
 oc-box --version
 oc-box -h | --help
@@ -236,6 +239,67 @@ Automatic updates are off by default. @code{--auto-update on} saves @code{auto_u
 
 Fetch/checkout/install subprocesses have a clean, positive-allowlisted environment. Global/system Git config, helpers, hooks, external protocols, provider tokens, SSH agents, and user proxy variables are not used by the public download. HTTPS is required; shell commands or a custom upstream URL are not accepted. Use manual source installation for a reviewed alternate deployment. Updates inside a container are refused because its private HOME is not the host installation. Git is required for public updates; build tools are not.
 
+@section secrets
+
+Manage an optional encrypted credential vault on the host. This command never starts Podman or copies secrets into the development environment. The existing env-file workflow is unchanged unless you select vault credentials explicitly. Use the literal @code{secrets} command first, followed by one action and, for set or remove, an uppercase environment name. Values and passphrases are accepted only through hidden controlling-terminal prompts, never argv, stdin, or environment password settings. Host-only; do not run it inside a development container.
+
+@example
+oc-box secrets init
+oc-box secrets set PERSONAL_GITHUB_TOKEN
+oc-box secrets set BRAVE_API_KEY
+oc-box secrets list
+oc-box secrets remove OLD_TOKEN
+oc-box secrets passwd
+@end example
+
+Actions: @code{init} creates an empty vault after entering/confirming a passphrase; it never overwrites an existing vault. @code{set NAME} unlocks, then enters/confirms the secret value and creates or replaces that entry. @code{list} unlocks and prints only sorted names, never values. @code{remove NAME} unlocks and deletes the named entry; a missing entry causes a clear error without changes. @code{passwd} unlocks with the old passphrase and asks for a new confirmed passphrase. No @code{get}, plaintext dump, insecure batch password option, or automated env-file import is provided. @code{oc-box secrets --help} describes the action syntax.
+
+Optional cryptography support is required only when using vault operations:
+
+@example
+pipx install 'oc-box[vault]'
+# Add support to an existing pipx installation:
+pipx inject oc-box 'cryptography>=44'
+# Or install/reinstall the uv tool with its extra:
+uv tool install --force 'oc-box[vault]'
+# In a package installation's activated virtual environment:
+python -m pip install 'oc-box[vault]'
+@end example
+
+For GitHub/source installations, @code{python3 install.py --with-vault} stages the optional crypto wheels privately in that release (using a temporary venv), not in system/user-site Python. The curl bootstrap accepts @code{sh -s -- --with-vault} when piped to a shell. Future GitHub upgrades preserve that opt-in. The source can also use a host Python with a distro-provided cryptography package. A missing dependency yields guidance, not a fallback to weak/custom encryption. No desktop keyring, external password manager, cloud service, or daemon is used.
+
+AES-256-GCM authenticates the ciphertext and format/KDF metadata; Scrypt uses a random 16-byte salt with n=131072, r=8, p=1 (approximately 128 MiB memory) and a 32-byte key. Each write generates a fresh salt and 12-byte nonce. Crypto is implemented by the maintained cryptography library, not handwritten primitives. Format version 1 accepts only those bounded parameters; tampered costs cannot trigger arbitrary memory allocation. Passphrases must have at least 12 characters when created/changed (maximum 1024 UTF-8 bytes). Entries are limited to 128, each nonempty UTF-8 value at most 64 KiB with no NUL, and the complete encrypted file to 2 MiB. Names, unlike workspace selections, are encrypted too.
+
+The host vault normally resides at @code{~/.local/share/oc-box/credentials/vault.json}, or its XDG_DATA_HOME equivalent. Its directory must be owned by your user with 0700 and the regular vault file with private 0600 permissions. Symlink paths, extra hard links, wrong ownership, insecure permissions, invalid formats, and nonregular vault/lock files are rejected. Files are locked during read-modify-write. Ciphertext is written to a 0600 temporary file, fsynced, and atomically replaced; no plaintext temp file or key file is created. Do not locate the vault inside a mounted project.
+
+There is no passphrase recovery or permanent unlock/cache agent. Forgotten passphrases make the encrypted data unrecoverable. Back up ciphertext and store the passphrase separately. Removing an entry or changing a passphrase does not erase older backups/snapshots or revoke the provider token. WSL requires a host terminal and filesystem permissions such as its Linux home filesystem; this is not a promise that an arbitrary Windows/shared mount enforces Unix permissions. Python memory is not guaranteed zeroized; core dumps are disabled on secret prompt entry where permitted, but host debugging/swap/hardware compromise and secrets delivered to container processes are outside at-rest encryption. During vault-enabled launches, host captured subprocess output uses anonymous Linux memfd storage rather than disk-backed temporary files. Launcher-generated failure messages redact exact active vault values. This is not a general redaction filter for OpenCode, provider logs, tool output, or session archives: an agent can still print, save, or transmit a credential it has received.
+
+@section credentials
+
+View or change **names-only** forwarding policy for an existing workspace. The default is @code{env}: auto-forward sourced token/API-key variables and configured @code{pass_env} exactly as before. No policy change occurs merely by upgrading. With no selection options, print mode and selected names without unlocking the vault, revealing values, starting a container, or refreshing config/auth.
+
+@example
+oc-box credentials --project ~/devel/demo
+oc-box credentials --workspace WORKSPACE_ID --credential-mode selected \
+  --env-secret GITHUB_TOKEN --vault-secret PERSONAL_GITHUB_TOKEN
+@end example
+
+Requires the registered project/marker and exclusive workspace lock. Exit its launcher before configuration; changes take effect on the next launch without reset or session import. Selectors default to the current directory; no new workspace is created here. Start a new environment normally once to register it, exit, then configure selections. Use only selectors and credential options; session, device, resource, deletion, or update options are refused.
+
+In @code{selected} mode, only the explicitly selected env/vault names are delivered, plus the launcher's fixed runtime settings and noncredential language/color/ model-routing preferences. This replaces automatic suffix forwarding and global @code{pass_env}, not just supplements them. Vault and env names cannot overlap. Uppercase credential names cannot override loader/shell/host runtime settings such as PATH, BASH_ENV, LD_PRELOAD, OPENCODE_AUTH_CONTENT, or OC_BOX variables. Names append/deduplicate; @code{--clear-credentials} clears both lists before adding.
+
+@example
+source /path/to/private/file.env
+oc-box credentials --project ~/devel/demo --credential-mode selected \
+  --clear-credentials --env-secret GITHUB_TOKEN --vault-secret BRAVE_API_KEY
+oc-box --project ~/devel/demo
+oc-box credentials --project ~/devel/demo --credential-mode env --clear-credentials
+@end example
+
+A normal start/reset/import launch unlocks once when selected vault names exist, and the decrypted selection is kept only in the launcher's memory/context. It is not written to the workspace metadata, host os.environ, command arguments, config files, or a cache. Values reach the container through Podman's inherited env names. Wrong passphrase/missing selection aborts before container setup or reset deletion. Env mode may also supplement inherited variables with selected vault names; a vault value then wins over the inherited same-named env value.
+
+Informational commands, maintenance terminal, explicit history sync, stop, repair, and upgrade never unlock. The maintenance shell's clean environment rules remain unchanged. Configuration/auth copying is an independent feature: these selections do not remove embedded credentials in copied config, provider or MCP auth files, project files, raw Podman create-time Env settings, previous processes, or previously saved container data. Selection is reduced forwarding, not an isolation boundary from secrets already inside the container. Delivered keys remain readable by the agent/tools with normal container permissions.
+
 @node Options
 @chapter Options
 
@@ -317,6 +381,22 @@ Pass the provider/model choice to the OpenCode TUI on this launch. It is not a p
 @example
 oc-box --project ~/devel/demo --model github-copilot/gpt-6.1-sol
 @end example
+
+@section --credential-mode env|selected
+
+With @code{credentials}, choose forwarding mode for that workspace. @code{env} is the unchanged default: suffix-based and custom pass_env forwarding, optionally supplemented with selected vault names. @code{selected} forwards only configured credential names, plus fixed runtime/nonsecret routing settings. The mode is saved in host metadata, not applied as a container reset or to an active client. Example: @code{oc-box credentials --project ~/devel/demo --credential-mode selected}.
+
+@section --env-secret NAME
+
+With @code{credentials}, append an uppercase environment credential name to the workspace's explicit env selection, repeatable and deduplicated. In selected mode it must be present/nonempty in the sourced host environment before launch; a missing value aborts before unlock/setup. Env mode already forwards legacy variables, so this list becomes restrictive only in selected mode. No value is accepted here. Example: @code{oc-box credentials --env-secret PERSONAL_GITHUB_TOKEN}.
+
+@section --vault-secret NAME
+
+With @code{credentials}, select an existing encrypted vault entry name to unlock and forward on normal start/reset/import launches. Repeat for multiple names. The name is saved in workspace metadata, never its secret value. Vault presence is checked when unlocking, not by this names-only configuration command. A name cannot also be selected with --env-secret. Example: @code{oc-box credentials --vault-secret BRAVE_API_KEY}.
+
+@section --clear-credentials
+
+With @code{credentials}, clear both saved env-name and vault-name lists before adding new selections on this invocation. It does not erase the vault, remove provider auth/config, revoke credentials, or change mode unless --credential-mode is also specified. Example: @code{oc-box credentials --credential-mode env --clear-credentials} returns to the original env workflow without deleting encrypted vault entries.
 
 @section --cpus NUMBER
 
