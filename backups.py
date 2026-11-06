@@ -200,6 +200,9 @@ def activate_project(staging, destination):
 
 def make_backup(box, args):
     crypto.validate_recipients(args.recipient or [])
+    minimum = crypto.passphrase_minimum(
+        args.recipient or [], getattr(args, "min_passphrase_length", None)
+    )
     path, data = box.find_workspace(args.project, args.workspace)
     if data is None:
         raise BackupError(
@@ -283,7 +286,7 @@ def make_backup(box, args):
             ) as temp:
                 staging = Path(temp)
                 _, recipient = crypto.generate_key(
-                    args.recipient or [], staging / "key.age"
+                    args.recipient or [], staging / "key.age", minimum=minimum
                 )
                 parts = {}
                 for name, producer in (
@@ -824,7 +827,12 @@ def parser_for(action):
         parser.add_argument(
             "--recipient",
             action="append",
-            help="native age public recipient; repeatable; otherwise age prompts for a backup passphrase",
+            help="native age public recipient; repeatable; otherwise prompt for a backup passphrase",
+        )
+        parser.add_argument(
+            "--min-passphrase-length",
+            type=int,
+            help="minimum characters for a new backup passphrase, 8..1024; overrides host config; incompatible with --recipient",
         )
     else:
         parser.add_argument("file", type=Path)

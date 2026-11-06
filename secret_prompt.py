@@ -1,4 +1,4 @@
-"""Small controlling-terminal editor for masked vault input.
+"""Controlling-terminal editor and creation policy for masked secret input.
 
 No input comes from stdin and no field is sent to stdout/stderr. Rendering is
 single-line and bounded to the current terminal width to avoid normal wrapping.
@@ -6,7 +6,9 @@ Reveal is explicit, prompt-local, and cleared before return/error. Terminal
 recordings, screen captures, resize reflow, or scrollback may retain revealed text.
 """
 
+import json
 import os
+from pathlib import Path
 import re
 import select
 import signal
@@ -30,6 +32,52 @@ KEYS = {
     b"\x1b[8~": "end",
     b"\x1b[3~": "delete",
 }
+MAX_PASSPHRASE_BYTES = 1024
+
+
+def validate_minimum(length):
+    if type(length) is not int or not 8 <= length <= MAX_PASSPHRASE_BYTES:
+        raise ValueError("Minimum passphrase length must be an integer from 8 to 1024.")
+    return length
+
+
+def passphrase_minimum(kind, override=None):
+    """Resolve public creation policy only; never restrict existing unlocks."""
+    if override is not None:
+        return validate_minimum(override)
+    key = kind + "_min_passphrase_length"
+    base = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+    try:
+        settings = json.loads((base / "oc-box/config.json").read_text())
+    except FileNotFoundError:
+        settings = {}
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            "Cannot read passphrase policy from oc-box/config.json."
+        ) from exc
+    if not isinstance(settings, dict):
+        raise ValueError("oc-box/config.json must be a JSON object.")
+    try:
+        return validate_minimum(settings.get(key, 8))
+    except ValueError as exc:
+        raise ValueError(f"Invalid {key} in oc-box/config.json: {exc}") from exc
+
+
+def new_passphrase(kind, minimum, *, reader=None):
+    minimum = validate_minimum(minimum)
+    reader = read_secret if reader is None else reader
+    first = reader(f"New {kind} passphrase ({minimum}+ characters): ")
+    if (
+        len(first) < minimum
+        or any(char in first for char in ("\0", "\r", "\n"))
+        or len(first.encode()) > MAX_PASSPHRASE_BYTES
+    ):
+        raise ValueError(
+            f"Choose a single-line passphrase of {minimum} or more characters (maximum 1024 UTF-8 bytes)."
+        )
+    if first != reader(f"Confirm {kind} passphrase: "):
+        raise ValueError("Passphrases do not match; no password was changed.")
+    return first
 
 
 def write(fd, text):

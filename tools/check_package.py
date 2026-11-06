@@ -148,9 +148,11 @@ def check(directory, *, with_vault=False):
         assert "--import-session" in run(cli, "--help")
         assert "secrets" in run(cli, "--help")
         assert "--recipient" in run(cli, "backup", "--help")
+        assert "--min-passphrase-length" in run(cli, "backup", "--help")
         assert "--identity" in run(cli, "restore", "--help")
         assert "--identity" in run(cli, "backup-info", "--help")
         assert "init" in run(cli, "secrets", "--help")
+        assert "--min-passphrase-length" in run(cli, "secrets", "--help")
         # Default package installation keeps crypto optional and never prompts.
         assert "cryptography" not in run(
             python,
@@ -280,7 +282,7 @@ def check(directory, *, with_vault=False):
 from pathlib import Path
 from unittest.mock import patch
 from oc_box import oc_box as box, vault
-phrase='synthetic package test passphrase'
+phrase='eight888'
 value='synthetic package test credential'
 with patch.object(vault,'hidden',side_effect=[phrase,phrase]), contextlib.redirect_stdout(io.StringIO()):
     assert box.main(['secrets','init'])==0

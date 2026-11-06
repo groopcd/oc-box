@@ -63,6 +63,48 @@ class VaultFixture(unittest.TestCase):
     "optional cryptography not installed; run tests with oc-box[vault]/uv --with cryptography",
 )
 class EncryptedVaultTests(VaultFixture):
+    def test_eight_character_creation_and_configured_change_policy_preserve_data(self):
+        phrase = "eight888"
+        with (
+            patch.object(vault, "hidden", side_effect=[phrase, phrase]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            vault.manage("init", path=self.path)
+        self.assertEqual(vault.unlock(vault.read_envelope(self.path), phrase), {})
+        settings = self.root / "config/oc-box/config.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text('{"vault_min_passphrase_length":16}')
+        before = self.path.read_bytes()
+        with (
+            patch.object(vault, "hidden", side_effect=[phrase, "twelve123456"]),
+            self.assertRaisesRegex(vault.VaultError, "16 or more"),
+        ):
+            vault.manage("passwd", path=self.path)
+        self.assertEqual(self.path.read_bytes(), before)
+        # A stricter creation policy must not prevent an existing short unlock.
+        with (
+            patch.object(vault, "hidden", return_value=phrase),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            vault.manage("list", path=self.path)
+        replacement = "newpass8"
+        with (
+            patch.object(
+                vault, "hidden", side_effect=[phrase, replacement, replacement]
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            vault.manage("passwd", path=self.path, min_passphrase_length=8)
+        self.assertEqual(vault.unlock(vault.read_envelope(self.path), replacement), {})
+
+    def test_creation_rejects_seven_characters_without_creating_vault(self):
+        with (
+            patch.object(vault, "hidden", return_value="short77"),
+            self.assertRaisesRegex(vault.VaultError, "8 or more"),
+        ):
+            vault.manage("init", path=self.path)
+        self.assertFalse(self.path.exists())
+
     def test_authenticated_encrypted_roundtrip_and_private_files(self):
         envelope = self.encrypted()
         raw = self.path.read_text()
@@ -266,6 +308,26 @@ class EncryptedVaultTests(VaultFixture):
 
 
 class VaultPolicyTests(VaultFixture):
+    def test_passphrase_cli_override_and_invalid_policy_are_checked_before_unlock(self):
+        with patch.object(vault, "manage") as manage:
+            self.assertEqual(
+                box.main(["secrets", "init", "--min-passphrase-length", "8"]), 0
+            )
+        manage.assert_called_once_with("init", None, min_passphrase_length=8)
+        for action in ("init", "passwd"):
+            for minimum in (7, 1025):
+                with (
+                    self.subTest(action=action, minimum=minimum),
+                    patch.object(vault, "hidden") as prompt,
+                    self.assertRaises(box.BoxError),
+                ):
+                    box.main(
+                        ["secrets", action, "--min-passphrase-length", str(minimum)]
+                    )
+                prompt.assert_not_called()
+        with self.assertRaisesRegex(box.BoxError, "init/passwd"):
+            box.main(["secrets", "list", "--min-passphrase-length", "8"])
+
     def test_env_workflow_is_default_and_never_opens_vault_or_loads_crypto(self):
         with (
             patch.dict(os.environ, {"EXAMPLE_TOKEN": VALUE}),

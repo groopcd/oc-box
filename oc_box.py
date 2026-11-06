@@ -2185,15 +2185,27 @@ def secrets_command(argv):
     parser.add_argument(
         "name", nargs="?", help="credential environment name for set/remove"
     )
+    parser.add_argument(
+        "--min-passphrase-length",
+        type=int,
+        help="minimum characters for a new vault passphrase, 8..1024; init/passwd only; overrides host config",
+    )
     args = parser.parse_args(argv)
     if (args.action in ("set", "remove")) != (args.name is not None):
         raise BoxError("Use a credential NAME only with secrets set/remove.")
+    if args.min_passphrase_length is not None and args.action not in ("init", "passwd"):
+        raise BoxError("--min-passphrase-length applies only to secrets init/passwd.")
     if os.environ.get("OC_BOX_CONTAINER") == "1":
         raise BoxError(
             "Manage the vault from the host, not from a development container."
         )
     try:
-        vault.manage(args.action, args.name)
+        options = (
+            {"min_passphrase_length": args.min_passphrase_length}
+            if args.min_passphrase_length is not None
+            else {}
+        )
+        vault.manage(args.action, args.name, **options)
     except vault.VaultError as exc:
         raise BoxError(str(exc)) from exc
     return 0

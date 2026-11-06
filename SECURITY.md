@@ -50,6 +50,12 @@ text as terminal control sequences, and bracketed control/multiline pastes are
 rejected. No values are displayed on stdout/stderr or exported as command-line
 arguments. This changes interactive display only, not at-rest encryption.
 
+Vault and backup passphrase creation default to a minimum of 8 characters.
+`vault_min_passphrase_length` and `backup_min_passphrase_length` in host oc-box
+config, or the per-operation `--min-passphrase-length` override, can require
+8..1024 characters (maximum 1024 UTF-8 bytes). These are creation policies:
+changing them does not invalidate existing passwords or rewrite encrypted data.
+
 The encrypted vault is outside the project/container at
 `$XDG_DATA_HOME/oc-box/credentials/vault.json` (default
 `~/.local/share/oc-box/credentials/vault.json`). Its directory/file must be
@@ -162,6 +168,13 @@ executed, or OpenCode config/auth refreshed for backup/info/restore. The complet
 project, private home, OS, and registry may contain credentials, so backups and their
 decryption keys must be handled as sensitive data. The separate host vault is
 not included; its encrypted file needs an independent backup.
+
+New backup passwords use the masked controlling-host-terminal editor, followed
+by standard age encryption. The validated password is supplied through a private
+echo-disabled PTY; it is never placed in argv, environment variables, or a
+plaintext file. age's private prompt output is captured only in memory. Unlock
+continues to use age's own terminal prompt for backward compatibility. Recipient
+encryption avoids a password prompt and ignores password creation policy.
 
 A stopped container and exclusive workspace lock protect database capture, not
 against host editors changing source during backup. Nested mounts and external

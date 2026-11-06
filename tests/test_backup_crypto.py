@@ -212,7 +212,7 @@ class AgeEnvelopeTests(unittest.TestCase):
         master, slave = pty.openpty()
         original = termios.tcgetattr(slave)
         output = self.root / "passphrase.age"
-        code = "import fcntl,os,sys,termios; os.setsid(); fcntl.ioctl(0,termios.TIOCSCTTY,0); sys.path.insert(0,sys.argv[1]); import backup_crypto as c; from pathlib import Path; c.generate_key([],Path(sys.argv[2])); p=c.load_key(Path(sys.argv[2]),[]); assert b'AGE-SECRET-KEY-1' in p; print('PASSPHRASE_ROUNDTRIP_OK',flush=True)"
+        code = "import fcntl,os,sys,termios; os.setsid(); fcntl.ioctl(0,termios.TIOCSCTTY,0); sys.path.insert(0,sys.argv[1]); import backup_crypto as c; from pathlib import Path; c.generate_key([],Path(sys.argv[2]),minimum=8); p=c.load_key(Path(sys.argv[2]),[]); assert b'AGE-SECRET-KEY-1' in p; print('PASSPHRASE_ROUNDTRIP_OK',flush=True)"
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -228,8 +228,12 @@ class AgeEnvelopeTests(unittest.TestCase):
             env=crypto.environment(),
         )
         seen = bytearray()
-        phrase = b"synthetic-age-backup-passphrase"
-        prompts = [b"Enter passphrase", b"Confirm passphrase", b"Enter passphrase"]
+        phrase = b"eight888"
+        prompts = [
+            b"New backup passphrase",
+            b"Confirm backup passphrase",
+            b"Enter passphrase",
+        ]
         step, offset = 0, 0
         try:
             deadline = time.monotonic() + 15
@@ -257,6 +261,82 @@ class AgeEnvelopeTests(unittest.TestCase):
 
 
 class BackupEnvironmentTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("age"), "optional age host tool unavailable")
+    def test_backup_age_bridge_keeps_password_out_of_argv_env_and_files(self):
+        phrase = "éight888"
+        with tempfile.TemporaryDirectory(prefix="oc-box-password-bridge-") as temporary:
+            path = Path(temporary) / "key.age"
+            with (
+                patch.object(crypto.secret_prompt, "read_secret", return_value=phrase),
+                patch.object(
+                    crypto.subprocess, "Popen", wraps=subprocess.Popen
+                ) as child,
+            ):
+                crypto.encrypt_passphrase(b"synthetic-private-key", path, 8)
+            arguments = child.call_args.args[0]
+            self.assertNotIn(phrase, " ".join(arguments))
+            self.assertNotIn(phrase, json.dumps(child.call_args.kwargs["env"]))
+            self.assertNotIn(phrase.encode(), path.read_bytes())
+            self.assertEqual(list(Path(temporary).iterdir()), [path])
+
+    def test_stricter_backup_policy_applies_to_creation_and_not_recipients(self):
+        with tempfile.TemporaryDirectory(prefix="oc-box-backup-policy-") as temporary:
+            settings = Path(temporary) / "oc-box/config.json"
+            settings.parent.mkdir()
+            settings.write_text('{"backup_min_passphrase_length":16}')
+            with patch.dict(os.environ, {"XDG_CONFIG_HOME": temporary}):
+                minimum = crypto.passphrase_minimum([])
+                self.assertEqual(minimum, 16)
+                self.assertEqual(crypto.passphrase_minimum([], 8), 8)
+                with (
+                    patch.object(
+                        crypto.secret_prompt, "read_secret", return_value="eight888"
+                    ),
+                    patch.object(crypto.subprocess, "Popen") as child,
+                    self.assertRaisesRegex(crypto.BackupError, "16 or more"),
+                ):
+                    crypto.encrypt_passphrase(
+                        b"key", Path(temporary) / "unused.age", minimum
+                    )
+                child.assert_not_called()
+                settings.write_text('{"backup_min_passphrase_length":7}')
+                self.assertIsNone(crypto.passphrase_minimum(["public-key"]))
+                with self.assertRaisesRegex(
+                    crypto.BackupError, "backup_min_passphrase_length"
+                ):
+                    crypto.passphrase_minimum([])
+
+    def test_backup_creation_policy_rejects_bad_options_before_backend_access(self):
+        import backups
+        import oc_box as box
+
+        for options in (
+            ["--min-passphrase-length", "7"],
+            ["--min-passphrase-length", "1025"],
+            ["--recipient", "age1" + "q" * 58, "--min-passphrase-length", "8"],
+        ):
+            with (
+                self.subTest(options=options),
+                patch.object(box, "find_workspace") as lookup,
+                self.assertRaises(crypto.BackupError),
+            ):
+                args = backups.parser_for("backup").parse_args(
+                    ["--output", "/tmp/example.ocbox", *options]
+                )
+                backups.make_backup(box, args)
+            lookup.assert_not_called()
+
+    def test_short_or_mismatched_backup_password_never_starts_age(self):
+        for answers in (["short77"], ["eight888", "different"]):
+            with (
+                self.subTest(answers=answers),
+                patch.object(crypto.secret_prompt, "read_secret", side_effect=answers),
+                patch.object(crypto.subprocess, "Popen") as child,
+                self.assertRaises(crypto.BackupError),
+            ):
+                crypto.encrypt_passphrase(b"synthetic-key", Path("unused.age"), 8)
+            child.assert_not_called()
+
     def test_backup_children_never_inherit_tokens_loader_hooks_or_age_settings(self):
         with patch.dict(
             os.environ,

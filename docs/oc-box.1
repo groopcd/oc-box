@@ -227,6 +227,8 @@ oc\-box secrets set BRAVE_API_KEY
 oc\-box secrets list
 oc\-box secrets remove OLD_TOKEN
 oc\-box secrets passwd
+# Override the saved minimum for a new/changed passphrase:
+oc\-box secrets passwd \-\-min\-passphrase\-length 8
 .fam T
 .fi
 .PP
@@ -256,7 +258,7 @@ python \-m pip install 'oc\-box[vault]'
 .PP
 For GitHub/source installations, \fBpython3 install.py \-\-with\-vault\fR stages the optional crypto wheels privately in that release (using a temporary venv), not in system/user\-site Python. The curl bootstrap accepts \fBsh \-s \-\- \-\-with\-vault\fR when piped to a shell. Future GitHub upgrades preserve that opt\-in. The source can also use a host Python with a distro\-provided cryptography package. A missing dependency yields guidance, not a fallback to weak/custom encryption. No desktop keyring, external password manager, cloud service, or daemon is used.
 .PP
-AES\-256\-GCM authenticates the ciphertext and format/KDF metadata; Scrypt uses a random 16\-byte salt with n=131072, r=8, p=1 (approximately 128 MiB memory) and a 32\-byte key. Each write generates a fresh salt and 12\-byte nonce. Crypto is implemented by the maintained cryptography library, not handwritten primitives. Format version 1 accepts only those bounded parameters; tampered costs cannot trigger arbitrary memory allocation. Passphrases must have at least 12 characters when created/changed (maximum 1024 UTF\-8 bytes). Entries are limited to 128, each nonempty UTF\-8 value at most 64 KiB with no NUL, and the complete encrypted file to 2 MiB. Names, unlike workspace selections, are encrypted too.
+AES\-256\-GCM authenticates the ciphertext and format/KDF metadata; Scrypt uses a random 16\-byte salt with n=131072, r=8, p=1 (approximately 128 MiB memory) and a 32\-byte key. Each write generates a fresh salt and 12\-byte nonce. Crypto is implemented by the maintained cryptography library, not handwritten primitives. Format version 1 accepts only those bounded parameters; tampered costs cannot trigger arbitrary memory allocation. New/changed passphrases default to a minimum of 8 characters, configurable with \fBvault_min_passphrase_length\fR in the host oc\-box config or \fB\-\-min\-passphrase\-length\fR on \fBinit\fR/\fBpasswd\fR\&. Integers from 8 to 1024 are accepted; longer passwords are allowed up to 1024 UTF\-8 bytes. Existing passphrases unlock regardless of the current creation minimum. Entries are limited to 128, each nonempty UTF\-8 value at most 64 KiB with no NUL, and the complete encrypted file to 2 MiB. Names, unlike workspace selections, are encrypted too.
 .PP
 The host vault normally resides at \fB~/\:.local/\:share/\:oc\-box/\:credentials/\:vault.json\fR, or its XDG_DATA_HOME equivalent. Its directory must be owned by your user with 0700 and the regular vault file with private 0600 permissions. Symlink paths, extra hard links, wrong ownership, insecure permissions, invalid formats, and nonregular vault/lock files are rejected. Files are locked during read\-modify\-write. Ciphertext is written to a 0600 temporary file, fsynced, and atomically replaced; no plaintext temp file or key file is created. Do not locate the vault inside a mounted project.
 .PP
@@ -305,7 +307,7 @@ The workspace lock requires its active OpenCode launcher or maintenance shell to
 .PP
 Full backup (default) captures the complete project including \fB\&.git\fR, untracked files and unfinished edits; the private home with the live OpenCode SQLite DB, subagent transcripts, snapshots, copied config/auth, and caches; registry/resume evidence; and a committed OCI image of the modified container OS. Mounted project and home are backed up separately, not folded into the image. Portable mode omits that OS image; system packages/SDKs must be recreated after restore. Neither mode captures running processes, kernel state, devices, host drivers, the host\-wide vault, host global DB/config, or arbitrary paths outside those components. Env files inside the selected project are project data and are included; host env files outside it are not read.
 .PP
-Default encryption uses age's own hidden passphrase prompt for a fresh key envelope; it is separate from the vault password, with no custom cipher/KDF. For unattended encryption use a native age X25519 public recipient, repeatable:
+Default encryption asks for a new/confirmed masked backup passphrase (default minimum 8 characters), separate from the vault password. Set \fBbackup_min_passphrase_length\fR in host oc\-box config or use \fB\-\-min\-passphrase\-length N\fR for this backup. Both accept integers from 8 to 1024; longer passwords are allowed up to 1024 UTF\-8 bytes. Blank/short/mismatched input is rejected, rather than asking age to generate a password. oc\-box passes the validated password to standard age through a private, echo\-disabled terminal; no password enters argv, environment variables, or plaintext files. Age still provides the cipher/KDF and prompts directly when unlocking existing backups, which are not restricted by the current creation minimum. For unattended encryption use a native age X25519 public recipient, repeatable:
 .PP
 .nf
 .fam C
@@ -356,6 +358,18 @@ The host vault is not included or unlocked. Credential selections retain names o
 .SS \-h, \-\-help
 .PP
 Print command choices, options, and short descriptions; exit without Podman. For example: \fBoc\-box \-\-help\fR\&.
+.SS \-\-min\-passphrase\-length N
+.PP
+Set the minimum character count for a new vault or backup passphrase for this operation. Accepted only with \fBoc\-box secrets init\fR, \fBoc\-box secrets passwd\fR, and \fBoc\-box backup\fR; it is incompatible with backup \fB\-\-recipient\fR\&. N must be an integer from 8 to 1024. The default is 8 unless the corresponding host config key \fBvault_min_passphrase_length\fR or \fBbackup_min_passphrase_length\fR is set; this flag overrides that key without saving it. Passwords may exceed the minimum, subject to the 1024 UTF\-8\-byte limit. Unlock/restore never enforces a new creation policy against an existing password. The number is public policy, not a way to pass a password in argv. For example:
+.PP
+.nf
+.fam C
+oc\-box secrets init \-\-min\-passphrase\-length 8
+oc\-box secrets passwd \-\-min\-passphrase\-length 16
+oc\-box backup \-\-project ~/devel/demo \-\-output /backup/demo.ocbox \e
+  \-\-min\-passphrase\-length 12
+.fam T
+.fi
 .SS \-\-project PATH
 .PP
 Select an existing project directory; relative paths resolve from the host working directory. Quote paths containing spaces. For lifecycle commands the default is the current directory. For status, omission means all workspaces. The project must not be the host home, \fB/\:\fR, \fB/\:home\fR, the oc\-box registry, or a directory containing trusted launcher/state files. Colons, commas, and line breaks in the project path are unsupported because of Podman mount syntax.
@@ -703,6 +717,19 @@ Variables ending \fB_API_KEY\fR or \fB_TOKEN\fR, plus \fBGH_TOKEN\fR, \fBGITHUB_
 .fi
 .PP
 Save that as \fB~/\:.config/\:oc\-box/\:config.json\fR (or its XDG equivalent). Only values present in the host environment are copied. Forwarded HTTP localhost URLs are mapped to the host\-service name. The default \fBLEMONADE_BASE_URL\fR is \fBhttp:/\:/\:host.containers.internal:13305/\:api/\:v1\fR\&. \fBTERM\fR defaults to \fBxterm\-256color\fR\&. Host PATH, shell startup scripts, proxy variables, engine sockets, and SSH agents are not forwarded by default.
+.PP
+Separate password creation minimums can be saved in the same JSON object:
+.PP
+.nf
+.fam C
+{
+  "vault_min_passphrase_length": 12,
+  "backup_min_passphrase_length": 16
+}
+.fam T
+.fi
+.PP
+Each defaults to 8 and accepts an integer from 8 to 1024. They set a minimum character count, not an exact size; all passphrases remain bounded to 1024 UTF\-8 bytes. \fB\-\-min\-passphrase\-length N\fR overrides the relevant setting for one creation/change. Invalid policy fails before vault unlock or backup lifecycle changes. Existing passwords and recipient\-encrypted backups do not consult these creation settings. Preserve your other keys when editing this file.
 .PP
 The same JSON object can include \fB"auto_update": true\fR to opt in to anonymous GitHub checks/installation before normal installed launches, or use \fBoc\-box upgrade \-\-auto\-update on\fR\&. The setting is off by default and is not forwarded into the container. \fBOC_BOX_UPDATE_CHECKED=1\fR is an internal one\-launch guard used when restarting the host launcher after automatic installation; it prevents recursion, not authentication or a workspace identity override.
 .PP

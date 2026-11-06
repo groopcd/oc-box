@@ -433,10 +433,27 @@ value command-line argument, saved history, or change to the encrypted format.
 The host vault is normally `~/.local/share/oc-box/credentials/vault.json`
 (`$XDG_DATA_HOME/oc-box/credentials/vault.json` when set), outside project and
 container storage. Credentials and their names are encrypted with AES-256-GCM;
-Scrypt derives the key from a passphrase (minimum 12 characters). The private
+Scrypt derives the key from a passphrase (default minimum 8 characters). The private
 file is 0600 and its directory 0700. There is no saved key, unlock cache,
 passphrase environment variable, plaintext export, or recovery mechanism for a
 forgotten passphrase. Back up the encrypted vault and keep its passphrase safe.
+
+Set separate minimum lengths in `~/.config/oc-box/config.json` (or its XDG
+equivalent), retaining any existing settings:
+
+```json
+{
+  "vault_min_passphrase_length": 12,
+  "backup_min_passphrase_length": 16
+}
+```
+
+Both default to 8 and accept integers from 8 to 1024; passwords can be longer
+than the selected minimum, up to 1024 UTF-8 bytes. Override for one operation
+with `oc-box secrets init --min-passphrase-length 8`,
+`oc-box secrets passwd --min-passphrase-length 8`, or
+`oc-box backup ... --min-passphrase-length 8`. These rules apply to new/changed
+passwords; existing vaults/backups still unlock with their original passwords.
 
 Select only the credentials an **existing** workspace needs, after exiting its
 active launcher. These commands do not start/reset a container or read values:
@@ -491,7 +508,7 @@ exit the source workspace's OpenCode launcher and keep host editors/builds idle:
 oc-box backup --project ~/devel/demo --output /backup/demo.ocbox
 # Smaller backup; rebuild the distro OS on first restored launch:
 oc-box backup --project ~/devel/demo --portable --output /backup/demo-portable.ocbox
-# Both prompt for an age backup passphrase, separate from the credential vault.
+# Both prompt for a masked backup passphrase, separate from the credential vault.
 oc-box backup-info /backup/demo.ocbox
 oc-box restore /backup/demo.ocbox --project ~/devel/demo-restored
 ```

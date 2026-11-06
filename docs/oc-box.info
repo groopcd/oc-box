@@ -486,6 +486,8 @@ settings.  Host-only; do not run it inside a development container.
      oc-box secrets list
      oc-box secrets remove OLD_TOKEN
      oc-box secrets passwd
+     # Override the saved minimum for a new/changed passphrase:
+     oc-box secrets passwd --min-passphrase-length 8
 
 Actions: ‘init’ creates an empty vault after entering/confirming a
 passphrase; it never overwrites an existing vault.  ‘set NAME’ unlocks,
@@ -560,11 +562,14 @@ MiB memory) and a 32-byte key.  Each write generates a fresh salt and
 12-byte nonce.  Crypto is implemented by the maintained cryptography
 library, not handwritten primitives.  Format version 1 accepts only
 those bounded parameters; tampered costs cannot trigger arbitrary memory
-allocation.  Passphrases must have at least 12 characters when
-created/changed (maximum 1024 UTF-8 bytes).  Entries are limited to 128,
-each nonempty UTF-8 value at most 64 KiB with no NUL, and the complete
-encrypted file to 2 MiB. Names, unlike workspace selections, are
-encrypted too.
+allocation.  New/changed passphrases default to a minimum of 8
+characters, configurable with ‘vault_min_passphrase_length’ in the host
+oc-box config or ‘--min-passphrase-length’ on ‘init’/‘passwd’.  Integers
+from 8 to 1024 are accepted; longer passwords are allowed up to 1024
+UTF-8 bytes.  Existing passphrases unlock regardless of the current
+creation minimum.  Entries are limited to 128, each nonempty UTF-8 value
+at most 64 KiB with no NUL, and the complete encrypted file to 2 MiB.
+Names, unlike workspace selections, are encrypted too.
 
 The host vault normally resides at
 ‘~/.local/share/oc-box/credentials/vault.json’, or its XDG_DATA_HOME
@@ -684,10 +689,18 @@ the host-wide vault, host global DB/config, or arbitrary paths outside
 those components.  Env files inside the selected project are project
 data and are included; host env files outside it are not read.
 
-Default encryption uses age's own hidden passphrase prompt for a fresh
-key envelope; it is separate from the vault password, with no custom
-cipher/KDF.  For unattended encryption use a native age X25519 public
-recipient, repeatable:
+Default encryption asks for a new/confirmed masked backup passphrase
+(default minimum 8 characters), separate from the vault password.  Set
+‘backup_min_passphrase_length’ in host oc-box config or use
+‘--min-passphrase-length N’ for this backup.  Both accept integers from
+8 to 1024; longer passwords are allowed up to 1024 UTF-8 bytes.
+Blank/short/mismatched input is rejected, rather than asking age to
+generate a password.  oc-box passes the validated password to standard
+age through a private, echo-disabled terminal; no password enters argv,
+environment variables, or plaintext files.  Age still provides the
+cipher/KDF and prompts directly when unlocking existing backups, which
+are not restricted by the current creation minimum.  For unattended
+encryption use a native age X25519 public recipient, repeatable:
 
      age-keygen -o ~/.config/backup-age-key.txt
      age-keygen -y ~/.config/backup-age-key.txt
@@ -830,7 +843,26 @@ File: oc-box.info,  Node: Options,  Next: Lifecycle and persistence,  Prev: Comm
 Print command choices, options, and short descriptions; exit without
 Podman.  For example: ‘oc-box --help’.
 
-5.2 -project PATH
+5.2 -min-passphrase-length N
+============================
+
+Set the minimum character count for a new vault or backup passphrase for
+this operation.  Accepted only with ‘oc-box secrets init’, ‘oc-box
+secrets passwd’, and ‘oc-box backup’; it is incompatible with backup
+‘--recipient’.  N must be an integer from 8 to 1024.  The default is 8
+unless the corresponding host config key ‘vault_min_passphrase_length’
+or ‘backup_min_passphrase_length’ is set; this flag overrides that key
+without saving it.  Passwords may exceed the minimum, subject to the
+1024 UTF-8-byte limit.  Unlock/restore never enforces a new creation
+policy against an existing password.  The number is public policy, not a
+way to pass a password in argv.  For example:
+
+     oc-box secrets init --min-passphrase-length 8
+     oc-box secrets passwd --min-passphrase-length 16
+     oc-box backup --project ~/devel/demo --output /backup/demo.ocbox \
+       --min-passphrase-length 12
+
+5.3 -project PATH
 =================
 
 Select an existing project directory; relative paths resolve from the
@@ -843,7 +875,7 @@ path are unsupported because of Podman mount syntax.
 
      oc-box --project "$HOME/devel/my project"
 
-5.3 -workspace ID
+5.4 -workspace ID
 =================
 
 Select an existing workspace by its full 32-character ID from ‘oc-box
@@ -853,7 +885,7 @@ original project directory.  The identity marker and registry are not
 interchangeable with OpenCode session IDs.  Example: ‘oc-box --status
 --workspace WORKSPACE_ID’.
 
-5.4 -status
+5.5 -status
 ===========
 
 Report CPU, RAM, storage, state, limits, and sessions without opening
@@ -861,7 +893,7 @@ OpenCode.  Equivalent to ‘status’.  Only selectors and ‘--json’ apply.
 It cannot be combined with another command, session mode, resource
 change, or deletion action.
 
-5.5 -json
+5.6 -json
 =========
 
 Emit status as one JSON object with ‘sampled_at’ and ‘workspaces’.
@@ -871,7 +903,7 @@ only to status.
 
      oc-box --status --json > status.json
 
-5.6 -about
+5.7 -about
 ==========
 
 Print oc-box version, author Paulo Dias and email, OpenAI
@@ -879,7 +911,7 @@ coding-assistant contribution, GPL-3.0-or-later licensing, and source
 commit.  No Podman or workspace is required.  Use alone, without
 lifecycle selectors/options.
 
-5.7 -version
+5.8 -version
 ============
 
 Print oc-box's commit-derived version and exit without Podman.  The
@@ -901,7 +933,7 @@ channel.  The absolute commit count remains in metadata for upgrade
 ordering; no workspace reset or database migration is required for the
 version-series transition.
 
-5.8 -distro NAME
+5.9 -distro NAME
 ================
 
 Choose a supported distro for a new environment.  The default matches
@@ -914,8 +946,8 @@ host packages or snapshot date.  Changing an existing workspace requires
      oc-box --project ~/devel/demo --distro tumbleweed
      oc-box reset --project ~/devel/demo --distro debian
 
-5.9 -check
-==========
+5.10 -check
+===========
 
 With ‘upgrade’, report whether the public GitHub commit differs from the
 installed version without installing it.  Returns success when a version
@@ -924,7 +956,7 @@ update-available exit code.  Network errors return nonzero.  Cannot be
 combined with ‘--auto-update’, workspace selectors, or other commands.
 Example: ‘oc-box upgrade --check’.
 
-5.10 -auto-update on|off
+5.11 -auto-update on|off
 ========================
 
 With ‘upgrade’, persistently enable or disable automatic updates before
@@ -934,7 +966,7 @@ performs no download or installation and preserves other keys in
 combined with ‘--check’ or workspace actions.  Example: ‘oc-box upgrade
 --auto-update on’.
 
-5.11 -new
+5.12 -new
 =========
 
 Start a new root conversation while retaining the same container and
@@ -942,7 +974,7 @@ files.  Use with start (the default) or reset.  Mutually exclusive with
 ‘--resume’ and ‘--import-session’.  Example: ‘oc-box --project
 ~/devel/demo --new’.
 
-5.12 -resume
+5.13 -resume
 ============
 
 Explicitly request the normal resume behavior.  Requires a registered
@@ -951,7 +983,7 @@ can start a new conversation.  Use with start/reset.  Mutually exclusive
 with ‘--new’ and ‘--import-session’.  Example: ‘oc-box --project
 ~/devel/demo --resume’.
 
-5.13 -import-session SESSION_ID
+5.14 -import-session SESSION_ID
 ===============================
 
 Copy a host conversation from the selected project into the private
@@ -965,7 +997,7 @@ project; the original registry and saved archive verify its project.
 
      oc-box --project ~/devel/demo --import-session ses_HOST_SESSION_ID
 
-5.14 -model PROVIDER/MODEL
+5.15 -model PROVIDER/MODEL
 ==========================
 
 Pass the provider/model choice to the OpenCode TUI on this launch.  It
@@ -974,7 +1006,7 @@ otherwise normal OpenCode provider/model preferences apply.
 
      oc-box --project ~/devel/demo --model github-copilot/gpt-6.1-sol
 
-5.15 -credential-mode env|selected
+5.16 -credential-mode env|selected
 ==================================
 
 With ‘credentials’, choose forwarding mode for that workspace.  ‘env’ is
@@ -985,7 +1017,7 @@ settings.  The mode is saved in host metadata, not applied as a
 container reset or to an active client.  Example: ‘oc-box credentials
 --project ~/devel/demo --credential-mode selected’.
 
-5.16 -env-secret NAME
+5.17 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -996,7 +1028,7 @@ Env mode already forwards legacy variables, so this list becomes
 restrictive only in selected mode.  No value is accepted here.  Example:
 ‘oc-box credentials --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.17 -vault-secret NAME
+5.18 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -1007,7 +1039,7 @@ names-only configuration command.  A name cannot also be selected with
 -env-secret.  Example: ‘oc-box credentials --vault-secret
 BRAVE_API_KEY’.
 
-5.18 -clear-credentials
+5.19 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -1017,7 +1049,7 @@ unless -credential-mode is also specified.  Example: ‘oc-box credentials
 --credential-mode env --clear-credentials’ returns to the original env
 workflow without deleting encrypted vault entries.
 
-5.19 -output FILE
+5.20 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -1027,7 +1059,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.20 -portable
+5.21 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -1037,7 +1069,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.21 -recipient AGE_KEY
+5.22 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -1048,7 +1080,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.22 -identity FILE
+5.23 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -1059,7 +1091,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.23 -cpus NUMBER
+5.24 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -1070,7 +1102,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.24 -memory SIZE
+5.25 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -1082,7 +1114,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.25 -pids-limit NUMBER
+5.26 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -1090,7 +1122,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.26 -device MAPPING
+5.27 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -1104,7 +1136,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.27 -podman-arg=-OPTION[=VALUE]
+5.28 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -1131,7 +1163,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.28 -clear-devices
+5.29 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -1142,7 +1174,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.29 -clear-podman-args
+5.30 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -1152,7 +1184,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.30 -delete-sessions
+5.31 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -1161,7 +1193,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.31 -all
+5.32 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -1169,7 +1201,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.32 -y, -yes
+5.33 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -1489,6 +1521,22 @@ localhost URLs are mapped to the host-service name.  The default
 ‘TERM’ defaults to ‘xterm-256color’.  Host PATH, shell startup scripts,
 proxy variables, engine sockets, and SSH agents are not forwarded by
 default.
+
+Separate password creation minimums can be saved in the same JSON
+object:
+
+     {
+       "vault_min_passphrase_length": 12,
+       "backup_min_passphrase_length": 16
+     }
+
+Each defaults to 8 and accepts an integer from 8 to 1024.  They set a
+minimum character count, not an exact size; all passphrases remain
+bounded to 1024 UTF-8 bytes.  ‘--min-passphrase-length N’ overrides the
+relevant setting for one creation/change.  Invalid policy fails before
+vault unlock or backup lifecycle changes.  Existing passwords and
+recipient-encrypted backups do not consult these creation settings.
+Preserve your other keys when editing this file.
 
 The same JSON object can include ‘"auto_update": true’ to opt in to
 anonymous GitHub checks/installation before normal installed launches,
@@ -1999,20 +2047,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2358
 Node: Commands4189
-Node: Options40844
-Node: Lifecycle and persistence55751
-Node: Distribution images57504
-Node: Sessions and recovery58399
-Node: Devices and host permissions63687
-Node: Resource reports66033
-Node: Configuration and environment68144
-Node: Files72266
-Node: Exit status76663
-Node: Examples77474
-Node: Troubleshooting79560
-Node: Installation and manuals87631
-Node: Authors and license92959
-Node: See also93566
+Node: Options41826
+Node: Lifecycle and persistence57710
+Node: Distribution images59463
+Node: Sessions and recovery60358
+Node: Devices and host permissions65646
+Node: Resource reports67992
+Node: Configuration and environment70103
+Node: Files74867
+Node: Exit status79264
+Node: Examples80075
+Node: Troubleshooting82161
+Node: Installation and manuals90232
+Node: Authors and license95560
+Node: See also96167
 
 End Tag Table
 

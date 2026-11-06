@@ -125,6 +125,11 @@ dependency lazy for default installs. Maintenance and informational commands
 never unlock. Wrong/missing selected credentials must abort before reset deletion.
 Secret values may be deliberately revealed only in the interactive host prompt;
 start every field masked, keep passphrases masked, and document recording risk.
+Vault/backup new-password minimums default to 8 characters, configurable separately
+in host config or by `--min-passphrase-length` (8..1024, 1024 UTF-8-byte cap).
+Enforce creation policy before unlock/lifecycle changes; never reject existing
+unlock passwords against a newer creation policy. age passwords go only through
+a private echo-disabled PTY, never argv/env/files; preserve standard age format.
 
 Full and portable backup/restore passed accepted host rootless-Podman validation
 for 1.0.0, including synthetic database bytes, session selection, rootless

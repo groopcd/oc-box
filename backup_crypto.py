@@ -11,19 +11,24 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import pty
 import re
+import select
 import shutil
 import signal
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import termios
 import time
 
 if __package__:
+    from . import secret_prompt
     from .backup_archive import BoundedTarInfo
 else:
+    import secret_prompt
     from backup_archive import BoundedTarInfo
 
 COMPONENTS = {
@@ -154,9 +159,117 @@ def validate_recipients(recipients):
         )
 
 
-def generate_key(recipients, output):
+def passphrase_minimum(recipients, override=None):
+    if recipients:
+        if override is not None:
+            raise BackupError(
+                "--min-passphrase-length cannot be combined with --recipient."
+            )
+        return None
+    try:
+        return secret_prompt.passphrase_minimum("backup", override)
+    except ValueError as exc:
+        raise BackupError(str(exc)) from exc
+
+
+def encrypt_passphrase(private, output, minimum):
+    try:
+        phrase = secret_prompt.new_passphrase("backup", minimum)
+    except (OSError, EOFError) as exc:
+        raise BackupError(
+            "Passphrase-encrypted backup requires a controlling host terminal; use --recipient for unattended backups."
+        ) from exc
+    except ValueError as exc:
+        raise BackupError(str(exc)) from exc
+    # age has no passphrase-fd option. Give it a private controlling PTY, with
+    # echo disabled before exec, and answer its standard prompts there. Only
+    # validated user input crosses this PTY; no secret enters argv/env or disk.
+    master, slave = pty.openpty()
+    process = None
+    try:
+        attributes = termios.tcgetattr(slave)
+        attributes[3] &= ~(termios.ECHO | termios.ECHONL)
+        termios.tcsetattr(slave, termios.TCSANOW, attributes)
+        child = (
+            "import fcntl,os,sys,termios; "
+            "fcntl.ioctl(2,termios.TIOCSCTTY,0); os.execvp(sys.argv[1],sys.argv[1:])"
+        )
+        with memory_file(private) as source:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-B",
+                    "-c",
+                    child,
+                    "age",
+                    "--encrypt",
+                    "--passphrase",
+                    "--output",
+                    str(output),
+                ],
+                stdin=source,
+                stdout=subprocess.DEVNULL,
+                stderr=slave,
+                env=environment(),
+                start_new_session=True,
+            )
+            os.close(slave)
+            slave = None
+            prompts = (b"Enter passphrase", b"Confirm passphrase")
+            pending = bytearray()
+            step = 0
+            deadline = time.monotonic() + 30
+            while process.poll() is None:
+                if time.monotonic() >= deadline:
+                    raise BackupError("Backup passphrase encryption timed out.")
+                if not select.select([master], [], [], 0.1)[0]:
+                    continue
+                try:
+                    chunk = os.read(master, 4096)
+                except OSError:
+                    break  # Linux PTY returns EIO after its slave exits.
+                if not chunk:
+                    break
+                pending.extend(chunk)
+                if len(pending) > 65536:
+                    raise BackupError("Unexpected backup passphrase tool response.")
+                if step < len(prompts) and prompts[step] in pending:
+                    remaining = memoryview(phrase.encode() + b"\n")
+                    while remaining:
+                        written = os.write(master, remaining)
+                        if not written:
+                            raise BackupError("Backup passphrase terminal closed.")
+                        remaining = remaining[written:]
+                    pending.clear()
+                    step += 1
+            if process.wait(timeout=3) or step != len(prompts):
+                raise BackupError(
+                    "Backup passphrase encryption failed; private tool output was not logged."
+                )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise BackupError(
+            "Backup passphrase tool failed; private tool output was not logged."
+        ) from exc
+    finally:
+        if slave is not None:
+            os.close(slave)
+        os.close(master)
+        if process is not None and process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+            try:
+                process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
+
+
+def generate_key(recipients, output, *, minimum=None):
     tools()
     validate_recipients(recipients)
+    minimum = passphrase_minimum(recipients, minimum)
     private = small(["age-keygen"])
     recipient = small(["age-keygen", "-y"], data=private).decode().strip()
     if not re.fullmatch(r"age1[0-9a-z]{58}", recipient):
@@ -165,18 +278,9 @@ def generate_key(recipients, output):
     if recipients:
         for value in recipients:
             command.extend(["--recipient", value])
+        small(command, data=private)
     else:
-        try:
-            fd = os.open("/dev/tty", os.O_RDWR | os.O_CLOEXEC)
-            os.close(fd)
-        except OSError as exc:
-            raise BackupError(
-                "Passphrase-encrypted backup requires a controlling host terminal; use --recipient for unattended backups."
-            ) from exc
-        command.append("--passphrase")
-    # age handles the passphrase prompt itself through /dev/tty. The fresh
-    # private key goes only through stdin, never argv/env or a plaintext file.
-    small(command, data=private, timeout=300, tty_errors=True)
+        encrypt_passphrase(private, output, minimum)
     output.chmod(0o600)
     return private, recipient
 

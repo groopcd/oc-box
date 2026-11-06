@@ -18,6 +18,11 @@ import stat
 import sys
 import tempfile
 
+if __package__:
+    from . import secret_prompt
+else:
+    import secret_prompt
+
 FORMAT = "oc-box-vault"
 VERSION = 1
 KDF = {"name": "scrypt", "n": 2**17, "r": 8, "p": 1}
@@ -150,15 +155,11 @@ def hidden(prompt, *, allow_reveal=False, maximum=1024):
         ) from exc
 
 
-def new_passphrase():
-    first = hidden("New vault passphrase (12+ characters): ")
-    if len(first) < 12 or "\0" in first or len(first.encode()) > 1024:
-        raise VaultError(
-            "Choose a passphrase of 12 or more characters (maximum 1024 UTF-8 bytes)."
-        )
-    if first != hidden("Confirm vault passphrase: "):
-        raise VaultError("Passphrases do not match; vault was not changed.")
-    return first
+def new_passphrase(minimum):
+    try:
+        return secret_prompt.new_passphrase("vault", minimum, reader=hidden)
+    except ValueError as exc:
+        raise VaultError(str(exc)) from exc
 
 
 def private_directory(path):
@@ -388,7 +389,15 @@ def select(names, *, path=None):
         return {name: values[name] for name in names}
 
 
-def manage(action, name=None, *, path=None):
+def manage(action, name=None, *, path=None, min_passphrase_length=None):
+    minimum = None
+    if action in ("init", "passwd"):
+        try:
+            minimum = secret_prompt.passphrase_minimum("vault", min_passphrase_length)
+        except ValueError as exc:
+            raise VaultError(str(exc)) from exc
+    elif min_passphrase_length is not None:
+        raise VaultError("--min-passphrase-length applies only to secrets init/passwd.")
     if action in ("set", "remove"):
         validate_name(name)
     target = vault_path() if path is None else Path(path)
@@ -399,7 +408,7 @@ def manage(action, name=None, *, path=None):
                     "Vault already exists; initialization will not overwrite it."
                 )
             crypto()
-            write_encrypted(target, {}, new_passphrase())
+            write_encrypted(target, {}, new_passphrase(minimum))
             print(
                 "Encrypted vault initialized. Keep its passphrase safe; there is no recovery key."
             )
@@ -428,7 +437,7 @@ def manage(action, name=None, *, path=None):
                 )
             del values[name]
         elif action == "passwd":
-            passphrase = new_passphrase()
+            passphrase = new_passphrase(minimum)
         else:
             raise VaultError("Unknown vault operation.")
         write_encrypted(target, values, passphrase)

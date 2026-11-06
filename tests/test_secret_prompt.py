@@ -21,6 +21,53 @@ APP = Path(__file__).resolve().parents[1]
 VALUE = "synthetic-PromptValue-0987"
 
 
+class PassphrasePolicyTests(unittest.TestCase):
+    def test_separate_saved_minimums_and_command_override_with_eight_character_floor(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix="oc-box-password-policy-") as temporary:
+            config = Path(temporary) / "oc-box/config.json"
+            config.parent.mkdir()
+            with patch.dict(os.environ, {"XDG_CONFIG_HOME": temporary}):
+                self.assertEqual(secret_prompt.passphrase_minimum("vault"), 8)
+                self.assertEqual(secret_prompt.passphrase_minimum("backup"), 8)
+                config.write_text(
+                    '{"vault_min_passphrase_length":12,"backup_min_passphrase_length":20}'
+                )
+                self.assertEqual(secret_prompt.passphrase_minimum("vault"), 12)
+                self.assertEqual(secret_prompt.passphrase_minimum("backup"), 20)
+                self.assertEqual(secret_prompt.passphrase_minimum("backup", 8), 8)
+                for bad in (7, 1025, True, 8.0, "8", None):
+                    config.write_text(json.dumps({"vault_min_passphrase_length": bad}))
+                    with self.subTest(bad=bad), self.assertRaises(ValueError):
+                        secret_prompt.passphrase_minimum("vault")
+                config.write_text("{")
+                with self.assertRaisesRegex(ValueError, "Cannot read"):
+                    secret_prompt.passphrase_minimum("backup")
+
+    def test_minimum_counts_characters_and_preserves_utf8_byte_bound(self):
+        for value, minimum, accepted in (
+            ("é" * 8, 8, True),
+            ("é" * 7, 8, False),
+            ("x" * 16, 16, True),
+            ("x" * 15, 16, False),
+            ("x" * 1024, 1024, True),
+            ("é" * 513, 8, False),
+            ("line\nbreak", 8, False),
+        ):
+            with (
+                self.subTest(minimum=minimum, accepted=accepted),
+                patch.object(secret_prompt, "read_secret", return_value=value),
+            ):
+                if accepted:
+                    self.assertEqual(
+                        secret_prompt.new_passphrase("backup", minimum), value
+                    )
+                else:
+                    with self.assertRaises(ValueError):
+                        secret_prompt.new_passphrase("backup", minimum)
+
+
 class EditorTests(unittest.TestCase):
     def test_masked_count_and_explicit_reveal_never_change_input(self):
         editor = secret_prompt.Editor(65536, True)

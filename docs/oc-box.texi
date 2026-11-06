@@ -253,6 +253,8 @@ oc-box secrets set BRAVE_API_KEY
 oc-box secrets list
 oc-box secrets remove OLD_TOKEN
 oc-box secrets passwd
+# Override the saved minimum for a new/changed passphrase:
+oc-box secrets passwd --min-passphrase-length 8
 @end example
 
 Actions: @code{init} creates an empty vault after entering/confirming a passphrase; it never overwrites an existing vault. @code{set NAME} unlocks, then enters/confirms the secret value and creates or replaces that entry. @code{list} unlocks and prints only sorted names, never values. @code{remove NAME} unlocks and deletes the named entry; a missing entry causes a clear error without changes. @code{passwd} unlocks with the old passphrase and asks for a new confirmed passphrase. No @code{get}, plaintext dump, insecure batch password option, or automated env-file import is provided. @code{oc-box secrets --help} describes the action syntax.
@@ -279,7 +281,7 @@ python -m pip install 'oc-box[vault]'
 
 For GitHub/source installations, @code{python3 install.py --with-vault} stages the optional crypto wheels privately in that release (using a temporary venv), not in system/user-site Python. The curl bootstrap accepts @code{sh -s -- --with-vault} when piped to a shell. Future GitHub upgrades preserve that opt-in. The source can also use a host Python with a distro-provided cryptography package. A missing dependency yields guidance, not a fallback to weak/custom encryption. No desktop keyring, external password manager, cloud service, or daemon is used.
 
-AES-256-GCM authenticates the ciphertext and format/KDF metadata; Scrypt uses a random 16-byte salt with n=131072, r=8, p=1 (approximately 128 MiB memory) and a 32-byte key. Each write generates a fresh salt and 12-byte nonce. Crypto is implemented by the maintained cryptography library, not handwritten primitives. Format version 1 accepts only those bounded parameters; tampered costs cannot trigger arbitrary memory allocation. Passphrases must have at least 12 characters when created/changed (maximum 1024 UTF-8 bytes). Entries are limited to 128, each nonempty UTF-8 value at most 64 KiB with no NUL, and the complete encrypted file to 2 MiB. Names, unlike workspace selections, are encrypted too.
+AES-256-GCM authenticates the ciphertext and format/KDF metadata; Scrypt uses a random 16-byte salt with n=131072, r=8, p=1 (approximately 128 MiB memory) and a 32-byte key. Each write generates a fresh salt and 12-byte nonce. Crypto is implemented by the maintained cryptography library, not handwritten primitives. Format version 1 accepts only those bounded parameters; tampered costs cannot trigger arbitrary memory allocation. New/changed passphrases default to a minimum of 8 characters, configurable with @code{vault_min_passphrase_length} in the host oc-box config or @code{--min-passphrase-length} on @code{init}/@code{passwd}. Integers from 8 to 1024 are accepted; longer passwords are allowed up to 1024 UTF-8 bytes. Existing passphrases unlock regardless of the current creation minimum. Entries are limited to 128, each nonempty UTF-8 value at most 64 KiB with no NUL, and the complete encrypted file to 2 MiB. Names, unlike workspace selections, are encrypted too.
 
 The host vault normally resides at @code{~/.local/share/oc-box/credentials/vault.json}, or its XDG_DATA_HOME equivalent. Its directory must be owned by your user with 0700 and the regular vault file with private 0600 permissions. Symlink paths, extra hard links, wrong ownership, insecure permissions, invalid formats, and nonregular vault/lock files are rejected. Files are locked during read-modify-write. Ciphertext is written to a 0600 temporary file, fsynced, and atomically replaced; no plaintext temp file or key file is created. Do not locate the vault inside a mounted project.
 
@@ -324,7 +326,7 @@ The workspace lock requires its active OpenCode launcher or maintenance shell to
 
 Full backup (default) captures the complete project including @code{.git}, untracked files and unfinished edits; the private home with the live OpenCode SQLite DB, subagent transcripts, snapshots, copied config/auth, and caches; registry/resume evidence; and a committed OCI image of the modified container OS. Mounted project and home are backed up separately, not folded into the image. Portable mode omits that OS image; system packages/SDKs must be recreated after restore. Neither mode captures running processes, kernel state, devices, host drivers, the host-wide vault, host global DB/config, or arbitrary paths outside those components. Env files inside the selected project are project data and are included; host env files outside it are not read.
 
-Default encryption uses age's own hidden passphrase prompt for a fresh key envelope; it is separate from the vault password, with no custom cipher/KDF. For unattended encryption use a native age X25519 public recipient, repeatable:
+Default encryption asks for a new/confirmed masked backup passphrase (default minimum 8 characters), separate from the vault password. Set @code{backup_min_passphrase_length} in host oc-box config or use @code{--min-passphrase-length N} for this backup. Both accept integers from 8 to 1024; longer passwords are allowed up to 1024 UTF-8 bytes. Blank/short/mismatched input is rejected, rather than asking age to generate a password. oc-box passes the validated password to standard age through a private, echo-disabled terminal; no password enters argv, environment variables, or plaintext files. Age still provides the cipher/KDF and prompts directly when unlocking existing backups, which are not restricted by the current creation minimum. For unattended encryption use a native age X25519 public recipient, repeatable:
 
 @example
 age-keygen -o ~/.config/backup-age-key.txt
@@ -374,6 +376,17 @@ The host vault is not included or unlocked. Credential selections retain names o
 @section -h, --help
 
 Print command choices, options, and short descriptions; exit without Podman. For example: @code{oc-box --help}.
+
+@section --min-passphrase-length N
+
+Set the minimum character count for a new vault or backup passphrase for this operation. Accepted only with @code{oc-box secrets init}, @code{oc-box secrets passwd}, and @code{oc-box backup}; it is incompatible with backup @code{--recipient}. N must be an integer from 8 to 1024. The default is 8 unless the corresponding host config key @code{vault_min_passphrase_length} or @code{backup_min_passphrase_length} is set; this flag overrides that key without saving it. Passwords may exceed the minimum, subject to the 1024 UTF-8-byte limit. Unlock/restore never enforces a new creation policy against an existing password. The number is public policy, not a way to pass a password in argv. For example:
+
+@example
+oc-box secrets init --min-passphrase-length 8
+oc-box secrets passwd --min-passphrase-length 16
+oc-box backup --project ~/devel/demo --output /backup/demo.ocbox \
+  --min-passphrase-length 12
+@end example
 
 @section --project PATH
 
@@ -721,6 +734,17 @@ Variables ending @code{_API_KEY} or @code{_TOKEN}, plus @code{GH_TOKEN}, @code{G
 @end example
 
 Save that as @code{~/.config/oc-box/config.json} (or its XDG equivalent). Only values present in the host environment are copied. Forwarded HTTP localhost URLs are mapped to the host-service name. The default @code{LEMONADE_BASE_URL} is @code{http://host.containers.internal:13305/api/v1}. @code{TERM} defaults to @code{xterm-256color}. Host PATH, shell startup scripts, proxy variables, engine sockets, and SSH agents are not forwarded by default.
+
+Separate password creation minimums can be saved in the same JSON object:
+
+@example
+@{
+  "vault_min_passphrase_length": 12,
+  "backup_min_passphrase_length": 16
+@}
+@end example
+
+Each defaults to 8 and accepts an integer from 8 to 1024. They set a minimum character count, not an exact size; all passphrases remain bounded to 1024 UTF-8 bytes. @code{--min-passphrase-length N} overrides the relevant setting for one creation/change. Invalid policy fails before vault unlock or backup lifecycle changes. Existing passwords and recipient-encrypted backups do not consult these creation settings. Preserve your other keys when editing this file.
 
 The same JSON object can include @code{"auto_update": true} to opt in to anonymous GitHub checks/installation before normal installed launches, or use @code{oc-box upgrade --auto-update on}. The setting is off by default and is not forwarded into the container. @code{OC_BOX_UPDATE_CHECKED=1} is an internal one-launch guard used when restarting the host launcher after automatic installation; it prevents recursion, not authentication or a workspace identity override.
 

@@ -409,6 +409,8 @@ oc-box secrets set BRAVE_API_KEY
 oc-box secrets list
 oc-box secrets remove OLD_TOKEN
 oc-box secrets passwd
+# Override the saved minimum for a new/changed passphrase:
+oc-box secrets passwd --min-passphrase-length 8
 ```
 
 Actions: `init` creates an empty vault after entering/confirming a passphrase;
@@ -477,8 +479,11 @@ random 16-byte salt with n=131072, r=8, p=1 (approximately 128 MiB memory) and a
 32-byte key. Each write generates a fresh salt and 12-byte nonce. Crypto is
 implemented by the maintained cryptography library, not handwritten primitives.
 Format version 1 accepts only those bounded parameters; tampered costs cannot
-trigger arbitrary memory allocation. Passphrases must have at least 12
-characters when created/changed (maximum 1024 UTF-8 bytes). Entries are limited
+trigger arbitrary memory allocation. New/changed passphrases default to a minimum
+of 8 characters, configurable with `vault_min_passphrase_length` in the host
+oc-box config or `--min-passphrase-length` on `init`/`passwd`. Integers from 8 to
+1024 are accepted; longer passwords are allowed up to 1024 UTF-8 bytes. Existing
+passphrases unlock regardless of the current creation minimum. Entries are limited
 to 128, each nonempty UTF-8 value at most 64 KiB with no NUL, and the complete
 encrypted file to 2 MiB. Names, unlike workspace selections, are encrypted too.
 
@@ -592,8 +597,16 @@ the host-wide vault, host global DB/config, or arbitrary paths outside those
 components. Env files inside the selected project are project data and are
 included; host env files outside it are not read.
 
-Default encryption uses age's own hidden passphrase prompt for a fresh key
-envelope; it is separate from the vault password, with no custom cipher/KDF.
+Default encryption asks for a new/confirmed masked backup passphrase (default
+minimum 8 characters), separate from the vault password. Set
+`backup_min_passphrase_length` in host oc-box config or use
+`--min-passphrase-length N` for this backup. Both accept integers from 8 to 1024;
+longer passwords are allowed up to 1024 UTF-8 bytes. Blank/short/mismatched input
+is rejected, rather than asking age to generate a password. oc-box passes the
+validated password to standard age through a private, echo-disabled terminal;
+no password enters argv, environment variables, or plaintext files. Age still
+provides the cipher/KDF and prompts directly when unlocking existing backups,
+which are not restricted by the current creation minimum.
 For unattended encryption use a native age X25519 public recipient, repeatable:
 
 ```sh
@@ -719,6 +732,25 @@ inspection; the launcher never deletes a caller-supplied tree on marker alone.
 
 Print command choices, options, and short descriptions; exit without Podman.
 For example: `oc-box --help`.
+
+### --min-passphrase-length N
+
+Set the minimum character count for a new vault or backup passphrase for this
+operation. Accepted only with `oc-box secrets init`, `oc-box secrets passwd`,
+and `oc-box backup`; it is incompatible with backup `--recipient`. N must be an
+integer from 8 to 1024. The default is 8 unless the corresponding host config
+key `vault_min_passphrase_length` or `backup_min_passphrase_length` is set; this
+flag overrides that key without saving it. Passwords may exceed the minimum,
+subject to the 1024 UTF-8-byte limit. Unlock/restore never enforces a new creation
+policy against an existing password. The number is public policy, not a way to
+pass a password in argv. For example:
+
+```sh
+oc-box secrets init --min-passphrase-length 8
+oc-box secrets passwd --min-passphrase-length 16
+oc-box backup --project ~/devel/demo --output /backup/demo.ocbox \
+  --min-passphrase-length 12
+```
 
 ### --project PATH
 
@@ -1308,6 +1340,22 @@ mapped to the host-service name. The default `LEMONADE_BASE_URL` is
 `http://host.containers.internal:13305/api/v1`. `TERM` defaults to
 `xterm-256color`. Host PATH, shell startup scripts, proxy variables, engine
 sockets, and SSH agents are not forwarded by default.
+
+Separate password creation minimums can be saved in the same JSON object:
+
+```json
+{
+  "vault_min_passphrase_length": 12,
+  "backup_min_passphrase_length": 16
+}
+```
+
+Each defaults to 8 and accepts an integer from 8 to 1024. They set a minimum
+character count, not an exact size; all passphrases remain bounded to 1024 UTF-8
+bytes. `--min-passphrase-length N` overrides the relevant setting for one
+creation/change. Invalid policy fails before vault unlock or backup lifecycle
+changes. Existing passwords and recipient-encrypted backups do not consult
+these creation settings. Preserve your other keys when editing this file.
 
 The same JSON object can include `"auto_update": true` to opt in to anonymous
 GitHub checks/installation before normal installed launches, or use `oc-box
