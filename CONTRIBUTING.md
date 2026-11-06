@@ -24,6 +24,19 @@ Tests use isolated temporary app data. Mainline model/MCP/LSP/formatter fixtures
 are local and bounded. These checks do not replace live host-side Podman tests.
 Do not run host lifecycle tests from inside the project's running container.
 
+## Distro dependency checks
+
+`.github/workflows/distros.yml` tests all seven catalog images in disposable
+containers. It installs mapped packages from `dependencies.py` using actual
+package managers, checks command providers (including private Podman helper
+paths and GNU du), tests an age recipient round-trip, and checks doctor output.
+This is package/dependency validation, not nested rootless Podman validation.
+Run only in a disposable root container with a read-only checkout:
+`python3 -B tools/test_dependency_distro.py --distro NAME --install`.
+The fixture intentionally needs no Python packages. Package-map changes must
+pass the distro matrix before release; keep host guidance separate from the
+workspace baseline and Python-tool extras.
+
 ## Live backup/restore validation
 
 Full and portable backup/restore passed the host fixture and were accepted for

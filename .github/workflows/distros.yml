@@ -1,0 +1,54 @@
+name: Distro dependency checks
+
+on:
+  push:
+    branches: [master, 'feature/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  packages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - distro: tumbleweed
+            image: registry.opensuse.org/opensuse/tumbleweed:latest
+          - distro: leap
+            image: registry.opensuse.org/opensuse/leap:latest
+          - distro: ubuntu
+            image: docker.io/library/ubuntu:24.04
+          - distro: debian
+            image: docker.io/library/debian:stable
+          - distro: fedora
+            image: registry.fedoraproject.org/fedora:latest
+          - distro: arch
+            image: docker.io/library/archlinux:base
+          - distro: alpine
+            image: docker.io/library/alpine:latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Install providers and exercise doctor in a disposable distro
+        env:
+          DISTRO: ${{ matrix.distro }}
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm --volume "$GITHUB_WORKSPACE:/src:ro" --workdir /src \
+            --env "DISTRO=$DISTRO" --env DEBIAN_FRONTEND=noninteractive \
+            --entrypoint /bin/sh "$IMAGE" -ec '
+              case "$DISTRO" in
+                tumbleweed|leap) zypper -n refresh; zypper -n install python3 ;;
+                ubuntu|debian) apt-get update; apt-get install -y --no-install-recommends python3 ;;
+                fedora) dnf install -y python3 ;;
+                arch) pacman -Syu --noconfirm --needed python ;;
+                alpine) apk add --no-cache python3 ;;
+              esac
+              python3 -B tools/test_dependency_distro.py --distro "$DISTRO" --install
+            '

@@ -17,6 +17,7 @@ oc\-box terminal [\-\-project PATH | \-\-workspace ID]
 oc\-box purge [\-\-project PATH | \-\-workspace ID] [\-\-delete\-sessions | \-\-all] [\-y]
 oc\-box list
 oc\-box distros
+oc\-box doctor [\-\-json] [\-\-feature FEATURE ...]
 oc\-box \-\-status [\-\-project PATH | \-\-workspace ID] [\-\-json]
 oc\-box status [\-\-project PATH | \-\-workspace ID] [\-\-json]
 oc\-box upgrade [\-\-check | \-\-auto\-update on|off]
@@ -43,6 +44,21 @@ On normal exit, oc\-box exports conversation history to separate archive session
 .PP
 The default resource limits are 4 CPU cores, 8 GiB RAM, and 2048 processes. These are ceilings, not reservations: resources are consumed dynamically up to those limits, and OpenCode itself has no fixed 4/8 GiB minimum requirement. There is no disk quota. Containers share the host kernel and can reach network services, including configured host services at \fBhost.containers.internal\fR\&. The project is intentionally writable and can be deleted by container commands. Additional Podman options and devices explicitly extend these defaults.
 .SH COMMANDS
+.SS doctor
+.PP
+Report prerequisites by feature, missing commands, and installation commands for the OS running doctor. It is read\-only: no packages installed, network requests, Podman operations, workspace/config changes, or secret prompts. Run on the host for host advice. Inside oc\-box it explicitly reports \fBcurrent\-container\fR; this cannot inspect host packages. A workspace's selected distro does not determine host package guidance. Unknown hosts list required providers without guessing a package manager from the default workspace image or executing os\-release text.
+.PP
+.nf
+.fam C
+oc\-box doctor
+oc\-box doctor \-\-feature backup \-\-feature vault
+oc\-box doctor \-\-feature backup\-info \-\-json
+.fam T
+.fi
+.PP
+Feature selectors: \fBlaunch\fR, \fBmaintenance\fR, \fBbackup\fR, \fBbackup\-info\fR, \fBrestore\fR, \fBvault\fR, \fBgithub\-upgrade\fR, \fBbootstrap\fR, \fBstorage\fR, \fBoverlay\fR, \fBmanuals\fR, and \fBdocs\-build\fR\&. Without selectors all are reported, but exit status checks only core \fBlaunch\fR prerequisites. With selectors, exit 0 means every selected feature's prerequisites are present; exit 1 means at least one is missing or incompatible. JSON schema version 1 includes scope, detected distro, feature availability, dependency details, missing providers, package names, installation commands, and notes. Missing optional features never disable unrelated commands. Feature commands check their prerequisites before secret prompts or destructive workspace changes and include OS\-specific fixes.
+.PP
+This checks installed prerequisites, not full runtime certification. Podman still checks rootless mode, subordinate IDs, controller delegation, and mounts; interactive commands check terminal requirements. Command presence does not establish a compatible version or validate every backend/driver configuration. Normal OpenCode launch verifies its host/container versions separately.
 .SS start
 .PP
 Create or resume an environment. This is the default when no command is given. The project directory must already exist and be dedicated to the project. Without a selector, use the current directory. With \fB\-\-workspace\fR, use the registered directory; a workspace ID takes precedence if both selectors are provided. Do not combine selectors when a single selector will do.
@@ -370,6 +386,9 @@ oc\-box backup \-\-project ~/devel/demo \-\-output /backup/demo.ocbox \e
   \-\-min\-passphrase\-length 12
 .fam T
 .fi
+.SS \-\-feature FEATURE
+.PP
+Doctor\-only, repeatable. Limit the dependency report and exit\-status evaluation to named features. \fBoc\-box doctor \-\-feature backup\-info\fR checks age and memory support without requiring Podman or host OpenCode. With no selector, report all features and evaluate launch prerequisites for the exit status. Use \fBoc\-box doctor \-\-help\fR for the complete accepted names.
 .SS \-\-project PATH
 .PP
 Select an existing project directory; relative paths resolve from the host working directory. Quote paths containing spaces. For lifecycle commands the default is the current directory. For status, omission means all workspaces. The project must not be the host home, \fB/\:\fR, \fB/\:home\fR, the oc\-box registry, or a directory containing trusted launcher/state files. Colons, commas, and line breaks in the project path are unsupported because of Podman mount syntax.
@@ -386,6 +405,8 @@ Select an existing workspace by its full 32\-character ID from \fBoc\-box list\f
 .PP
 Report CPU, RAM, storage, state, limits, and sessions without opening OpenCode. Equivalent to \fBstatus\fR\&. Only selectors and \fB\-\-json\fR apply. It cannot be combined with another command, session mode, resource change, or deletion action.
 .SS \-\-json
+.PP
+Doctor also accepts this flag to emit its versioned feature/dependency report.
 .PP
 Emit status as one JSON object with \fBsampled_at\fR and \fBworkspaces\fR\&. Sizes are numeric bytes and unavailable values are \fBnull\fR; notes explain partial results. Progress goes to stderr, not the JSON stream. Applies only to status.
 .PP
@@ -561,6 +582,21 @@ Default purge retains host archive copies; \fB\-\-delete\-sessions\fR and \fB\-\
 .PP
 CPU, RAM, process, distro, and mapping changes require reset for existing containers. A stop/start alone reuses the old create\-time settings. Avoid changing resources directly through Podman if metadata consistency is required. An active launcher holds a nonblocking workspace lock; start, sync, reset, repair, terminal, and purge require that launcher to exit. Read\-only list/status and explicit stop can run from a second terminal. A crash releases the lock when its process exits; an orphan still running can retain it.
 .SH DISTRIBUTION IMAGES
+.SS Host dependency installation
+.PP
+Host requirements and workspace baseline packages are separate. These commands cover core rootless tools and optional age backup tools; doctor prints only packages missing for each feature. Run OS package commands manually with the privileges appropriate to your machine (\fBsudo\fR on a configured regular host, or as root without sudo in an administrative shell).
+.PP
+| Host distro | Core rootless prerequisites plus optional backup tools | | \-\-\- | \-\-\- | | Tumbleweed / Leap | \fBsudo zypper refresh && sudo zypper install python3 podman passt shadow catatonit conmon crun age\fR | | Ubuntu / Debian | \fBsudo apt update && sudo apt install python3 podman passt uidmap catatonit conmon crun age\fR | | Fedora | \fBsudo dnf install python3 podman passt shadow\-utils catatonit conmon crun age\fR | | Arch | \fBsudo pacman \-Syu \-\-needed python podman passt shadow catatonit conmon crun age\fR | | Alpine | \fBsudo apk add python3 podman passt shadow\-subids catatonit conmon crun age\fR |
+.PP
+Installing packages alone does not configure subordinate IDs, cgroups, or make rootful Podman rootless. Alpine requires its release's community repository for some providers; Ubuntu may require its official universe repository. Use a current supported OS with Python 3.10+ and pasta\-capable Podman; an older Leap/ Python combination may need an OS upgrade rather than a package reinstall.
+.PP
+| Feature | Host dependencies | | \-\-\- | \-\-\- | | Launch/reset/sync | Linux, running Python 3.10+, Podman, pasta (\fBpasst\fR), newuidmap/newgidmap, catatonit, conmon, crun or runc, host OpenCode 1.x | | Maintenance/stop/repair/purge | Linux, Python, Podman and UID helpers; history preservation/deletion additionally uses host OpenCode | | Full/portable backup | Linux, Python, rootless Podman/UID helpers, age/age\-keygen (both from \fBage\fR), memfd support | | Backup inspection | Linux, Python, age/age\-keygen, memfd; no Podman/OpenCode/vault extra | | Restore | Backup prerequisites plus pasta, init/helper/runtime providers for container creation | | Optional vault | \fBcryptography\fR in the same Python environment as oc\-box; no age requirement | | GitHub installation/upgrade | Git and Python; one\-line download also needs curl, mktemp and trusted CA certificates | | Storage reports | GNU \fBdu\fR from \fBcoreutils\fR; BusyBox du is insufficient; other metrics still work if absent | | FUSE overlay driver | \fBfuse\-overlayfs\fR only if selected/needed; kernel overlay does not require it | | Read manuals | man (\fBman\fR, \fBman\-db\fR, or Alpine \fBmandoc\fR) and info (\fBinfo\fR or \fBtexinfo\fR) | | Regenerate manuals | GNU makeinfo (\fBtexinfo\fR); contributor\-only, never required to install/use oc\-box |
+.PP
+Host OpenCode is not supplied by these mappings; see https://opencode.ai/docs/#install. Use the existing Python installation channel for vault support: \fBuv tool install \-\-force 'oc\-box[vault]'\fR, \fBpipx inject oc\-box 'cryptography>=44'\fR, or GitHub/source \fB\-\-with\-vault\fR\&. Do not install Python dependencies into system Python to fix an isolated tool's missing extra.
+.PP
+Inside each workspace, oc\-box automatically installs Bash, CA certificates, curl, Git, Python, ripgrep, tar/gzip, Node/npm, and PDF tools (\fBpoppler\-tools\fR on openSUSE, \fBpoppler\-utils\fR on Debian/Ubuntu/Fedora/Alpine, \fBpoppler\fR on Arch). uv/uvx and matching OpenCode are bootstrapped inside private storage. MCPs, formatters, language servers, plugins and project libraries may have their own requirements; doctor does not infer those from project configuration.
+.PP
+Distro CI installs mapped packages in disposable instances of all seven catalog images, checks actual command providers, tests standard age, and verifies scoped guidance. It does not run nested rootless Podman or replace host lifecycle tests.
 .PP
 .nf
 .fam C

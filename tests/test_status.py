@@ -27,6 +27,11 @@ status = load("status_report")
 
 class StatusTests(unittest.TestCase):
     def setUp(self):
+        prerequisites = patch.object(
+            status.dependencies, "probe", return_value=(True, "available")
+        )
+        prerequisites.start()
+        self.addCleanup(prerequisites.stop)
         modules = patch.dict(sys.modules, {"status_report": status})
         modules.start()
         self.addCleanup(modules.stop)

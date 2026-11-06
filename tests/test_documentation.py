@@ -11,6 +11,7 @@ import sys
 import tempfile
 import unittest
 import backups
+import dependencies
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
@@ -41,6 +42,7 @@ class DocumentationTests(unittest.TestCase):
         parser = box.parser()
         parsers = [
             parser,
+            dependencies.parser(),
             *(
                 backups.parser_for(action)
                 for action in ("backup", "backup-info", "restore")

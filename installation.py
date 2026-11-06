@@ -17,6 +17,7 @@ else:
 
 PROGRAM_FILES = (
     "oc_box.py",
+    "dependencies.py",
     "backups.py",
     "backup_crypto.py",
     "backup_archive.py",

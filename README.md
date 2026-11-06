@@ -50,6 +50,24 @@ the boundary and tradeoffs.
   one-line installer.
 - Network access for initial image, package, and plugin downloads.
 
+Check installed tools and get feature-specific installation commands:
+
+```sh
+oc-box doctor
+oc-box doctor --feature backup --feature vault
+oc-box doctor --feature backup-info --json
+```
+
+Missing optional dependencies identify the affected feature without disabling
+normal launches. Missing age on Tumbleweed suggests
+`sudo zypper refresh && sudo zypper install age`; Ubuntu/Debian use apt, Fedora
+dnf, Arch pacman, and Alpine apk. Commands are for the OS running doctor, not
+the workspace image. See the [host dependency table](docs/cli.md#host-dependency-installation)
+for all seven distros and the distinction from automatically installed workspace
+tools. Doctor does not install packages, unlock secrets, start Podman, or change
+workspaces. Inside oc-box it reports container prerequisites only; run from the
+host terminal for host advice.
+
 Install on the **host as your regular user**, without sudo. Choose one channel:
 
 | Method | Install | Update |

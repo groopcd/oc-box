@@ -10,9 +10,11 @@ import sys
 import tempfile
 
 if __package__:
+    from . import dependencies
     from .installation import atomic_file
     from .version_info import get_version_info
 else:
+    import dependencies
     from installation import atomic_file
     from version_info import get_version_info
 
@@ -113,6 +115,10 @@ def upgrade(root, *, check=False):
             "Run oc-box upgrade on the host as your regular user, without sudo."
         )
     current = current_install(root)
+    try:
+        dependencies.require("github-upgrade")
+    except dependencies.DependencyError as exc:
+        raise UpdateError(str(exc)) from exc
     print("Installed oc-box: " + current["version"], flush=True)
     with tempfile.TemporaryDirectory(prefix="oc-box-upgrade-") as temporary:
         work = Path(temporary)

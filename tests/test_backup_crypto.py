@@ -364,7 +364,7 @@ class BackupEnvironmentTests(unittest.TestCase):
 
     def test_missing_age_yields_actionable_optional_dependency_message(self):
         with patch.object(crypto.shutil, "which", return_value=None):
-            with self.assertRaisesRegex(crypto.BackupError, "package 'age'"):
+            with self.assertRaisesRegex(crypto.BackupError, "age, age-keygen"):
                 crypto.tools()
 
 

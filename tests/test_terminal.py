@@ -294,6 +294,7 @@ class MaintenanceTerminalTests(unittest.TestCase):
     def test_backend_check_uses_clean_environment(self):
         clean = box.maintenance_host_env()
         with (
+            patch.object(box.dependencies, "require"),
             patch.object(box.os, "geteuid", return_value=1000),
             patch.object(
                 box,

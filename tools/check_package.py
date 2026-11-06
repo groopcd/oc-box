@@ -42,6 +42,7 @@ def check(directory, *, with_vault=False):
         ), requirements
         for name in (
             "oc_box.py",
+            "dependencies.py",
             "backups.py",
             "backup_crypto.py",
             "backup_archive.py",
@@ -146,6 +147,9 @@ def check(directory, *, with_vault=False):
         assert json.loads(run(cli, "--status", "--json"))["workspaces"] == []
         assert "Python-package managed" in run(cli, "upgrade")
         assert "--import-session" in run(cli, "--help")
+        doctor = json.loads(run(cli, "doctor", "--feature", "github-upgrade", "--json"))
+        assert doctor["schema_version"] == 1
+        assert doctor["features"][0]["id"] == "github-upgrade"
         assert "secrets" in run(cli, "--help")
         assert "--recipient" in run(cli, "backup", "--help")
         assert "--min-passphrase-length" in run(cli, "backup", "--help")

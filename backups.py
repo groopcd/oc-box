@@ -223,7 +223,7 @@ def make_backup(box, args):
             raise BackupError(
                 "Backup output must be outside the project and workspace registry."
             )
-    box.check_backend(env=crypto.environment())
+    box.check_backend(env=crypto.environment(), feature="backup")
     crypto.tools()
     with box.workspace_lock(path):
         box.refresh_workspace_identity(path, data)
@@ -508,7 +508,7 @@ def inspect_backup(box, args):
 
 
 def restore_backup(box, args):
-    box.check_backend(env=crypto.environment())
+    box.check_backend(env=crypto.environment(), feature="restore")
     if args.project is None:
         raise BackupError(
             "Restore requires --project PATH (a new, nonexistent host destination)."

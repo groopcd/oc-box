@@ -16,6 +16,7 @@ oc-box terminal [--project PATH | --workspace ID]
 oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
 oc-box list
 oc-box distros
+oc-box doctor [--json] [--feature FEATURE ...]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
 oc-box upgrade [--check | --auto-update on|off]
@@ -64,6 +65,39 @@ The project is intentionally writable and can be deleted by container commands.
 Additional Podman options and devices explicitly extend these defaults.
 
 ## Commands
+
+### doctor
+
+Report prerequisites by feature, missing commands, and installation commands for
+the OS running doctor. It is read-only: no packages installed, network requests,
+Podman operations, workspace/config changes, or secret prompts. Run on the host
+for host advice. Inside oc-box it explicitly reports `current-container`; this
+cannot inspect host packages. A workspace's selected distro does not determine
+host package guidance. Unknown hosts list required providers without guessing a
+package manager from the default workspace image or executing os-release text.
+
+```sh
+oc-box doctor
+oc-box doctor --feature backup --feature vault
+oc-box doctor --feature backup-info --json
+```
+
+Feature selectors: `launch`, `maintenance`, `backup`, `backup-info`, `restore`,
+`vault`, `github-upgrade`, `bootstrap`, `storage`, `overlay`, `manuals`, and
+`docs-build`. Without selectors all are reported, but exit status checks only
+core `launch` prerequisites. With selectors, exit 0 means every selected
+feature's prerequisites are present; exit 1 means at least one is missing or
+incompatible. JSON schema version 1 includes scope, detected distro, feature
+availability, dependency details, missing providers, package names, installation
+commands, and notes. Missing optional features never disable unrelated commands.
+Feature commands check their prerequisites before secret prompts or destructive
+workspace changes and include OS-specific fixes.
+
+This checks installed prerequisites, not full runtime certification. Podman
+still checks rootless mode, subordinate IDs, controller delegation, and mounts;
+interactive commands check terminal requirements. Command presence does not
+establish a compatible version or validate every backend/driver configuration.
+Normal OpenCode launch verifies its host/container versions separately.
 
 ### start
 
@@ -752,6 +786,14 @@ oc-box backup --project ~/devel/demo --output /backup/demo.ocbox \
   --min-passphrase-length 12
 ```
 
+### --feature FEATURE
+
+Doctor-only, repeatable. Limit the dependency report and exit-status evaluation
+to named features. `oc-box doctor --feature backup-info` checks age and memory
+support without requiring Podman or host OpenCode. With no selector, report all
+features and evaluate launch prerequisites for the exit status. Use
+`oc-box doctor --help` for the complete accepted names.
+
 ### --project PATH
 
 Select an existing project directory; relative paths resolve from the host
@@ -780,6 +822,8 @@ Equivalent to `status`. Only selectors and `--json` apply. It cannot be combined
 with another command, session mode, resource change, or deletion action.
 
 ### --json
+
+Doctor also accepts this flag to emit its versioned feature/dependency report.
 
 Emit status as one JSON object with `sampled_at` and `workspaces`. Sizes are
 numeric bytes and unavailable values are `null`; notes explain partial results.
@@ -1087,6 +1131,60 @@ explicit stop can run from a second terminal. A crash releases the lock when
 its process exits; an orphan still running can retain it.
 
 ## Distribution images
+
+### Host dependency installation
+
+Host requirements and workspace baseline packages are separate. These commands
+cover core rootless tools and optional age backup tools; doctor prints only
+packages missing for each feature. Run OS package commands manually with the
+privileges appropriate to your machine (`sudo` on a configured regular host, or
+as root without sudo in an administrative shell).
+
+| Host distro | Core rootless prerequisites plus optional backup tools |
+| --- | --- |
+| Tumbleweed / Leap | `sudo zypper refresh && sudo zypper install python3 podman passt shadow catatonit conmon crun age` |
+| Ubuntu / Debian | `sudo apt update && sudo apt install python3 podman passt uidmap catatonit conmon crun age` |
+| Fedora | `sudo dnf install python3 podman passt shadow-utils catatonit conmon crun age` |
+| Arch | `sudo pacman -Syu --needed python podman passt shadow catatonit conmon crun age` |
+| Alpine | `sudo apk add python3 podman passt shadow-subids catatonit conmon crun age` |
+
+Installing packages alone does not configure subordinate IDs, cgroups, or make
+rootful Podman rootless. Alpine requires its release's community repository for
+some providers; Ubuntu may require its official universe repository. Use a
+current supported OS with Python 3.10+ and pasta-capable Podman; an older Leap/
+Python combination may need an OS upgrade rather than a package reinstall.
+
+| Feature | Host dependencies |
+| --- | --- |
+| Launch/reset/sync | Linux, running Python 3.10+, Podman, pasta (`passt`), newuidmap/newgidmap, catatonit, conmon, crun or runc, host OpenCode 1.x |
+| Maintenance/stop/repair/purge | Linux, Python, Podman and UID helpers; history preservation/deletion additionally uses host OpenCode |
+| Full/portable backup | Linux, Python, rootless Podman/UID helpers, age/age-keygen (both from `age`), memfd support |
+| Backup inspection | Linux, Python, age/age-keygen, memfd; no Podman/OpenCode/vault extra |
+| Restore | Backup prerequisites plus pasta, init/helper/runtime providers for container creation |
+| Optional vault | `cryptography` in the same Python environment as oc-box; no age requirement |
+| GitHub installation/upgrade | Git and Python; one-line download also needs curl, mktemp and trusted CA certificates |
+| Storage reports | GNU `du` from `coreutils`; BusyBox du is insufficient; other metrics still work if absent |
+| FUSE overlay driver | `fuse-overlayfs` only if selected/needed; kernel overlay does not require it |
+| Read manuals | man (`man`, `man-db`, or Alpine `mandoc`) and info (`info` or `texinfo`) |
+| Regenerate manuals | GNU makeinfo (`texinfo`); contributor-only, never required to install/use oc-box |
+
+Host OpenCode is not supplied by these mappings; see
+https://opencode.ai/docs/#install. Use the existing Python installation channel
+for vault support: `uv tool install --force 'oc-box[vault]'`,
+`pipx inject oc-box 'cryptography>=44'`, or GitHub/source `--with-vault`.
+Do not install Python dependencies into system Python to fix an isolated tool's
+missing extra.
+
+Inside each workspace, oc-box automatically installs Bash, CA certificates,
+curl, Git, Python, ripgrep, tar/gzip, Node/npm, and PDF tools (`poppler-tools` on
+openSUSE, `poppler-utils` on Debian/Ubuntu/Fedora/Alpine, `poppler` on Arch).
+uv/uvx and matching OpenCode are bootstrapped inside private storage. MCPs,
+formatters, language servers, plugins and project libraries may have their own
+requirements; doctor does not infer those from project configuration.
+
+Distro CI installs mapped packages in disposable instances of all seven catalog
+images, checks actual command providers, tests standard age, and verifies scoped
+guidance. It does not run nested rootless Podman or replace host lifecycle tests.
 
 ```text
 Name         Image

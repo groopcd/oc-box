@@ -128,8 +128,14 @@ def crypto():
         from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
         from cryptography.exceptions import InvalidTag
     except ImportError as exc:
+        if __package__:
+            from .dependencies import extra_guidance
+        else:
+            from dependencies import extra_guidance
         raise VaultError(
-            "Vault support needs the optional cryptography dependency. Use pipx/uv to install 'oc-box[vault]', or rerun the GitHub/source installer with --with-vault. The default env-file workflow requires no crypto dependency."
+            "Vault support needs the optional cryptography dependency. "
+            + "\n".join(extra_guidance(["cryptography"]))
+            + "\nThe default env-file workflow requires no crypto dependency."
         ) from exc
     return AESGCM, Scrypt, InvalidTag
 

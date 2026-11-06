@@ -10,6 +10,9 @@ portable: use example project paths and synthetic session IDs, not local data.
 - `sync_config.py`: container-only config refresh with dependency-cache reuse.
 - `terminal_ui.py`: native TUI relay and startup loading indicator.
 - `status_report.py`: read-only host resource and storage reporting.
+- `dependencies.py`: read-only feature-scoped doctor, OS package providers and
+  early preflight guidance. Keep host and workspace-container scopes distinct;
+  never install packages automatically from diagnostics.
 - `version_info.py`: commit-derived version and author/license information.
 - `workspace_identity.py`: generic Linux VFS directory identity, capability-based
   persistent handles and strict fallback; shared by lifecycle/status checks.
@@ -82,6 +85,10 @@ python3 -B tests/smoke_mainline.py
 The smoke test uses temporary databases and offline fixture services, with
 bounded timeouts. It does not verify actual Podman isolation. Live Podman
 verification must run on the host, outside another container/sandbox.
+
+Package/dependency mappings must pass `.github/workflows/distros.yml` on all
+seven catalog images using `tools/test_dependency_distro.py`. That disposable
+package installation fixture does not test nested/rootless Podman lifecycle.
 
 A host-terminal Tumbleweed container/OpenCode launch has succeeded. Full live
 MCP, formatter, language-server, and stop/resume verification is still pending;

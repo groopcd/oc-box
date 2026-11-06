@@ -58,6 +58,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
      oc-box list
      oc-box distros
+     oc-box doctor [--json] [--feature FEATURE ...]
      oc-box --status [--project PATH | --workspace ID] [--json]
      oc-box status [--project PATH | --workspace ID] [--json]
      oc-box upgrade [--check | --auto-update on|off]
@@ -118,7 +119,43 @@ File: oc-box.info,  Node: Commands,  Next: Options,  Prev: Description,  Up: Top
 4 Commands
 **********
 
-4.1 start
+4.1 doctor
+==========
+
+Report prerequisites by feature, missing commands, and installation
+commands for the OS running doctor.  It is read-only: no packages
+installed, network requests, Podman operations, workspace/config
+changes, or secret prompts.  Run on the host for host advice.  Inside
+oc-box it explicitly reports ‘current-container’; this cannot inspect
+host packages.  A workspace's selected distro does not determine host
+package guidance.  Unknown hosts list required providers without
+guessing a package manager from the default workspace image or executing
+os-release text.
+
+     oc-box doctor
+     oc-box doctor --feature backup --feature vault
+     oc-box doctor --feature backup-info --json
+
+Feature selectors: ‘launch’, ‘maintenance’, ‘backup’, ‘backup-info’,
+‘restore’, ‘vault’, ‘github-upgrade’, ‘bootstrap’, ‘storage’, ‘overlay’,
+‘manuals’, and ‘docs-build’.  Without selectors all are reported, but
+exit status checks only core ‘launch’ prerequisites.  With selectors,
+exit 0 means every selected feature's prerequisites are present; exit 1
+means at least one is missing or incompatible.  JSON schema version 1
+includes scope, detected distro, feature availability, dependency
+details, missing providers, package names, installation commands, and
+notes.  Missing optional features never disable unrelated commands.
+Feature commands check their prerequisites before secret prompts or
+destructive workspace changes and include OS-specific fixes.
+
+This checks installed prerequisites, not full runtime certification.
+Podman still checks rootless mode, subordinate IDs, controller
+delegation, and mounts; interactive commands check terminal
+requirements.  Command presence does not establish a compatible version
+or validate every backend/driver configuration.  Normal OpenCode launch
+verifies its host/container versions separately.
+
+4.2 start
 =========
 
 Create or resume an environment.  This is the default when no command is
@@ -146,7 +183,7 @@ retain compatible caches.  The container OpenCode version is verified
 against the host on every launch; exact upgrades and downgrades are
 supported, with no fallback to another release.
 
-4.2 stop
+4.3 stop
 ========
 
 Stop a registered container without deleting the project, container OS,
@@ -159,7 +196,7 @@ afterward if a final history export was missed.
 
      oc-box stop --project ~/devel/demo
 
-4.3 sync
+4.4 sync
 ========
 
 Refresh host conversation archives without opening the TUI. Requires an
@@ -177,7 +214,7 @@ resolving the error.
      oc-box sync --project ~/devel/demo
      oc-box sync --workspace WORKSPACE_ID
 
-4.4 terminal
+4.5 terminal
 ============
 
 Open an interactive maintenance shell in an existing workspace container
@@ -245,7 +282,7 @@ For example, after mapping an NPU in an earlier reset:
      xrt-smi examine
      exit
 
-4.5 reset
+4.6 reset
 =========
 
 Recreate the environment's container OS, then launch OpenCode and resume
@@ -267,7 +304,7 @@ distributions, especially to/from Alpine.
      oc-box reset --project ~/devel/demo --distro ubuntu
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
 
-4.6 repair
+4.7 repair
 ==========
 
 Explicitly accept the current directory identity for an existing
@@ -305,7 +342,7 @@ and supply ‘--workspace ID’ explicitly.  With ‘--workspace’, check the
 registered path and restore its missing marker rather than using the
 current directory.
 
-4.7 purge
+4.8 purge
 =========
 
 Remove this workspace's labeled containers, owned volumes, owned
@@ -347,7 +384,7 @@ apply only to purge.
      oc-box purge --project ~/devel/disposable --all
      oc-box purge --workspace WORKSPACE_ID --all --yes
 
-4.8 list
+4.9 list
 ========
 
 List all registered workspaces with aligned headers: WORKSPACE ID,
@@ -374,8 +411,8 @@ machine-readable output.
 
      oc-box list
 
-4.9 distros
-===========
+4.10 distros
+============
 
 List supported distro names, image references, and the detected host
 default.  No Podman invocation is required.  This is a fixed supported
@@ -385,7 +422,7 @@ workspace.
      oc-box distros
      oc-box --project ~/devel/demo --distro fedora
 
-4.10 status
+4.11 status
 ===========
 
 Alias of ‘--status’.  Report all registered environments unless
@@ -399,7 +436,7 @@ Resource reports for metric interpretation.
      oc-box --status --project ~/devel/demo
      oc-box --status --json
 
-4.11 upgrade
+4.12 upgrade
 ============
 
 Check and update the installed oc-box launcher/modules and prebuilt
@@ -468,7 +505,7 @@ for a reviewed alternate deployment.  Updates inside a container are
 refused because its private HOME is not the host installation.  Git is
 required for public updates; build tools are not.
 
-4.12 secrets
+4.13 secrets
 ============
 
 Manage an optional encrypted credential vault on the host.  This command
@@ -598,7 +635,7 @@ exact active vault values.  This is not a general redaction filter for
 OpenCode, provider logs, tool output, or session archives: an agent can
 still print, save, or transmit a credential it has received.
 
-4.13 credentials
+4.14 credentials
 ================
 
 View or change **names-only** forwarding policy for an existing
@@ -656,7 +693,7 @@ container data.  Selection is reduced forwarding, not an isolation
 boundary from secrets already inside the container.  Delivered keys
 remain readable by the agent/tools with normal container permissions.
 
-4.14 backup
+4.15 backup
 ===========
 
 Create one encrypted ‘.ocbox’ file for an existing workspace (available
@@ -728,7 +765,7 @@ committed image.  Failure leaves no final partial backup; the source
 remains stopped, not reset/deleted.  The temporary capture image is
 removed by its unique tag; shared base images remain.
 
-4.15 backup-info
+4.16 backup-info
 ================
 
 Decrypt/verify a backup's manifest and ciphertext checksums without
@@ -752,7 +789,7 @@ authentication chunk.  Wrong keys, corruption, missing/extra components,
 unsupported versions, or unsafe outer envelope paths are rejected before
 restore activation.
 
-4.16 restore
+4.17 restore
 ============
 
 Restore into a **new, nonexistent** host project destination.  Never
@@ -862,7 +899,17 @@ way to pass a password in argv.  For example:
      oc-box backup --project ~/devel/demo --output /backup/demo.ocbox \
        --min-passphrase-length 12
 
-5.3 -project PATH
+5.3 -feature FEATURE
+====================
+
+Doctor-only, repeatable.  Limit the dependency report and exit-status
+evaluation to named features.  ‘oc-box doctor --feature backup-info’
+checks age and memory support without requiring Podman or host OpenCode.
+With no selector, report all features and evaluate launch prerequisites
+for the exit status.  Use ‘oc-box doctor --help’ for the complete
+accepted names.
+
+5.4 -project PATH
 =================
 
 Select an existing project directory; relative paths resolve from the
@@ -875,7 +922,7 @@ path are unsupported because of Podman mount syntax.
 
      oc-box --project "$HOME/devel/my project"
 
-5.4 -workspace ID
+5.5 -workspace ID
 =================
 
 Select an existing workspace by its full 32-character ID from ‘oc-box
@@ -885,7 +932,7 @@ original project directory.  The identity marker and registry are not
 interchangeable with OpenCode session IDs.  Example: ‘oc-box --status
 --workspace WORKSPACE_ID’.
 
-5.5 -status
+5.6 -status
 ===========
 
 Report CPU, RAM, storage, state, limits, and sessions without opening
@@ -893,8 +940,11 @@ OpenCode.  Equivalent to ‘status’.  Only selectors and ‘--json’ apply.
 It cannot be combined with another command, session mode, resource
 change, or deletion action.
 
-5.6 -json
+5.7 -json
 =========
+
+Doctor also accepts this flag to emit its versioned feature/dependency
+report.
 
 Emit status as one JSON object with ‘sampled_at’ and ‘workspaces’.
 Sizes are numeric bytes and unavailable values are ‘null’; notes explain
@@ -903,7 +953,7 @@ only to status.
 
      oc-box --status --json > status.json
 
-5.7 -about
+5.8 -about
 ==========
 
 Print oc-box version, author Paulo Dias and email, OpenAI
@@ -911,7 +961,7 @@ coding-assistant contribution, GPL-3.0-or-later licensing, and source
 commit.  No Podman or workspace is required.  Use alone, without
 lifecycle selectors/options.
 
-5.8 -version
+5.9 -version
 ============
 
 Print oc-box's commit-derived version and exit without Podman.  The
@@ -933,8 +983,8 @@ channel.  The absolute commit count remains in metadata for upgrade
 ordering; no workspace reset or database migration is required for the
 version-series transition.
 
-5.9 -distro NAME
-================
+5.10 -distro NAME
+=================
 
 Choose a supported distro for a new environment.  The default matches
 the host ID when supported; openSUSE Tumbleweed/Slowroll use Tumbleweed,
@@ -946,7 +996,7 @@ host packages or snapshot date.  Changing an existing workspace requires
      oc-box --project ~/devel/demo --distro tumbleweed
      oc-box reset --project ~/devel/demo --distro debian
 
-5.10 -check
+5.11 -check
 ===========
 
 With ‘upgrade’, report whether the public GitHub commit differs from the
@@ -956,7 +1006,7 @@ update-available exit code.  Network errors return nonzero.  Cannot be
 combined with ‘--auto-update’, workspace selectors, or other commands.
 Example: ‘oc-box upgrade --check’.
 
-5.11 -auto-update on|off
+5.12 -auto-update on|off
 ========================
 
 With ‘upgrade’, persistently enable or disable automatic updates before
@@ -966,7 +1016,7 @@ performs no download or installation and preserves other keys in
 combined with ‘--check’ or workspace actions.  Example: ‘oc-box upgrade
 --auto-update on’.
 
-5.12 -new
+5.13 -new
 =========
 
 Start a new root conversation while retaining the same container and
@@ -974,7 +1024,7 @@ files.  Use with start (the default) or reset.  Mutually exclusive with
 ‘--resume’ and ‘--import-session’.  Example: ‘oc-box --project
 ~/devel/demo --new’.
 
-5.13 -resume
+5.14 -resume
 ============
 
 Explicitly request the normal resume behavior.  Requires a registered
@@ -983,7 +1033,7 @@ can start a new conversation.  Use with start/reset.  Mutually exclusive
 with ‘--new’ and ‘--import-session’.  Example: ‘oc-box --project
 ~/devel/demo --resume’.
 
-5.14 -import-session SESSION_ID
+5.15 -import-session SESSION_ID
 ===============================
 
 Copy a host conversation from the selected project into the private
@@ -997,7 +1047,7 @@ project; the original registry and saved archive verify its project.
 
      oc-box --project ~/devel/demo --import-session ses_HOST_SESSION_ID
 
-5.15 -model PROVIDER/MODEL
+5.16 -model PROVIDER/MODEL
 ==========================
 
 Pass the provider/model choice to the OpenCode TUI on this launch.  It
@@ -1006,7 +1056,7 @@ otherwise normal OpenCode provider/model preferences apply.
 
      oc-box --project ~/devel/demo --model github-copilot/gpt-6.1-sol
 
-5.16 -credential-mode env|selected
+5.17 -credential-mode env|selected
 ==================================
 
 With ‘credentials’, choose forwarding mode for that workspace.  ‘env’ is
@@ -1017,7 +1067,7 @@ settings.  The mode is saved in host metadata, not applied as a
 container reset or to an active client.  Example: ‘oc-box credentials
 --project ~/devel/demo --credential-mode selected’.
 
-5.17 -env-secret NAME
+5.18 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -1028,7 +1078,7 @@ Env mode already forwards legacy variables, so this list becomes
 restrictive only in selected mode.  No value is accepted here.  Example:
 ‘oc-box credentials --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.18 -vault-secret NAME
+5.19 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -1039,7 +1089,7 @@ names-only configuration command.  A name cannot also be selected with
 -env-secret.  Example: ‘oc-box credentials --vault-secret
 BRAVE_API_KEY’.
 
-5.19 -clear-credentials
+5.20 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -1049,7 +1099,7 @@ unless -credential-mode is also specified.  Example: ‘oc-box credentials
 --credential-mode env --clear-credentials’ returns to the original env
 workflow without deleting encrypted vault entries.
 
-5.20 -output FILE
+5.21 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -1059,7 +1109,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.21 -portable
+5.22 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -1069,7 +1119,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.22 -recipient AGE_KEY
+5.23 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -1080,7 +1130,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.23 -identity FILE
+5.24 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -1091,7 +1141,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.24 -cpus NUMBER
+5.25 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -1102,7 +1152,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.25 -memory SIZE
+5.26 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -1114,7 +1164,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.26 -pids-limit NUMBER
+5.27 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -1122,7 +1172,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.27 -device MAPPING
+5.28 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -1136,7 +1186,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.28 -podman-arg=-OPTION[=VALUE]
+5.29 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -1163,7 +1213,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.29 -clear-devices
+5.30 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -1174,7 +1224,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.30 -clear-podman-args
+5.31 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -1184,7 +1234,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.31 -delete-sessions
+5.32 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -1193,7 +1243,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.32 -all
+5.33 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -1201,7 +1251,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.33 -y, -yes
+5.34 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -1245,6 +1295,73 @@ File: oc-box.info,  Node: Distribution images,  Next: Sessions and recovery,  Pr
 
 7 Distribution images
 *********************
+
+7.1 Host dependency installation
+================================
+
+Host requirements and workspace baseline packages are separate.  These
+commands cover core rootless tools and optional age backup tools; doctor
+prints only packages missing for each feature.  Run OS package commands
+manually with the privileges appropriate to your machine (‘sudo’ on a
+configured regular host, or as root without sudo in an administrative
+shell).
+
+| Host distro | Core rootless prerequisites plus optional backup tools |
+| -- | -- | | Tumbleweed / Leap | ‘sudo zypper refresh && sudo zypper
+install python3 podman passt shadow catatonit conmon crun age’ | |
+Ubuntu / Debian | ‘sudo apt update && sudo apt install python3 podman
+passt uidmap catatonit conmon crun age’ | | Fedora | ‘sudo dnf install
+python3 podman passt shadow-utils catatonit conmon crun age’ | | Arch |
+‘sudo pacman -Syu --needed python podman passt shadow catatonit conmon
+crun age’ | | Alpine | ‘sudo apk add python3 podman passt shadow-subids
+catatonit conmon crun age’ |
+
+Installing packages alone does not configure subordinate IDs, cgroups,
+or make rootful Podman rootless.  Alpine requires its release's
+community repository for some providers; Ubuntu may require its official
+universe repository.  Use a current supported OS with Python 3.10+ and
+pasta-capable Podman; an older Leap/ Python combination may need an OS
+upgrade rather than a package reinstall.
+
+| Feature | Host dependencies | | -- | -- | | Launch/reset/sync | Linux,
+running Python 3.10+, Podman, pasta (‘passt’), newuidmap/newgidmap,
+catatonit, conmon, crun or runc, host OpenCode 1.x | |
+Maintenance/stop/repair/purge | Linux, Python, Podman and UID helpers;
+history preservation/deletion additionally uses host OpenCode | |
+Full/portable backup | Linux, Python, rootless Podman/UID helpers,
+age/age-keygen (both from ‘age’), memfd support | | Backup inspection |
+Linux, Python, age/age-keygen, memfd; no Podman/OpenCode/vault extra | |
+Restore | Backup prerequisites plus pasta, init/helper/runtime providers
+for container creation | | Optional vault | ‘cryptography’ in the same
+Python environment as oc-box; no age requirement | | GitHub
+installation/upgrade | Git and Python; one-line download also needs
+curl, mktemp and trusted CA certificates | | Storage reports | GNU ‘du’
+from ‘coreutils’; BusyBox du is insufficient; other metrics still work
+if absent | | FUSE overlay driver | ‘fuse-overlayfs’ only if
+selected/needed; kernel overlay does not require it | | Read manuals |
+man (‘man’, ‘man-db’, or Alpine ‘mandoc’) and info (‘info’ or ‘texinfo’)
+| | Regenerate manuals | GNU makeinfo (‘texinfo’); contributor-only,
+never required to install/use oc-box |
+
+Host OpenCode is not supplied by these mappings; see
+https://opencode.ai/docs/#install.  Use the existing Python installation
+channel for vault support: ‘uv tool install --force 'oc-box[vault]'’,
+‘pipx inject oc-box 'cryptography>=44'’, or GitHub/source
+‘--with-vault’.  Do not install Python dependencies into system Python
+to fix an isolated tool's missing extra.
+
+Inside each workspace, oc-box automatically installs Bash, CA
+certificates, curl, Git, Python, ripgrep, tar/gzip, Node/npm, and PDF
+tools (‘poppler-tools’ on openSUSE, ‘poppler-utils’ on
+Debian/Ubuntu/Fedora/Alpine, ‘poppler’ on Arch).  uv/uvx and matching
+OpenCode are bootstrapped inside private storage.  MCPs, formatters,
+language servers, plugins and project libraries may have their own
+requirements; doctor does not infer those from project configuration.
+
+Distro CI installs mapped packages in disposable instances of all seven
+catalog images, checks actual command providers, tests standard age, and
+verifies scoped guidance.  It does not run nested rootless Podman or
+replace host lifecycle tests.
 
      Name         Image
      tumbleweed   registry.opensuse.org/opensuse/tumbleweed:latest
@@ -2045,22 +2162,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description2358
-Node: Commands4189
-Node: Options41826
-Node: Lifecycle and persistence57710
-Node: Distribution images59463
-Node: Sessions and recovery60358
-Node: Devices and host permissions65646
-Node: Resource reports67992
-Node: Configuration and environment70103
-Node: Files74867
-Node: Exit status79264
-Node: Examples80075
-Node: Troubleshooting82161
-Node: Installation and manuals90232
-Node: Authors and license95560
-Node: See also96167
+Node: Description2410
+Node: Commands4241
+Node: Options43788
+Node: Lifecycle and persistence60172
+Node: Distribution images61925
+Node: Sessions and recovery66686
+Node: Devices and host permissions71974
+Node: Resource reports74320
+Node: Configuration and environment76431
+Node: Files81195
+Node: Exit status85592
+Node: Examples86403
+Node: Troubleshooting88489
+Node: Installation and manuals96560
+Node: Authors and license101888
+Node: See also102495
 
 End Tag Table
 

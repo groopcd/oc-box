@@ -9,9 +9,10 @@ import shutil
 import subprocess
 
 if __package__:
-    from . import workspace_identity
+    from . import dependencies, workspace_identity
 else:
     import workspace_identity
+    import dependencies
 
 LABEL = "io.oc-box.workspace"
 
@@ -81,6 +82,9 @@ def directory_bytes(path, *, private=False):
     other container UIDs can create directories inaccessible to the host UID.
     No process is executed inside a managed container.
     """
+    available, _ = dependencies.probe("du")
+    if not available:
+        return None, dependencies.missing_message("Storage size scan", ["du"])
     command = [
         "du",
         "--summarize",

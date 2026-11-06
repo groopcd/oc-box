@@ -23,9 +23,10 @@ import time
 import uuid
 
 if __package__:
-    from . import credentials, vault, workspace_identity
+    from . import credentials, dependencies, vault, workspace_identity
 else:
     import credentials
+    import dependencies
     import vault
     import workspace_identity
 
@@ -258,7 +259,11 @@ def podman(*args, **kwargs):
     return run(["podman", *args], **kwargs)
 
 
-def check_backend(*, env=None):
+def check_backend(*, env=None, feature="maintenance"):
+    try:
+        dependencies.require(feature)
+    except dependencies.DependencyError as exc:
+        raise BoxError(str(exc)) from exc
     if os.geteuid() == 0:
         raise BoxError(
             "Run oc-box as your regular user, without sudo (rootless Podman is required)."
@@ -2016,6 +2021,7 @@ def parser():
             "list",
             "distros",
             "status",
+            "doctor",
         ),
         default="start",
     )
@@ -2041,7 +2047,7 @@ def parser():
     result.add_argument(
         "--json",
         action="store_true",
-        help="emit --status as JSON with numeric byte values",
+        help="emit status or doctor as JSON",
     )
     result.add_argument(
         "--check",
@@ -2256,6 +2262,8 @@ def credentials_command(args):
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "doctor":
+        return dependencies.cli(arguments[1:])
     if arguments and arguments[0] in ("backup", "backup-info", "restore"):
         if __package__:
             from .backups import BackupError, cli
@@ -2268,6 +2276,10 @@ def main(argv=None):
     if arguments and arguments[0] == "secrets":
         return secrets_command(arguments[1:])
     args = parser().parse_args(argv)
+    if args.command == "doctor":
+        raise BoxError(
+            "Use 'oc-box doctor' first, followed by --json/--feature; see its --help."
+        )
     if args.command in ("backup", "backup-info", "restore"):
         raise BoxError(
             "Use 'oc-box backup|backup-info|restore' first, followed by that command's options; see its --help."
@@ -2561,7 +2573,12 @@ def main(argv=None):
                 )
     with loading_stage("Checking rootless Podman"):
         check_backend(
-            **({"env": maintenance_host_env()} if args.command == "terminal" else {})
+            **({"env": maintenance_host_env()} if args.command == "terminal" else {}),
+            **(
+                {"feature": "launch"}
+                if args.command in ("start", "reset", "sync")
+                else {}
+            ),
         )
     state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
     path, data = find_workspace(

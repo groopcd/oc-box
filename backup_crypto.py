@@ -25,10 +25,11 @@ import termios
 import time
 
 if __package__:
-    from . import secret_prompt
+    from . import dependencies, secret_prompt
     from .backup_archive import BoundedTarInfo
 else:
     import secret_prompt
+    import dependencies
     from backup_archive import BoundedTarInfo
 
 COMPONENTS = {
@@ -48,10 +49,10 @@ class BackupError(Exception):
 
 
 def tools():
-    if not shutil.which("age") or not shutil.which("age-keygen"):
-        raise BackupError(
-            "Backup/restore requires age and age-keygen on the host (package 'age' on common Linux distros). No vault unlock or crypto extra is required."
-        )
+    try:
+        dependencies.require("backup-info")
+    except dependencies.DependencyError as exc:
+        raise BackupError(str(exc)) from exc
 
 
 def environment():
