@@ -476,6 +476,55 @@ storage before delivery; it does not hide a delivered key from the agent.
 See the [complete credential reference](docs/cli.md#credentials) and
 [security notes](SECURITY.md) before migrating sensitive credentials.
 
+## Backup and restore (feature-branch preview)
+
+Encrypted workspace backup/restore is under validation on
+`feature/backup-restore`; it is not part of the current tagged/PyPI release.
+It is intended for the first 1.0.x release **after host Podman validation**.
+Do not install this branch over a working launcher solely to test it: invoke
+its `oc_box.py` directly from a host terminal against disposable fixtures first.
+
+Install the optional host `age` package (provides `age` and `age-keygen`). Then
+exit the source workspace's OpenCode launcher and keep host editors/builds idle:
+
+```sh
+# Complete project, private home/session DB, registry evidence, and OS image:
+oc-box backup --project ~/devel/demo --output /backup/demo.ocbox
+# Smaller backup; rebuild the distro OS on first restored launch:
+oc-box backup --project ~/devel/demo --portable --output /backup/demo-portable.ocbox
+# Both prompt for an age backup passphrase, separate from the credential vault.
+oc-box backup-info /backup/demo.ocbox
+oc-box restore /backup/demo.ocbox --project ~/devel/demo-restored
+```
+
+Backups are always encrypted with the standard age format. Project/home/registry
+archive and image bytes stream directly into encryption; only ciphertext is
+temporarily staged. Native age public recipients can replace the passphrase for
+unattended backups using `--recipient age1...`; restore/info use the matching
+private `--identity FILE`. The host-wide credential vault is **not included**;
+back up its encrypted file separately and retain its own passphrase.
+
+Restore is non-overwriting and creates fresh workspace/container/volume IDs.
+It preserves conversation IDs, full live database/subagent history, source/Git
+edits, private home, and resource/credential-name selections. It keeps the old
+**in-container** project/home paths and maps the new host project there, rather
+than rewriting database paths. Thus the host directory may move while the agent
+still sees the original internal path. It leaves the new container stopped;
+devices and extra Podman settings are recorded but not activated. Reconfigure
+required hardware explicitly. Full backups keep the OS image; portable restores
+need system packages reinstalled. Compatible CPU architecture is required.
+
+The initial format refuses extra bind mounts/volumes and nested project mounts,
+does not copy ACLs/xattrs/SELinux labels, and is not a running-process checkpoint.
+Source symlinks are stored, not followed. Restores reject path traversal, device
+nodes/FIFOs, duplicate paths, hardlink/symlink escapes, unbounded archive metadata,
+and elevated permission bits. Previously stored credentials/auth/history are
+included in private home/project/OS files: treat the encrypted backup and its key
+as sensitive. Deleting a backup does not revoke those credentials.
+
+See [backup commands and limitations](docs/cli.md#backup) and
+[host fixture validation](CONTRIBUTING.md#live-backuprestore-validation).
+
 ## Documentation
 
 The [complete CLI reference](docs/cli.md) covers **every command and option**,

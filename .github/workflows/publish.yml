@@ -31,13 +31,15 @@ jobs:
           python-version: '3.10'
       - name: Create isolated build tools
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends age
           python -m venv "$RUNNER_TEMP/oc-box-build"
           "$RUNNER_TEMP/oc-box-build/bin/python" -m pip install build twine 'cryptography>=44'
       - name: Validate source and release version
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python -m compileall -q oc_box.py bootstrap.py sync_config.py terminal_ui.py status_report.py workspace_identity.py installation.py updater.py version_info.py
+          python -m compileall -q oc_box.py bootstrap.py sync_config.py terminal_ui.py status_report.py workspace_identity.py installation.py updater.py version_info.py backups.py backup_crypto.py backup_archive.py
           python tools/build_docs.py --check
           python - <<'PY'
           import os

@@ -178,6 +178,8 @@ def collect_workspace(path, data, *, podman, session_state, now):
         "workspace_id": data["id"],
         "distro": data["distro"],
         "project": data["project"],
+        "restore_incomplete": bool(data.get("restore_incomplete")),
+        "container_project": data.get("container_project", data["project"]),
         "project_status": "missing directory",
         "container_name": data["container"],
         "container_id": None,
@@ -214,6 +216,10 @@ def collect_workspace(path, data, *, podman, session_state, now):
         "notes": notes,
     }
     project = Path(data["project"])
+    if report["restore_incomplete"]:
+        notes.append(
+            "Restore did not finish. Do not start it; inspect this workspace and any restore_staging_project metadata, then use plain purge by workspace ID before retrying. No history sync will run during that cleanup."
+        )
     condition, selected = project_condition(data)
     report["project_status"] = condition
     report["project_marker_workspace"] = selected
@@ -430,6 +436,8 @@ def print_report(report):
     for item in items:
         print(f"\n{item['workspace_id']}")
         print(f"  Project: {item['project']} ({item['project_status']})")
+        if item["container_project"] != item["project"]:
+            print(f"  In-container project path: {item['container_project']}")
         print(
             f"  Container: {item['container_name']} ({item['container_id'] or 'missing'})"
         )

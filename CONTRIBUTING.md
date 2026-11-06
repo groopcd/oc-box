@@ -6,8 +6,10 @@ formatters, language servers, plugins, and the host/container storage boundary.
 
 ## Checks
 
-Python 3.10+ and stdlib are sufficient for unit tests. The mainline smoke test
-also needs Git and OpenCode (integration checked with 1.19.5):
+Python 3.10+ and stdlib run the base tests. Full vault coverage needs the optional
+cryptography library; backup integration tests need host age/age-keygen. CI
+installs age explicitly. The mainline smoke test also needs Git and OpenCode
+(integration checked with 1.19.5):
 
 ```sh
 uv run --no-project --with cryptography python -B -m unittest discover -s tests -v
@@ -19,6 +21,47 @@ git diff --check
 Tests use isolated temporary app data. Mainline model/MCP/LSP/formatter fixtures
 are local and bounded. These checks do not replace live host-side Podman tests.
 Do not run host lifecycle tests from inside the project's running container.
+
+## Live backup/restore validation
+
+The `feature/backup-restore` branch is deliberately not merged or released until
+the host fixture is accepted. Do not reset/purge real projects to validate it.
+From an ordinary Linux **host** terminal, without sudo, install the age package
+and ensure rootless Podman works. Then run the branch's fixture script directly:
+
+```sh
+python3 ~/devel/oc-box/tools/test_backup_podman.py
+```
+
+It uses a fresh temporary directory and isolated `OC_BOX_STATE_HOME`, creates
+only random workspace labels, uses a small Alpine container, and supplies no
+OpenCode/provider credentials or vault access. It seeds a synthetic SQLite DB,
+private-home auth sentinel, project/Git/untracked edits, and modified system
+files. Both full and portable backups use real age recipient encryption,
+Podman commit/save/load, rootless home ownership, and stopped container restores.
+It verifies checksums, session IDs, internal-path binding, expected OS-file
+preservation/omission, and that original project/container data remains intact.
+It never invokes normal OpenCode setup or uses real project sessions.
+
+On success/failure it prints its retained fixture directory. Keep that output
+for review. Remove only its owned test containers/volumes using the exact path
+printed by the test:
+
+```sh
+python3 tools/test_backup_podman.py --cleanup /tmp/oc-box-live-backup-EXAMPLE
+```
+
+The test-owned backup archives/key and host files remain for manual inspection;
+they are synthetic, private, and not release artifacts. Cleanup does not run
+global prune or touch registered real projects. CI/offline fixtures exercise
+actual age/archive pipelines and substitute only Podman transport; they cannot
+certify kernel isolation, SELinux, image loading, or UID mapping on your host.
+If the live check fails, stop and retain the test environment for diagnosis.
+
+The planned first 1.0.x version bump happens only after successful validation,
+before merging, retesting, tagging, and publishing to GitHub/PyPI. The current
+feature branch retains the 0.1 commit-derived series during review, and merely
+pushing it does not create a release or publish to PyPI.
 
 ## Manuals
 

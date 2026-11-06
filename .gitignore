@@ -22,3 +22,6 @@ uv.lock
 vault.json
 .vault.lock
 .vault-*
+*.ocbox
+backup-age-key.txt
+identity.txt

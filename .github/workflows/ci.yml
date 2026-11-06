@@ -25,6 +25,8 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Unit and documentation coverage checks
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends age
           python -m venv "$RUNNER_TEMP/tests"
           "$RUNNER_TEMP/tests/bin/python" -m pip install 'cryptography>=44'
           "$RUNNER_TEMP/tests/bin/python" -B -m unittest discover -s tests -v

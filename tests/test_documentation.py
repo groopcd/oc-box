@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import backups
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
@@ -38,8 +39,18 @@ class DocumentationTests(unittest.TestCase):
             for value in re.findall(r"(?<![\w-])--?[a-z][a-z-]*", heading)
         }
         parser = box.parser()
+        parsers = [
+            parser,
+            *(
+                backups.parser_for(action)
+                for action in ("backup", "backup-info", "restore")
+            ),
+        ]
         expected = {
-            value for action in parser._actions for value in action.option_strings
+            value
+            for current in parsers
+            for action in current._actions
+            for value in action.option_strings
         }
         self.assertEqual(options, expected)
         commands = next(
@@ -96,6 +107,10 @@ class DocumentationTests(unittest.TestCase):
             "auto_update",
             "oc-box upgrade --check",
             "curl -fsSL",
+            "oc-box backup",
+            "restore_incomplete",
+            "--recipient",
+            "container_project",
         ):
             self.assertIn(phrase, text)
 

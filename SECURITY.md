@@ -152,6 +152,37 @@ plugins, and MCPs are upstream dependencies. Baseline downloads use HTTPS where
 the launcher fetches them directly; distribution tools follow their configured
 repositories and signature policies. Keep the host kernel and Podman patched.
 
+## Backup/restore preview
+
+The unmerged backup/restore feature uses established age authenticated encryption
+for streaming components and an age-protected fresh per-backup key. Only
+ciphertext is staged on disk; keys and captured tool errors use anonymous memfd
+storage. No provider credentials are forwarded, vault unlocked, container code
+executed, or OpenCode config/auth refreshed for backup/info/restore. The complete
+project, private home, OS, and registry may contain credentials, so backups and their
+decryption keys must be handled as sensitive data. The separate host vault is
+not included; its encrypted file needs an independent backup.
+
+A stopped container and exclusive workspace lock protect database capture, not
+against host editors changing source during backup. Nested mounts and external
+bind/volume data are not silently included. Restore stages into new directories
+and owned volumes; it rejects existing destinations and archive traversal,
+duplicate paths, device/special entries, excessive metadata, sparse extensions,
+hardlink escapes, and symlink-ancestor writes. Source ACLs/xattrs and setuid/gid
+bits are not restored. Ordinary source symlink targets remain symlinks, never
+followed during extraction; later host tools can follow them normally.
+
+An encrypted backup is confidential and tamper-detectable, not proof of trusted
+origin: anyone knowing a public recipient can create a new archive for it.
+Only restore trusted backups. Container OS files and private home tools/config
+are code when later used. Restore never starts an image automatically, does not
+reactivate archived device/extra host settings, clears image Env/declared volumes,
+disables image healthchecks, and sets the normal fixed entrypoint. Podman remains responsible for OCI layer
+validation. No claim is made that arbitrary malicious OCI images are safe.
+Partial image imports may remain in Podman's shared cache; cleanup never prunes
+unrelated images. Initial backup format is same-architecture, complete/manual,
+not an incremental store or running-process checkpoint.
+
 ## Installation and updates
 
 The curl bootstrap and `oc-box upgrade` trust the code published at the public

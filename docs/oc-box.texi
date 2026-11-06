@@ -59,6 +59,9 @@ oc-box upgrade [--check | --auto-update on|off]
 oc-box secrets init|list|passwd
 oc-box secrets set|remove NAME
 oc-box credentials [--project PATH | --workspace ID] [CREDENTIAL-OPTIONS]
+oc-box backup [--project PATH | --workspace ID] --output FILE [--portable] [--recipient AGE_KEY ...]
+oc-box backup-info FILE [--identity FILE ...]
+oc-box restore FILE --project NEW_PATH [--identity FILE ...]
 oc-box --about
 oc-box --version
 oc-box -h | --help
@@ -308,6 +311,63 @@ A normal start/reset/import launch unlocks once when selected vault names exist,
 
 Informational commands, maintenance terminal, explicit history sync, stop, repair, and upgrade never unlock. The maintenance shell's clean environment rules remain unchanged. Configuration/auth copying is an independent feature: these selections do not remove embedded credentials in copied config, provider or MCP auth files, project files, raw Podman create-time Env settings, previous processes, or previously saved container data. Selection is reduced forwarding, not an isolation boundary from secrets already inside the container. Delivered keys remain readable by the agent/tools with normal container permissions.
 
+@section backup
+
+Feature-branch preview for validation before the first 1.0.x release. Create one encrypted @code{.ocbox} file for an existing workspace. Requires host age/age-keygen, Python, rootless Podman, and Linux memfd support; it does not require the vault crypto extra or unlock the credential vault. The command must be first, with its own options after it. Use --project/--workspace or the current directory.
+
+@example
+oc-box backup --project ~/devel/demo --output /backup/demo.ocbox
+oc-box backup --workspace WORKSPACE_ID --portable --output /backup/demo-portable.ocbox
+@end example
+
+The workspace lock requires its active OpenCode launcher or maintenance shell to exit. The command verifies marker/physical identity and resource ownership, then stops the container if needed; it remains stopped afterward. Host editors, builds, and other processes must not change project files during capture. The launcher lock cannot quiesce unrelated host writers. Project and container configuration must be intact; missing containers and unknown extra bind mounts/ volumes are refused rather than silently omit outside data.
+
+Full backup (default) captures the complete project including @code{.git}, untracked files and unfinished edits; the private home with the live OpenCode SQLite DB, subagent transcripts, snapshots, copied config/auth, and caches; registry/resume evidence; and a committed OCI image of the modified container OS. Mounted project and home are backed up separately, not folded into the image. Portable mode omits that OS image; system packages/SDKs must be recreated after restore. Neither mode captures running processes, kernel state, devices, host drivers, the host-wide vault, host global DB/config, or arbitrary paths outside those components. Env files inside the selected project are project data and are included; host env files outside it are not read.
+
+Default encryption uses age's own hidden passphrase prompt for a fresh key envelope; it is separate from the vault password, with no custom cipher/KDF. For unattended encryption use a native age X25519 public recipient, repeatable:
+
+@example
+age-keygen -o ~/.config/backup-age-key.txt
+age-keygen -y ~/.config/backup-age-key.txt
+oc-box backup --project ~/devel/demo --recipient age1PUBLIC_KEY \
+  --output /backup/demo.ocbox
+@end example
+
+The generated private key file is sensitive and should remain 0600 outside project/container access. The public recipient may be stored in a scheduler. Keep the private identity/backup passphrase separately; losing it makes the backup unrecoverable. Age plugins/SSH identities are not accepted in format v1.
+
+The envelope contains fixed-name age-encrypted components plus an encrypted manifest and age-protected per-backup private key. The manifest authenticates component SHA-256 digests/sizes; all components use age authenticated streaming encryption. Plaintext streams through pipes, and secret keys/captured stderr use anonymous memory. Temporary backup staging contains ciphertext only. At most 16 TiB ciphertext/expanded archive bytes per component and 2 million entries are accepted in format v1. The output parent must exist outside the project, registry, and private home. New output is published atomically without replacing an existing file and has 0600 permissions. Expect enough free space for staged ciphertext, final output, and a temporary committed image. Failure leaves no final partial backup; the source remains stopped, not reset/deleted. The temporary capture image is removed by its unique tag; shared base images remain.
+
+@section backup-info
+
+Decrypt/verify a backup's manifest and ciphertext checksums without starting Podman or extracting workspace contents. Requires age and a controlling terminal for passphrase backups, or a native private --identity file for recipient backups. Output is JSON metadata including kind, source path/ID, architecture, component sizes/checksums, saved session IDs, settings, and documented limitations. Raw additional Podman option values are omitted to avoid printing saved secrets. It never prints archived file contents or the host vault and does not execute container image code. Metadata itself may contain private paths/session names.
+
+@example
+oc-box backup-info /backup/demo.ocbox
+oc-box backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt
+@end example
+
+Inspection stages only encrypted envelope components while checking them. It authenticates the manifest and binds component ciphertext to it; restore also verifies every age data stream through its final authentication chunk. Wrong keys, corruption, missing/extra components, unsupported versions, or unsafe outer envelope paths are rejected before restore activation.
+
+@section restore
+
+Restore into a **new, nonexistent** host project destination. Never overwrites an existing directory or workspace; there is no --force/--replace mode. Run on the host as your regular user after installing age. The active source workspace does not need to be removed: this is a fresh independent environment.
+
+@example
+oc-box restore /backup/demo.ocbox --project ~/devel/demo-restored
+oc-box restore /backup/demo.ocbox --project ~/devel/demo-restored \
+  --identity ~/.config/backup-age-key.txt
+@end example
+
+It decrypts/verifies the manifest, checks architecture/settings, stages project files in a private sibling directory, creates a fresh labeled home volume, and streams its extraction under podman unshare for container UID/GID mappings. Registry content is retained as @code{recovered-registry/} evidence, not activated as arbitrary create commands or old host-archive paths. Then a full backup loads the captured OCI image; portable mode selects the original distro catalog image. Only after component restoration succeeds does atomic no-replace rename publish the project and record its actual destination identity with fresh IDs.
+
+The new environment is **created but not started**. Its resume selection keeps the original conversation IDs and complete container DB. Original private home and in-container project paths remain the same; @code{container_project} in metadata can differ from the new host project. Existing session snapshots/tool paths need no database rewrite. Status reports both paths when different. Host archive sync from a restored workspace uses fresh namespaced archive IDs and the new host project. Old host archive associations are not reused/deleted.
+
+Normal startup still copies the current host config/auth and checks the exact host OpenCode version. The archive's device/extra Podman settings are recorded as requirements but **not automatically activated**. The restored image's environment and declared volumes are cleared, image healthchecks are disabled, and a fixed entrypoint is used; backup image hooks, startup commands, external mounts, and host device settings are not trusted as new host launch privileges. Full restores retain OS files, which are executable code when you later start/use that environment: restore only trusted backups. Portable restores recreate baseline tools on first normal launch and need custom system dependencies reinstalled. Host drivers and CPU architecture are not portable; this initial format requires a matching CPU architecture even for portable mode because cached home binaries may be native.
+
+Extraction refuses traversal, duplicate/excessive entries, special devices/ FIFOs/sockets, sparse extensions, oversized metadata, hardlinks outside earlier regular entries, and any write through a symlink ancestor. Project files become owned by the current host user; private-home ownership is mapped in the rootless namespace. Regular modes/timestamps/symlinks/hardlinks are kept, but setuid/setgid/ sticky bits, ACLs, xattrs, and source SELinux labels are not restored. New project mounts use Podman's normal :z relabeling. Symlink targets may name outside paths but are never followed during extraction; check them before later host use. Restored project and staging roots are kept private (0700), even if the original root had broader permissions; permissions of ordinary files/subdirectories remain.
+
+The host vault is not included or unlocked. Credential selections retain names only, so provide matching host env/vault credentials before normal selected-mode startup. Copied auth/config and secrets stored in project/home/OS are part of the encrypted payload and remain present after restore. A failed operation cleans only its newly created project/volume/container/registry and preserves original environments; interruption may retain staging marked incomplete, which normal launch refuses until the operator inspects/retries. Loaded OCI images may remain in shared Podman image cache after failure; no global prune is used. The host registry journals fresh resource IDs and @code{restore_staging_project} before payload extraction. An interrupted or failed-cleanup entry has @code{restore_incomplete: true}; list/status can expose its ID without launching it. Inspect the staging location, use plain @code{purge --workspace ID} for its managed resources (which skips history sync for incomplete restores), and retry to a new destination. Orphan staging directories may need manual host removal after inspection; the launcher never deletes a caller-supplied tree on marker alone.
+
 @node Options
 @chapter Options
 
@@ -405,6 +465,22 @@ With @code{credentials}, select an existing encrypted vault entry name to unlock
 @section --clear-credentials
 
 With @code{credentials}, clear both saved env-name and vault-name lists before adding new selections on this invocation. It does not erase the vault, remove provider auth/config, revoke credentials, or change mode unless --credential-mode is also specified. Example: @code{oc-box credentials --credential-mode env --clear-credentials} returns to the original env workflow without deleting encrypted vault entries.
+
+@section --output FILE
+
+Backup-only. Required new encrypted backup output pathname. Its parent must already exist outside the project/registry/private volume. Existing files or symlinks are never overwritten, including a destination created during capture. Example: @code{oc-box backup --project ~/devel/demo --output /backup/demo.ocbox}. The archive suffix is conventional; the versioned format is checked on restore.
+
+@section --portable
+
+Backup-only. Omit the container OS image while retaining project, complete private home, sessions, registry evidence, and limits/credential-name settings. Restore rebuilds the selected distro OS/baseline tools; custom system packages and native-cache compatibility are the user's responsibility. Example: @code{oc-box backup --project ~/devel/demo --portable --output /backup/demo.ocbox}.
+
+@section --recipient AGE_KEY
+
+Backup-only, repeatable (up to 16). Encrypt the backup key envelope to a native age X25519 public key, allowing backup without a password prompt. Any matching private identity can decrypt it. Without this option age requests a backup passphrase interactively. Public recipients are not secret; private identities must be stored independently of the archive and project. Example: @code{oc-box backup --recipient age1PUBLIC_KEY --output /backup/demo.ocbox}.
+
+@section --identity FILE
+
+Restore/backup-info only, repeatable. Read a native age X25519 private identity file owned by the host user with private permissions, no symlink or extra hard links. Plugins, SSH identities, and encrypted identity files are refused in the initial format; passphrase-encrypted backups instead use age's terminal prompt. No identity text or passphrase is accepted through argv/environment. Example: @code{oc-box backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt}.
 
 @section --cpus NUMBER
 

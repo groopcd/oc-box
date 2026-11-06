@@ -17,6 +17,9 @@ portable: use example project paths and synthetic session IDs, not local data.
   per-workspace credential policy. Legacy env-file forwarding remains default.
 - `secret_prompt.py`: controlling-TTY masked input, explicit value reveal, safe
   terminal restoration. Never reveal passphrases or accept non-TTY fallback.
+- `backups.py` / `backup_crypto.py` / `backup_archive.py`: host-only encrypted
+  backup/restore feature; use established age streaming encryption, no plaintext
+  archive staging, fresh restore IDs, and no archived privilege reactivation.
 - `install.py`: copies the launcher to `~/.local/share/oc-box` and creates
   `~/.local/bin/oc-box`.
 - `installation.py`: staged immutable installed copies and launcher activation.
@@ -119,3 +122,10 @@ dependency lazy for default installs. Maintenance and informational commands
 never unlock. Wrong/missing selected credentials must abort before reset deletion.
 Secret values may be deliberately revealed only in the interactive host prompt;
 start every field masked, keep passphrases masked, and document recording risk.
+
+Backup/restore is under review on `feature/backup-restore`. Do not merge/tag/
+publish until the user accepts host Podman validation. Keep the 0.1 series
+during this review; prepare the first 1.0.x release after acceptance. Test with
+`tools/test_backup_podman.py` on a host, isolated from real workspace state.
+Restores retain original internal project paths via `container_project`; host
+destinations/physical identities and resource IDs are fresh, not DB path edits.

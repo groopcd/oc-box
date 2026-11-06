@@ -706,7 +706,17 @@ def warn_device_access(data):
     )
 
 
-def create_container(path, data):
+def container_project(data):
+    # Restore keeps old internal paths while moving the host project safely.
+    return data.get("container_project", data["project"])
+
+
+def create_container(path, data, *, environment=None):
+    def create_podman(*args, **kwargs):
+        return podman(
+            *args, **kwargs, **({"env": environment} if environment is not None else {})
+        )
+
     project = validate_project(data["project"])
     if not workspace_identity.same_project(data, project):
         raise BoxError(
@@ -719,9 +729,11 @@ def create_container(path, data):
     warn_device_access(data)
     print(f"Creating {data['distro']} environment ({data['image']})", flush=True)
     # The named home is container-only storage, not a bind of the user's home.
-    volume = podman("volume", "exists", data["home_volume"], capture=True, check=False)
+    volume = create_podman(
+        "volume", "exists", data["home_volume"], capture=True, check=False
+    )
     if volume.returncode == 1:
-        podman(
+        create_podman(
             "volume",
             "create",
             "--label",
@@ -732,11 +744,11 @@ def create_container(path, data):
     elif volume.returncode != 0:
         raise BoxError("Cannot check the private home volume.")
     volume_info = json.loads(
-        podman("volume", "inspect", data["home_volume"], capture=True).stdout
+        create_podman("volume", "inspect", data["home_volume"], capture=True).stdout
     )[0]
     if (volume_info.get("Labels") or {}).get(LABEL) != data["id"]:
         raise BoxError("Private home volume ownership mismatch.")
-    podman(
+    create_podman(
         "create",
         "--name",
         data["container"],
@@ -758,11 +770,14 @@ def create_container(path, data):
         "--pids-limit",
         str(data["pids"]),
         "--workdir",
-        str(project),
+        container_project(data),
         "--volume",
         f"{data['home_volume']}:{data['home']}:rw",
         "--volume",
-        f"{project}:{project}:rw,z,rprivate,nosuid,nodev",
+        f"{project}:{container_project(data)}:rw,z,rprivate,nosuid,nodev",
+        *(["--image-volume=ignore"] if data.get("restored_from") else []),
+        *(["--unsetenv-all"] if data.get("restored_from") else []),
+        *(["--no-healthcheck"] if data.get("restored_from") else []),
         *("--device=" + device for device in data.get("devices", [])),
         *data.get("podman_args", []),
         "--env",
@@ -802,7 +817,8 @@ def start_container(path, data):
         info = inspect_owned(data)
     mounts = info.get("Mounts", [])
     if not any(
-        m.get("Destination") == data["project"] and m.get("Source") == data["project"]
+        m.get("Destination") == container_project(data)
+        and m.get("Source") == data["project"]
         for m in mounts
     ):
         raise BoxError("Container workspace mount does not match the host registry.")
@@ -841,7 +857,7 @@ def start_container(path, data):
         "-c",
         'test -r "$1" && test -w "$1" && ls -A "$1" >/dev/null',
         "oc-box",
-        data["project"],
+        container_project(data),
         capture=True,
         check=False,
         timeout=30,
@@ -936,7 +952,7 @@ def container_env(data):
         "XDG_STATE_HOME": home + "/.local/state",
         "XDG_CACHE_HOME": home + "/.cache",
         "SHELL": "/bin/bash",
-        "PWD": data["project"],
+        "PWD": container_project(data),
         "OPENCODE_DISABLE_SANDBOX": "1",
         "OC_BOX_CONTAINER": "1",
         "OPENCODE_CONFIG": home + "/.config/opencode/oc-box-profile.json",
@@ -1021,7 +1037,7 @@ def maintenance_command(data):
         term = "xterm-256color"
     variables = {
         "HOME": data["home"],
-        "PWD": data["project"],
+        "PWD": container_project(data),
         "TERM": term,
         "PATH": "/opt/oc-box/runtime/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
         "SHELL": "/bin/bash",
@@ -1039,7 +1055,7 @@ def maintenance_command(data):
             "-i",
             "-t",
             "--workdir",
-            data["project"],
+            container_project(data),
             data["container"],
             "/usr/bin/env",
             "-i",
@@ -1072,7 +1088,7 @@ def maintenance_terminal(path, data):
             "Workspace container is missing. 'oc-box terminal' never creates a replacement; use a normal oc-box launch to recreate it explicitly."
         )
     if not any(
-        mount.get("Destination") == data["project"]
+        mount.get("Destination") == container_project(data)
         and mount.get("Source") == data["project"]
         for mount in info.get("Mounts", [])
     ):
@@ -1111,7 +1127,7 @@ def exec_command(data, command, *, interactive=False):
     result = ContainerCommand(["podman", "exec", "-i"], environment)
     if interactive and sys.stdin.isatty() and sys.stdout.isatty():
         result.append("-t")
-    result.extend(["--workdir", data["project"]])
+    result.extend(["--workdir", container_project(data)])
     # Keep container HOME/XDG/config settings from changing the host Podman
     # process's storage/config discovery. Only these non-secret settings belong
     # in argv; credentials/custom forwarded values use inherited environment.
@@ -1354,7 +1370,8 @@ def refresh_sessions(path, data):
     roots = [
         item
         for item in values
-        if item.get("directory") == data["project"] and valid_session_id(item.get("id"))
+        if item.get("directory") == container_project(data)
+        and valid_session_id(item.get("id"))
     ]
     roots.sort(key=lambda item: item.get("updated", 0), reverse=True)
     state = session_state(path)
@@ -1538,7 +1555,10 @@ def verify_session_import(data, exported, imported):
             ):
                 del state["raw"]
                 omitted += 1
-    if imported["info"].get("directory") != data["project"] or actual != expected:
+    if (
+        imported["info"].get("directory") != container_project(data)
+        or actual != expected
+    ):
         raise BoxError(
             "Imported session verification failed: project, message, or part content differs "
             f"(source: {len(expected)} messages/{sum(len(m['parts']) for m in expected.values())} parts; "
@@ -1621,6 +1641,7 @@ with tempfile.TemporaryDirectory(prefix='oc-box-import-') as directory:
     sys.exit(result.returncode)
 """
     payload = json.loads(json.dumps(exported))
+    payload["info"]["directory"] = container_project(data)
     # Import is workspace activity: otherwise a newer pre-existing conversation
     # would immediately displace this older imported session on the next launch.
     payload["info"].setdefault("time", {})["updated"] = max(
@@ -1686,6 +1707,7 @@ def archive_session(export, data):
         return value
 
     result = remap(result)
+    result["info"]["directory"] = data["project"]
     result["info"].pop("parentID", None)
     result["info"].pop("permission", None)
     result["info"]["title"] = f"[oc-box {Path(data['project']).name}] " + info.get(
@@ -1788,7 +1810,7 @@ def launch_environment(path, data, args):
         else:
             with loading_stage("Finding workspace session"):
                 sessions = refresh_sessions(path, data)
-        command = [CONTAINER_OPENCODE, data["project"]]
+        command = [CONTAINER_OPENCODE, container_project(data)]
         if not args.new and sessions.get("last"):
             command.extend(["--session", sessions["last"]])
         if args.model:
@@ -1914,6 +1936,7 @@ def purge(path, data, args):
     try:
         if (
             not (args.delete_sessions or args.all)
+            and not data.get("restore_incomplete")
             and inspect_owned(data)
             and Path(data["project"]).is_dir()
         ):
@@ -1986,6 +2009,9 @@ def parser():
             "upgrade",
             "secrets",
             "credentials",
+            "backup",
+            "backup-info",
+            "restore",
             "purge",
             "list",
             "distros",
@@ -2218,9 +2244,22 @@ def credentials_command(args):
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] in ("backup", "backup-info", "restore"):
+        if __package__:
+            from .backups import BackupError, cli
+        else:
+            from backups import BackupError, cli
+        try:
+            return cli(sys.modules[__name__], arguments)
+        except BackupError as exc:
+            raise BoxError(str(exc)) from exc
     if arguments and arguments[0] == "secrets":
         return secrets_command(arguments[1:])
     args = parser().parse_args(argv)
+    if args.command in ("backup", "backup-info", "restore"):
+        raise BoxError(
+            "Use 'oc-box backup|backup-info|restore' first, followed by that command's options; see its --help."
+        )
     if args.command == "secrets":
         raise BoxError("Use 'oc-box secrets ACTION [NAME]' with no workspace options.")
     credential_options = bool(
@@ -2538,6 +2577,10 @@ def main(argv=None):
         print("Container stopped; files, packages, and conversations retained.")
         return 0
     with workspace_lock(path), contextlib.ExitStack() as launch_context:
+        if data.get("restore_incomplete") and args.command != "purge":
+            raise BoxError(
+                "This workspace restore did not finish. Do not start it; inspect backup recovery staging and use plain purge by ID before retrying into a new destination."
+            )
         if args.command == "reset":
             # Validate/unlock before reset removes the old OS. Wrong/missing
             # credentials must never destroy an otherwise working environment.
@@ -2571,6 +2614,9 @@ def main(argv=None):
                 check_resource_controllers(data)
                 remove_resources(data, keep_home=True)
                 data["ready"] = False
+                # Reset rebuilds the distro, not the captured custom OS image.
+                # Keep any restored internal paths for the preserved home DB.
+                data["image"] = DISTROS[data["distro"]][0]
                 if args.distro:
                     data["distro"] = distro_name(args.distro)
                     data["image"] = DISTROS[data["distro"]][0]
