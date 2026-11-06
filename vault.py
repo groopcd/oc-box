@@ -9,7 +9,6 @@ cached, exported, put in argv, or written alongside the vault.
 import base64
 import contextlib
 import fcntl
-import getpass
 import json
 import os
 from pathlib import Path
@@ -18,7 +17,6 @@ import resource
 import stat
 import sys
 import tempfile
-import warnings
 
 FORMAT = "oc-box-vault"
 VERSION = 1
@@ -131,9 +129,7 @@ def crypto():
     return AESGCM, Scrypt, InvalidTag
 
 
-def hidden(prompt):
-    # getpass otherwise falls back to echoing input and warns on redirected
-    # stdin. A controlling terminal must exist; fail rather than accept that.
+def hidden(prompt, *, allow_reveal=False, maximum=1024):
     try:
         # Reduce accidental plaintext disclosure through launcher core dumps.
         # This is not memory zeroization or protection against same-user/root
@@ -143,18 +139,12 @@ def hidden(prompt):
             resource.setrlimit(resource.RLIMIT_CORE, (0, hard))
         except (OSError, ValueError):
             pass
-        terminal = os.open("/dev/tty", os.O_RDWR | os.O_CLOEXEC | os.O_NOCTTY)
-        try:
-            if not os.isatty(terminal):
-                raise VaultError(
-                    "Secret input requires a controlling host terminal; stdin, files, and environment passphrases are not accepted."
-                )
-        finally:
-            os.close(terminal)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", getpass.GetPassWarning)
-            return getpass.getpass(prompt)
-    except (OSError, EOFError, getpass.GetPassWarning) as exc:
+        if __package__:
+            from .secret_prompt import read_secret
+        else:
+            from secret_prompt import read_secret
+        return read_secret(prompt, allow_reveal=allow_reveal, maximum=maximum)
+    except (OSError, EOFError) as exc:
         raise VaultError(
             "Secret input requires a controlling host terminal with hidden input."
         ) from exc
@@ -424,9 +414,11 @@ def manage(action, name=None, *, path=None):
                 print(entry)
             return
         if action == "set":
-            value = hidden("Secret value (hidden): ")
+            value = hidden("Secret value: ", allow_reveal=True, maximum=MAX_SECRET)
             validate_value(value)
-            if value != hidden("Confirm secret value: "):
+            if value != hidden(
+                "Confirm secret value: ", allow_reveal=True, maximum=MAX_SECRET
+            ):
                 raise VaultError("Secret values do not match; vault was not changed.")
             values[name] = value
         elif action == "remove":

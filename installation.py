@@ -18,6 +18,7 @@ else:
 PROGRAM_FILES = (
     "oc_box.py",
     "vault.py",
+    "secret_prompt.py",
     "credentials.py",
     "__init__.py",
     "__main__.py",

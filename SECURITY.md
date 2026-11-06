@@ -34,9 +34,21 @@ quota, so project, image, and volume growth can exhaust host disk space.
 The original env-file workflow remains the default: no vault initialization,
 password prompt, or crypto dependency is introduced by an ordinary upgrade.
 The opt-in vault uses cryptography's Scrypt KDF and AES-256-GCM; it does not
-implement cryptographic primitives itself. A passphrase is entered only on a
-controlling host terminal with echo disabled. There is no passphrase argument,
+implement cryptographic primitives itself. Credentials are entered only on a
+controlling host terminal with kernel echo disabled; a custom masked editor
+provides a character count. There is no passphrase argument,
 environment variable, plaintext export, key file, daemon, or permanent unlock.
+
+At secret-value and confirmation prompts, the user may deliberately press Ctrl+R
+to show/hide the current input. Every prompt starts masked; passphrases have no
+reveal mode. The visible field is single-line/width-bounded and erased on return,
+cancel, and handled signals, but terminal recordings, screenshots, observers,
+scrollback, or resize reflow can retain revealed values. Do not reveal in a
+recorded/shared terminal. Mask/count feedback discloses length. Kernel input
+echo remains disabled even in reveal mode; the renderer never executes secret
+text as terminal control sequences, and bracketed control/multiline pastes are
+rejected. No values are displayed on stdout/stderr or exported as command-line
+arguments. This changes interactive display only, not at-rest encryption.
 
 The encrypted vault is outside the project/container at
 `$XDG_DATA_HOME/oc-box/credentials/vault.json` (default

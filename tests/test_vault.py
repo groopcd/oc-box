@@ -16,6 +16,7 @@ from unittest.mock import patch
 import credentials
 import oc_box as box
 import vault
+import secret_prompt
 import installation
 
 try:
@@ -251,7 +252,7 @@ class EncryptedVaultTests(VaultFixture):
             ["secrets", "set", "EXAMPLE_TOKEN"],
             [
                 ("Vault passphrase", PASSPHRASE),
-                ("Secret value (hidden)", VALUE),
+                ("Secret value:", VALUE),
                 ("Confirm secret value", VALUE),
             ],
         )
@@ -650,11 +651,13 @@ class VaultFilesystemTests(VaultFixture):
     def test_hidden_input_refuses_no_controlling_terminal(self):
         with (
             patch.object(vault.os, "open", side_effect=OSError("no tty")),
-            patch.object(vault.getpass, "getpass") as prompt,
+            patch.object(
+                secret_prompt, "read_secret", wraps=secret_prompt.read_secret
+            ) as prompt,
         ):
             with self.assertRaisesRegex(vault.VaultError, "controlling host terminal"):
                 vault.hidden("Secret: ")
-        prompt.assert_not_called()
+        prompt.assert_called_once()
 
     def test_missing_crypto_is_reported_without_initializing_vault(self):
         with (

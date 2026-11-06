@@ -15,6 +15,8 @@ portable: use example project paths and synthetic session IDs, not local data.
   persistent handles and strict fallback; shared by lifecycle/status checks.
 - `vault.py` / `credentials.py`: optional encrypted host vault and names-only
   per-workspace credential policy. Legacy env-file forwarding remains default.
+- `secret_prompt.py`: controlling-TTY masked input, explicit value reveal, safe
+  terminal restoration. Never reveal passphrases or accept non-TTY fallback.
 - `install.py`: copies the launcher to `~/.local/share/oc-box` and creates
   `~/.local/bin/oc-box`.
 - `installation.py`: staged immutable installed copies and launcher activation.
@@ -115,3 +117,5 @@ Vault values/passphrases never belong in argv, logs, project files, registry
 metadata, plaintext temporary files, or host os.environ. Keep the optional crypto
 dependency lazy for default installs. Maintenance and informational commands
 never unlock. Wrong/missing selected credentials must abort before reset deletion.
+Secret values may be deliberately revealed only in the interactive host prompt;
+start every field masked, keep passphrases masked, and document recording risk.

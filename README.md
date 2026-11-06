@@ -405,7 +405,8 @@ the host needs a controlling terminal and normal private Unix file permissions,
 including under WSL. Do not put the vault on an exposed project mount or a
 Windows-shared path that cannot enforce those permissions.
 
-Create the vault and store secrets through hidden prompts (names only in argv):
+Create the vault and store secrets through interactive masked prompts (names
+only in argv):
 
 ```sh
 oc-box secrets init
@@ -415,6 +416,19 @@ oc-box secrets list            # Unlocks; prints names, never values
 oc-box secrets remove OLD_TOKEN
 oc-box secrets passwd          # Change the vault passphrase
 ```
+
+Typing/pasting shows `*` characters and a live character count. At **secret
+value** and confirmation prompts, press **Ctrl+R** to switch between masked and
+visible input; each prompt starts masked. Vault passphrases always stay masked
+and cannot be revealed. Use Backspace/Delete and arrow/Home/End keys to correct
+input, **Ctrl+U** to clear, Enter to accept, or **Ctrl+C** to cancel. Bracketed
+multiline/control-character or oversized pastes are rejected rather than
+silently truncated. The input field scrolls horizontally for long values.
+
+Revealed text is cleared when leaving the prompt, but explicitly showing a key
+can expose it in terminal recordings, screenshots, scrollback/reflow, or screen
+sharing. Masked feedback reveals length, not content. There is still no plaintext
+value command-line argument, saved history, or change to the encrypted format.
 
 The host vault is normally `~/.local/share/oc-box/credentials/vault.json`
 (`$XDG_DATA_HOME/oc-box/credentials/vault.json` when set), outside project and

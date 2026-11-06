@@ -44,6 +44,7 @@ def check(directory, *, with_vault=False):
             "oc_box.py",
             "workspace_identity.py",
             "vault.py",
+            "secret_prompt.py",
             "credentials.py",
             "bootstrap.py",
             "sync_config.py",

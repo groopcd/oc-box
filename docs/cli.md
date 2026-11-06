@@ -396,7 +396,7 @@ starts Podman or copies secrets into the development environment. The existing
 env-file workflow is unchanged unless you select vault credentials explicitly.
 Use the literal `secrets` command first, followed by one action and, for set or
 remove, an uppercase environment name. Values and passphrases are accepted only
-through hidden controlling-terminal prompts, never argv, stdin, or environment
+through masked controlling-terminal prompts, never argv, stdin, or environment
 password settings. Host-only; do not run it inside a development container.
 
 ```sh
@@ -416,6 +416,38 @@ entry; a missing entry causes a clear error without changes. `passwd` unlocks
 with the old passphrase and asks for a new confirmed passphrase. No `get`,
 plaintext dump, insecure batch password option, or automated env-file import
 is provided. `oc-box secrets --help` describes the action syntax.
+
+Input feedback shows a mask and character count for typing and pasting. Secret
+value and confirmation prompts start masked and offer **Ctrl+R** to toggle
+visible/masked input on the fly. Passphrase creation, confirmation, and unlock
+prompts always stay masked: Ctrl+R does not reveal or modify passphrases. Reveal
+state never carries to the next prompt. There is no flag or setting that makes
+credentials visible by default.
+
+Editing keys: Left/Right move, Home/End (or Ctrl+A/Ctrl+E) select the ends,
+Backspace/Delete remove a character, Ctrl+U clears the entire value, Ctrl+W
+removes the preceding word, and Ctrl+K clears from the cursor to the end. Enter
+accepts; Ctrl+C, Ctrl+D, or Ctrl+Z cancels without changing the vault. Ctrl+Z
+cancels rather than suspending a process that is holding sensitive input. The
+normal terminal settings and bracketed-paste mode are restored on exit/errors.
+
+Long values use a width-bounded horizontal viewport with a count, so they do not
+normally wrap; only the current field is displayed, never prior vault values.
+UTF-8 input is preserved exactly, with byte limits applied before insertion.
+Terminal control/bidi/combining characters are never executed/rendered as active
+terminal sequences when revealed. Bracketed paste treats its contents as data,
+not toggle/edit/submit keystrokes: multiline, control-character, invalid UTF-8,
+or oversized bracketed pastes are rejected as a whole. Correct/reenter rejected
+input before submission (Ctrl+U clears it); it is not silently truncated. A
+terminal without bracketed-paste support cannot distinguish a pasted newline
+from Enter, so paste only a single-line token with no trailing newline.
+
+The field is erased on completion/cancellation, including when revealed. This
+does not undo exposure to terminal recordings, screen capture/sharing, or
+scrollback/reflow. A visible value is an intentional display of a secret on your
+host terminal, not a way to export or log it; mask/count feedback also discloses
+length. No prompt input is written to stdout/stderr, shell history, registry,
+or plaintext temporary files, and the encrypted vault format is unchanged.
 
 Optional cryptography support is required only when using vault operations:
 
