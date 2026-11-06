@@ -403,6 +403,17 @@ This command works without Podman or a registered workspace.  It does
 not update host OpenCode, modify a source checkout, reset a container,
 or touch project/session data.
 
+This command's GitHub update path applies only to curl/source-installed
+copies.  Python-package installations detect their packaged distribution
+marker and print ‘pipx upgrade oc-box’, ‘uv tool upgrade oc-box’, or the
+current interpreter's pip upgrade command instead, without downloading
+or installing anything.  They reject ‘--auto-update on’ because a
+package manager owns those files; normal launches skip GitHub automatic
+updates even if a shared host config enables them.  ‘--auto-update off’
+on a package-managed copy prints that package guidance and does not
+modify the GitHub installation's shared setting.  Both channels use the
+same runtime/workspace format and remain supported in parallel.
+
      oc-box upgrade --check
      oc-box upgrade
      oc-box upgrade --auto-update on
@@ -522,6 +533,12 @@ files do not.  Installed copies retain their installation-time identity
 in ‘build-info.json’; reinstall to update it.  This is separate from the
 host OpenCode version matched inside containers.  Use alone, for
 example: ‘oc-box --version’.
+
+PyPI distribution metadata uses only ‘0.1.N’, because public PyPI
+versions cannot contain the local ‘+gHASH’ suffix.  Its packaged
+build-info still includes the full source identity displayed by this
+command, so the exact Git commit is retained even in a wheel/source
+distribution installed without Git.
 
 5.8 -distro NAME
 ================
@@ -1393,6 +1410,61 @@ assuming database/CLI compatibility.  Podman must work from the regular
 host user, not through sudo.  Network access is needed for initial
 distribution, runtime, and dependency downloads.
 
+16.1 Python package installations
+=================================
+
+Selected releases are also available through PyPI (after the first
+successful publication).  Choose one package-managed CLI installation,
+not system pip:
+
+     pipx install oc-box
+     # Or:
+     uv tool install oc-box
+
+Inside an activated virtual environment, standard pip also works:
+
+     python -m pip install oc-box
+
+Podman, OpenCode, Linux/cgroup configuration, and device drivers are
+external host requirements, not Python dependencies.  Package
+installation never creates the curl installer's ‘~/.local/share/oc-box’
+release tree or a competing global wrapper.  pipx/uv expose the
+package's console entrypoint in their normal bin directory.  ‘python -m
+oc_box’ is also available inside the package environment.
+
+Upgrade through the owner of the installation:
+
+     pipx upgrade oc-box
+     uv tool upgrade oc-box
+     # Inside the installed virtual environment:
+     python -m pip install --upgrade oc-box
+
+The regular GitHub/curl installer and updater remain supported.  Both
+channels read the same workspace registry, projects, and private
+containers.  If several launchers exist, use ‘command -v oc-box’ to
+check which PATH entry is selected; avoid keeping conflicting launchers
+in the same bin location.  Source commits continue to publish on GitHub
+independently of selected PyPI releases.
+
+Wheels include runtime scripts, prebuilt manuals, license/notice, and
+source metadata in the isolated ‘oc_box’ namespace.  Manuals also
+install under the Python environment's ‘share/man/man1’ and ‘share/info’
+directories; tool-manager environments are not necessarily in the host
+readers' default search path.  For example, after activating the
+relevant environment:
+
+     man "$VIRTUAL_ENV/share/man/man1/oc-box.1"
+     info --file "$VIRTUAL_ENV/share/info/oc-box.info"
+
+No source checkout, setuptools, documentation build tools, or
+third-party Python runtime dependency is required to use an installed
+wheel.  For building or publishing, see CONTRIBUTING.md: GitHub's
+‘publish.yml’ workflow uses the ‘pypi’ environment and PyPI Trusted
+Publishing without long-lived upload tokens.
+
+16.2 GitHub/curl installations
+==============================
+
 One-line installation from the public GitHub branch requires curl, Git,
 and Python 3.10+ already available on the host.  It installs oc-box, not
 Podman or host OpenCode, and executes the downloaded installer as your
@@ -1472,20 +1544,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description1983
 Node: Commands3814
-Node: Options20311
-Node: Lifecycle and persistence30627
-Node: Distribution images32380
-Node: Sessions and recovery33275
-Node: Devices and host permissions38563
-Node: Resource reports40909
-Node: Configuration and environment43020
-Node: Files47142
-Node: Exit status51539
-Node: Examples52350
-Node: Troubleshooting54436
-Node: Installation and manuals62507
-Node: Authors and license65291
-Node: See also65898
+Node: Options21031
+Node: Lifecycle and persistence31660
+Node: Distribution images33413
+Node: Sessions and recovery34308
+Node: Devices and host permissions39596
+Node: Resource reports41942
+Node: Configuration and environment44053
+Node: Files48175
+Node: Exit status52572
+Node: Examples53383
+Node: Troubleshooting55469
+Node: Installation and manuals63540
+Node: Authors and license68576
+Node: See also69183
 
 End Tag Table
 

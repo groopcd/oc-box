@@ -119,6 +119,16 @@ do not modify project source checkouts, workspace registries, private container
 volumes, or OpenCode credentials. A host-container boundary is not bypassed to
 update the host: use the host terminal.
 
+Python-package installs use a separate `oc_box` namespace and packaged resource
+marker. They do not execute the GitHub self-updater or write the source
+installer's global wrapper/release tree. Upgrade them through pipx, uv, or pip
+in their environment. The build workflow and PyPI publishing job are separate;
+only the latter receives GitHub OIDC permissions and exchanges them for PyPI's
+short-lived upload credential. No permanent PyPI token is required. Publishing
+is limited to selected reviewed releases/manual dispatches, not pull requests.
+This provides authenticated publishing, not a guarantee of harmless package
+contents; maintain package/account ownership and review upstream changes.
+
 ## Reporting issues
 
 Report security-sensitive issues privately to Paulo Dias at

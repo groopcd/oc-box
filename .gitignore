@@ -15,3 +15,7 @@ build-info.json
 auth.json
 mcp-auth.json
 session-before-relocation.json
+build/
+dist/
+*.egg-info/
+uv.lock

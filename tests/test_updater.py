@@ -284,6 +284,45 @@ class UpdateTests(unittest.TestCase):
             with self.assertRaisesRegex(box.BoxError, "on the host"):
                 box.main(["upgrade"])
 
+    def test_package_managed_install_cannot_create_competing_github_launcher(self):
+        source = self.root / "package"
+        source.mkdir()
+        (source / "distribution.json").write_text('{"installer":"python-package"}')
+        with (
+            patch.object(updater, "git") as network,
+            patch.object(updater, "update_settings") as settings,
+        ):
+            with self.assertRaisesRegex(updater.UpdateError, "Python-package managed"):
+                updater.upgrade(source)
+            self.assertIsNone(updater.automatic_upgrade(source))
+            with (
+                patch.object(box, "APP", source),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(box.main(["upgrade"]), 0)
+                self.assertIn("pip", output.getvalue())
+                with self.assertRaisesRegex(box.BoxError, "cannot manage"):
+                    box.main(["upgrade", "--auto-update=on"])
+            network.assert_not_called()
+            settings.assert_not_called()
+        with self.assertRaisesRegex(ValueError, "Python package installer"):
+            installation.install(source, self.home)
+        self.assertFalse((self.home / ".local/bin/oc-box").exists())
+
+    def test_package_upgrade_message_selects_pipx_uv_or_current_interpreter(self):
+        for marker, expected in (
+            ("pipx_metadata.json", "pipx upgrade oc-box"),
+            ("uv-receipt.toml", "uv tool upgrade oc-box"),
+            (None, "-m pip install --upgrade oc-box"),
+        ):
+            with self.subTest(marker=marker):
+                if marker:
+                    (self.root / marker).touch()
+                with patch.object(updater.sys, "prefix", str(self.root)):
+                    self.assertIn(expected, updater.package_upgrade_message())
+                if marker:
+                    (self.root / marker).unlink()
+
     def test_versioned_install_keeps_old_release_and_preserves_workspace_data(self):
         registry = self.home / ".local/state/oc-box/workspaces/keep"
         registry.mkdir(parents=True)
@@ -443,7 +482,7 @@ class UpdateTests(unittest.TestCase):
             + ").write_text(json.dumps({'argv':sys.argv[1:],'env':dict(os.environ)}))\n"
             + " shutil.copytree("
             + repr(str(APP))
-            + ",sys.argv[-1],ignore=shutil.ignore_patterns('.git','__pycache__','.ruff_cache','.oc-box-id'))\n"
+            + ",sys.argv[-1],ignore=shutil.ignore_patterns('.git','__pycache__','.ruff_cache','.oc-box-id','.venv','build','dist','*.egg-info'))\n"
             + " pathlib.Path(sys.argv[-1],'build-info.json').write_text(json.dumps({'version':'0.1.1+gfixture','commit':'"
             + "a" * 40
             + "','commit_count':1,'dirty':False}))\n"

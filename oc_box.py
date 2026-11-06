@@ -22,7 +22,10 @@ import threading
 import time
 import uuid
 
-import workspace_identity
+if __package__:
+    from . import workspace_identity
+else:
+    import workspace_identity
 
 APP = Path(__file__).resolve().parent
 LABEL = "io.oc-box.workspace"
@@ -110,7 +113,10 @@ def loading_stage(label, *, interval=5.0, stream=None):
 
 def run_tui(command):
     # Lazy import also keeps noninteractive CLI/library consumers lightweight.
-    from terminal_ui import run_tui as relay
+    if __package__:
+        from .terminal_ui import run_tui as relay
+    else:
+        from terminal_ui import run_tui as relay
 
     return relay(command, env=getattr(command, "environment", None))
 
@@ -1021,7 +1027,10 @@ def maintenance_command(data):
 
 def maintenance_terminal(path, data):
     """Hold the workspace lock; start only an existing container, not setup."""
-    from terminal_ui import run_tui as relay
+    if __package__:
+        from .terminal_ui import run_tui as relay
+    else:
+        from terminal_ui import run_tui as relay
 
     project = validate_project(data["project"])
     selected, _ = find_workspace(project)
@@ -2044,7 +2053,10 @@ def parser():
 
 
 def report_status(args):
-    from status_report import collect_reports, print_report
+    if __package__:
+        from .status_report import collect_reports, print_report
+    else:
+        from status_report import collect_reports, print_report
 
     if args.workspace or args.project is not None:
         path, data = find_workspace(args.project, args.workspace)
@@ -2108,8 +2120,31 @@ def main(argv=None):
             raise BoxError("Upgrade accepts only --check or --auto-update on/off.")
         if args.check and args.auto_update is not None:
             raise BoxError("--check and --auto-update are mutually exclusive.")
-        from updater import UpdateError, update_settings, upgrade
+        if __package__:
+            from .updater import (
+                UpdateError,
+                package_managed,
+                package_upgrade_message,
+                update_settings,
+                upgrade,
+            )
+        else:
+            from updater import (
+                UpdateError,
+                package_managed,
+                package_upgrade_message,
+                update_settings,
+                upgrade,
+            )
 
+        if package_managed(APP):
+            if args.auto_update == "on":
+                raise BoxError(
+                    package_upgrade_message()
+                    + " GitHub automatic updates cannot manage a Python-package installation."
+                )
+            print(package_upgrade_message())
+            return 0
         if os.environ.get("OC_BOX_CONTAINER") == "1":
             raise BoxError(
                 "Run 'oc-box upgrade' on the host; the container cannot update its host launcher."
@@ -2151,7 +2186,10 @@ def main(argv=None):
             raise BoxError(
                 "--about and --version cannot be combined with workspace commands."
             )
-        from version_info import about_text, get_version_info
+        if __package__:
+            from .version_info import about_text, get_version_info
+        else:
+            from version_info import about_text, get_version_info
 
         print(
             about_text(APP)
@@ -2234,7 +2272,10 @@ def main(argv=None):
             )
         return 0
     if args.command == "list":
-        from status_report import project_condition
+        if __package__:
+            from .status_report import project_condition
+        else:
+            from status_report import project_condition
 
         headers = ("WORKSPACE ID", "DISTRO", "PROJECT", "STATUS", "SESSION ID")
         rows = []
@@ -2269,7 +2310,10 @@ def main(argv=None):
     if args.command != "purge" and (args.all or args.delete_sessions or args.yes):
         raise BoxError("--all, --delete-sessions, and --yes apply only to purge.")
     if args.command == "start" and os.environ.get("OC_BOX_CONTAINER") != "1":
-        from updater import UpdateError, automatic_upgrade
+        if __package__:
+            from .updater import UpdateError, automatic_upgrade
+        else:
+            from updater import UpdateError, automatic_upgrade
 
         try:
             release = automatic_upgrade(APP)
@@ -2367,11 +2411,15 @@ def main(argv=None):
     return 0
 
 
-if __name__ == "__main__":
+def entrypoint():
     try:
-        sys.exit(main())
+        return main()
     except (BoxError, OSError, ValueError) as exc:
         print(f"oc-box: {exc}", file=sys.stderr)
-        sys.exit(1)
+        return 1
     except KeyboardInterrupt:
-        sys.exit(130)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(entrypoint())

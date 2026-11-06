@@ -8,7 +8,10 @@ import re
 import shutil
 import subprocess
 
-import workspace_identity
+if __package__:
+    from . import workspace_identity
+else:
+    import workspace_identity
 
 LABEL = "io.oc-box.workspace"
 
@@ -58,6 +61,11 @@ def memory_limit(value):
 
 def uptime(started, now):
     try:
+        # Podman uses RFC3339Nano; Python 3.10 accepts only fixed-width
+        # fractional seconds. Normalize to microseconds before parsing.
+        started = re.sub(
+            r"\.(\d+)", lambda match: "." + match[1][:6].ljust(6, "0"), started, count=1
+        )
         timestamp = datetime.fromisoformat(started.replace("Z", "+00:00"))
         if timestamp.year > 1:
             return max(0, int((now - timestamp).total_seconds()))

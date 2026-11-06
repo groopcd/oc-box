@@ -1,0 +1,83 @@
+name: Build and publish Python package
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish to PyPI after checks (false builds only)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.10'
+      - name: Create isolated build tools
+        run: |
+          python -m venv "$RUNNER_TEMP/oc-box-build"
+          "$RUNNER_TEMP/oc-box-build/bin/python" -m pip install build twine
+      - name: Validate source and release version
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python -m compileall -q oc_box.py bootstrap.py sync_config.py terminal_ui.py status_report.py workspace_identity.py installation.py updater.py version_info.py
+          python tools/build_docs.py --check
+          python - <<'PY'
+          import os
+          from version_info import get_version_info, VERSION_SERIES
+          build = get_version_info('.')
+          expected = f"v{VERSION_SERIES}.{build['commit_count']}"
+          assert not build['dirty'], 'Publish only a clean source commit'
+          if os.environ.get('RELEASE_TAG'):
+              assert os.environ['RELEASE_TAG'] == expected, f'Release tag must be {expected}'
+          print('Publishing/building', expected, 'from', build['commit'])
+          PY
+      - name: Run source regression tests
+        run: python -B -m unittest discover -s tests -v
+      - name: Build wheel and source distribution
+        run: |
+          "$RUNNER_TEMP/oc-box-build/bin/python" -m build
+          "$RUNNER_TEMP/oc-box-build/bin/python" -m twine check dist/*
+      - name: Verify isolated package installation and resources
+        run: python tools/check_package.py dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-distributions
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: github.event_name == 'release' || inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/project/oc-box/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-distributions
+          path: dist
+      - name: Publish with PyPI Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1

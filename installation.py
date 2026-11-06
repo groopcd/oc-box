@@ -9,10 +9,15 @@ import shutil
 import subprocess
 import tempfile
 
-from version_info import get_version_info
+if __package__:
+    from .version_info import get_version_info
+else:
+    from version_info import get_version_info
 
 PROGRAM_FILES = (
     "oc_box.py",
+    "__init__.py",
+    "__main__.py",
     "bootstrap.py",
     "sync_config.py",
     "terminal_ui.py",
@@ -48,6 +53,10 @@ def atomic_file(path, content, mode=0o644):
 
 def install(source, home=None):
     source = Path(source).resolve()
+    if (source / "distribution.json").is_file():
+        raise ValueError(
+            "This copy is managed by a Python package installer; use pipx/uv/pip to upgrade, not install.py. The GitHub installer remains available separately."
+        )
     home = Path.home() if home is None else Path(home)
     target = home / ".local/share/oc-box"
     # Validate all inputs before changing an existing installation.

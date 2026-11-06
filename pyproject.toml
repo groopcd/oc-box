@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=77.0.3", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oc-box"
+dynamic = ["version"]
+description = "Persistent rootless Podman development environments for mainline OpenCode"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "GPL-3.0-or-later"
+license-files = ["LICENSE", "NOTICE"]
+authors = [{ name = "Paulo Dias", email = "paulo.miguel.dias@gmail.com" }]
+keywords = ["opencode", "podman", "containers", "development", "sandbox"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development",
+]
+
+[project.urls]
+Homepage = "https://github.com/groopcd/oc-box"
+Documentation = "https://github.com/groopcd/oc-box/blob/master/docs/cli.md"
+Repository = "https://github.com/groopcd/oc-box.git"
+Issues = "https://github.com/groopcd/oc-box/issues"
+
+[project.scripts]
+oc-box = "oc_box.oc_box:entrypoint"
+
+[tool.setuptools]
+packages = ["oc_box"]
+package-dir = { oc_box = "." }
+include-package-data = false
+
+[tool.setuptools.package-data]
+oc_box = [
+  "LICENSE", "NOTICE", "README.md", "CONTRIBUTING.md", "SECURITY.md",
+  "install.sh", "docs/cli.md", "docs/oc-box.1", "docs/oc-box.texi", "docs/oc-box.info",
+]
+
+[tool.setuptools.data-files]
+"share/man/man1" = ["docs/oc-box.1"]
+"share/info" = ["docs/oc-box.info"]

@@ -71,7 +71,42 @@ python3 install.py
 oc-box --version
 ```
 
-The installer copies the launcher to `~/.local/share/oc-box` and creates
+### Python package channel
+
+PyPI releases are an additional distribution channel using the same code and
+workspace format. After the first release is published, install the CLI in an
+isolated tool environment:
+
+```sh
+pipx install oc-box
+# Or:
+uv tool install oc-box
+```
+
+For standard pip, activate a virtual environment first and use
+`python -m pip install oc-box`. System/user-site pip installs are unnecessary;
+Podman, host OpenCode, and Linux setup are still external requirements.
+
+Upgrade using the tool that owns that installation:
+
+```sh
+pipx upgrade oc-box
+uv tool upgrade oc-box
+# Inside the installation's virtual environment:
+python -m pip install --upgrade oc-box
+```
+
+`oc-box upgrade` detects Python-package installations and prints the appropriate
+command; it does not overwrite package-managed files or create a competing
+GitHub-installed launcher. GitHub/curl installations retain `oc-box upgrade` and
+opt-in automatic GitHub updates. If both channels are installed, check
+`command -v oc-box` to select the intended launcher. PyPI package versions use
+`0.1.N`, while `oc-box --version` also records `+gHASH` for source provenance.
+Published PyPI releases are selected separately from ordinary GitHub commits.
+Packaged manuals are in the package's `docs/` and the tool environment's
+`share/man`/`share/info`; those directories may need explicit reader paths.
+
+The GitHub/curl installer copies the launcher to `~/.local/share/oc-box` and creates
 `~/.local/bin/oc-box`. Add that bin directory to PATH if needed. No Python/npm
 dependencies or documentation build tools are required for installation.
 Restart OpenCode to load new configuration. The installer stages a complete

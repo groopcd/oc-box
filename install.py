@@ -4,7 +4,10 @@
 from pathlib import Path
 import sys
 
-from installation import install
+if __package__:
+    from .installation import install
+else:
+    from installation import install
 
 try:
     install(Path(__file__).resolve().parent)

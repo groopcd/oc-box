@@ -411,6 +411,10 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(
             status.uptime("2026-11-05T11:00:00.123456789Z", self.now), 3599
         )
+        for fractional in ("1", "12", "1234", "12345", "123456", "1234567"):
+            self.assertEqual(
+                status.uptime("2026-11-05T11:00:00." + fractional + "Z", self.now), 3599
+            )
         self.assertIsNone(status.uptime("0001-01-01T00:00:00Z", self.now))
         self.assertIsNone(status.uptime("invalid", self.now))
         self.assertEqual(status.memory_limit("8g"), 8 * 1024**3)

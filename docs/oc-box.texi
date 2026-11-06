@@ -219,6 +219,8 @@ oc-box --status --json
 
 Check and update the installed oc-box launcher/modules and prebuilt manuals from the fixed public GitHub repository, branch @code{master}. Run on the host as your regular user; no sudo or GitHub token is needed. This command works without Podman or a registered workspace. It does not update host OpenCode, modify a source checkout, reset a container, or touch project/session data.
 
+This command's GitHub update path applies only to curl/source-installed copies. Python-package installations detect their packaged distribution marker and print @code{pipx upgrade oc-box}, @code{uv tool upgrade oc-box}, or the current interpreter's pip upgrade command instead, without downloading or installing anything. They reject @code{--auto-update on} because a package manager owns those files; normal launches skip GitHub automatic updates even if a shared host config enables them. @code{--auto-update off} on a package-managed copy prints that package guidance and does not modify the GitHub installation's shared setting. Both channels use the same runtime/workspace format and remain supported in parallel.
+
 @example
 oc-box upgrade --check
 oc-box upgrade
@@ -272,6 +274,8 @@ Print oc-box version, author Paulo Dias and email, OpenAI coding-assistant contr
 @section --version
 
 Print oc-box's commit-derived version and exit without Podman. The format is @code{0.1.N+gHASH}, with N the full-history commit count. Each commit advances N; tracked uncommitted changes add @code{.dirty}. Untracked files do not. Installed copies retain their installation-time identity in @code{build-info.json}; reinstall to update it. This is separate from the host OpenCode version matched inside containers. Use alone, for example: @code{oc-box --version}.
+
+PyPI distribution metadata uses only @code{0.1.N}, because public PyPI versions cannot contain the local @code{+gHASH} suffix. Its packaged build-info still includes the full source identity displayed by this command, so the exact Git commit is retained even in a wheel/source distribution installed without Git.
 
 @section --distro NAME
 
@@ -732,6 +736,46 @@ Use @code{oc-box terminal} to debug an existing container without launching Open
 @chapter Installation and manuals
 
 Requires Linux, Python 3.10 or later, rootless Podman with pasta networking, delegated cgroup CPU/memory/PIDs controllers, and host OpenCode 1.x. Session import/export compatibility was checked with OpenCode 1.19.5. Other major OpenCode versions are rejected rather than assuming database/CLI compatibility. Podman must work from the regular host user, not through sudo. Network access is needed for initial distribution, runtime, and dependency downloads.
+
+@section Python package installations
+
+Selected releases are also available through PyPI (after the first successful publication). Choose one package-managed CLI installation, not system pip:
+
+@example
+pipx install oc-box
+# Or:
+uv tool install oc-box
+@end example
+
+Inside an activated virtual environment, standard pip also works:
+
+@example
+python -m pip install oc-box
+@end example
+
+Podman, OpenCode, Linux/cgroup configuration, and device drivers are external host requirements, not Python dependencies. Package installation never creates the curl installer's @code{~/.local/share/oc-box} release tree or a competing global wrapper. pipx/uv expose the package's console entrypoint in their normal bin directory. @code{python -m oc_box} is also available inside the package environment.
+
+Upgrade through the owner of the installation:
+
+@example
+pipx upgrade oc-box
+uv tool upgrade oc-box
+# Inside the installed virtual environment:
+python -m pip install --upgrade oc-box
+@end example
+
+The regular GitHub/curl installer and updater remain supported. Both channels read the same workspace registry, projects, and private containers. If several launchers exist, use @code{command -v oc-box} to check which PATH entry is selected; avoid keeping conflicting launchers in the same bin location. Source commits continue to publish on GitHub independently of selected PyPI releases.
+
+Wheels include runtime scripts, prebuilt manuals, license/notice, and source metadata in the isolated @code{oc_box} namespace. Manuals also install under the Python environment's @code{share/man/man1} and @code{share/info} directories; tool-manager environments are not necessarily in the host readers' default search path. For example, after activating the relevant environment:
+
+@example
+man "$VIRTUAL_ENV/share/man/man1/oc-box.1"
+info --file "$VIRTUAL_ENV/share/info/oc-box.info"
+@end example
+
+No source checkout, setuptools, documentation build tools, or third-party Python runtime dependency is required to use an installed wheel. For building or publishing, see CONTRIBUTING.md: GitHub's @code{publish.yml} workflow uses the @code{pypi} environment and PyPI Trusted Publishing without long-lived upload tokens.
+
+@section GitHub/curl installations
 
 One-line installation from the public GitHub branch requires curl, Git, and Python 3.10+ already available on the host. It installs oc-box, not Podman or host OpenCode, and executes the downloaded installer as your user:
 

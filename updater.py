@@ -9,8 +9,12 @@ import subprocess
 import sys
 import tempfile
 
-from installation import atomic_file
-from version_info import get_version_info
+if __package__:
+    from .installation import atomic_file
+    from .version_info import get_version_info
+else:
+    from installation import atomic_file
+    from version_info import get_version_info
 
 UPSTREAM = "https://github.com/groopcd/oc-box.git"
 BRANCH = "master"
@@ -18,6 +22,29 @@ BRANCH = "master"
 
 class UpdateError(Exception):
     pass
+
+
+def package_managed(root):
+    return (Path(root) / "distribution.json").is_file()
+
+
+def package_upgrade_message():
+    prefix = Path(sys.prefix)
+    if (prefix / "pipx_metadata.json").is_file():
+        command = "pipx upgrade oc-box"
+    elif (prefix / "uv-receipt.toml").is_file():
+        command = "uv tool upgrade oc-box"
+    else:
+        import shlex
+
+        command = shlex.join(
+            [sys.executable, "-m", "pip", "install", "--upgrade", "oc-box"]
+        )
+    return (
+        "This oc-box installation is Python-package managed. Update with: "
+        + command
+        + ". GitHub/curl installations still use 'oc-box upgrade'; choose one launcher on PATH."
+    )
 
 
 def public_git_env(temporary):
@@ -79,6 +106,8 @@ def current_install(root):
 
 
 def upgrade(root, *, check=False):
+    if package_managed(root):
+        raise UpdateError(package_upgrade_message())
     if os.geteuid() == 0:
         raise UpdateError(
             "Run oc-box upgrade on the host as your regular user, without sudo."
@@ -201,7 +230,11 @@ def update_settings(enabled):
 
 
 def automatic_upgrade(root):
-    if os.environ.get("OC_BOX_UPDATE_CHECKED") == "1" or (Path(root) / ".git").exists():
+    if (
+        package_managed(root)
+        or os.environ.get("OC_BOX_UPDATE_CHECKED") == "1"
+        or (Path(root) / ".git").exists()
+    ):
         return None
     base = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
     try:

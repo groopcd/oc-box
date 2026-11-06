@@ -17,6 +17,9 @@ portable: use example project paths and synthetic session IDs, not local data.
   `~/.local/bin/oc-box`.
 - `installation.py`: staged immutable installed copies and launcher activation.
 - `updater.py` / `install.sh`: public GitHub upgrades and one-line bootstrap.
+- `pyproject.toml` / `setup.py`: Python distributions with an isolated `oc_box`
+  namespace, resources, public versions, and source metadata.
+- `.github/workflows/publish.yml`: selected PyPI releases via Trusted Publishing.
 - `tests/`: stdlib unit tests and bounded offline mainline integration fixtures.
 - `docs/cli.md`: canonical command reference; `tools/build_docs.py` generates
   the committed man/Texinfo/Info manuals from it.
@@ -51,6 +54,9 @@ Version `0.1.N+gHASH` is derived from the full Git history; every commit advance
 N automatically. The installer embeds the source identity in its private
 `build-info.json`. Original project code/documentation is GPL-3.0-or-later;
 retain LICENSE and NOTICE when distributing/installing it.
+PyPI uses the public `0.1.N` version; retain the full `+gHASH` identity in package
+resources. Python-package installations upgrade through pipx/uv/pip, never the
+GitHub self-updater. Preserve the normal curl/GitHub update path in parallel.
 
 Update `docs/cli.md` when command-line behavior changes, then regenerate with
 `python3 tools/build_docs.py` (requires GNU makeinfo). Prebuilt manuals ship in
