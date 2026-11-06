@@ -50,7 +50,53 @@ the boundary and tradeoffs.
   one-line installer.
 - Network access for initial image, package, and plugin downloads.
 
-Install directly from GitHub on the **host as your regular user**, without sudo:
+Install on the **host as your regular user**, without sudo. Choose one channel:
+
+| Method | Install | Update |
+| --- | --- | --- |
+| **pipx — isolated CLI from [PyPI](https://pypi.org/project/oc-box/)** | `pipx install oc-box` | `pipx upgrade oc-box` |
+| **uv — isolated CLI from PyPI** | `uv tool install oc-box` | `uv tool upgrade oc-box` |
+| **pip — inside an activated virtual environment** | `python -m pip install oc-box` | `python -m pip install --upgrade oc-box` |
+| **GitHub — latest development branch** | One-line installer below | `oc-box upgrade` |
+
+### Install from PyPI
+
+For a standalone command, pipx keeps oc-box in its own Python environment:
+
+```sh
+pipx install oc-box
+pipx ensurepath
+oc-box --version
+```
+
+Alternatively, use uv's tool manager:
+
+```sh
+uv tool install oc-box
+uv tool update-shell
+oc-box --version
+```
+
+Open a new terminal if the tool manager has just added its bin directory to
+PATH. Both methods install published releases from
+**[pypi.org/project/oc-box](https://pypi.org/project/oc-box/)**.
+
+For standard pip, create and activate a dedicated virtual environment first:
+
+```sh
+python3 -m venv ~/.venvs/oc-box
+. ~/.venvs/oc-box/bin/activate
+python -m pip install oc-box
+oc-box --version
+```
+
+Use the activated environment or `~/.venvs/oc-box/bin/oc-box` on later visits.
+Podman, host OpenCode, and Linux setup remain external requirements. There is
+no need for `sudo pip` or a system/user-site pip installation.
+
+### Install from GitHub or source
+
+The existing one-line installer remains available for the latest GitHub code:
 
 ```sh
 curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh
@@ -71,23 +117,10 @@ python3 install.py
 oc-box --version
 ```
 
-### Python package channel
+### Upgrade PyPI installations
 
-PyPI releases are an additional distribution channel using the same code and
-workspace format. After the first release is published, install the CLI in an
-isolated tool environment:
-
-```sh
-pipx install oc-box
-# Or:
-uv tool install oc-box
-```
-
-For standard pip, activate a virtual environment first and use
-`python -m pip install oc-box`. System/user-site pip installs are unnecessary;
-Podman, host OpenCode, and Linux setup are still external requirements.
-
-Upgrade using the tool that owns that installation:
+The PyPI and GitHub channels use the same code and workspace format. Choose
+the package manager that owns your CLI installation when upgrading it:
 
 ```sh
 pipx upgrade oc-box
@@ -105,6 +138,8 @@ opt-in automatic GitHub updates. If both channels are installed, check
 Published PyPI releases are selected separately from ordinary GitHub commits.
 Packaged manuals are in the package's `docs/` and the tool environment's
 `share/man`/`share/info`; those directories may need explicit reader paths.
+
+### GitHub installation layout
 
 The GitHub/curl installer copies the launcher to `~/.local/share/oc-box` and creates
 `~/.local/bin/oc-box`. Add that bin directory to PATH if needed. No Python/npm

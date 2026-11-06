@@ -1231,20 +1231,28 @@ is needed for initial distribution, runtime, and dependency downloads.
 
 ### Python package installations
 
-Selected releases are also available through PyPI (after the first successful
-publication). Choose one package-managed CLI installation, not system pip:
+Selected releases are available at https://pypi.org/project/oc-box/. Choose one
+package-managed CLI installation, not system pip:
 
 ```sh
 pipx install oc-box
+pipx ensurepath
 # Or:
 uv tool install oc-box
+uv tool update-shell
 ```
 
-Inside an activated virtual environment, standard pip also works:
+Open a new terminal if those commands add the tool-manager bin directory to
+PATH. For standard pip, create and activate a dedicated virtual environment:
 
 ```sh
+python3 -m venv ~/.venvs/oc-box
+. ~/.venvs/oc-box/bin/activate
 python -m pip install oc-box
+oc-box --version
 ```
+
+On later visits, activate it again or call `~/.venvs/oc-box/bin/oc-box` directly.
 
 Podman, OpenCode, Linux/cgroup configuration, and device drivers are external
 host requirements, not Python dependencies. Package installation never creates
