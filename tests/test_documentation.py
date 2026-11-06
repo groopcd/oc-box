@@ -93,6 +93,9 @@ class DocumentationTests(unittest.TestCase):
             "project_filesystem_identity",
             "capability-based",
             "filesystem-independent",
+            "auto_update",
+            "oc-box upgrade --check",
+            "curl -fsSL",
         ):
             self.assertIn(phrase, text)
 

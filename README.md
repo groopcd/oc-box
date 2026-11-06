@@ -46,9 +46,23 @@ the boundary and tradeoffs.
 - Linux, Python 3.10+, rootless Podman with pasta networking.
 - Delegated CPU, memory, and process cgroup controllers.
 - A host OpenCode 1.x installation. Integration checks use OpenCode 1.19.5.
+- Git on the host for installation from GitHub and self-updates; curl for the
+  one-line installer.
 - Network access for initial image, package, and plugin downloads.
 
-From a source checkout, run on the **host as your regular user**, without sudo:
+Install directly from GitHub on the **host as your regular user**, without sudo:
+
+```sh
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh
+```
+
+This downloads and runs the public installer; it trusts the published GitHub
+source. To inspect it first, download `install.sh`, review it, and run `sh
+install.sh`. Git clones the full public branch history anonymously into a
+temporary directory so installed versions retain their accurate commit count.
+It does not use or save your GitHub/provider tokens.
+
+Alternatively, install from a source checkout:
 
 ```sh
 git clone https://github.com/groopcd/oc-box.git
@@ -60,7 +74,36 @@ oc-box --version
 The installer copies the launcher to `~/.local/share/oc-box` and creates
 `~/.local/bin/oc-box`. Add that bin directory to PATH if needed. No Python/npm
 dependencies or documentation build tools are required for installation.
-Reinstall after source updates; restart OpenCode to load new configuration.
+Restart OpenCode to load new configuration. The installer stages a complete
+versioned copy under `~/.local/share/oc-box/releases/`, then atomically switches
+the launcher. Existing sessions keep their original code until they exit;
+earlier installed copies are retained, not removed while they may be in use.
+For the first migration from an older flat installation, exit its active oc-box
+launchers before reinstalling. The pinned-release guarantee applies afterward.
+
+### Upgrade from GitHub
+
+```sh
+oc-box upgrade --check       # Check for a changed published version
+oc-box upgrade               # Install the current public GitHub master commit
+oc-box upgrade --auto-update on
+oc-box upgrade --auto-update off
+```
+
+Automatic updates are **opt-in**. When enabled, normal installed `oc-box` starts
+check GitHub before opening a workspace, install a changed version, and continue
+with the same arguments. Network/update failures print a message and continue
+with the installed version. There is no background daemon or update during an
+active session. Informational commands, maintenance terminals, reset/purge, and
+direct source-checkout launches do not perform automatic checks.
+
+Upgrades replace only the installed launcher/modules/manuals. They do not pull
+into or change a source checkout, reset containers, delete workspaces, touch
+provider credentials, or change the host OpenCode version. A locally installed
+commit ahead of the published branch is retained. No GitHub token is required;
+updates use the fixed public HTTPS upstream without global Git config, helpers,
+hooks, or forwarded environment secrets. This follows the development branch,
+not signed release artifacts; see [SECURITY.md](SECURITY.md).
 
 ## Quick start
 
@@ -99,6 +142,7 @@ oc-box repair --project ~/devel/demo # Accept a verified directory identity chan
 oc-box reset --project ~/devel/demo --cpus 8 --memory 16g
 oc-box purge --project ~/devel/demo  # Remove environment; retain source files
 oc-box --about
+oc-box upgrade --check
 ```
 
 `--workspace ID` selects a registered workspace from any directory. It also
@@ -280,7 +324,7 @@ info --file "$HOME/.local/share/info/oc-box.info"
 Readers are host packages (`man` and `info` on openSUSE). See
 [CONTRIBUTING.md](CONTRIBUTING.md) to regenerate the manuals from `docs/cli.md`.
 `oc-box --version` uses `0.1.N+gHASH`, advancing automatically with Git commits;
-installed copies retain their source version until reinstalled.
+installed copies retain their source version until upgraded or reinstalled.
 
 ## Development status
 

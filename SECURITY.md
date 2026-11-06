@@ -91,6 +91,34 @@ plugins, and MCPs are upstream dependencies. Baseline downloads use HTTPS where
 the launcher fetches them directly; distribution tools follow their configured
 repositories and signature policies. Keep the host kernel and Podman patched.
 
+## Installation and updates
+
+The curl bootstrap and `oc-box upgrade` trust the code published at the public
+`https://github.com/groopcd/oc-box` master branch over HTTPS. This is not a signed
+release or reproducible-build verification scheme. Review the installer or use
+a reviewed source checkout if you need to inspect code before execution.
+
+Upgrades use an anonymous HTTPS Git fetch in a temporary HOME with global/system
+Git config, credential helpers, hooks, and non-HTTPS Git transports disabled.
+Provider/publishing tokens, shell/loader hooks, and arbitrary host environment
+variables are not inherited. The fetched commit is pinned and checked, with full
+history for the version count. Its installer then runs as the host user with a
+clean environment to stage the new program and prebuilt manuals in `~/.local`.
+No sudo, GitHub token, project script, or submodule is needed. A compromise of
+the upstream account/source is still a software-supply-chain risk.
+
+Automatic updates are explicit opt-in and run only before normal installed
+launches, never while an agent is working. Failed network checks fall back to
+the installed version. Installation validates its source files and stages a
+complete versioned copy before switching the launcher. Old running launchers
+use their existing release path, which is not overwritten or removed. Updates
+from an old flat installation require its active launchers to exit first; they
+do not yet have pinned-release imports. New versioned installations can be
+upgraded while other versioned launchers remain active. Updates
+do not modify project source checkouts, workspace registries, private container
+volumes, or OpenCode credentials. A host-container boundary is not bypassed to
+update the host: use the host terminal.
+
 ## Reporting issues
 
 Report security-sensitive issues privately to Paulo Dias at

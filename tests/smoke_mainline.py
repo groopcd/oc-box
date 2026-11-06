@@ -73,6 +73,25 @@ def build_permission_regression(root, env, project):
         payload = box.config_archive({"home": str(home)})
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         archive.extractall(home / ".config/opencode", filter="data")
+    # This fixture plugin is plain JS and does not import the SDK. Seed the
+    # exact SDK manifest so mainline does not contact npm during an offline
+    # permission test (a cold package install can otherwise take 60+ seconds).
+    installed, _ = bounded(["opencode", "--version"], env=env, cwd=project, timeout=10)
+    config_directory = home / ".config/opencode"
+    package = config_directory / "node_modules/@opencode-ai/plugin"
+    package.mkdir(parents=True)
+    (package / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "@opencode-ai/plugin",
+                "version": installed.strip(),
+                "type": "module",
+            }
+        )
+    )
+    (config_directory / "package.json").write_text(
+        json.dumps({"dependencies": {"@opencode-ai/plugin": installed.strip()}})
+    )
     profile = home / ".config/opencode/oc-box-profile.json"
     scoped = dict(env)
     scoped["XDG_CONFIG_HOME"] = str(home / ".config")

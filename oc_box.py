@@ -1935,6 +1935,7 @@ def parser():
             "reset",
             "repair",
             "terminal",
+            "upgrade",
             "purge",
             "list",
             "distros",
@@ -1965,6 +1966,16 @@ def parser():
         "--json",
         action="store_true",
         help="emit --status as JSON with numeric byte values",
+    )
+    result.add_argument(
+        "--check",
+        action="store_true",
+        help="with upgrade, check GitHub for a changed version without installing",
+    )
+    result.add_argument(
+        "--auto-update",
+        choices=("on", "off"),
+        help="with upgrade, enable/disable automatic GitHub updates before normal launches",
     )
     result.add_argument(
         "--workspace",
@@ -2066,6 +2077,55 @@ def report_status(args):
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    if (args.check or args.auto_update is not None) and args.command != "upgrade":
+        raise BoxError("--check and --auto-update apply only to upgrade.")
+    if args.command == "upgrade":
+        if any(
+            (
+                args.project is not None,
+                args.workspace,
+                args.distro,
+                args.new,
+                args.resume,
+                args.import_session,
+                args.model,
+                args.cpus,
+                args.memory,
+                args.pids_limit is not None,
+                args.device,
+                args.podman_arg,
+                args.clear_devices,
+                args.clear_podman_args,
+                args.all,
+                args.delete_sessions,
+                args.yes,
+                args.status,
+                args.json,
+                args.about,
+                args.version,
+            )
+        ):
+            raise BoxError("Upgrade accepts only --check or --auto-update on/off.")
+        if args.check and args.auto_update is not None:
+            raise BoxError("--check and --auto-update are mutually exclusive.")
+        from updater import UpdateError, update_settings, upgrade
+
+        if os.environ.get("OC_BOX_CONTAINER") == "1":
+            raise BoxError(
+                "Run 'oc-box upgrade' on the host; the container cannot update its host launcher."
+            )
+        try:
+            if args.auto_update is not None:
+                if os.geteuid() == 0:
+                    raise BoxError(
+                        "Run oc-box upgrade as your regular host user, without sudo."
+                    )
+                update_settings(args.auto_update == "on")
+                return 0
+            upgrade(APP, check=args.check)
+        except UpdateError as exc:
+            raise BoxError(str(exc)) from exc
+        return 0
     if args.about or args.version:
         if (
             args.command != "start"
@@ -2208,6 +2268,28 @@ def main(argv=None):
         return 0
     if args.command != "purge" and (args.all or args.delete_sessions or args.yes):
         raise BoxError("--all, --delete-sessions, and --yes apply only to purge.")
+    if args.command == "start" and os.environ.get("OC_BOX_CONTAINER") != "1":
+        from updater import UpdateError, automatic_upgrade
+
+        try:
+            release = automatic_upgrade(APP)
+        except (UpdateError, OSError, ValueError) as exc:
+            print(
+                f"oc-box: automatic update unavailable: {exc}; continuing with the installed version.",
+                file=sys.stderr,
+            )
+        else:
+            if release is not None:
+                environment = {**os.environ, "OC_BOX_UPDATE_CHECKED": "1"}
+                os.execve(
+                    sys.executable,
+                    [
+                        sys.executable,
+                        str(release / "oc_box.py"),
+                        *(sys.argv[1:] if argv is None else argv),
+                    ],
+                    environment,
+                )
     with loading_stage("Checking rootless Podman"):
         check_backend(
             **({"env": maintenance_host_env()} if args.command == "terminal" else {})

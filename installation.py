@@ -1,0 +1,176 @@
+"""Stage complete user-local installations and atomically switch the launcher."""
+
+import fcntl
+import json
+import os
+from pathlib import Path
+import shlex
+import shutil
+import subprocess
+import tempfile
+
+from version_info import get_version_info
+
+PROGRAM_FILES = (
+    "oc_box.py",
+    "bootstrap.py",
+    "sync_config.py",
+    "terminal_ui.py",
+    "status_report.py",
+    "version_info.py",
+    "workspace_identity.py",
+    "installation.py",
+    "updater.py",
+    "install.py",
+    "install.sh",
+    "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "LICENSE",
+    "NOTICE",
+)
+MANUAL_FILES = ("cli.md", "oc-box.1", "oc-box.texi", "oc-box.info")
+
+
+def atomic_file(path, content, mode=0o644):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".oc-box-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def install(source, home=None):
+    source = Path(source).resolve()
+    home = Path.home() if home is None else Path(home)
+    target = home / ".local/share/oc-box"
+    # Validate all inputs before changing an existing installation.
+    inputs = [
+        *(source / name for name in PROGRAM_FILES),
+        *(source / "docs" / name for name in MANUAL_FILES),
+    ]
+    for path in inputs:
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"Missing or nonregular installation file: {path.name}")
+    build = get_version_info(source)
+    target.mkdir(parents=True, exist_ok=True)
+    if target.is_symlink():
+        raise ValueError("The oc-box installation root must not be a symlink.")
+    releases = target / "releases"
+    releases.mkdir(exist_ok=True)
+    if releases.is_symlink():
+        raise ValueError("The oc-box releases directory must not be a symlink.")
+    for name in (*PROGRAM_FILES, "build-info.json", "current"):
+        destination = target / name
+        if destination.is_dir() and not destination.is_symlink():
+            raise ValueError(f"Unexpected directory in installation: {name}")
+    if (
+        (target / "docs").is_dir()
+        and not (target / "docs").is_symlink()
+        and (target / "legacy-docs").exists()
+    ):
+        raise ValueError(
+            "Both legacy manual directories exist; inspect the installation."
+        )
+    with (target / ".install.lock").open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        release = Path(
+            tempfile.mkdtemp(
+                prefix=(build.get("commit") or "local")[:12] + "-", dir=releases
+            )
+        )
+        activated = False
+        try:
+            for name in PROGRAM_FILES:
+                shutil.copyfile(source / name, release / name)
+                (release / name).chmod(0o644)
+            (release / "docs").mkdir()
+            for name in MANUAL_FILES:
+                shutil.copyfile(source / "docs" / name, release / "docs" / name)
+                (release / "docs" / name).chmod(0o644)
+            atomic_file(
+                release / "build-info.json",
+                (json.dumps(build, indent=2) + "\n").encode(),
+            )
+            # Readers/install-info are optional: ship prebuilt manuals.
+            man = home / ".local/share/man/man1/oc-box.1"
+            info = home / ".local/share/info/oc-box.info"
+            atomic_file(man, (release / "docs/oc-box.1").read_bytes())
+            atomic_file(info, (release / "docs/oc-box.info").read_bytes())
+            binary = home / ".local/bin/oc-box"
+            # A running launcher keeps this exact immutable release path. It
+            # never lazy-loads modules from a half-updated or newer directory.
+            wrapper = (
+                "#!/bin/sh\nexec python3 "
+                + shlex.quote(str(release / "oc_box.py"))
+                + ' "$@"\n'
+            )
+            link = target / ".current-next"
+            link.unlink(missing_ok=True)
+            link.symlink_to(release.relative_to(target), target_is_directory=True)
+            os.replace(link, target / "current")
+            activated = True
+            # Preserve documented/legacy installed paths as pointers into the
+            # current release, including build metadata and manual sources.
+            for name in (*PROGRAM_FILES, "build-info.json", "docs"):
+                destination = target / name
+                if destination.is_dir() and not destination.is_symlink():
+                    # The old installer used a docs directory; keep it intact
+                    # until it can be renamed, then replace only our directory.
+                    if name != "docs":
+                        raise ValueError(
+                            f"Unexpected directory in installation: {name}"
+                        )
+                    legacy = target / "legacy-docs"
+                    if legacy.exists():
+                        raise ValueError(
+                            "Both legacy manual directories exist; inspect the installation."
+                        )
+                    destination.rename(legacy)
+                temporary = target / (".next-" + name)
+                temporary.unlink(missing_ok=True)
+                temporary.symlink_to(
+                    "current/" + name, target_is_directory=name == "docs"
+                )
+                os.replace(temporary, destination)
+            atomic_file(binary, wrapper.encode(), 0o755)
+        finally:
+            if not activated:
+                shutil.rmtree(release)
+    utility = shutil.which("install-info") or shutil.which(
+        "install-info", path="/usr/sbin:/sbin"
+    )
+    if utility:
+        try:
+            result = subprocess.run(
+                [utility, "--info-dir=" + str(info.parent), str(info)],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            if result.returncode:
+                print(
+                    "Note: Info index update failed; use 'info --file "
+                    + str(info)
+                    + "'."
+                )
+        except (OSError, subprocess.TimeoutExpired):
+            print(
+                "Note: Info index update unavailable; use 'info --file "
+                + str(info)
+                + "'."
+            )
+    print(f"Installed {binary} ({build['version']})")
+    print(f"Installed manual pages: {man} and {info}")
+    print(
+        "Read with 'man oc-box' or 'info oc-box'; full reference: "
+        + str(target / "docs/cli.md")
+    )
+    print("Ensure ~/.local/bin is on PATH. Use 'oc-box upgrade' for future updates.")
+    return release

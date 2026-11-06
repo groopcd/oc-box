@@ -18,6 +18,7 @@ oc-box list
 oc-box distros
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
+oc-box upgrade [--check | --auto-update on|off]
 oc-box --about
 oc-box --version
 oc-box -h | --help
@@ -323,6 +324,58 @@ oc-box --status --project ~/devel/demo
 oc-box --status --json
 ```
 
+### upgrade
+
+Check and update the installed oc-box launcher/modules and prebuilt manuals
+from the fixed public GitHub repository, branch `master`. Run on the host as
+your regular user; no sudo or GitHub token is needed. This command works without
+Podman or a registered workspace. It does not update host OpenCode, modify a
+source checkout, reset a container, or touch project/session data.
+
+```sh
+oc-box upgrade --check
+oc-box upgrade
+oc-box upgrade --auto-update on
+oc-box upgrade --auto-update off
+```
+
+`--check` compares the installed commit with GitHub and reports whether it
+differs, without installing. A normal upgrade clones the full public branch
+history into a temporary directory, pins the checked commit, verifies source
+identity, and runs its staged user-local installer. An identical clean build
+does not download the full history again. A locally installed build whose commit
+count is ahead of the published branch is retained rather than downgraded.
+Source-checkout updates remain a separate `git pull`/review task: upgrade always
+targets the installed user-local copy. A changed published commit at the same
+count can replace a different installed build.
+
+The installer stages a complete release under `~/.local/share/oc-box/releases/`,
+including license and manuals, before switching the launcher. New processes use
+the new version; active launchers keep their original release path and lazy-load
+its original modules. Old release directories are retained and have no automatic
+garbage collection. `current` and compatible top-level installed paths point to
+the activated release. An older flat installation is migrated; its old manuals
+are preserved as `legacy-docs`. No workspaces or credentials are migrated/deleted.
+
+Automatic updates are off by default. `--auto-update on` saves `auto_update: true`
+in the existing host oc-box configuration, retaining settings such as `pass_env`.
+Normal installed `start` launches check before Podman/workspace setup and, when
+updated, continue with the same arguments. No background daemon, active-session
+update, or automatic check for list/status/terminal/reset/purge is introduced.
+Direct source-checkout launches skip automatic updates. A concurrent check does
+not block another normal launcher. Network/download failures are reported and
+the normal launch continues with the installed version; explicit upgrade failures
+return nonzero. After enabling automatic updates you are trusting future code
+published to this development branch, not signed release artifacts.
+
+Fetch/checkout/install subprocesses have a clean, positive-allowlisted
+environment. Global/system Git config, helpers, hooks, external protocols,
+provider tokens, SSH agents, and user proxy variables are not used by the public
+download. HTTPS is required; shell commands or a custom upstream URL are not
+accepted. Use manual source installation for a reviewed alternate deployment.
+Updates inside a container are refused because its private HOME is not the host
+installation. Git is required for public updates; build tools are not.
+
 ## Options
 
 ### -h, --help
@@ -394,6 +447,22 @@ Changing an existing workspace requires `reset --distro NAME`.
 oc-box --project ~/devel/demo --distro tumbleweed
 oc-box reset --project ~/devel/demo --distro debian
 ```
+
+### --check
+
+With `upgrade`, report whether the public GitHub commit differs from the
+installed version without installing it. Returns success when a version is
+available or the installation is current; it is not an update-available exit
+code. Network errors return nonzero. Cannot be combined with `--auto-update`,
+workspace selectors, or other commands. Example: `oc-box upgrade --check`.
+
+### --auto-update on|off
+
+With `upgrade`, persistently enable or disable automatic updates before normal
+installed launches. The default is off. This setting itself performs no download
+or installation and preserves other keys in `~/.config/oc-box/config.json` (or
+its XDG equivalent). Cannot be combined with `--check` or workspace actions.
+Example: `oc-box upgrade --auto-update on`.
 
 ### --new
 
@@ -824,6 +893,13 @@ mapped to the host-service name. The default `LEMONADE_BASE_URL` is
 `xterm-256color`. Host PATH, shell startup scripts, proxy variables, engine
 sockets, and SSH agents are not forwarded by default.
 
+The same JSON object can include `"auto_update": true` to opt in to anonymous
+GitHub checks/installation before normal installed launches, or use `oc-box
+upgrade --auto-update on`. The setting is off by default and is not forwarded
+into the container. `OC_BOX_UPDATE_CHECKED=1` is an internal one-launch guard
+used when restarting the host launcher after automatic installation; it prevents
+recursion, not authentication or a workspace identity override.
+
 Forwarded credential/custom environment values are passed through the Podman
 client's environment, not embedded in its process arguments. They are still
 accessible to container processes and same-user environment inspection. Copied
@@ -842,7 +918,14 @@ Podman is the environment boundary. No OpenCode fork is installed.
 
 `~/.local/bin/oc-box` is the launcher. `~/.local/share/oc-box/` contains installed
 Python sources, documentation, LICENSE, NOTICE, and embedded `build-info.json`.
-The source checkout and installation are independent; reinstall after updates.
+New installations stage complete versioned copies under `releases/` and use a
+`current` symlink plus compatibility pointers for the documented top-level files.
+The launcher pins a release path so other active launchers keep their code
+unchanged. Old copies are retained, not automatically deleted. When first
+switching from an older flat installation, exit old active launchers before
+reinstalling; only launchers installed with release-path pinning have this
+concurrent-update guarantee. The source checkout and installation are
+independent; use `upgrade` or reinstall after updates.
 `~/.local/share/man/man1/oc-box.1` and `~/.local/share/info/oc-box.info` are the
 installed manuals. Installation requires no man/Info build tools.
 
@@ -1131,7 +1214,29 @@ OpenCode versions are rejected rather than assuming database/CLI compatibility.
 Podman must work from the regular host user, not through sudo. Network access
 is needed for initial distribution, runtime, and dependency downloads.
 
-Install from the source checkout as your host user:
+One-line installation from the public GitHub branch requires curl, Git, and
+Python 3.10+ already available on the host. It installs oc-box, not Podman or
+host OpenCode, and executes the downloaded installer as your user:
+
+```sh
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh
+```
+
+To inspect before execution instead of piping to a shell:
+
+```sh
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh -o install-oc-box.sh
+# Review install-oc-box.sh, then:
+sh install-oc-box.sh
+```
+
+The bootstrap clones full history anonymously into a private temporary directory
+and removes that temporary checkout when finished. It does not configure Git
+authentication, download credentials, or keep a source checkout in your project.
+When moving from an older flat installation, exit its active oc-box launchers
+first; future versioned installations can coexist with already running versions.
+
+Alternatively install from the source checkout as your host user:
 
 ```sh
 python3 install.py

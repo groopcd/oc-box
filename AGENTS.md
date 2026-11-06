@@ -15,6 +15,8 @@ portable: use example project paths and synthetic session IDs, not local data.
   persistent handles and strict fallback; shared by lifecycle/status checks.
 - `install.py`: copies the launcher to `~/.local/share/oc-box` and creates
   `~/.local/bin/oc-box`.
+- `installation.py`: staged immutable installed copies and launcher activation.
+- `updater.py` / `install.sh`: public GitHub upgrades and one-line bootstrap.
 - `tests/`: stdlib unit tests and bounded offline mainline integration fixtures.
 - `docs/cli.md`: canonical command reference; `tools/build_docs.py` generates
   the committed man/Texinfo/Info manuals from it.
@@ -95,3 +97,8 @@ private archive-origin evidence under `retired/`; keep that recovery path tested
 `terminal` is maintenance-only: no host credential/pass_env forwarding, no
 OpenCode/auth/config refresh, startup profiles, or persistent shell history.
 Keep its environment allowlisted and preserve the original container run state.
+
+Updates fetch the fixed public HTTPS upstream anonymously with sanitized Git
+configuration/environment. Never reuse publishing/provider credentials for
+downloads. Keep automatic updating opt-in, preserve running release copies,
+workspaces and source checkouts, and do not self-update from inside a container.
