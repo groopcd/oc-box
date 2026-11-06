@@ -140,11 +140,29 @@ class DocumentationTests(unittest.TestCase):
             tempfile.TemporaryDirectory(prefix="oc-box-doc-rebuild-") as temporary,
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(build.main(["--output-dir", temporary]), 0)
+            first = Path(temporary) / "first"
+            second = Path(temporary) / "second"
+            self.assertEqual(build.main(["--output-dir", str(first)]), 0)
+            self.assertEqual(build.main(["--output-dir", str(second)]), 0)
             self.assertEqual(
-                (Path(temporary) / "oc-box.info").read_bytes(),
-                (APP / "docs/oc-box.info").read_bytes(),
+                (first / "oc-box.info").read_bytes(),
+                (second / "oc-box.info").read_bytes(),
             )
+            # makeinfo embeds its version and can change wrapping, typography,
+            # and tag-table offsets between releases (e.g. 7.1 vs 7.3). Exact
+            # byte reproducibility applies within one toolchain, not across
+            # arbitrary host versions. Sources are checked separately above.
+            generated = (first / "oc-box.info").read_text()
+            committed = (APP / "docs/oc-box.info").read_text()
+            nodes = r"^File: [^\n]*?Node: ([^,\n]+)"
+            self.assertEqual(
+                re.findall(nodes, generated, re.MULTILINE),
+                re.findall(nodes, committed, re.MULTILINE),
+            )
+            self.assertIn("--import-session", generated)
+            self.assertIn("oc-box upgrade --check", generated)
+            if generated.splitlines()[0] == committed.splitlines()[0]:
+                self.assertEqual(generated, committed)
 
     @unittest.skipUnless(shutil.which("info"), "GNU Info reader not installed")
     def test_info_reader_can_load_the_options_node(self):

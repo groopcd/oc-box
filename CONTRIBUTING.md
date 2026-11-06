@@ -31,6 +31,10 @@ python3 -B tools/build_docs.py
 
 End-user installation copies prebuilt manuals and must not require build tools.
 Optional man/Info rendering checks run when groff and GNU info are available.
+Info output is byte-reproducible with the same makeinfo version. Different
+Texinfo releases may change their banner, wrapping, typography, and tag offsets;
+tests verify matching navigation across versions rather than requiring identical
+binary output from every distribution's documentation toolchain.
 
 ## Source and release hygiene
 
