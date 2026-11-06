@@ -1,8 +1,10 @@
 # Contributing
 
-Use the full Git history: the release identity is `0.1.N+gHASH`, with the commit
-count as N. Changes should keep mainline OpenCode unmodified and preserve MCPs,
-formatters, language servers, plugins, and the host/container storage boundary.
+Use the full Git history: the release identity is `1.0.N+gHASH`, with N the
+commit count minus the 1.0.0 baseline (29). Keep the absolute `commit_count` in
+metadata for upgrade compatibility with 0.1 releases. Changes should keep mainline
+OpenCode unmodified and preserve MCPs, formatters, language servers, plugins, and
+the host/container storage boundary.
 
 ## Checks
 
@@ -24,13 +26,16 @@ Do not run host lifecycle tests from inside the project's running container.
 
 ## Live backup/restore validation
 
-The `feature/backup-restore` branch is deliberately not merged or released until
-the host fixture is accepted. Do not reset/purge real projects to validate it.
+Full and portable backup/restore passed the host fixture and were accepted for
+the 1.0.0 release. This exercises real rootless Podman and age with a synthetic
+SQLite database, rather than a restored project's live model inference. Repeat
+it for changes to backup transport, restore lifecycle, or host ownership.
+Do not reset/purge real projects to validate it.
 From an ordinary Linux **host** terminal, without sudo, install the age package
-and ensure rootless Podman works. Then run the branch's fixture script directly:
+and ensure rootless Podman works. Then run the fixture from the repository root:
 
 ```sh
-python3 ~/devel/oc-box/tools/test_backup_podman.py
+python3 tools/test_backup_podman.py
 ```
 
 It uses a fresh temporary directory and isolated `OC_BOX_STATE_HOME`, creates
@@ -58,10 +63,11 @@ actual age/archive pipelines and substitute only Podman transport; they cannot
 certify kernel isolation, SELinux, image loading, or UID mapping on your host.
 If the live check fails, stop and retain the test environment for diagnosis.
 
-The planned first 1.0.x version bump happens only after successful validation,
-before merging, retesting, tagging, and publishing to GitHub/PyPI. The current
-feature branch retains the 0.1 commit-derived series during review, and merely
-pushing it does not create a release or publish to PyPI.
+The accepted host validation covers project/Git edits, private-home/database
+bytes, rootless ownership, saved session selection, retained internal paths,
+source preservation, stopped restores, and the expected full/portable OS-state
+differences. Fixture paths, keys, IDs, and archives are private test data, not
+public documentation or release assets. Pushing a branch does not publish to PyPI.
 
 ## Manuals
 
@@ -122,13 +128,17 @@ GitHub installer. Standard build produces the wheel from the sdist to verify
 that it works without Git. Do not publish a dirty working tree.
 
 PyPI rejects local `+gHASH` version suffixes: the distribution version is
-`0.1.N` from full-history commit count, and packaged `build-info.json` keeps
-`0.1.N+gHASH` plus the full commit. Each selected release needs a unique version;
-ordinary commits remain on GitHub without requiring a PyPI upload.
+`1.0.N` from full-history commit count minus `VERSION_BASE_COMMIT_COUNT`, and
+packaged `build-info.json` keeps `1.0.N+gHASH` plus the full commit and absolute
+commit count. The first stable release has count 29 and version 1.0.0; every
+subsequent commit advances the patch automatically. Version calculation rejects
+shallow history. Fast-forward the tested release commit into master so merging
+does not add an extra version increment. Each selected release needs a unique
+version; ordinary commits remain on GitHub without requiring a PyPI upload.
 
 Trusted Publisher configuration in PyPI must match:
 
-- Project: `oc-box` (pending publisher until its first successful publication).
+- Project: `oc-box`.
 - GitHub owner/repository: `groopcd/oc-box`.
 - Workflow filename: `publish.yml`.
 - GitHub environment: `pypi`.
@@ -140,7 +150,7 @@ Actions are pinned by commit. The user must create/own the PyPI account and
 configure the matching publisher; pending publishers do not reserve names.
 
 First run the workflow with its `publish` input false to verify a build-only
-run. A published GitHub release named `v0.1.N` (matching that commit's count)
+run. A published GitHub release named `v1.0.N` (matching `public_version(build)`)
 builds, validates, and publishes to PyPI. Alternatively manually dispatch
 `publish.yml` on a reviewed commit with `publish` true. Environment protection
 rules may require owner approval. Do not publish from untrusted pull requests.

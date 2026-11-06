@@ -292,7 +292,7 @@ A normal start/reset/import launch unlocks once when selected vault names exist,
 Informational commands, maintenance terminal, explicit history sync, stop, repair, and upgrade never unlock. The maintenance shell's clean environment rules remain unchanged. Configuration/auth copying is an independent feature: these selections do not remove embedded credentials in copied config, provider or MCP auth files, project files, raw Podman create\-time Env settings, previous processes, or previously saved container data. Selection is reduced forwarding, not an isolation boundary from secrets already inside the container. Delivered keys remain readable by the agent/tools with normal container permissions.
 .SS backup
 .PP
-Feature\-branch preview for validation before the first 1.0.x release. Create one encrypted \fB\&.ocbox\fR file for an existing workspace. Requires host age/age\-keygen, Python, rootless Podman, and Linux memfd support; it does not require the vault crypto extra or unlock the credential vault. The command must be first, with its own options after it. Use \-\-project/\-\-workspace or the current directory.
+Create one encrypted \fB\&.ocbox\fR file for an existing workspace (available since 1.0.0). Requires host age/age\-keygen, Python, rootless Podman, and Linux memfd support; it does not require the vault crypto extra or unlock the credential vault. The command must be first, with its own options after it. Use \-\-project/\-\-workspace or the current directory.
 .PP
 .nf
 .fam C
@@ -385,9 +385,9 @@ oc\-box \-\-status \-\-json > status.json
 Print oc\-box version, author Paulo Dias and email, OpenAI coding\-assistant contribution, GPL\-3.0\-or\-later licensing, and source commit. No Podman or workspace is required. Use alone, without lifecycle selectors/options.
 .SS \-\-version
 .PP
-Print oc\-box's commit\-derived version and exit without Podman. The format is \fB0.1.N+gHASH\fR, with N the full\-history commit count. Each commit advances N; tracked uncommitted changes add \fB\&.dirty\fR\&. Untracked files do not. Installed copies retain their installation\-time identity in \fBbuild\-info.json\fR; reinstall to update it. This is separate from the host OpenCode version matched inside containers. Use alone, for example: \fBoc\-box \-\-version\fR\&.
+Print oc\-box's commit\-derived version and exit without Podman. The format is \fB1.0.N+gHASH\fR, with N the full\-history commit count minus 29 (the 1.0.0 baseline). Each later commit advances N; shallow history cannot supply a release identity. Tracked uncommitted changes add \fB\&.dirty\fR\&. Untracked files do not. Installed copies retain their installation\-time identity in \fBbuild\-info.json\fR; reinstall to update it. This is separate from the host OpenCode version matched inside containers. Use alone, for example: \fBoc\-box \-\-version\fR\&.
 .PP
-PyPI distribution metadata uses only \fB0.1.N\fR, because public PyPI versions cannot contain the local \fB+gHASH\fR suffix. Its packaged build\-info still includes the full source identity displayed by this command, so the exact Git commit is retained even in a wheel/source distribution installed without Git.
+PyPI distribution metadata uses only \fB1.0.N\fR, because public PyPI versions cannot contain the local \fB+gHASH\fR suffix. Its packaged build\-info still includes the full source identity displayed by this command, so the exact Git commit is retained even in a wheel/source distribution installed without Git. Existing 0.1 installations retain their original embedded identity until upgraded through their usual channel. The absolute commit count remains in metadata for upgrade ordering; no workspace reset or database migration is required for the version\-series transition.
 .SS \-\-distro NAME
 .PP
 Choose a supported distro for a new environment. The default matches the host ID when supported; openSUSE Tumbleweed/Slowroll use Tumbleweed, other openSUSE variants use Leap, and unknown hosts fall back to Tumbleweed. The image is a distribution userland, not an exact clone of host packages or snapshot date. Changing an existing workspace requires \fBreset \-\-distro NAME\fR\&.

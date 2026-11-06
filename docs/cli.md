@@ -562,9 +562,9 @@ keys remain readable by the agent/tools with normal container permissions.
 
 ### backup
 
-Feature-branch preview for validation before the first 1.0.x release. Create one
-encrypted `.ocbox` file for an existing workspace. Requires host age/age-keygen,
-Python, rootless Podman, and Linux memfd support; it does not require the vault
+Create one encrypted `.ocbox` file for an existing workspace (available since
+1.0.0). Requires host age/age-keygen, Python, rootless Podman, and Linux memfd
+support; it does not require the vault
 crypto extra or unlock the credential vault. The command must be first, with
 its own options after it. Use --project/--workspace or the current directory.
 
@@ -766,16 +766,21 @@ workspace is required. Use alone, without lifecycle selectors/options.
 ### --version
 
 Print oc-box's commit-derived version and exit without Podman. The format is
-`0.1.N+gHASH`, with N the full-history commit count. Each commit advances N;
-tracked uncommitted changes add `.dirty`. Untracked files do not. Installed
+`1.0.N+gHASH`, with N the full-history commit count minus 29 (the 1.0.0
+baseline). Each later commit advances N; shallow history cannot supply a release
+identity. Tracked uncommitted changes add `.dirty`. Untracked files do not. Installed
 copies retain their installation-time identity in `build-info.json`; reinstall
 to update it. This is separate from the host OpenCode version matched inside
 containers. Use alone, for example: `oc-box --version`.
 
-PyPI distribution metadata uses only `0.1.N`, because public PyPI versions
+PyPI distribution metadata uses only `1.0.N`, because public PyPI versions
 cannot contain the local `+gHASH` suffix. Its packaged build-info still includes
 the full source identity displayed by this command, so the exact Git commit is
 retained even in a wheel/source distribution installed without Git.
+Existing 0.1 installations retain their original embedded identity until
+upgraded through their usual channel. The absolute commit count remains in
+metadata for upgrade ordering; no workspace reset or database migration is
+required for the version-series transition.
 
 ### --distro NAME
 

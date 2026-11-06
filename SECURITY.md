@@ -152,9 +152,9 @@ plugins, and MCPs are upstream dependencies. Baseline downloads use HTTPS where
 the launcher fetches them directly; distribution tools follow their configured
 repositories and signature policies. Keep the host kernel and Podman patched.
 
-## Backup/restore preview
+## Backup and restore
 
-The unmerged backup/restore feature uses established age authenticated encryption
+Backup/restore uses established age authenticated encryption
 for streaming components and an age-protected fresh per-backup key. Only
 ciphertext is staged on disk; keys and captured tool errors use anonymous memfd
 storage. No provider credentials are forwarded, vault unlocked, container code

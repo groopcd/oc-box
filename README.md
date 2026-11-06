@@ -134,7 +134,7 @@ command; it does not overwrite package-managed files or create a competing
 GitHub-installed launcher. GitHub/curl installations retain `oc-box upgrade` and
 opt-in automatic GitHub updates. If both channels are installed, check
 `command -v oc-box` to select the intended launcher. PyPI package versions use
-`0.1.N`, while `oc-box --version` also records `+gHASH` for source provenance.
+`1.0.N`, while `oc-box --version` also records `+gHASH` for source provenance.
 Published PyPI releases are selected separately from ordinary GitHub commits.
 Packaged manuals are in the package's `docs/` and the tool environment's
 `share/man`/`share/info`; those directories may need explicit reader paths.
@@ -476,13 +476,12 @@ storage before delivery; it does not hide a delivered key from the agent.
 See the [complete credential reference](docs/cli.md#credentials) and
 [security notes](SECURITY.md) before migrating sensitive credentials.
 
-## Backup and restore (feature-branch preview)
+## Backup and restore
 
-Encrypted workspace backup/restore is under validation on
-`feature/backup-restore`; it is not part of the current tagged/PyPI release.
-It is intended for the first 1.0.x release **after host Podman validation**.
-Do not install this branch over a working launcher solely to test it: invoke
-its `oc_box.py` directly from a host terminal against disposable fixtures first.
+Version 1.0.0 adds encrypted full and portable workspace backups. Both modes
+passed the disposable Linux host/rootless-Podman fixture, including project/Git
+edits, private-home database bytes, session IDs, internal paths, rootless
+ownership, and stopped restores. See the [validation details](CONTRIBUTING.md#live-backuprestore-validation).
 
 Install the optional host `age` package (provides `age` and `age-keygen`). Then
 exit the source workspace's OpenCode launcher and keep host editors/builds idle:
@@ -547,8 +546,10 @@ info --file "$HOME/.local/share/info/oc-box.info"
 
 Readers are host packages (`man` and `info` on openSUSE). See
 [CONTRIBUTING.md](CONTRIBUTING.md) to regenerate the manuals from `docs/cli.md`.
-`oc-box --version` uses `0.1.N+gHASH`, advancing automatically with Git commits;
-installed copies retain their source version until upgraded or reinstalled.
+`oc-box --version` uses `1.0.N+gHASH`: 1.0.0 is the stable baseline, and later
+commits advance N automatically. Installed copies retain their source version
+until upgraded or reinstalled. Existing 0.1 installations upgrade through their
+usual installation channel; no workspace reset or history migration is needed.
 
 ## Development status
 

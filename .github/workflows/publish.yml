@@ -43,9 +43,10 @@ jobs:
           python tools/build_docs.py --check
           python - <<'PY'
           import os
-          from version_info import get_version_info, VERSION_SERIES
+          from version_info import get_version_info, public_version
           build = get_version_info('.')
-          expected = f"v{VERSION_SERIES}.{build['commit_count']}"
+          expected = 'v' + public_version(build)
+          assert build['commit'] and build['commit_count'], 'Full Git history is required'
           assert not build['dirty'], 'Publish only a clean source commit'
           if os.environ.get('RELEASE_TAG'):
               assert os.environ['RELEASE_TAG'] == expected, f'Release tag must be {expected}'

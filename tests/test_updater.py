@@ -164,7 +164,7 @@ class UpdateTests(unittest.TestCase):
             patch.object(
                 updater,
                 "get_version_info",
-                return_value={"commit": commit, "dirty": False},
+                return_value={"commit": commit, "dirty": False, "version": "1.0.0"},
             ),
             patch.object(
                 updater.subprocess,
@@ -422,6 +422,12 @@ class UpdateTests(unittest.TestCase):
         remote.mkdir()
         for name in installation.PROGRAM_FILES:
             shutil.copyfile(APP / name, remote / name)
+        version_file = remote / "version_info.py"
+        version_file.write_text(
+            version_file.read_text().replace(
+                "VERSION_BASE_COMMIT_COUNT = 29", "VERSION_BASE_COMMIT_COUNT = 1"
+            )
+        )
         shutil.copytree(APP / "docs", remote / "docs")
         env = {
             **updater.public_git_env(self.root),
@@ -447,6 +453,16 @@ class UpdateTests(unittest.TestCase):
         first_commit = local("rev-parse", "HEAD")
         with contextlib.redirect_stdout(io.StringIO()):
             first = installation.install(remote, self.home)
+        # Simulate the installed metadata of a pre-1.0 launcher. The full count
+        # remains comparable even though the public patch baseline changes.
+        metadata = first / "build-info.json"
+        legacy = {
+            "version": "0.1.1+g" + first_commit[:7],
+            "commit": first_commit,
+            "commit_count": 1,
+            "dirty": False,
+        }
+        metadata.write_text(json.dumps(legacy))
         (remote / "README.md").write_text(
             (remote / "README.md").read_text() + "\nFixture update.\n"
         )
@@ -473,14 +489,17 @@ class UpdateTests(unittest.TestCase):
         with (
             patch.object(updater.os, "geteuid", return_value=1000),
             patch.object(updater, "git", side_effect=transport),
-            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             second = updater.upgrade(APP)
+        self.assertIn("Installed oc-box: 0.1.1+g", output.getvalue())
+        self.assertIn("Installed oc-box: 1.0.1+g", output.getvalue())
         self.assertIsNotNone(second)
         target = self.home / ".local/share/oc-box"
         build = get_version_info(target)
         self.assertEqual(build["commit"], expected)
         self.assertEqual(build["commit_count"], 2)
+        self.assertTrue(build["version"].startswith("1.0.1+g"))
         self.assertEqual(get_version_info(first)["commit"], first_commit)
         self.assertEqual(local("status", "--porcelain"), "")
         self.assertEqual(local("rev-parse", "HEAD"), expected)

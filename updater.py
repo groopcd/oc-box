@@ -172,20 +172,14 @@ def upgrade(root, *, check=False):
             raise UpdateError(
                 "Downloaded source identity could not be verified; existing installation retained."
             )
-        verified = {
-            "commit": commit,
-            "commit_count": count,
-            "version": f"0.1.{count}+g{commit[:7]}",
-        }
-        if (
-            current.get("commit_count") is not None
-            and current["commit_count"] > verified["commit_count"]
-        ):
+        if current.get("commit_count") is not None and current["commit_count"] > count:
             print(
                 "Installed build is ahead of the published branch; leaving it installed."
             )
             return None
-        print("Installing " + verified["version"], flush=True)
+        # Version series/baselines belong to the downloaded release, not to
+        # this older updater. Its installer embeds the exact source identity.
+        print("Installing verified source " + commit[:12], flush=True)
         # A future version may add installed modules; use that version's staged
         # installer. This trusts the published source, but never project hooks,
         # Git credential/config overrides, or inherited provider credentials.
@@ -211,6 +205,7 @@ def upgrade(root, *, check=False):
         actual = get_version_info(target)
         if actual.get("commit") != commit or actual.get("dirty"):
             raise UpdateError("Installed version does not match the downloaded commit.")
+        print("Installed oc-box: " + actual["version"], flush=True)
         return (target / "current").resolve(strict=True)
 
 

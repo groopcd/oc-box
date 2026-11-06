@@ -654,12 +654,11 @@ remain readable by the agent/tools with normal container permissions.
 4.14 backup
 ===========
 
-Feature-branch preview for validation before the first 1.0.x release.
-Create one encrypted ‘.ocbox’ file for an existing workspace.  Requires
-host age/age-keygen, Python, rootless Podman, and Linux memfd support;
-it does not require the vault crypto extra or unlock the credential
-vault.  The command must be first, with its own options after it.  Use
--project/-workspace or the current directory.
+Create one encrypted ‘.ocbox’ file for an existing workspace (available
+since 1.0.0).  Requires host age/age-keygen, Python, rootless Podman,
+and Linux memfd support; it does not require the vault crypto extra or
+unlock the credential vault.  The command must be first, with its own
+options after it.  Use -project/-workspace or the current directory.
 
      oc-box backup --project ~/devel/demo --output /backup/demo.ocbox
      oc-box backup --workspace WORKSPACE_ID --portable --output /backup/demo-portable.ocbox
@@ -884,18 +883,23 @@ lifecycle selectors/options.
 ============
 
 Print oc-box's commit-derived version and exit without Podman.  The
-format is ‘0.1.N+gHASH’, with N the full-history commit count.  Each
-commit advances N; tracked uncommitted changes add ‘.dirty’.  Untracked
-files do not.  Installed copies retain their installation-time identity
-in ‘build-info.json’; reinstall to update it.  This is separate from the
-host OpenCode version matched inside containers.  Use alone, for
-example: ‘oc-box --version’.
+format is ‘1.0.N+gHASH’, with N the full-history commit count minus 29
+(the 1.0.0 baseline).  Each later commit advances N; shallow history
+cannot supply a release identity.  Tracked uncommitted changes add
+‘.dirty’.  Untracked files do not.  Installed copies retain their
+installation-time identity in ‘build-info.json’; reinstall to update it.
+This is separate from the host OpenCode version matched inside
+containers.  Use alone, for example: ‘oc-box --version’.
 
-PyPI distribution metadata uses only ‘0.1.N’, because public PyPI
+PyPI distribution metadata uses only ‘1.0.N’, because public PyPI
 versions cannot contain the local ‘+gHASH’ suffix.  Its packaged
 build-info still includes the full source identity displayed by this
 command, so the exact Git commit is retained even in a wheel/source
-distribution installed without Git.
+distribution installed without Git.  Existing 0.1 installations retain
+their original embedded identity until upgraded through their usual
+channel.  The absolute commit count remains in metadata for upgrade
+ordering; no workspace reset or database migration is required for the
+version-series transition.
 
 5.8 -distro NAME
 ================
@@ -1995,20 +1999,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2358
 Node: Commands4189
-Node: Options40890
-Node: Lifecycle and persistence55442
-Node: Distribution images57195
-Node: Sessions and recovery58090
-Node: Devices and host permissions63378
-Node: Resource reports65724
-Node: Configuration and environment67835
-Node: Files71957
-Node: Exit status76354
-Node: Examples77165
-Node: Troubleshooting79251
-Node: Installation and manuals87322
-Node: Authors and license92650
-Node: See also93257
+Node: Options40844
+Node: Lifecycle and persistence55751
+Node: Distribution images57504
+Node: Sessions and recovery58399
+Node: Devices and host permissions63687
+Node: Resource reports66033
+Node: Configuration and environment68144
+Node: Files72266
+Node: Exit status76663
+Node: Examples77474
+Node: Troubleshooting79560
+Node: Installation and manuals87631
+Node: Authors and license92959
+Node: See also93566
 
 End Tag Table
 

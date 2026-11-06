@@ -30,7 +30,7 @@ def check(directory, *, with_vault=False):
         )
         metadata = BytesParser().parsebytes(wheel.read(metadata_path))
         version = metadata["Version"]
-        assert re.fullmatch(r"0\.1\.\d+", version), version
+        assert re.fullmatch(r"\d+\.\d+\.\d+", version), version
         assert metadata["Name"] == "oc-box"
         assert metadata["Requires-Python"] == ">=3.10"
         assert metadata["License-Expression"] == "GPL-3.0-or-later"

@@ -24,7 +24,7 @@ if BUILD.get("commit_count") is None or BUILD.get("commit") is None:
     raise RuntimeError(
         "Building oc-box requires full Git history or embedded source-distribution build metadata."
     )
-PUBLIC_VERSION = f"{version.VERSION_SERIES}.{BUILD['commit_count']}"
+PUBLIC_VERSION = version.public_version(BUILD)
 
 
 class BuildPackage(build_py):

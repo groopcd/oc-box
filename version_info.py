@@ -4,11 +4,19 @@ import json
 from pathlib import Path
 import subprocess
 
-VERSION_SERIES = "0.1"
+VERSION_SERIES = "1.0"
+# The first stable release is the 29th full-history commit. Keep the absolute
+# count in build metadata for compatibility with installed 0.1-series updaters.
+VERSION_BASE_COMMIT_COUNT = 29
 AUTHOR_NAME = "Paulo Dias"
 AUTHOR_EMAIL = "paulo.miguel.dias@gmail.com"
 AI_CONTRIBUTION = "OpenAI coding assistant via OpenCode: implementation, debugging, tests, and documentation."
 LICENSE = "GPL-3.0-or-later"
+
+
+def public_version(build):
+    """The public package/tag version, without source-local provenance."""
+    return build["version"].split("+", 1)[0]
 
 
 def get_version_info(root):
@@ -25,11 +33,16 @@ def get_version_info(root):
             ).stdout.strip()
 
         try:
+            if git("rev-parse", "--is-shallow-repository") != "false":
+                raise ValueError("Versioning requires full Git history")
             count = int(git("rev-list", "--count", "HEAD"))
+            patch = count - VERSION_BASE_COMMIT_COUNT
+            if patch < 0:
+                raise ValueError("History predates this version series")
             commit = git("rev-parse", "HEAD")
             dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
             return {
-                "version": f"{VERSION_SERIES}.{count}+g{commit[:7]}"
+                "version": f"{VERSION_SERIES}.{patch}+g{commit[:7]}"
                 + (".dirty" if dirty else ""),
                 "commit": commit,
                 "commit_count": count,

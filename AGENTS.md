@@ -57,11 +57,14 @@ without modifying the parent environment. Verify `gh api user` reports
 `groopcd` before publishing. Pass Git credential helpers per command rather
 than storing tokens or changing global authentication settings.
 
-Version `0.1.N+gHASH` is derived from the full Git history; every commit advances
-N automatically. The installer embeds the source identity in its private
-`build-info.json`. Original project code/documentation is GPL-3.0-or-later;
+Version `1.0.N+gHASH` is derived from the full Git history, with N the commit
+count minus the 1.0.0 baseline (29); every later commit advances N automatically.
+Keep the absolute `commit_count` for old updater compatibility, require full
+history, and fast-forward tested release commits into master. The installer
+embeds the source identity in its private `build-info.json`. Original project
+code/documentation is GPL-3.0-or-later;
 retain LICENSE and NOTICE when distributing/installing it.
-PyPI uses the public `0.1.N` version; retain the full `+gHASH` identity in package
+PyPI uses the public `1.0.N` version; retain the full `+gHASH` identity in package
 resources. Python-package installations upgrade through pipx/uv/pip, never the
 GitHub self-updater. Preserve the normal curl/GitHub update path in parallel.
 
@@ -123,9 +126,11 @@ never unlock. Wrong/missing selected credentials must abort before reset deletio
 Secret values may be deliberately revealed only in the interactive host prompt;
 start every field masked, keep passphrases masked, and document recording risk.
 
-Backup/restore is under review on `feature/backup-restore`. Do not merge/tag/
-publish until the user accepts host Podman validation. Keep the 0.1 series
-during this review; prepare the first 1.0.x release after acceptance. Test with
-`tools/test_backup_podman.py` on a host, isolated from real workspace state.
+Full and portable backup/restore passed accepted host rootless-Podman validation
+for 1.0.0, including synthetic database bytes, session selection, rootless
+ownership, internal paths, source preservation, stopped restores, and OS-state
+differences. Repeat `tools/test_backup_podman.py` on a host for relevant lifecycle
+changes, isolated from real workspace state. This fixture does not test restored
+real-project model inference.
 Restores retain original internal project paths via `container_project`; host
 destinations/physical identities and resource IDs are fresh, not DB path edits.
