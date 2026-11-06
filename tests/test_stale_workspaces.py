@@ -19,6 +19,9 @@ spec.loader.exec_module(box)
 
 class StaleWorkspaceTests(unittest.TestCase):
     def setUp(self):
+        prerequisites = patch.object(box.dependencies, "require")
+        prerequisites.start()
+        self.addCleanup(prerequisites.stop)
         temporary = tempfile.TemporaryDirectory(prefix="oc-box-stale-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)

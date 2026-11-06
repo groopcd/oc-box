@@ -20,6 +20,9 @@ spec.loader.exec_module(box)
 
 class WorkspaceTests(unittest.TestCase):
     def setUp(self):
+        prerequisites = patch.object(box.dependencies, "require")
+        prerequisites.start()
+        self.addCleanup(prerequisites.stop)
         self.tmp = tempfile.TemporaryDirectory(prefix="oc-box-test-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)

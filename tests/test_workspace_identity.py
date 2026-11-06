@@ -33,6 +33,9 @@ def stable(fsid="filesystem-a", handle="01020304", kind=77):
 
 class WorkspaceIdentityTests(unittest.TestCase):
     def setUp(self):
+        prerequisites = patch.object(box.dependencies, "require")
+        prerequisites.start()
+        self.addCleanup(prerequisites.stop)
         temporary = tempfile.TemporaryDirectory(prefix="oc-box-identity-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
