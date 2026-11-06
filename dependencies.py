@@ -58,6 +58,7 @@ PACKAGES = {
         "info": "info",
     },
     "leap": {
+        "oci-runtime": "runc",
         "python": "python3",
         "newuidmap": "shadow",
         "newgidmap": "shadow",
@@ -243,7 +244,28 @@ def probe(key):
         import ssl
 
         try:
+            paths = ssl.get_default_verify_paths()
+            # OpenSSL loads hashed CA directories lazily; zero preloaded CAs
+            # alone is not evidence that Fedora's system trust store is absent.
             present = ssl.create_default_context().cert_store_stats()["x509_ca"] > 0
+            if not present and paths.capath:
+                present = any(Path(paths.capath).glob("????????.[0-9]"))
+            if not present:
+                # Some distro OpenSSL builds use a system-trust backend rather
+                # than loading roots into Python's in-memory context up front.
+                for bundle in (
+                    paths.cafile,
+                    "/etc/pki/tls/certs/ca-bundle.crt",
+                    "/etc/ssl/certs/ca-certificates.crt",
+                    "/var/lib/ca-certificates/ca-bundle.pem",
+                ):
+                    if (
+                        bundle
+                        and Path(bundle).is_file()
+                        and b"-----BEGIN CERTIFICATE-----" in Path(bundle).read_bytes()
+                    ):
+                        present = True
+                        break
             return present, "Trusted HTTPS CA certificates for downloads"
         except (OSError, ssl.SSLError):
             return False, "HTTPS trust store unavailable"

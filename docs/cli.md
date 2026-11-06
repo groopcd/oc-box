@@ -1142,7 +1142,8 @@ as root without sudo in an administrative shell).
 
 | Host distro | Core rootless prerequisites plus optional backup tools |
 | --- | --- |
-| Tumbleweed / Leap | `sudo zypper refresh && sudo zypper install python3 podman passt shadow catatonit conmon crun age` |
+| Tumbleweed | `sudo zypper refresh && sudo zypper install python3 podman passt shadow catatonit conmon crun age` |
+| Leap | `sudo zypper refresh && sudo zypper install python3 podman passt shadow catatonit conmon runc age` |
 | Ubuntu / Debian | `sudo apt update && sudo apt install python3 podman passt uidmap catatonit conmon crun age` |
 | Fedora | `sudo dnf install python3 podman passt shadow-utils catatonit conmon crun age` |
 | Arch | `sudo pacman -Syu --needed python podman passt shadow catatonit conmon crun age` |

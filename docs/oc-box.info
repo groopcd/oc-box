@@ -1307,14 +1307,15 @@ configured regular host, or as root without sudo in an administrative
 shell).
 
 | Host distro | Core rootless prerequisites plus optional backup tools |
-| -- | -- | | Tumbleweed / Leap | ‘sudo zypper refresh && sudo zypper
-install python3 podman passt shadow catatonit conmon crun age’ | |
-Ubuntu / Debian | ‘sudo apt update && sudo apt install python3 podman
-passt uidmap catatonit conmon crun age’ | | Fedora | ‘sudo dnf install
-python3 podman passt shadow-utils catatonit conmon crun age’ | | Arch |
-‘sudo pacman -Syu --needed python podman passt shadow catatonit conmon
-crun age’ | | Alpine | ‘sudo apk add python3 podman passt shadow-subids
-catatonit conmon crun age’ |
+| -- | -- | | Tumbleweed | ‘sudo zypper refresh && sudo zypper install
+python3 podman passt shadow catatonit conmon crun age’ | | Leap | ‘sudo
+zypper refresh && sudo zypper install python3 podman passt shadow
+catatonit conmon runc age’ | | Ubuntu / Debian | ‘sudo apt update &&
+sudo apt install python3 podman passt uidmap catatonit conmon crun age’
+| | Fedora | ‘sudo dnf install python3 podman passt shadow-utils
+catatonit conmon crun age’ | | Arch | ‘sudo pacman -Syu --needed python
+podman passt shadow catatonit conmon crun age’ | | Alpine | ‘sudo apk
+add python3 podman passt shadow-subids catatonit conmon crun age’ |
 
 Installing packages alone does not configure subordinate IDs, cgroups,
 or make rootful Podman rootless.  Alpine requires its release's
@@ -2167,17 +2168,17 @@ Node: Commands4241
 Node: Options43788
 Node: Lifecycle and persistence60172
 Node: Distribution images61925
-Node: Sessions and recovery66686
-Node: Devices and host permissions71974
-Node: Resource reports74320
-Node: Configuration and environment76431
-Node: Files81195
-Node: Exit status85592
-Node: Examples86403
-Node: Troubleshooting88489
-Node: Installation and manuals96560
-Node: Authors and license101888
-Node: See also102495
+Node: Sessions and recovery66793
+Node: Devices and host permissions72081
+Node: Resource reports74427
+Node: Configuration and environment76538
+Node: Files81302
+Node: Exit status85699
+Node: Examples86510
+Node: Troubleshooting88596
+Node: Installation and manuals96667
+Node: Authors and license101995
+Node: See also102602
 
 End Tag Table
 

@@ -180,6 +180,23 @@ class DependencyTests(unittest.TestCase):
         self.assertFalse(available)
         self.assertIn("GNU du", detail)
 
+    def test_hashed_certificate_directory_is_not_mistaken_for_missing_cas(self):
+        import ssl
+        from types import SimpleNamespace
+
+        with tempfile.TemporaryDirectory() as temporary:
+            Path(temporary, "0123abcd.0").write_text("synthetic trust fixture")
+            with (
+                patch.object(
+                    ssl,
+                    "get_default_verify_paths",
+                    return_value=SimpleNamespace(capath=temporary),
+                ),
+                patch.object(ssl, "create_default_context") as context,
+            ):
+                context.return_value.cert_store_stats.return_value = {"x509_ca": 0}
+                self.assertTrue(deps.probe("ca-certificates")[0])
+
     def test_private_podman_helpers_and_alternative_oci_runtime_are_accepted(self):
         with (
             patch.object(deps.shutil, "which", return_value=None),
