@@ -132,6 +132,16 @@ class V2HostFixtureTests(unittest.TestCase):
         server, worker = fixture.make_provider(state)
         self.assertEqual(server.server_address[0], "127.0.0.1")
         try:
+            health = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            try:
+                health.request("GET", "/health")
+                response = health.getresponse()
+                self.assertEqual(response.status, 200)
+                self.assertEqual(
+                    json.loads(response.read()), {"fixture": "oc-box-v2-acceptance"}
+                )
+            finally:
+                health.close()
 
             def request(messages, key):
                 connection = HTTPConnection("127.0.0.1", server.server_port, timeout=5)
@@ -182,6 +192,114 @@ class V2HostFixtureTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             worker.join(timeout=3)
+
+    def test_native_fixture_request_passes_eof_and_selects_build_after_network_probe(
+        self,
+    ):
+        state = {"requests": 0, "markers": set(), "errors": []}
+        with (
+            patch.object(
+                box, "exec_command", side_effect=lambda data, arguments: arguments
+            ),
+            patch.object(
+                box,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, "HOST_V2_ACCEPTANCE_OK", ""
+                ),
+            ) as run,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            fixture.run_fixture_session({}, "ses_fixture", state, 12345)
+        self.assertEqual(run.call_count, 2)
+        health, native = run.call_args_list
+        self.assertIn("http://host.containers.internal:12345/health", health.args[0])
+        self.assertEqual(health.kwargs["timeout"], 15)
+        self.assertEqual(native.kwargs["input"], "")
+        self.assertTrue(native.kwargs["private"])
+        self.assertIn("--agent", native.args[0])
+        self.assertIn("build", native.args[0])
+
+    def test_network_probe_failure_does_not_start_a_native_model_request(self):
+        with (
+            patch.object(
+                box, "exec_command", side_effect=lambda data, arguments: arguments
+            ),
+            patch.object(
+                box, "run", side_effect=box.BoxError("connection failed")
+            ) as run,
+            self.assertRaisesRegex(
+                box.BoxError, "Native model request was not started"
+            ),
+        ):
+            fixture.run_fixture_session({}, "ses_fixture", {}, 12345)
+        run.assert_called_once()
+
+    def retained_source(self, root):
+        fixture.write_wrapper(root, Path(sys.executable), Path(sys.executable))
+        fixture.storage_config(root)
+        (root / "config/oc-box").mkdir()
+        (root / "config/oc-box/config.json").write_text(
+            '{"default_distro":"tumbleweed"}'
+        )
+        (root / "config/opencode").mkdir()
+        (root / "config/opencode/opencode.json").write_text(
+            json.dumps(fixture.fixture_config(12345))
+        )
+        (root / "host-home").mkdir()
+        (root / "data/containers/storage").mkdir(parents=True)
+        (root / "podman-run").mkdir()
+        source = root / "source"
+        source.mkdir()
+        (source / "unfinished.txt").write_text("PROJECT_RETAINED\n")
+        with (
+            patch.dict(os.environ, fixture.isolated_env(root), clear=True),
+            patch.object(Path, "home", return_value=root / "host-home"),
+        ):
+            path, data = box.create_workspace(source, "tumbleweed")
+        (root / "fixture-ids.json").write_text(json.dumps([data["id"]]))
+        return path, data
+
+    def test_resume_validates_only_stopped_source_and_reuses_native_paths(self):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            path, data = self.retained_source(root)
+            with patch.object(
+                fixture, "stopped_container", return_value={"State": {"Running": False}}
+            ):
+                recovered, v1, v2, distro = fixture.resume_fixture(root)
+            self.assertEqual(recovered, root)
+            self.assertEqual(v1, Path(sys.executable).resolve())
+            self.assertEqual(v1, v2)
+            self.assertEqual(distro, "tumbleweed")
+            self.assertEqual(box.read_json(path)["id"], data["id"])
+            (root / "full.ocbox").write_bytes(b"fixture archive evidence")
+            with self.assertRaisesRegex(
+                ValueError, "overwrite backup/restore evidence"
+            ):
+                fixture.resume_fixture(root)
+            self.assertEqual(
+                (root / "full.ocbox").read_bytes(), b"fixture archive evidence"
+            )
+
+    def test_resume_refuses_changed_storage_or_external_project_and_preserves_files(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            path, data = self.retained_source(root)
+            storage = root / "config/containers/storage.conf"
+            original = storage.read_text()
+            storage.write_text('[storage]\ngraphroot="/external/storage"\n')
+            with self.assertRaisesRegex(ValueError, "expected isolated graphroot"):
+                fixture.resume_fixture(root)
+            self.assertIn("/external/storage", storage.read_text())
+            storage.write_text(original)
+            data["project"] = str(root.parent / "real-project")
+            box.atomic_json(path, data)
+            with self.assertRaisesRegex(ValueError, "isolated source/home"):
+                fixture.resume_fixture(root)
+            self.assertEqual(box.read_json(path)["project"], data["project"])
 
     def test_fixture_cleanup_refuses_projects_outside_fixture_root(self):
         with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:

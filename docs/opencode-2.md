@@ -285,6 +285,29 @@ host-executable routing, credential checks and cleanup boundaries. Native V2 CI
 also exercises its exact provider/MCP config and rotated environment without
 Podman. Only a successful run on the host closes the live acceptance gate.
 
+The fixture supplies explicit stdin EOF to noninteractive native V2 `run`
+commands. OpenCode 2.2.6 reads Podman exec's open FIFO until EOF even when a
+prompt is supplied in argv; without that EOF it waits before contacting the
+provider. CI reproduces this wait and verifies the fix against a native private
+server. A short host-loopback provider probe now fails before inference when
+pasta/firewall connectivity is unavailable.
+
+For a failed **source-only run before backups begin**, retry its retained
+container/runtime cache without repeating setup downloads:
+
+```sh
+git pull --ff-only
+uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
+  --resume /tmp/oc-box-live-v2-EXAMPLE
+```
+
+Resume validates the private fixture directory, resource identity, isolated
+Podman storage and stopped state, then generates new synthetic credentials and
+a new fixture provider port. It reuses the recorded native executables and V1
+seed history. It refuses fixtures with backup/restore evidence or missing
+executables; those need a new run after fixture-only cleanup. Resume does not
+accept replacement executable paths.
+
 #### Manual alternative
 
 Use only disposable projects, credential selections and backups:

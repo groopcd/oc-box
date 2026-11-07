@@ -121,6 +121,9 @@ V1/V2 integration enabled on master and pull requests after the feature merges.
 checks: isolated synthetic vault/provider/MCP, native version executables, real
 rootless backup/reset/downgrade. Prompt/TUI actions are scripted; do not claim a
 live pass from its offline unit tests or run it inside this container.
+Native V2 fixture `run` calls require explicit stdin EOF: Podman exec supplies a
+FIFO that upstream otherwise waits to read before inference. Source-only retry
+must validate its private registry/graphroot/runroot and refuse backup evidence.
 
 Package/dependency mappings must pass `.github/workflows/distros.yml` on all
 seven catalog images using `tools/test_dependency_distro.py`. That disposable

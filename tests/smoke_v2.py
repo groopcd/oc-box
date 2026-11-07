@@ -88,6 +88,62 @@ def host_fixture_probe(binary):
             }
             for name in ("CONFIG", "DATA", "STATE", "CACHE"):
                 env["XDG_" + name + "_HOME"] = str(root / name.lower())
+            # Podman exec -i supplies a FIFO inside the container. V2 reads
+            # that FIFO until EOF even when the prompt is already in argv.
+            # Reproduce the retained host-fixture timeout with an open pipe,
+            # then close it and verify the same native --server request runs.
+            with (
+                patch.dict(os.environ, env, clear=True),
+                bridge.server(binary) as request,
+            ):
+                session = request(
+                    "POST", "/api/session", {"location": {"directory": str(root)}}
+                )["data"]["id"]
+                client_env = {**env, "OPENCODE_PASSWORD": request.endpoint["password"]}
+                process = subprocess.Popen(
+                    [
+                        binary,
+                        "run",
+                        "--server",
+                        request.endpoint["url"],
+                        "--session",
+                        session,
+                        "--agent",
+                        "build",
+                        "--model",
+                        "fixture/gpt-smoke",
+                        "Exercise synthetic vault delivery.",
+                    ],
+                    env=client_env,
+                    cwd=root,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    start_new_session=True,
+                )
+                try:
+                    time.sleep(3)
+                    assert process.poll() is None and state["requests"] == 0, (
+                        "Expected open-FIFO input wait before provider request"
+                    )
+                    output, errors = process.communicate(input="", timeout=90)
+                    assert (
+                        process.returncode == 0 and "HOST_V2_ACCEPTANCE_OK" in output
+                    ), errors[-2000:]
+                    assert not state["errors"] and state["markers"] == {
+                        "VAULT_SHELL_OK",
+                        "VAULT_MCP_OK",
+                    }, state["errors"]
+                finally:
+                    if process.poll() is None:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    process.communicate(timeout=5)
+            print(
+                "PASS: reproduced V2 open-FIFO stdin wait; explicit EOF allows native --server session request and tools.",
+                flush=True,
+            )
+            state["markers"].clear()
             result = bounded(
                 [
                     binary,

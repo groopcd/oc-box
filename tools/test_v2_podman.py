@@ -15,8 +15,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shlex
+import stat
 import sys
 import tempfile
 import threading
@@ -198,6 +200,15 @@ def make_provider(state):
         def log_message(self, format, *args):
             pass
 
+        def do_GET(self):
+            if self.path != "/health":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"fixture":"oc-box-v2-acceptance"}')
+
         def do_POST(self):
             try:
                 if self.headers.get("Authorization") != "Bearer " + state["key"]:
@@ -328,6 +339,69 @@ def digest_home(data, name):
     )
 
 
+def run_fixture_session(data, session_id, state, provider_port):
+    """Bounded reachability check, then EOF-terminated native model input."""
+    health = "import json,sys; from urllib.request import build_opener,ProxyHandler; opener=build_opener(ProxyHandler({})); response=opener.open(sys.argv[1],timeout=5); assert json.load(response)=={'fixture':'oc-box-v2-acceptance'}"
+    try:
+        box.run(
+            box.exec_command(
+                data,
+                [
+                    "python3",
+                    "-c",
+                    health,
+                    f"http://host.containers.internal:{provider_port}/health",
+                ],
+            ),
+            input="",
+            capture=True,
+            private=True,
+            timeout=15,
+        )
+    except box.BoxError as exc:
+        raise box.BoxError(
+            "Fixture provider is unreachable through pasta's host-loopback mapping; check host firewall/networking. Native model request was not started."
+        ) from exc
+    print(
+        "oc-box fixture: Provider reachable; exercising selected-vault shell and MCP delivery.",
+        flush=True,
+    )
+    try:
+        return box.run(
+            box.exec_command(
+                data,
+                [
+                    box.CONTAINER_OPENCODE,
+                    "run",
+                    "--session",
+                    session_id,
+                    "--model",
+                    "fixture/gpt-smoke",
+                    "--agent",
+                    "build",
+                    "Exercise synthetic vault shell and MCP delivery.",
+                ],
+            ),
+            capture=True,
+            private=True,
+            input="",
+            timeout=180,
+        )
+    except box.BoxError:
+        print(
+            "oc-box fixture: Model request failed; provider requests="
+            + str(state["requests"])
+            + ", verified tool outputs="
+            + ",".join(sorted(state["markers"]))
+            + ", fixture errors="
+            + str(len(state["errors"]))
+            + ". Private request/response data was not logged.",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
+
+
 def cleanup(root):
     if (
         root.is_symlink()
@@ -367,8 +441,126 @@ def cleanup(root):
     )
 
 
-def run(root, v1, v2, distro):
-    write_wrapper(root, v1, v2)
+def resume_fixture(root):
+    """Only retry a stopped source fixture that has not started backups yet."""
+    if root.is_symlink() or not root.name.startswith(PREFIX):
+        raise ValueError("Not a V2 acceptance fixture directory")
+    root = root.resolve(strict=True)
+    if root.stat().st_uid != os.getuid() or root.stat().st_mode & 0o077:
+        raise ValueError("V2 acceptance fixture must be owned by this user and private")
+    for relative in (
+        "registry",
+        "registry/workspaces",
+        "source",
+        "config",
+        "config/containers",
+        "config/opencode",
+        "config/oc-box",
+        "bin",
+        "data",
+        "data/containers",
+        "data/containers/storage",
+        "podman-run",
+    ):
+        path = root / relative
+        if path.is_symlink() or not path.is_dir():
+            raise ValueError("Invalid retained fixture directory: " + relative)
+    home = root / "host-home"
+    if home.is_symlink() or (home.exists() and not home.is_dir()):
+        raise ValueError("Invalid retained fixture host home")
+    for relative in (
+        "fixture-ids.json",
+        "executables.json",
+        "host-major",
+        "bin/opencode",
+        "config/opencode/opencode.json",
+        "config/oc-box/config.json",
+        "source/unfinished.txt",
+        "config/containers/storage.conf",
+    ):
+        path = root / relative
+        info = path.lstat()
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_size > 1024 * 1024
+        ):
+            raise ValueError("Invalid retained fixture file: " + relative)
+    ids = json.loads((root / "fixture-ids.json").read_text())
+    if (
+        not isinstance(ids, list)
+        or len(ids) != 1
+        or not isinstance(ids[0], str)
+        or not re.fullmatch(r"[0-9a-f]{32}", ids[0])
+    ):
+        raise ValueError(
+            "Resume supports only a source fixture before backup/restore; use cleanup and a new fixture after later failures"
+        )
+    if any(
+        (root / name).exists()
+        for name in (
+            "full.ocbox",
+            "portable.ocbox",
+            "restored-full",
+            "restored-portable",
+            "result.json",
+        )
+    ):
+        raise ValueError(
+            "Resume would overwrite backup/restore evidence; use cleanup and a new fixture"
+        )
+    storage = (
+        '[storage]\ndriver = "overlay"\nrunroot = '
+        + json.dumps(str(root / "podman-run"))
+        + "\ngraphroot = "
+        + json.dumps(str(root / "data/containers/storage"))
+        + "\n"
+    )
+    if (root / "config/containers/storage.conf").read_text() != storage:
+        raise ValueError(
+            "Retained fixture Podman storage is not the expected isolated graphroot/runroot"
+        )
+    paths = json.loads((root / "executables.json").read_text())
+    if not isinstance(paths, dict) or set(paths) != {"1", "2"}:
+        raise ValueError("Invalid retained fixture executable mapping")
+    binaries = tuple(Path(paths[major]).resolve(strict=True) for major in ("1", "2"))
+    if not all(os.access(binary, os.X_OK) for binary in binaries):
+        raise ValueError(
+            "Retained native test executables are missing; reinstall them and start a new fixture"
+        )
+    with patch.dict(os.environ, isolated_env(root), clear=True):
+        paths = list(box.workspace_paths())
+        if len(paths) != 1 or paths[0].is_symlink() or paths[0].parent.is_symlink():
+            raise ValueError("Unexpected workspaces in retained fixture registry")
+        path, data = workspace(ids[0])
+        if (
+            paths[0] != path
+            or data["project"] != str(root / "source")
+            or data["home"] != str(root / "host-home")
+            or data["distro"] not in box.DISTROS
+            or data.get("restore_incomplete")
+            or data.get("devices")
+            or data.get("podman_args")
+        ):
+            raise ValueError(
+                "Retained fixture workspace does not match its isolated source/home"
+            )
+        if (
+            data["container"] != "oc-box-" + ids[0]
+            or data["home_volume"] != "oc-box-home-" + ids[0]
+        ):
+            raise ValueError(
+                "Retained fixture resource names do not match its recorded identity"
+            )
+        with box.workspace_lock(path):
+            box.refresh_workspace_identity(path, data)
+            stopped_container(data)
+    return root, *binaries, data["distro"]
+
+
+def run(root, v1, v2, distro, *, resume=False):
+    if not resume:
+        write_wrapper(root, v1, v2)
     state = {
         "key": "fixture-" + secrets.token_urlsafe(24),
         "markers": set(),
@@ -379,14 +571,16 @@ def run(root, v1, v2, distro):
     ids = []
     reports = []
     source = root / "source"
-    source.mkdir()
+    source.mkdir(exist_ok=resume)
+    (root / "host-home").mkdir(exist_ok=resume)
     config = root / "config/opencode"
-    config.mkdir(parents=True)
+    config.mkdir(parents=True, exist_ok=resume)
     settings = root / "config/oc-box"
-    settings.mkdir()
+    settings.mkdir(exist_ok=resume)
     (settings / "config.json").write_text(json.dumps({"default_distro": distro}))
-    storage_config(root)
-    (root / "fixture-ids.json").write_text("[]")
+    if not resume:
+        storage_config(root)
+        (root / "fixture-ids.json").write_text("[]")
     server, worker = make_provider(state)
     try:
         with (
@@ -411,7 +605,11 @@ def run(root, v1, v2, distro):
             (root / "host-major").write_text("1")
             config_value = fixture_config(server.server_port)
             (config / "opencode.json").write_text(json.dumps(config_value))
-            path, data = box.create_workspace(source, distro)
+            if resume:
+                ident = json.loads((root / "fixture-ids.json").read_text())[0]
+                path, data = workspace(ident)
+            else:
+                path, data = box.create_workspace(source, distro)
             ids.append(data["id"])
             (root / "fixture-ids.json").write_text(json.dumps(ids))
             (source / "unfinished.txt").write_text("PROJECT_RETAINED\n")
@@ -444,22 +642,8 @@ def run(root, v1, v2, distro):
                         )
                 session_id = LEGACY_ID
                 state["markers"].clear()
-                native_run = box.run(
-                    box.exec_command(
-                        current,
-                        [
-                            box.CONTAINER_OPENCODE,
-                            "run",
-                            "--session",
-                            session_id,
-                            "--model",
-                            "fixture/gpt-smoke",
-                            "Exercise synthetic vault shell and MCP delivery.",
-                        ],
-                    ),
-                    capture=True,
-                    private=True,
-                    timeout=180,
+                native_run = run_fixture_session(
+                    current, session_id, state, server.server_port
                 )
                 if (
                     state["errors"]
@@ -546,8 +730,9 @@ def run(root, v1, v2, distro):
                 return 0
 
             active = {"id": data["id"], "stage": "seed-v1"}
-            with patch.object(box, "run_tui", side_effect=snapshot_current):
-                box.main(["start", "--workspace", data["id"]])
+            if not resume:
+                with patch.object(box, "run_tui", side_effect=snapshot_current):
+                    box.main(["start", "--workspace", data["id"]])
             path, data = workspace(data["id"])
             stopped_container(data)
             original_v1_digest = digest_home(data, ".local/share/opencode/opencode.db")
@@ -760,6 +945,11 @@ def main(argv=None):
     )
     parser.add_argument("--distro", choices=tuple(box.DISTROS), default="tumbleweed")
     parser.add_argument("--cleanup", type=Path)
+    parser.add_argument(
+        "--resume",
+        type=Path,
+        help="retry a retained stopped source fixture before any backup/restore, reusing its native executables and container cache",
+    )
     args = parser.parse_args(argv)
     if os.environ.get("OC_BOX_CONTAINER") == "1" or os.geteuid() == 0:
         parser.exit(
@@ -767,7 +957,22 @@ def main(argv=None):
             "Run this fixture from a regular HOST terminal, not sudo or inside oc-box.\n",
         )
     if args.cleanup:
+        if args.resume:
+            parser.error("--cleanup and --resume cannot be combined")
         cleanup(args.cleanup)
+        return 0
+    if args.resume:
+        if args.opencode_v1 or args.opencode_v2:
+            parser.error(
+                "--resume reuses the recorded native executables; do not supply replacement paths"
+            )
+        root, v1, v2, distro = resume_fixture(args.resume)
+        print("Retrying retained V2 source fixture: " + str(root), flush=True)
+        try:
+            run(root, v1, v2, distro, resume=True)
+        except BaseException:
+            print("Fixture retained for diagnosis: " + str(root), file=sys.stderr)
+            raise
         return 0
     if not args.opencode_v1 or not args.opencode_v2:
         parser.error("--opencode-v1 and --opencode-v2 are required for a new fixture")
