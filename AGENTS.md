@@ -23,6 +23,9 @@ portable: use example project paths and synthetic session IDs, not local data.
   ephemeral memory only; no published container/LAN ports or shared host service.
   Owners wait for attached clients before sync/stop, and lifecycle locks remain
   exclusive against reset/purge/backup. Attach never refreshes credentials.
+- `session_terminal.py`: native persistent V2 session shell PTY client with
+  authenticated WebSocket framing, resize/checkpoint replay and Ctrl-] detach.
+  Reuse the session terminal, never replace it with the mini chat interface.
 - `plugin_compat.py` / `plugin_bridge.js`: bounded copied-V1-plugin adapters on
   native V2 plugin APIs. Keep host originals and V1 behavior intact, propagate
   refusal errors and preserve attachments/structured output; reject unsupported
@@ -143,9 +146,14 @@ private archive-origin evidence under `retired/`; keep that recovery path tested
 V1 `terminal` and `terminal --maintenance` are maintenance-only: no host
 credential/pass_env forwarding, OpenCode/auth/config refresh, startup profiles,
 or persistent shell history. Preserve the original container run state.
-Default V2 terminal joins the current session using a clean compact client;
+Default V2 terminal joins the current session's actual persistent shell PTY;
 it may coexist with TUI/web through same-user leases without changing lifecycle
 state. Browser/client processes must not inherit provider/vault values.
+Copied V2 plugin fixes keep host/V1 originals intact. Clamp UTF-8 by bytes with
+whole-code-point slices; definition audits use primary-request JSON schemas.
+Configured local source files outside autoload directories still need adapters;
+only bridge explicit supported outbound-message/header semantics, preserving
+native media/reasoning and rejecting unsupported identity/order changes.
 
 Updates fetch the fixed public HTTPS upstream anonymously with sanitized Git
 configuration/environment. Never reuse publishing/provider credentials for

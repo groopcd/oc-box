@@ -148,6 +148,105 @@ class PluginCompatibilityTests(unittest.TestCase):
             json.loads((self.config / "opencode.json").read_text()), values
         )
 
+    def test_configured_sources_outside_autoload_directory_with_no_sdk_import_are_adapted(
+        self,
+    ):
+        custom = self.config / "custom-plugins/pdf.ts"
+        custom.parent.mkdir()
+        custom.write_text(
+            'export default async () => ({"experimental.chat.messages.transform": async (_, output) => {}})'
+        )
+        uri = custom.as_uri()
+        (self.config / "opencode.json").write_text(json.dumps({"plugin": [uri]}))
+        files = self.contents()
+        relative = Path("custom-plugins/pdf.ts")
+        original, directory, _ = plugin_compat.bridge_file(relative)
+        self.assertEqual(files[str(original)], custom.read_bytes())
+        self.assertNotIn(str(relative), files)
+        self.assertEqual(
+            json.loads(files["opencode.json"])["plugin"],
+            ["/home/example/.config/opencode/" + str(directory)],
+        )
+
+    def test_local_plugin_resolution_is_bounded_to_copied_config_root(self):
+        self.assertEqual(
+            plugin_compat.local_source(self.plugin.as_uri(), self.config), self.plugin
+        )
+        self.assertIsNone(plugin_compat.local_source("../../outside.ts", self.config))
+        self.assertIsNone(
+            plugin_compat.local_source("file://remote.example/plugin.ts", self.config)
+        )
+        self.assertIsNone(plugin_compat.local_source("native-package", self.config))
+
+    def test_copied_audit_caveat_reports_v2_json_schema_semantics(self):
+        source = b'''"schemaChars is NOT: parameters arrives as the internal Zod object, measuring ~6.8x " +
+        "the emitted JSON Schema. MCP tool definitions never reach this hook at all - only " +
+        "built-in and plugin-registered tools appear here."'''
+        copied = plugin_compat.copied_source(
+            Path("plugins/tool-definition-audit.ts"), source
+        )
+        self.assertIn(b"JSON Schema supplied by the oc-box V2 request bridge", copied)
+        self.assertNotIn(b"schemaChars is NOT", copied)
+        self.assertEqual(
+            plugin_compat.copied_source(Path("plugins/other.ts"), source), source
+        )
+
+    def test_copied_output_clamp_patch_is_exact_and_host_source_is_unchanged(self):
+        content = b'const HEAD_BYTES = 5000; const TAIL_BYTES = 2000; const CLAMP_THRESHOLDS = 0;\nconst bytes = Buffer.byteLength(original, "utf8");\nif (original.length <= threshold) return\nconst raw = s.slice(0, budget)\nconst raw = s.slice(-budget)\nnl > budget * 0.8\nnl >= 0 && nl < budget * 0.2\n'
+        corrected = plugin_compat.copied_source(
+            Path("plugins/output-clamp.ts"), content
+        )
+        self.assertIn(b'Buffer.byteLength(original, "utf8") <= threshold', corrected)
+        self.assertIn(b"utf8Slice(s, budget, true)", corrected)
+        self.assertEqual(
+            plugin_compat.copied_source(Path("plugins/another.ts"), content), content
+        )
+        self.assertEqual(
+            plugin_compat.copied_source(
+                Path("plugins/output-clamp.ts"), b"unfamiliar plugin"
+            ),
+            b"unfamiliar plugin",
+        )
+
+    @unittest.skipUnless(
+        shutil.which("node"), "Node required for Unicode byte-budget behavior"
+    )
+    def test_copied_output_clamp_utf8_behavior_matches_byte_not_character_limits(self):
+        source = """const HEAD_BYTES = 5000
+const TAIL_BYTES = 2000
+const CLAMP_THRESHOLDS = new Map()
+function belowThreshold(original: string, threshold: number) {
+  const bytes = Buffer.byteLength(original, "utf8")
+  if (original.length <= threshold) return true
+  return false
+}
+function headSlice(s: string, budget: number): string {
+  const raw = s.slice(0, budget)
+  const nl = raw.lastIndexOf("\\n")
+  return nl > budget * 0.8 ? raw.slice(0, nl) : raw
+}
+function tailSlice(s: string, budget: number): string {
+  const raw = s.slice(-budget)
+  const nl = raw.indexOf("\\n")
+  return nl >= 0 && nl < budget * 0.2 ? raw.slice(nl + 1) : raw
+}
+""".encode()
+        corrected = plugin_compat.copied_source(Path("plugins/output-clamp.ts"), source)
+        result = subprocess.run(
+            [
+                "node",
+                "--experimental-vm-modules",
+                "--no-warnings",
+                str(Path(__file__).with_name("copied_plugin_bytes.mjs")),
+            ],
+            input=json.dumps({"source": corrected.decode()}),
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS:", result.stdout)
+
     def test_native_plugin_config_and_explicit_removals_keep_options_and_order(self):
         config = {
             "plugins": [

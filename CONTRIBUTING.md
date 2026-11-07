@@ -40,7 +40,11 @@ V2 shared-client tests use real temporary native servers and local Podman-transp
 substitutes for authenticated browser pairing/cookies, same-session/API process
 identity, event streaming and binary upgrades. Unit tests cover same-user leases,
 concurrent attach without unlock, owner wait ordering, maintenance exclusion and
-port failure. Host-terminal web/TUI/mini coexistence must still be validated.
+port failure. Native session-shell PTY tests verify persistent identity, viewport,
+detach/reattach and shell state alongside web access. Host-terminal web/TUI/shell
+coexistence must still be validated. Copied plugin tests cover Unicode byte
+budgets, primary-request JSON schemas, configured sources outside autoload
+directories, PDF/history transforms and model-variant request rewriting.
 
 ## Bash completion
 

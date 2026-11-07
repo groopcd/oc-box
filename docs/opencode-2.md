@@ -11,8 +11,9 @@ a terminal with a different environment does not replace a running service's
 environment.
 
 oc-box owns a private authenticated stdio server in each active workspace.
-The full TUI, compact terminal and web clients use native **`--server`** against
-that same service. Isolated setup/history probes still use **`--standalone`**.
+The full TUI and web clients use native APIs against that same service. The
+terminal command connects to its session-scoped persistent shell PTY. Isolated
+setup/history probes still use **`--standalone`**.
 The server inherits that launch's env-file/vault selections through Podman's
 `--env NAME` forwarding. Values never enter command arguments, host global
 environment, registry metadata, or plaintext service config. Upstream's private,
@@ -34,8 +35,14 @@ one-use pairing link. `--no-open` prints the link; `--port N` selects a local
 port (default automatic). Keep the foreground web command open; Ctrl-C ends
 only that relay. It can also own a normal credential-aware V2 launch when no
 TUI is active. A later ordinary `oc-box --project PATH` joins with the full TUI.
-`terminal` joins with upstream's compact `mini` interface. Attached clients use
-the already-running server's config and credentials, not a new shell snapshot.
+`terminal` opens the session's actual shell terminal, also visible in the native
+TUI/web terminal panel. It reuses the session's currently controlled running
+terminal (or the last running terminal), creating one only if none exists. The
+shell starts in the session project and uses the existing server environment.
+`Ctrl-]` detaches, retaining shell state for later reattachment; typing `exit`
+ends the shell. Connecting takes interactive control and resizes its viewport;
+other clients remain connected and can regain control through their terminal
+panel. Attached clients use the running service, not a fresh credential snapshot.
 
 Same-user clients obtain a memory-only lease through a private host runtime
 Unix socket; no endpoint/password is saved to registry or service config. The
@@ -113,18 +120,29 @@ provider/MCP config resolution.
 | Model/new/resume | V1 CLI flags | Session create/switch-model API and launch-local TUI config |
 | Backup/reset/restore | Complete private home | Both databases and major selection preserved, internal paths retained |
 | Status/doctor/completion | Available | Available without starting OpenCode |
-| Terminal/web | Maintenance shell | Concurrent compact terminal/full TUI/web on one service/session; `--maintenance` retains restricted shell |
+| Terminal/web | Maintenance shell | Actual session shell PTY/full TUI/web coexist; `--maintenance` retains restricted shell |
 
-The generated oc-box plugin is ported. Copied standalone V1 plugins importing
-`@opencode-ai/plugin` get generated native V2 entrypoints; the source remains
-byte-identical on the host and in a non-autodiscovered private module. V1 uses
-the original files. The bridge supports `shell.env`, `tool.execute.before/after`,
-`tool.definition`, text custom tools, provider-discovery `config` hooks, and
+The generated oc-box plugin is ported. Copied V1 standalone sources from the
+autoload directories or explicitly configured paths under the copied config
+root get native V2 entrypoints, including `custom-plugins/` and sources without
+SDK imports. Native V2 directory entries are preserved. Host originals and V1
+behavior remain intact; private source copies use non-autodiscovered modules.
+The bridge supports `shell.env`, `tool.execute.before/after`, `tool.definition`,
+outbound `experimental.chat.messages.transform`, `chat.headers`, text custom
+tools, provider-discovery `config` hooks, and
 `dispose`. Shell hooks translate V2 `shell` to V1 `bash`; refusal propagates as
 a native tool error. Result conversion retains nontext file attachments and
-structured output. Tool-definition callbacks apply at plugin activation, not on
-every MCP catalog refresh. Config edits outside provider discovery, V1 client
-DB/history APIs, auth/provider/chat/event hooks and multi-factory modules require
+structured output. Definition callbacks get serializable JSON schemas at startup
+and every primary request (including advertised MCP/Code Mode tools); internal
+cyclic validation objects are not reported as zero-sized wire schemas. Outbound
+message conversion preserves original native media, reasoning and provider
+metadata unless a supported text/PDF/tool-input edit changes that specific part.
+Message identity, role and order changes are refused. Header hooks get the
+selected model variant. The copied Copilot effort workaround's private-header
+contract is also applied at V2's native HTTP request boundary, preserving an
+existing reasoning field and stripping its private header.
+Config edits outside provider discovery, V1 client
+DB/history APIs, auth/provider/other chat/event hooks and multi-factory modules require
 a native V2 port and are reported rather than silently ignored.
 
 `opencode-sandbox` uses a generated entrypoint invoking its existing container
@@ -144,7 +162,19 @@ capabilities/context, Python isolation variables, output clamping/spill files,
 and tool-definition audit reports were exercised against synthetic services.
 The packaged sandbox
 0.6.0 container opt-out and supported hooks also run in the regular V2 smoke.
-Host source files are never modified by this adaptation.
+Host source files are never modified by this adaptation. The known copied
+`output-clamp.ts` implementation receives an exact, private-V2 UTF-8 repair:
+threshold checks and head/tail slicing use bytes, preserve whole code points,
+and retain the complete spill file. The host and V1 original remain unchanged;
+unrecognized plugin implementations are not rewritten. The audit report caveat
+is updated in its copied source to describe JSON-schema measurement.
+
+Configured sandbox-uncloak, PDF extraction and Copilot effort plugins now load
+and have behavioral tests: historical wrapped input is cleaned only in outbound
+model context, real PDF bytes become text, and selected effort reaches a synthetic
+Responses endpoint. Unicode cases at 9,000/24,000 bytes are bounded to 8,192 bytes
+without splitting characters. Lemonade discovery uses a fixture server; a stopped
+real Lemonade server is expected to be unreachable and no real model is loaded.
 
 ## History and downgrade strategy
 
@@ -179,9 +209,9 @@ services. It checks tools/formatting, MCP Code Mode execution, env substitution,
 Build/Plan behavior, large native history transfer, duplicate protection, host
 sync, credential rotation, and real upstream V1-to-V2 snapshot migration with
 unchanged V1 source bytes. It does not test real provider inference or Podman.
-It also checks a live foreground owner, same-user client leases, native compact
-terminal replay/exit while a browser relay is open, one-use browser pairing,
-cookies, shared process/session identity and event streaming. Binary upgrade
+It also checks a live foreground owner, same-user client leases, actual session
+shell detach/replay/retained environment while a browser relay is open, one-use
+browser pairing, cookies, shared process/session identity and event streaming. Binary upgrade
 traffic and lifecycle lock/close ordering have separate offline fixtures.
 
 Before merge/release, accept host-terminal testing in a disposable workspace:
@@ -189,8 +219,8 @@ fresh/warm V2 TUI, env-file and selected-vault provider/MCP access, stop/resume,
 import/sync, full/portable backup restore, reset and V1 downgrade. This development
 container cannot validate host Podman. Keep the branch unmerged until accepted.
 Reported host testing has confirmed 1.x env/MCP operation and 2.2.6 MCP access,
-cold/warm startup, native TUI exit and host history sync; the external plugin
-failures prompted the adapter above and need a host retest. Selected-vault,
+cold/warm startup, native TUI exit, web access and host history sync. The session
+shell and new plugin fixes need a host retest. Selected-vault,
 full/portable restore, reset and downgrade host validation are still pending.
 
 ## Upstream references

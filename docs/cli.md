@@ -72,8 +72,9 @@ This compatibility branch supports OpenCode 1.x and 2.x, tested with 1.19.5 and
 2.2.6. The host release selects the exact container package: `opencode-ai` for
 1.x, `@opencode/cli` for 2.x. V2 uses a workspace-owned private stdio server with
 native `--server` clients and current env-file/vault selections at server startup;
-isolated setup/history probes use `--standalone`. The host shared service is never restarted or
-exposed inside the container. Its service settings are not copied. V2 uses a
+isolated setup/history probes use `--standalone`. The host shared service is
+never restarted or exposed inside the container. Its service settings are not
+copied. V2 uses a
 separate container database/resume state seeded from a consistent V1 snapshot
 and migrated by upstream; V1 history is retained for downgrade.
 
@@ -227,8 +228,14 @@ browser tab alone does not close its relay or terminate the owner.
 
 ### terminal
 
-On V2, the default is OpenCode's compact terminal client attached to the active
-private service/session; it can run concurrently with the full TUI and web UI.
+On V2, the default connects to the active session's native persistent shell
+terminal, also shown in OpenCode's TUI/web terminal panel. It can run concurrently
+with those clients. The currently controlled running PTY is reused (otherwise
+the last running PTY), or a new session terminal is created when none exists.
+It uses the session project and the running server's environment. `Ctrl-]`
+detaches without ending the shell; reattach to retain shell variables and state.
+Typing `exit` ends the shell. Connection takes interactive control and propagates
+terminal dimensions; TUI/web clients can regain control in their terminal panel.
 It does not forward new host credentials, refresh config/auth, or take the
 exclusive lifecycle lock. A ready active V2 owner is required; start `oc-box`
 or `oc-box web` first. Exit the attached client to release its lease without
@@ -879,7 +886,7 @@ session client. This retains the existing allowlisted environment, no host
 credential forwarding/unlock, no config/auth refresh, no startup profiles and
 no persistent shell history. Maintenance holds the exclusive workspace lock;
 exit the active owner first. Without this flag, terminal joins an active V2
-session with OpenCode's compact `mini` terminal interface; 1.x continues to use
+session's actual persistent shell PTY; 1.x continues to use
 the existing maintenance shell.
 
 ### --port N
@@ -1857,8 +1864,8 @@ when diagnosing a wait; reset discards the OS cache and can repeat cold setup.
 ### Active workspace lock or failed import
 
 Exit the active launcher before sync/reset/repair/maintenance/purge. Ordinary V2
-TUI, compact terminal and web clients can join the live owner. Status and stop remain
-available in another terminal. Do not delete the lock file to bypass a live
+TUI, session shell terminals and web clients can join the live owner. Status and
+stop remain available in another terminal. Do not delete the lock file to bypass a live
 process. For a failed import, retry the same flag with an updated launcher;
 recovery uses the saved export without overwriting existing container work.
 For a failed archive sync, use `sync`; the original live DB remains in its

@@ -4,13 +4,17 @@ import fs from "node:fs/promises"
 import vm from "node:vm"
 
 const source = await fs.readFile(process.argv[2], "utf8")
-const context = vm.createContext({ structuredClone, process: { env: {} }, URL })
+const context = vm.createContext({ structuredClone, process: { env: {} }, URL, Buffer, Request, Headers })
 const sdk = new vm.SyntheticModule(["Model"], function () {
   this.setExport("Model", { Info: { default: (providerID, id) => ({ id, modelID: id, providerID, name: id,
     capabilities: { tools: true, input: ["text"], output: ["text"] }, limit: {}, variants: [] }) } })
 }, { context })
 const files = new vm.SyntheticModule(["readFile"], function () {
   this.setExport("readFile", async () => '{"providers":{"fixture":{"package":"aisdk:fixture","settings":{"baseURL":"http://localhost/v1"}}}}')
+}, { context })
+const effect = new vm.SyntheticModule(["Schema"], function () {
+  this.setExport("Schema", { isSchema: input => !!input?.fixtureSchema,
+    toJsonSchemaDocument: () => ({ schema: { type: "object", properties: { command: { type: "string" } } }, definitions: {} }) })
 }, { context })
 const legacy = new vm.SyntheticModule(["tool"], function () {
   this.setExport("tool", { schema: { object: input => input } })
@@ -22,7 +26,7 @@ const bridge = new vm.SourceTextModule(source, {
   initializeImportMeta(meta) { meta.url = "file:///fixture/plugin_bridge.js" },
   importModuleDynamically: async () => legacy,
 })
-await bridge.link(specifier => specifier === "@opencode/plugin" ? sdk : files)
+await bridge.link(specifier => specifier === "@opencode/plugin" ? sdk : specifier === "effect" ? effect : files)
 await bridge.evaluate()
 const adapt = bridge.namespace.adapt
 
@@ -36,6 +40,7 @@ function fixture() {
       async list() { return [] },
     },
     shell: { async hook(name, callback) { hooks.set(name, callback) } },
+    session: { async hook(name, callback) { hooks.set("session." + name, callback) } },
     provider: { async list() { return { data: [] } }, async transform() {} },
   }
   return { ctx, hooks }
@@ -97,6 +102,56 @@ function fixture() {
   assert.equal(event.result.metadata.title, "[clamped]")
   await hooks.get("execute.after")({ status: "error" })
   assert.equal(calls, 1)
+}
+{
+  const { ctx, hooks } = fixture()
+  const schema = { fixtureSchema: true, cycle: null }
+  schema.cycle = schema
+  let measured
+  ctx.tool.list = async () => [{ id: "shell", description: "Shell", input: schema }]
+  await adapt({ default: async () => ({ "tool.definition": async (_, output) => { measured = JSON.stringify(output.parameters).length } }) }, "schema").setup(ctx)
+  assert.ok(measured > 20)
+  await hooks.get("session.context")({ tools: { fixture: { description: "MCP", input: { type: "object", properties: { query: { type: "string" } } } } }, messages: [] })
+  assert.ok(measured > 20)
+}
+{
+  const { ctx, hooks } = fixture()
+  await adapt({ default: async () => ({
+    "experimental.chat.messages.transform": async (_, output) => {
+      const parts = output.messages[0].parts
+      parts[0] = { ...parts[0], type: "text", text: "converted PDF" }
+      parts[1].state.input.command = "clean command"
+    },
+    "chat.headers": async (input, output) => { output.headers.effort = input.message.model.variant },
+  }) }, "chat").setup(ctx)
+  const media = { type: "media", media: { mediaType: "application/pdf", source: { type: "base64", data: "fixture" } }, filename: "fixture.pdf" }
+  const tool = { type: "tool-call", id: "call_fixture", name: "shell", input: { command: "wrapped" }, providerMetadata: { fixture: true } }
+  const reasoning = { type: "reasoning", text: "opaque", encrypted: "retained" }
+  const event = { sessionID: "ses_fixture", messages: [{ role: "assistant", content: [media, tool, reasoning] }], tools: {} }
+  await hooks.get("session.context")(event)
+  assert.equal(event.messages[0].content[0].text, "converted PDF")
+  assert.equal(event.messages[0].content[1].input.command, "clean command")
+  assert.equal(event.messages[0].content[1].providerMetadata, tool.providerMetadata)
+  assert.equal(event.messages[0].content[2], reasoning)
+  const request = { model: { providerID: "fixture", id: "gpt-6-fixture", variant: "high" }, headers: { retained: "yes" } }
+  await hooks.get("session.model.request")(request)
+  assert.equal(request.headers.effort, "high")
+  assert.equal(request.headers.retained, "yes")
+  const http = { request: new Request("https://api.example.test/responses", { method: "POST", headers: { "x-oc-copilot-effort": "high", "content-type": "application/json" }, body: JSON.stringify({ model: "gpt-6-fixture", include: ["existing"] }) }) }
+  await hooks.get("session.http.request")(http)
+  const body = await http.request.json()
+  assert.equal(body.reasoning.effort, "high")
+  assert.equal(body.reasoning.summary, "auto")
+  assert.deepEqual(body.include, ["existing", "reasoning.encrypted_content"])
+  assert.equal(http.request.headers.has("x-oc-copilot-effort"), false)
+  const existing = { request: new Request("https://api.example.test/responses", { method: "POST", headers: { "x-oc-copilot-effort": "max" }, body: JSON.stringify({ model: "gpt-6-fixture", reasoning: { effort: "low" } }) }) }
+  await hooks.get("session.http.request")(existing)
+  assert.equal((await existing.request.json()).reasoning.effort, "low")
+}
+{
+  const { ctx, hooks } = fixture()
+  await adapt({ default: async () => ({ "experimental.chat.messages.transform": async (_, value) => { value.messages[0].parts.reverse() } }) }, "order").setup(ctx)
+  await assert.rejects(hooks.get("session.context")({ messages: [{ role: "user", content: [{ type: "text", text: "one" }, { type: "text", text: "two" }] }], tools: {} }), /part order/)
 }
 {
   const { ctx } = fixture()

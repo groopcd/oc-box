@@ -164,7 +164,7 @@ The owner keeps the lifecycle lock and waits for attached terminal/web/TUI clien
 
 @section terminal
 
-On V2, the default is OpenCode's compact terminal client attached to the active private service/session; it can run concurrently with the full TUI and web UI. It does not forward new host credentials, refresh config/auth, or take the exclusive lifecycle lock. A ready active V2 owner is required; start @code{oc-box} or @code{oc-box web} first. Exit the attached client to release its lease without stopping other clients. Use @code{--maintenance} for the shell described below. On V1 the existing maintenance-shell default is retained.
+On V2, the default connects to the active session's native persistent shell terminal, also shown in OpenCode's TUI/web terminal panel. It can run concurrently with those clients. The currently controlled running PTY is reused (otherwise the last running PTY), or a new session terminal is created when none exists. It uses the session project and the running server's environment. @code{Ctrl-]} detaches without ending the shell; reattach to retain shell variables and state. Typing @code{exit} ends the shell. Connection takes interactive control and propagates terminal dimensions; TUI/web clients can regain control in their terminal panel. It does not forward new host credentials, refresh config/auth, or take the exclusive lifecycle lock. A ready active V2 owner is required; start @code{oc-box} or @code{oc-box web} first. Exit the attached client to release its lease without stopping other clients. Use @code{--maintenance} for the shell described below. On V1 the existing maintenance-shell default is retained.
 
 Open an interactive maintenance shell in an existing workspace container instead of starting OpenCode. Select the current project, @code{--project PATH}, or @code{--workspace ID}. Only these selectors, @code{--maintenance} and help are accepted. Run from a real host terminal with TTY input/output; piped or redirected input/output is refused.
 
@@ -442,7 +442,7 @@ Doctor-only, repeatable. Limit the dependency report and exit-status evaluation 
 
 @section --maintenance
 
-Terminal-only. Open the restricted maintenance shell instead of a live V2 session client. This retains the existing allowlisted environment, no host credential forwarding/unlock, no config/auth refresh, no startup profiles and no persistent shell history. Maintenance holds the exclusive workspace lock; exit the active owner first. Without this flag, terminal joins an active V2 session with OpenCode's compact @code{mini} terminal interface; 1.x continues to use the existing maintenance shell.
+Terminal-only. Open the restricted maintenance shell instead of a live V2 session client. This retains the existing allowlisted environment, no host credential forwarding/unlock, no config/auth refresh, no startup profiles and no persistent shell history. Maintenance holds the exclusive workspace lock; exit the active owner first. Without this flag, terminal joins an active V2 session's actual persistent shell PTY; 1.x continues to use the existing maintenance shell.
 
 @section --port N
 
@@ -998,7 +998,7 @@ Cold creation performs package and plugin downloads. Timed stage output and the 
 
 @section Active workspace lock or failed import
 
-Exit the active launcher before sync/reset/repair/maintenance/purge. Ordinary V2 TUI, compact terminal and web clients can join the live owner. Status and stop remain available in another terminal. Do not delete the lock file to bypass a live process. For a failed import, retry the same flag with an updated launcher; recovery uses the saved export without overwriting existing container work. For a failed archive sync, use @code{sync}; the original live DB remains in its volume. A deleted private volume cannot be recovered from session metadata alone.
+Exit the active launcher before sync/reset/repair/maintenance/purge. Ordinary V2 TUI, session shell terminals and web clients can join the live owner. Status and stop remain available in another terminal. Do not delete the lock file to bypass a live process. For a failed import, retry the same flag with an updated launcher; recovery uses the saved export without overwriting existing container work. For a failed archive sync, use @code{sync}; the original live DB remains in its volume. A deleted private volume cannot be recovered from session metadata alone.
 
 @section Maintenance shell environment
 

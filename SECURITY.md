@@ -48,6 +48,11 @@ The relay forwards HTTP/streams/WebSocket bytes over Podman exec, never publishe
 a container port or exposes a shared host service. Browser launch receives a
 sanitized environment. The owner retains the exclusive lifecycle lock until all
 attached clients finish; backup/reset/purge cannot race their writes.
+Default V2 terminal access connects to the session's native persistent shell PTY
+with authenticated WebSocket framing. Ctrl-] releases the attachment without
+terminating the shell; its environment/state belong to the running service.
+The connecting host's provider/vault values are not forwarded. Maintenance
+shells retain their separate allowlisted environment and exclusive lock.
 
 The original env-file workflow remains the default: no vault initialization,
 password prompt, or crypto dependency is introduced by an ordinary upgrade.

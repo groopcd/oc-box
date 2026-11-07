@@ -295,14 +295,21 @@ terminate the owner.
 4.7 terminal
 ============
 
-On V2, the default is OpenCode's compact terminal client attached to the
-active private service/session; it can run concurrently with the full
-TUI and web UI. It does not forward new host credentials, refresh
-config/auth, or take the exclusive lifecycle lock.  A ready active V2
-owner is required; start ‘oc-box’ or ‘oc-box web’ first.  Exit the
-attached client to release its lease without stopping other clients.
-Use ‘--maintenance’ for the shell described below.  On V1 the existing
-maintenance-shell default is retained.
+On V2, the default connects to the active session's native persistent
+shell terminal, also shown in OpenCode's TUI/web terminal panel.  It can
+run concurrently with those clients.  The currently controlled running
+PTY is reused (otherwise the last running PTY), or a new session
+terminal is created when none exists.  It uses the session project and
+the running server's environment.  ‘Ctrl-]’ detaches without ending the
+shell; reattach to retain shell variables and state.  Typing ‘exit’ ends
+the shell.  Connection takes interactive control and propagates terminal
+dimensions; TUI/web clients can regain control in their terminal panel.
+It does not forward new host credentials, refresh config/auth, or take
+the exclusive lifecycle lock.  A ready active V2 owner is required;
+start ‘oc-box’ or ‘oc-box web’ first.  Exit the attached client to
+release its lease without stopping other clients.  Use ‘--maintenance’
+for the shell described below.  On V1 the existing maintenance-shell
+default is retained.
 
 Open an interactive maintenance shell in an existing workspace container
 instead of starting OpenCode.  Select the current project, ‘--project
@@ -1004,8 +1011,8 @@ V2 session client.  This retains the existing allowlisted environment,
 no host credential forwarding/unlock, no config/auth refresh, no startup
 profiles and no persistent shell history.  Maintenance holds the
 exclusive workspace lock; exit the active owner first.  Without this
-flag, terminal joins an active V2 session with OpenCode's compact ‘mini’
-terminal interface; 1.x continues to use the existing maintenance shell.
+flag, terminal joins an active V2 session's actual persistent shell PTY;
+1.x continues to use the existing maintenance shell.
 
 5.5 -port N
 ===========
@@ -2108,9 +2115,9 @@ discards the OS cache and can repeat cold setup.
 ===========================================
 
 Exit the active launcher before sync/reset/repair/maintenance/purge.
-Ordinary V2 TUI, compact terminal and web clients can join the live
-owner.  Status and stop remain available in another terminal.  Do not
-delete the lock file to bypass a live process.  For a failed import,
+Ordinary V2 TUI, session shell terminals and web clients can join the
+live owner.  Status and stop remain available in another terminal.  Do
+not delete the lock file to bypass a live process.  For a failed import,
 retry the same flag with an updated launcher; recovery uses the saved
 export without overwriting existing container work.  For a failed
 archive sync, use ‘sync’; the original live DB remains in its volume.  A
@@ -2330,20 +2337,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2527
 Node: Commands5616
-Node: Options48407
-Node: Lifecycle and persistence65864
-Node: Distribution images67984
-Node: Sessions and recovery72859
-Node: Devices and host permissions78147
-Node: Resource reports80493
-Node: Configuration and environment82604
-Node: Files87383
-Node: Exit status91849
-Node: Examples92660
-Node: Troubleshooting94746
-Node: Installation and manuals102904
-Node: Authors and license110517
-Node: See also111124
+Node: Options48897
+Node: Lifecycle and persistence66330
+Node: Distribution images68450
+Node: Sessions and recovery73325
+Node: Devices and host permissions78613
+Node: Resource reports80959
+Node: Configuration and environment83070
+Node: Files87849
+Node: Exit status92315
+Node: Examples93126
+Node: Troubleshooting95212
+Node: Installation and manuals103377
+Node: Authors and license110990
+Node: See also111597
 
 End Tag Table
 

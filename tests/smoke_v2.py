@@ -8,6 +8,7 @@ import argparse
 import base64
 import contextlib
 import http.cookiejar
+import fcntl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
@@ -17,12 +18,14 @@ import pty
 import select
 import signal
 import shutil
+import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
 import threading
 import time
+import termios
 from urllib.parse import quote
 from urllib.request import (
     Request,
@@ -114,13 +117,34 @@ export const Fixture = async () => ({
     execute: async args => ({ title: "probe", output: "LEGACY_TOOL_OK " + args.value }) }) }
 })
 """)
+        custom = source / "custom-plugins"
+        custom.mkdir()
+        (custom / "chat.ts").write_text("""export default async () => ({
+  "experimental.chat.messages.transform": async (_, output) => {
+    for (const message of output.messages) for (const part of message.parts) {
+      if (part.type === "text" && part.text.startsWith("Exercise")) part.text += " CONTEXT_BRIDGE_OK"
+    }
+  },
+  "chat.headers": async (_, output) => { output.headers["x-oc-box-chat-fixture"] = "HEADERS_BRIDGE_OK" }
+})\n""")
+        configured_plugins = ["opencode-sandbox@0.6.0", (custom / "chat.ts").as_uri()]
         if legacy_plugin_dir:
             for plugin in Path(legacy_plugin_dir).glob("*.ts"):
                 shutil.copyfile(plugin, legacy_plugins / plugin.name)
+            for plugin in (Path(legacy_plugin_dir).parent / "custom-plugins").glob(
+                "*.ts"
+            ):
+                if plugin.name in (
+                    "sandbox-uncloak.ts",
+                    "pdf-to-text.ts",
+                    "copilot-gpt6-effort.ts",
+                ):
+                    shutil.copyfile(plugin, custom / plugin.name)
+                    configured_plugins.append((custom / plugin.name).as_uri())
         (source / "opencode.json").write_text(
             json.dumps(
                 {
-                    "plugins": ["opencode-sandbox@0.6.0"],
+                    "plugins": configured_plugins,
                     "agents": {
                         "build": {
                             "permissions": [
@@ -231,7 +255,76 @@ export const Fixture = async () => ({
                 self.wfile.write(json.dumps(data).encode())
 
             def do_POST(self):
+                assert self.headers.get("x-oc-box-chat-fixture") == "HEADERS_BRIDGE_OK"
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path.endswith("/responses"):
+                    assert body["reasoning"]["effort"] == "high", body
+                    assert "reasoning.encrypted_content" in body["include"], body
+                    assert self.headers.get("x-oc-copilot-effort") is None
+                    requests.append(body)
+                    item = {
+                        "id": "msg_response_fixture",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "RESPONSES_EFFORT_OK",
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                    response = {
+                        "id": "resp_fixture",
+                        "object": "response",
+                        "created_at": 1,
+                        "status": "completed",
+                        "model": "gpt-6-fixture",
+                        "output": [item],
+                        "usage": {
+                            "input_tokens": 1,
+                            "output_tokens": 1,
+                            "total_tokens": 2,
+                            "input_tokens_details": {"cached_tokens": 0},
+                            "output_tokens_details": {"reasoning_tokens": 0},
+                        },
+                    }
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    for event in (
+                        {
+                            "type": "response.created",
+                            "response": {
+                                **response,
+                                "status": "in_progress",
+                                "output": [],
+                            },
+                        },
+                        {
+                            "type": "response.output_item.added",
+                            "output_index": 0,
+                            "item": {**item, "status": "in_progress", "content": []},
+                        },
+                        {
+                            "type": "response.output_text.delta",
+                            "item_id": item["id"],
+                            "output_index": 0,
+                            "content_index": 0,
+                            "delta": "RESPONSES_EFFORT_OK",
+                        },
+                        {
+                            "type": "response.output_item.done",
+                            "output_index": 0,
+                            "item": item,
+                        },
+                        {"type": "response.completed", "response": response},
+                    ):
+                        self.wfile.write(
+                            ("data: " + json.dumps(event) + "\n\n").encode()
+                        )
+                    return
                 requests.append(body)
                 tools = {
                     tool["function"]["name"]: tool for tool in body.get("tools", [])
@@ -240,8 +333,10 @@ export const Fixture = async () => ({
                     message.get("role") == "tool"
                     for message in body.get("messages", [])
                 )
+                if "PDF_BRIDGE_FIXTURE" in str(body.get("messages")):
+                    completed = 100
                 delta, finish = {"content": "Smoke complete"}, "stop"
-                maximum = 9 if legacy_plugin_dir else 6
+                maximum = 11 if legacy_plugin_dir else 6
                 if tools and completed < maximum:
                     if completed == 0:
                         name, arguments = (
@@ -282,12 +377,22 @@ export const Fixture = async () => ({
                                 "command": "python3 -c 'print(\"OUTPUT_CLAMP_FIXTURE\" * 1200)'"
                             },
                         )
-                    else:
+                    elif completed == 8:
                         name, arguments = (
                             "shell",
                             {
                                 "command": 'test "$PIP_REQUIRE_VIRTUALENV" = 1 && test "$PYTHONDONTWRITEBYTECODE" = 1 && printf PYTHON_ISOLATION_OK'
                             },
+                        )
+                    elif completed == 9:
+                        name, arguments = (
+                            "shell",
+                            {"command": "python3 -c 'print(\"中\" * 3000)'"},
+                        )
+                    else:
+                        name, arguments = (
+                            "shell",
+                            {"command": "python3 -c 'print(\"🙂\" * 6000)'"},
                         )
                     assert name in tools, list(tools)
                     delta = {
@@ -339,6 +444,20 @@ export const Fixture = async () => ({
             "snapshots": False,
             "update": "disable",
             "providers": {
+                "responses-fixture": {
+                    "package": "aisdk:@ai-sdk/openai",
+                    "settings": {
+                        "baseURL": f"http://127.0.0.1:{model.server_port}/v1",
+                        "apiKey": "synthetic",
+                    },
+                    "models": {
+                        "gpt-6-fixture": {
+                            "name": "Effort fixture",
+                            "variants": [{"id": "high"}],
+                            "limit": {"context": 32000, "output": 2000},
+                        }
+                    },
+                },
                 "lemonade": {
                     "package": "aisdk:@ai-sdk/openai-compatible",
                     "settings": {
@@ -451,6 +570,10 @@ export const Fixture = async () => ({
                 "Exercise native write/read and shell tools.",
             )
             assert target.is_file(), output
+            assert any(
+                "CONTEXT_BRIDGE_OK" in str(request.get("messages"))
+                for request in requests
+            ), "Legacy outbound messages hook missing"
             assert not (project / "SHOULD_NOT_EXIST").exists(), (
                 "Legacy before-hook refusal failed"
             )
@@ -491,6 +614,27 @@ export const Fixture = async () => ({
                 assert list((root / "clamped-output").glob("*.txt")), (
                     "Actual output clamp spill missing"
                 )
+                for call in ("call_9", "call_10"):
+                    result = next(
+                        message
+                        for message in messages
+                        if message.get("tool_call_id") == call
+                    )
+                    text = str(result["content"])
+                    assert "[output-clamp]" in text and len(text.encode()) <= 8192, (
+                        call,
+                        len(text.encode()),
+                    )
+                    assert "�" not in text, (
+                        call,
+                        text[max(0, text.index("�") - 30) : text.index("�") + 30],
+                    )
+                audit = json.loads((root / "tool-definitions.json").read_text())
+                assert all(row["schema"] > 0 for row in audit["tools"]), audit
+                print(
+                    "PASS: actual output-clamp Unicode thresholds/retained bytes and nonzero request JSON-schema audit.",
+                    flush=True,
+                )
             assert any(
                 message.get("role") == "tool"
                 and "ENV_OK" in str(message.get("content"))
@@ -530,6 +674,98 @@ export const Fixture = async () => ({
             ident = listed[0]["id"]
             exported = json.loads(cli("export", ident))
             box.validate_session_export(exported, ident)
+            if legacy_plugin_dir:
+                response_output = cli(
+                    "run",
+                    "--model",
+                    "responses-fixture/gpt-6-fixture#high",
+                    "Use the selected effort without tools.",
+                )
+                assert "RESPONSES_EFFORT_OK" in response_output, response_output
+                print(
+                    "PASS: actual copied Copilot effort hook injects selected effort at native V2 HTTP request boundary.",
+                    flush=True,
+                )
+                # Produce a minimal real PDF and verify its configured plugin
+                # converts it at native V2 request time, before model lowering.
+                pdf = project / "fixture.pdf"
+                content = b"BT /F1 12 Tf 50 700 Td (PDF_BRIDGE_FIXTURE) Tj ET"
+                objects = [
+                    b"<< /Type /Catalog /Pages 2 0 R >>",
+                    b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+                    b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 4 0 R >> >> /Contents 5 0 R >>",
+                    b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+                    b"<< /Length "
+                    + str(len(content)).encode()
+                    + b" >>\nstream\n"
+                    + content
+                    + b"\nendstream",
+                ]
+                document = bytearray(b"%PDF-1.4\n")
+                offsets = [0]
+                for index, value in enumerate(objects, 1):
+                    offsets.append(len(document))
+                    document.extend(
+                        str(index).encode() + b" 0 obj\n" + value + b"\nendobj\n"
+                    )
+                position = len(document)
+                document.extend(b"xref\n0 6\n0000000000 65535 f \n")
+                for offset in offsets[1:]:
+                    document.extend(f"{offset:010d} 00000 n \n".encode())
+                document.extend(
+                    b"trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n"
+                    + str(position).encode()
+                    + b"\n%%EOF\n"
+                )
+                pdf.write_bytes(document)
+                cli(
+                    "run",
+                    "--model",
+                    "fixture/gpt-smoke",
+                    "--file",
+                    str(pdf),
+                    "Read this attachment without tools.",
+                )
+                assert any(
+                    "<attached-pdf" in str(request.get("messages"))
+                    and "PDF_BRIDGE_FIXTURE" in str(request.get("messages"))
+                    for request in requests
+                ), "Actual PDF request conversion missing"
+                historical = json.loads(json.dumps(exported))
+                shell = next(
+                    part
+                    for message in historical["messages"]
+                    if message["type"] == "assistant"
+                    for part in message["content"]
+                    if part.get("type") == "tool"
+                    and part["name"] == "shell"
+                    and part["state"]["status"] == "completed"
+                )
+                shell["id"] = "call_historical_uncloak"
+                shell["state"]["input"]["command"] = (
+                    "bwrap unix-block.bpf /usr/bin/bash -c 'printf UNCLOAK_RECOVERED'"
+                )
+                old_file = root / "wrapped-transcript.json"
+                old_file.write_text(json.dumps(historical))
+                historical_env = {**env, "XDG_DATA_HOME": str(root / "uncloak-data")}
+                cli("import", str(old_file), scoped=historical_env)
+                before_requests = len(requests)
+                cli(
+                    "run",
+                    "--session",
+                    ident,
+                    "Finish without tools.",
+                    scoped=historical_env,
+                )
+                assert any(
+                    "UNCLOAK_RECOVERED" in str(request["messages"])
+                    and "bwrap unix-block.bpf" not in str(request["messages"])
+                    for request in requests[before_requests:]
+                ), "Actual sandbox-uncloak request transform missing"
+                print(
+                    "PASS: configured PDF extraction and historical sandbox-uncloak behavior at native V2 request boundary.",
+                    flush=True,
+                )
             archived = box.archive_session(exported, data)
             archive = root / "archive.json"
             archive.write_text(json.dumps(archived))
@@ -814,21 +1050,21 @@ export const Fixture = async () => ({
                             gateway.url + "/api/info", timeout=10
                         ) as response:
                             assert json.load(response)["pid"] == first["pid"]
-                        # Attach the real compact terminal while the browser
-                        # relay and owner are still alive; exiting detaches
-                        # without terminating the shared session/service.
+                        # Attach the session's actual shell while the browser
+                        # and owner stay alive, then reattach to preserved state.
                         master, slave = pty.openpty()
                         compact = local_client(
                             box,
                             data,
                             joined,
                             [
-                                binary,
-                                "mini",
-                                "--server",
+                                sys.executable,
+                                "-B",
+                                "-c",
+                                (APP / "session_terminal.py").read_text(),
                                 joined["url"],
-                                "--session",
                                 ident,
+                                str(project),
                             ],
                         )
                         process = subprocess.Popen(
@@ -853,9 +1089,21 @@ export const Fixture = async () => ({
                                         terminal_output.extend(os.read(master, 65536))
                                     except OSError:
                                         break
-                                if not sent and b"Smoke complete" in terminal_output:
-                                    os.write(master, b"/exit\r")
+                                if not sent and terminal_output:
+                                    fcntl.ioctl(
+                                        master,
+                                        termios.TIOCSWINSZ,
+                                        struct.pack("HHHH", 31, 95, 0, 0),
+                                    )
+                                    os.kill(process.pid, signal.SIGWINCH)
+                                    os.write(
+                                        master,
+                                        b"export OC_BOX_PTY_TEST=retained; printf '\\nSHELL_TERMINAL_OK\\n'\r",
+                                    )
                                     sent = True
+                                if b"SHELL_TERMINAL_OK\r\n" in terminal_output:
+                                    os.write(master, b"\x1d")
+                                    break
                             if sent:
                                 process.wait(timeout=5)
                             assert sent and process.returncode == 0, bytes(
@@ -866,6 +1114,71 @@ export const Fixture = async () => ({
                                 os.killpg(process.pid, signal.SIGKILL)
                             process.wait(timeout=5)
                             os.close(master)
+                        with browser.open(
+                            gateway.url
+                            + "/api/experimental/session/"
+                            + ident
+                            + "/terminal/read",
+                            timeout=10,
+                        ) as response:
+                            screen = json.load(response)["data"]
+                            assert "SHELL_TERMINAL_OK" in screen["screen"]["text"], (
+                                screen
+                            )
+                            assert (
+                                screen["screen"]["cols"],
+                                screen["screen"]["rows"],
+                            ) == (95, 31), screen
+                        terminals = workspace_service.api(
+                            box,
+                            data,
+                            joined,
+                            "GET",
+                            "/api/experimental/session/" + ident + "/terminal",
+                        )["data"]
+                        assert (
+                            len(terminals) == 1 and terminals[0]["status"] == "running"
+                        ), terminals
+                        master, slave = pty.openpty()
+                        resumed = subprocess.Popen(
+                            compact,
+                            env=compact.environment,
+                            cwd=project,
+                            stdin=slave,
+                            stdout=slave,
+                            stderr=slave,
+                            start_new_session=True,
+                        )
+                        os.close(slave)
+                        replay = bytearray()
+                        try:
+                            deadline = time.monotonic() + 20
+                            sent = False
+                            while (
+                                resumed.poll() is None and time.monotonic() < deadline
+                            ):
+                                if select.select([master], [], [], 0.1)[0]:
+                                    try:
+                                        replay.extend(os.read(master, 65536))
+                                    except OSError:
+                                        break
+                                if not sent and b"SHELL_TERMINAL_OK" in replay:
+                                    os.write(
+                                        master,
+                                        b'test "$OC_BOX_PTY_TEST" = retained && printf "REATTACH_OK\\n"; exit\r',
+                                    )
+                                    sent = True
+                            resumed.wait(timeout=5)
+                            assert (
+                                sent
+                                and resumed.returncode == 0
+                                and b"REATTACH_OK\r\n" in replay
+                            ), bytes(replay[-3000:])
+                        finally:
+                            if resumed.poll() is None:
+                                os.killpg(resumed.pid, signal.SIGKILL)
+                            resumed.wait(timeout=5)
+                            os.close(master)
                         assert (
                             workspace_service.api(
                                 box, data, joined, "GET", "/api/info"
@@ -873,7 +1186,7 @@ export const Fixture = async () => ({
                             == first["pid"]
                         )
                     print(
-                        "PASS: shared foreground V2 service, concurrent native compact terminal/browser/API, pairing/cookies, same-session replay and event streaming.",
+                        "PASS: native session shell terminal/browser/API, detach/replay/preserved shell state, pairing/cookies and event streaming.",
                         flush=True,
                     )
                 owner.wait_clients()

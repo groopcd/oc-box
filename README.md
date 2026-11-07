@@ -167,11 +167,12 @@ oc-box web --project ~/devel/demo
 oc-box terminal --project ~/devel/demo
 ```
 
-The web UI and compact terminal reuse the existing service/credentials without
-ending the TUI session. Web access is host-loopback-only with a native one-use
-pairing link; keep its foreground command open. The owner waits for attached
-clients before final sync/stop. `terminal --maintenance` retains the restricted
-shell, and 1.x retains its previous terminal behavior. See the
+The web UI and session shell terminal reuse the existing service/credentials
+without ending the TUI session. Web access is host-loopback-only with a native
+one-use pairing link; keep its foreground command open. The owner waits for
+attached clients before final sync/stop. `Ctrl-]` detaches from the session shell,
+preserving it for reattachment; `exit` closes that shell. `terminal --maintenance`
+retains the restricted shell, and 1.x retains its previous terminal behavior. See the
 [V2 client guide](docs/opencode-2.md#concurrent-web-terminal-and-full-tui-clients).
 
 ### Bash completion

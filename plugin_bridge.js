@@ -2,16 +2,86 @@
 // This is a plugin, not a replacement for OpenCode tools or its service.
 import { Model } from "@opencode/plugin"
 import { readFile } from "node:fs/promises"
+import { Schema } from "effect"
 
 const supported = new Set([
   "config", "tool", "dispose", "shell.env", "tool.definition",
   "tool.execute.before", "tool.execute.after",
+  "experimental.chat.messages.transform", "chat.headers",
 ])
 const alias = name => name === "shell" ? "bash" : name
 const clone = value => structuredClone(value)
 const expand = value => typeof value === "string" ? value.replace(/\{env:([^}]+)\}/g, (_, name) => process.env[name] || "")
   : Array.isArray(value) ? value.map(expand)
   : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, expand(item)])) : value
+
+function inputSchema(input) {
+  if (input?.["~standard"]?.jsonSchema) return input["~standard"].jsonSchema.input({ target: "draft-2020-12" })
+  if (Schema.isSchema(input)) {
+    const document = Schema.toJsonSchemaDocument(input)
+    return Object.keys(document.definitions).length ? { ...document.schema, $defs: document.definitions } : document.schema
+  }
+  if (!input || typeof input !== "object") return {}
+  // Do not pass cyclic validation implementations as claimed wire schemas.
+  return JSON.parse(JSON.stringify(input))
+}
+
+async function transformMessages(hook, event) {
+  const originals = new Map()
+  const view = event.messages.map((message, index) => ({
+    info: { id: message.id || "msg_view_" + index, sessionID: event.sessionID, role: message.role },
+    parts: message.content.map((native, partIndex) => {
+      const identity = { id: "prt_view_" + index + "_" + partIndex, sessionID: event.sessionID, messageID: message.id }
+      let part
+      if (native.type === "media") {
+        const source = native.media.source
+        const url = source.type === "base64" ? `data:${native.media.mediaType};base64,${source.data}`
+          : source.type === "bytes" ? `data:${native.media.mediaType};base64,${Buffer.from(source.data).toString("base64")}`
+          : source.type === "url" ? source.url : undefined
+        part = { ...identity, type: "file", mime: native.media.mediaType, filename: native.filename, url }
+      } else if (native.type === "tool-call") {
+        part = { ...identity, type: "tool", callID: native.id, tool: alias(native.name), state: { status: "completed", input: clone(native.input) } }
+      } else {
+        part = { ...identity, type: native.type, ...(typeof native.text === "string" ? { text: native.text } : {}) }
+      }
+      originals.set(part.id, { native, before: JSON.stringify(part) })
+      return part
+    }),
+  }))
+  const output = { messages: view }
+  await hook({}, output)
+  if (output.messages.length !== event.messages.length) throw new Error("oc-box V1 adapter: adding/removing whole history messages requires a native V2 port")
+  for (let index = 0; index < output.messages.length; index++) {
+    if (output.messages[index].info.id !== (event.messages[index].id || "msg_view_" + index) ||
+        output.messages[index].info.role !== event.messages[index].role) {
+      throw new Error("oc-box V1 adapter: changing history message order/identity/role requires a native V2 port")
+    }
+    const parts = output.messages[index].parts
+    if (!Array.isArray(parts) || parts.length !== event.messages[index].content.length) {
+      throw new Error("oc-box V1 adapter: changing history part count requires a native V2 port")
+    }
+    event.messages[index].content = parts.map((part, partIndex) => {
+      if (part.id !== "prt_view_" + index + "_" + partIndex) {
+        throw new Error("oc-box V1 adapter: changing history part order/identity requires a native V2 port")
+      }
+      const previous = originals.get(part.id)
+      if (!previous) throw new Error("oc-box V1 adapter: invented legacy history parts require a native V2 port")
+      if (JSON.stringify(part) === previous.before) return previous.native
+      const before = JSON.parse(previous.before)
+      if (part.sessionID !== before.sessionID || part.messageID !== before.messageID) {
+        throw new Error("oc-box V1 adapter: changing history references requires a native V2 port")
+      }
+      if (part.type === "text" && typeof part.text === "string" && ["text", "media"].includes(previous.native.type)) {
+        return previous.native.type === "text" ? { ...previous.native, text: part.text } : { type: "text", text: part.text }
+      }
+      if (part.type === "tool" && previous.native.type === "tool-call" &&
+          part.tool === before.tool && part.callID === before.callID && part.state?.status === before.state.status) {
+        return { ...previous.native, input: part.state.input }
+      }
+      throw new Error("oc-box V1 adapter: unsupported legacy history part mutation")
+    })
+  }
+}
 
 function toolResult(value) {
   if (typeof value === "string") return { content: value }
@@ -144,15 +214,62 @@ export function adapt(module, id) {
       if (hooks["tool.definition"]) {
         const definitions = new Map()
         for (const tool of await ctx.tool.list()) {
-          const value = { description: tool.description, parameters: tool.input }
+          let parameters
+          try { parameters = inputSchema(tool.input) } catch { continue }
+          const original = JSON.stringify(parameters)
+          const value = { description: tool.description, parameters }
           await hooks["tool.definition"]({ toolID: alias(tool.id) }, value)
-          definitions.set(tool.id, value)
+          definitions.set(tool.id, { ...value, original })
         }
         await ctx.tool.transform(editor => {
           for (const [id, value] of definitions) editor.update(id, tool => {
             tool.description = value.description
-            tool.input = value.parameters
+            if (JSON.stringify(value.parameters) !== value.original) tool.input = value.parameters
           })
+        })
+      }
+      if (hooks["tool.definition"] || hooks["experimental.chat.messages.transform"]) {
+        await ctx.session.hook("context", async event => {
+          if (hooks["tool.definition"]) {
+            for (const [name, definition] of Object.entries(event.tools)) {
+              const value = { description: definition.description, parameters: clone(definition.input) }
+              await hooks["tool.definition"]({ toolID: alias(name) }, value)
+              definition.description = value.description
+              definition.input = value.parameters
+            }
+          }
+          if (hooks["experimental.chat.messages.transform"]) await transformMessages(hooks["experimental.chat.messages.transform"], event)
+        })
+      }
+      if (hooks["chat.headers"]) {
+        await ctx.session.hook("model.request", async event => {
+          const output = { headers: event.headers }
+          await hooks["chat.headers"]({ sessionID: event.sessionID,
+            message: { model: { variant: event.model.variant } },
+            model: { id: event.model.id, providerID: event.model.providerID, api: { id: event.model.id } },
+            provider: { info: { id: event.model.providerID } } }, output)
+          event.headers = output.headers
+        })
+        // The copied Copilot effort workaround wraps global fetch on V1.
+        // V2's native request executor need not call that global, so apply its
+        // private-header contract at the supported HTTP request boundary too.
+        await ctx.session.hook("http.request", async event => {
+          const effort = event.request.headers.get("x-oc-copilot-effort")
+          if (!effort) return
+          const headers = new Headers(event.request.headers)
+          headers.delete("x-oc-copilot-effort")
+          let body = await event.request.clone().text()
+          if (["low", "medium", "high", "xhigh", "max"].includes(effort) && /\/responses(?:\?|$)/.test(event.request.url)) {
+            const value = JSON.parse(body)
+            if (typeof value.model === "string" && value.model.startsWith("gpt-6") && !value.reasoning) {
+              value.reasoning = { effort, summary: "auto" }
+              value.include = Array.isArray(value.include) ? value.include : []
+              if (!value.include.includes("reasoning.encrypted_content")) value.include.push("reasoning.encrypted_content")
+              body = JSON.stringify(value)
+            }
+          }
+          headers.delete("content-length")
+          event.request = new Request(event.request, { headers, body })
         })
       }
       if (hooks["shell.env"]) {

@@ -114,17 +114,19 @@ class WorkspaceServiceTests(unittest.TestCase):
             patch.object(
                 service, "attach", return_value=contextlib.nullcontext(self.connection)
             ),
-            patch.object(box, "run_tui", return_value=7) as relay,
+            patch("terminal_ui.run_tui", return_value=7) as relay,
             patch.object(vault, "hidden") as prompt,
             patch.object(box, "prepare_runtime") as prepare,
             patch.object(box, "stop_container") as stop,
         ):
             self.assertEqual(box.main(["terminal", "--workspace", self.data["id"]]), 7)
         command = relay.call_args.args[0]
-        self.assertIn("mini", command)
-        self.assertIn("--server", command)
+        self.assertNotIn("mini", command)
+        self.assertNotIn("--server", command)
+        self.assertIn("persistent-pty", " ".join(command))
         self.assertIn("ses_shared", command)
         self.assertNotIn("--standalone", command)
+        self.assertFalse(relay.call_args.kwargs["show_loading"])
         for operation in (prompt, prepare, stop):
             operation.assert_not_called()
 

@@ -1299,30 +1299,8 @@ def config_archive(data):
     sandbox_version = None
     config_home = data["home"] + "/.config/opencode"
     if v2 and source.is_dir():
-        for folder in ("plugin", "plugins"):
-            for file in sorted((source / folder).glob("*")):
-                if (
-                    file.is_file()
-                    and file.suffix in (".ts", ".js")
-                    and "@opencode-ai/plugin" in file.read_text()
-                ):
-                    relative = file.relative_to(source)
-                    original, directory, script = plugin_compat.bridge_file(relative)
-                    if (source / original).exists() or (source / directory).exists():
-                        raise BoxError(
-                            "A generated V2 plugin adapter path conflicts with an existing config file; inspect the plugin directory before launching."
-                        )
-                    local_plugins[relative] = (original, directory, script)
-                    for alias in (
-                        str(file),
-                        "file://" + str(file),
-                        "./" + str(relative),
-                        str(relative),
-                    ):
-                        replacements[alias] = config_home + "/" + str(directory)
-                    replacements[config_home + "/" + str(relative)] = (
-                        config_home + "/" + str(directory)
-                    )
+        candidates = set()
+        configured = {}
         for filename in ("config.json", "opencode.json", "opencode.jsonc"):
             file = source / filename
             if file.is_file():
@@ -1336,9 +1314,49 @@ def config_archive(data):
                             if isinstance(entry, list)
                             else entry.get("package", "")
                         )
+                        local = plugin_compat.local_source(target, source)
+                        if local:
+                            candidates.add(local)
+                            configured[target.removeprefix("-")] = local
                         package = plugin_compat.package_target(target)
                         if package:
                             sandbox_version = package[1]
+        for folder in ("plugin", "plugins"):
+            candidates.update(
+                file
+                for file in (source / folder).glob("*")
+                if file.is_file() and file.suffix in (".ts", ".js")
+            )
+        for file in sorted(candidates):
+            text = file.read_text()
+            native = "@opencode/plugin" in text or re.search(
+                r"export\s+default\s*\{", text
+            )
+            if (
+                "@opencode-ai/plugin" in text
+                or not native
+                or file in configured.values()
+            ):
+                relative = file.relative_to(source)
+                original, directory, script = plugin_compat.bridge_file(relative)
+                if (source / original).exists() or (source / directory).exists():
+                    raise BoxError(
+                        "A generated V2 plugin adapter path conflicts with an existing config file; inspect the plugin directory before launching."
+                    )
+                local_plugins[relative] = (original, directory, script)
+                for alias in (
+                    str(file),
+                    "file://" + str(file),
+                    "./" + str(relative),
+                    str(relative),
+                ):
+                    replacements[alias] = config_home + "/" + str(directory)
+                replacements[config_home + "/" + str(relative)] = (
+                    config_home + "/" + str(directory)
+                )
+                for target, local in configured.items():
+                    if local == file:
+                        replacements[target] = config_home + "/" + str(directory)
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
 
@@ -1365,7 +1383,8 @@ def config_archive(data):
             content = file.read_bytes()
             if relative in local_plugins:
                 original, directory, script = local_plugins[relative]
-                add_bytes(str(original), content, file.stat().st_mode & 0o777)
+                patched = plugin_compat.copied_source(relative, content)
+                add_bytes(str(original), patched, file.stat().st_mode & 0o777)
                 add_bytes(str(directory / "index.js"), script)
                 add_bytes(
                     str(directory / "package.json"),
@@ -3124,12 +3143,12 @@ def main(argv=None):
                     data,
                     connection,
                     [
-                        CONTAINER_OPENCODE,
-                        "mini",
-                        "--server",
+                        "python3",
+                        "-c",
+                        (APP / "session_terminal.py").read_text(),
                         connection["url"],
-                        "--session",
                         connection["session"],
+                        container_project(data),
                     ],
                     interactive=True,
                 )
@@ -3139,7 +3158,15 @@ def main(argv=None):
                     + "; the existing service and credentials are retained.",
                     flush=True,
                 )
-                return run_tui(command)
+                print(
+                    "oc-box: Session shell terminal; Ctrl-] detaches and keeps it running, 'exit' closes the shell.",
+                    flush=True,
+                )
+                if __package__:
+                    from .terminal_ui import run_tui as relay
+                else:
+                    from terminal_ui import run_tui as relay
+                return relay(command, env=command.environment, show_loading=False)
         if args.command == "start" and workspace_service.controller_running(
             sys.modules[__name__], data
         ):
