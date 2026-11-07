@@ -2953,8 +2953,6 @@ def main(argv=None):
                 launch_context.enter_context(credentials.unlocked(data))
             except vault.VaultError as exc:
                 raise BoxError(str(exc)) from exc
-            # Validate CLI compatibility before deleting a working container.
-            detect_opencode_release()
         if args.command in ("start", "reset", "sync", "terminal"):
             refresh_workspace_identity(path, data)
         if args.command == "terminal":
@@ -2978,6 +2976,9 @@ def main(argv=None):
                     raise BoxError(
                         "Project marker does not match the selected workspace; refusing to reset it. Use 'oc-box --status' to select the current workspace."
                     )
+                # Identity and credential validation take precedence; validate
+                # CLI compatibility before deleting a working container.
+                detect_opencode_release()
                 check_resource_controllers(data)
                 remove_resources(data, keep_home=True)
                 data["ready"] = False
