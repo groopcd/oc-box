@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 import subprocess
 
-VERSION_SERIES = "1.0"
-# The first stable release is the 29th full-history commit. Keep the absolute
-# count in build metadata for compatibility with installed 0.1-series updaters.
+VERSION_SERIES = "1.5"
+# Retain the original stable patch-count baseline across the 1.5 transition.
+# Absolute counts still order upgrades from installed 0.1/1.0-series launchers.
 VERSION_BASE_COMMIT_COUNT = 29
 AUTHOR_NAME = "Paulo Dias"
 AUTHOR_EMAIL = "paulo.miguel.dias@gmail.com"

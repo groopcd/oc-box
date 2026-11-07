@@ -79,14 +79,16 @@ without modifying the parent environment. Verify `gh api user` reports
 `groopcd` before publishing. Pass Git credential helpers per command rather
 than storing tokens or changing global authentication settings.
 
-Version `1.0.N+gHASH` is derived from the full Git history, with N the commit
+Version `1.5.N+gHASH` is derived from the full Git history, with N the commit
 count minus the 1.0.0 baseline (29); every later commit advances N automatically.
+The 1.5 series deliberately retains this baseline; do not reset the patch count
+or rewrite embedded 0.1/1.0 identities when preparing the V2 release.
 Keep the absolute `commit_count` for old updater compatibility, require full
 history, and fast-forward tested release commits into master. The installer
 embeds the source identity in its private `build-info.json`. Original project
 code/documentation is GPL-3.0-or-later;
 retain LICENSE and NOTICE when distributing/installing it.
-PyPI uses the public `1.0.N` version; retain the full `+gHASH` identity in package
+PyPI uses the public `1.5.N` version; retain the full `+gHASH` identity in package
 resources. Python-package installations upgrade through pipx/uv/pip, never the
 GitHub self-updater. Preserve the normal curl/GitHub update path in parallel.
 
@@ -115,6 +117,10 @@ Host TUI/web/persistent-shell coexistence, detach/reattach, stop/resume and upda
 plugin behavior are accepted. Selected-vault credentials, V2 full/portable
 backup/restore, reset and V1 downgrade still require host acceptance. Keep native
 V1/V2 integration enabled on master and pull requests after the feature merges.
+`tools/test_v2_podman.py` is the opt-in host acceptance fixture for these remaining
+checks: isolated synthetic vault/provider/MCP, native version executables, real
+rootless backup/reset/downgrade. Prompt/TUI actions are scripted; do not claim a
+live pass from its offline unit tests or run it inside this container.
 
 Package/dependency mappings must pass `.github/workflows/distros.yml` on all
 seven catalog images using `tools/test_dependency_distro.py`. That disposable

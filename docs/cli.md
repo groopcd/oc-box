@@ -949,18 +949,21 @@ workspace is required. Use alone, without lifecycle selectors/options.
 ### --version
 
 Print oc-box's commit-derived version and exit without Podman. The format is
-`1.0.N+gHASH`, with N the full-history commit count minus 29 (the 1.0.0
+`1.5.N+gHASH`, with N the full-history commit count minus 29 (the original 1.0.0
 baseline). Each later commit advances N; shallow history cannot supply a release
 identity. Tracked uncommitted changes add `.dirty`. Untracked files do not. Installed
 copies retain their installation-time identity in `build-info.json`; reinstall
 to update it. This is separate from the host OpenCode version matched inside
 containers. Use alone, for example: `oc-box --version`.
 
-PyPI distribution metadata uses only `1.0.N`, because public PyPI versions
+The OpenCode V2-compatible release moves to series 1.5 while retaining the
+existing commit-derived patch count; its first published patch is not required
+to be zero. Installed older copies keep their original 0.1/1.0 identity.
+PyPI distribution metadata uses only `1.5.N`, because public PyPI versions
 cannot contain the local `+gHASH` suffix. Its packaged build-info still includes
 the full source identity displayed by this command, so the exact Git commit is
 retained even in a wheel/source distribution installed without Git.
-Existing 0.1 installations retain their original embedded identity until
+Existing 0.1/1.0 installations retain their original embedded identity until
 upgraded through their usual channel. The absolute commit count remains in
 metadata for upgrade ordering; no workspace reset or database migration is
 required for the version-series transition.

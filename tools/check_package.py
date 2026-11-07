@@ -100,6 +100,8 @@ def check(directory, *, with_vault=False):
             "tests/plugin_bridge_fixture.mjs",
             "tests/copied_plugin_bytes.mjs",
             "tools/check_package.py",
+            "tools/test_v2_podman.py",
+            "tests/test_v2_host_fixture.py",
             "opencode_compat.py",
             "opencode_v2_io.py",
             "workspace_service.py",

@@ -229,6 +229,63 @@ data/credential contracts but do not replace host rootless-Podman validation.
 
 ### Remaining release checks
 
+The next published version uses **1.5.N**, preserving the original commit-count
+patch baseline and upgrade ordering. This branch is prepared for that series;
+publication waits for the host results below.
+
+#### Automated disposable host fixture
+
+Run `tools/test_v2_podman.py` from the repository root in your regular Linux host
+terminal. It cannot run from this development container: host Podman resources
+are not exposed, and nested Podman would not test the host lifecycle. The fixture
+creates a private temporary registry, config, host DBs and encrypted synthetic
+vault. It never uses the operator's vault, env-file/provider values, projects,
+models, or shared OpenCode service. Use separate unmodified 1.19.5 and 2.2.6
+executables to avoid replacing your installed OpenCode. For example:
+
+```sh
+git pull --ff-only
+fixture_tools=$(mktemp -d /tmp/oc-box-v2-tools-XXXXXXXX)
+npm install --prefix "$fixture_tools/v1" --no-audit --no-fund opencode-ai@1.19.5
+npm install --prefix "$fixture_tools/v2" --no-audit --no-fund @opencode/cli@2.2.6
+uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
+  --opencode-v1 "$fixture_tools/v1/node_modules/.bin/opencode" \
+  --opencode-v2 "$fixture_tools/v2/node_modules/.bin/opencode"
+```
+
+Requires host rootless Podman prerequisites, age/age-keygen, Git, npm and uv for
+these setup commands; see `oc-box doctor`. The default test distro is Tumbleweed
+(`--distro NAME` selects another catalog distro). Expect image/package downloads,
+separate exact-version runtime installs and full encrypted image transfers;
+the run can take several minutes and needs room for three temporary workspaces
+plus encrypted backups. It invokes production commands against fixture-owned
+resources only. A host-loopback synthetic provider and container-local MCP verify
+native tool execution and selected-vault credentials, without real inference.
+
+Checks include credential rotation, attach without unlock, wrong-password reset
+preserving the container, V1 snapshot migration, full/portable byte-exact restores
+and native V2 launches, reset with retained home/history and OS rebuild, V1
+downgrade and V2 return without lost progress. The TUI and masked password input
+are scripted fixture actions; selection, decryption, forwarding, native servers,
+tools, resource locks and rootless storage are real production paths. Your
+interactive TUI/web/shell testing covers the separately accepted UI behavior.
+
+Send the final PASS lines and the printed `result.json` report. On success or
+failure the fixture is retained for diagnosis. Its private keys/vault/archives
+are synthetic test data; do not publish the fixture directory. The printed
+cleanup command removes only fixture-owned Podman resources, retaining files:
+
+```sh
+python3 tools/test_v2_podman.py --cleanup /tmp/oc-box-live-v2-EXAMPLE
+```
+
+The fixture has offline unit tests for host refusal, environment isolation,
+host-executable routing, credential checks and cleanup boundaries. Native V2 CI
+also exercises its exact provider/MCP config and rotated environment without
+Podman. Only a successful run on the host closes the live acceptance gate.
+
+#### Manual alternative
+
 Use only disposable projects, credential selections and backups:
 
 - **Selected vault credentials:** launch V2 using a selected synthetic vault

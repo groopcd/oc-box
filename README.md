@@ -155,7 +155,7 @@ command; it does not overwrite package-managed files or create a competing
 GitHub-installed launcher. GitHub/curl installations retain `oc-box upgrade` and
 opt-in automatic GitHub updates. If both channels are installed, check
 `command -v oc-box` to select the intended launcher. PyPI package versions use
-`1.0.N`, while `oc-box --version` also records `+gHASH` for source provenance.
+`1.5.N`, while `oc-box --version` also records `+gHASH` for source provenance.
 Published PyPI releases are selected separately from ordinary GitHub commits.
 Packaged manuals are in the package's `docs/` and the tool environment's
 `share/man`/`share/info`; those directories may need explicit reader paths.
@@ -618,10 +618,12 @@ info --file "$HOME/.local/share/info/oc-box.info"
 
 Readers are host packages (`man` and `info` on openSUSE). See
 [CONTRIBUTING.md](CONTRIBUTING.md) to regenerate the manuals from `docs/cli.md`.
-`oc-box --version` uses `1.0.N+gHASH`: 1.0.0 is the stable baseline, and later
-commits advance N automatically. Installed copies retain their source version
-until upgraded or reinstalled. Existing 0.1 installations upgrade through their
-usual installation channel; no workspace reset or history migration is needed.
+`oc-box --version` uses `1.5.N+gHASH`. The 1.5 series retains N's original 1.0.0
+baseline (full-history commit count minus 29), so commits continue advancing N
+automatically rather than restarting at zero. Installed copies retain their
+source version until upgraded or reinstalled. Existing 0.1/1.0 installations
+upgrade through their usual channel; no workspace reset or history migration is
+needed for the version-series change.
 
 ## Development status
 

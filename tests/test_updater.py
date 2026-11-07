@@ -494,13 +494,13 @@ class UpdateTests(unittest.TestCase):
         ):
             second = updater.upgrade(APP)
         self.assertIn("Installed oc-box: 0.1.1+g", output.getvalue())
-        self.assertIn("Installed oc-box: 1.0.1+g", output.getvalue())
+        self.assertIn("Installed oc-box: 1.5.1+g", output.getvalue())
         self.assertIsNotNone(second)
         target = self.home / ".local/share/oc-box"
         build = get_version_info(target)
         self.assertEqual(build["commit"], expected)
         self.assertEqual(build["commit_count"], 2)
-        self.assertTrue(build["version"].startswith("1.0.1+g"))
+        self.assertTrue(build["version"].startswith("1.5.1+g"))
         self.assertEqual(get_version_info(first)["commit"], first_commit)
         self.assertEqual(local("status", "--porcelain"), "")
         self.assertEqual(local("rev-parse", "HEAD"), expected)

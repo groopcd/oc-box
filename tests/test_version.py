@@ -56,8 +56,8 @@ class VersionTests(unittest.TestCase):
         self.git("commit", "-m", "First")
         first = version.get_version_info(self.root)
         self.assertEqual(first["commit_count"], 1)
-        self.assertTrue(first["version"].startswith("1.0.0+g"))
-        self.assertEqual(version.public_version(first), "1.0.0")
+        self.assertTrue(first["version"].startswith("1.5.0+g"))
+        self.assertEqual(version.public_version(first), "1.5.0")
         source.write_text("second")
         self.assertTrue(
             version.get_version_info(self.root)["version"].endswith(".dirty")
@@ -66,8 +66,8 @@ class VersionTests(unittest.TestCase):
         self.git("commit", "-m", "Second")
         second = version.get_version_info(self.root)
         self.assertEqual(second["commit_count"], 2)
-        self.assertTrue(second["version"].startswith("1.0.1+g"))
-        self.assertEqual(version.public_version(second), "1.0.1")
+        self.assertTrue(second["version"].startswith("1.5.1+g"))
+        self.assertEqual(version.public_version(second), "1.5.1")
         self.assertNotEqual(first["commit"], second["commit"])
         (self.root / "placeholder").touch()
         self.assertEqual(version.get_version_info(self.root), second)
@@ -81,7 +81,7 @@ class VersionTests(unittest.TestCase):
             self.assertIsNone(version.get_version_info(self.root)["commit"])
         shallow = self.root / "shallow"
         self.git("clone", "--depth=1", self.root.as_uri(), str(shallow))
-        self.assertEqual(version.get_version_info(shallow)["version"], "1.0.0+unknown")
+        self.assertEqual(version.get_version_info(shallow)["version"], "1.5.0+unknown")
         self.assertIsNone(version.get_version_info(shallow)["commit_count"])
 
     def test_legacy_embedded_metadata_retains_its_original_identity(self):
@@ -94,6 +94,11 @@ class VersionTests(unittest.TestCase):
         (self.root / "build-info.json").write_text(json.dumps(legacy))
         self.assertEqual(version.get_version_info(self.root), legacy)
         self.assertEqual(version.public_version(legacy), "0.1.27")
+        legacy["version"] = "1.0.7+gfixture"
+        legacy["commit_count"] = 36
+        (self.root / "build-info.json").write_text(json.dumps(legacy))
+        self.assertEqual(version.get_version_info(self.root), legacy)
+        self.assertEqual(version.public_version(legacy), "1.0.7")
 
     def test_installed_copy_keeps_source_version_without_git(self):
         home = self.root / "home"
@@ -144,16 +149,16 @@ class VersionTests(unittest.TestCase):
                     timeout=10,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn("oc-box 1.0.", result.stdout)
+                self.assertIn("oc-box 1.5.", result.stdout)
 
     def test_unknown_version_is_explicit_in_unversioned_source(self):
         self.assertEqual(
-            version.get_version_info(self.root)["version"], "1.0.0+unknown"
+            version.get_version_info(self.root)["version"], "1.5.0+unknown"
         )
 
     def test_invalid_installed_metadata_does_not_crash_about(self):
         (self.root / "build-info.json").write_text('{"partial":')
-        self.assertIn("1.0.0+unknown", version.about_text(self.root))
+        self.assertIn("1.5.0+unknown", version.about_text(self.root))
 
     def test_license_is_complete_gpl3_with_project_later_version_notice(self):
         text = (APP / "LICENSE").read_text()

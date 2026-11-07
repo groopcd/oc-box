@@ -8,6 +8,7 @@ import argparse
 import base64
 import contextlib
 import http.cookiejar
+import importlib.util
 import fcntl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -44,6 +45,96 @@ import opencode_compat as compat
 import opencode_v2_io as bridge
 import sync_config
 import workspace_service
+
+
+def host_fixture_probe(binary):
+    """Exercise the opt-in host fixture's exact native config/model contract.
+
+    Podman lifecycle remains host-only; this catches fixture protocol mistakes
+    in CI before asking the operator to run the full disposable host test.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "v2_acceptance_probe", APP / "tools/test_v2_podman.py"
+    )
+    assert spec is not None and spec.loader is not None
+    fixture = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(fixture)
+    state = {
+        "key": "synthetic-native-fixture-key",
+        "markers": set(),
+        "requests": 0,
+        "errors": [],
+    }
+    provider, worker = fixture.make_provider(state)
+    try:
+        with tempfile.TemporaryDirectory(prefix="oc-box-host-contract-") as temporary:
+            root = Path(temporary)
+            config = root / "config/opencode"
+            config.mkdir(parents=True)
+            value = fixture.fixture_config(provider.server_port)
+            value["provider"]["fixture"]["options"]["baseURL"] = (
+                f"http://127.0.0.1:{provider.server_port}/v1"
+            )
+            (config / "opencode.json").write_text(json.dumps(value))
+            env = {
+                "HOME": str(root / "home"),
+                "PATH": os.environ["PATH"],
+                "LANG": "C.UTF-8",
+                fixture.KEY: state["key"],
+                "OPENCODE_DISABLE_MODELS_FETCH": "1",
+                "OPENCODE_CONFIG_CONTENT": json.dumps(
+                    box.container_build_config("2.2.6")
+                ),
+            }
+            for name in ("CONFIG", "DATA", "STATE", "CACHE"):
+                env["XDG_" + name + "_HOME"] = str(root / name.lower())
+            result = bounded(
+                [
+                    binary,
+                    "run",
+                    "--standalone",
+                    "--model",
+                    "fixture/gpt-smoke",
+                    "Exercise synthetic vault delivery without a real provider.",
+                ],
+                env,
+                root,
+                timeout=90,
+            )
+            assert (
+                "HOST_V2_ACCEPTANCE_OK" in result
+                and not state["errors"]
+                and state["markers"] == {"VAULT_SHELL_OK", "VAULT_MCP_OK"}
+            ), state["errors"]
+            state["key"] = "synthetic-native-fixture-rotated"
+            env[fixture.KEY] = state["key"]
+            state["markers"].clear()
+            result = bounded(
+                [
+                    binary,
+                    "run",
+                    "--standalone",
+                    "--model",
+                    "fixture/gpt-smoke",
+                    "Exercise rotated synthetic credentials.",
+                ],
+                env,
+                root,
+                timeout=90,
+            )
+            assert (
+                "HOST_V2_ACCEPTANCE_OK" in result
+                and not state["errors"]
+                and state["markers"] == {"VAULT_SHELL_OK", "VAULT_MCP_OK"}
+            ), state["errors"]
+        print(
+            "PASS: host acceptance fixture's exact native provider/MCP contract and rotated environment (offline; no Podman lifecycle).",
+            flush=True,
+        )
+    finally:
+        provider.shutdown()
+        provider.server_close()
+        worker.join(timeout=3)
 
 
 def bounded(command, env, cwd, timeout=60):
@@ -1207,3 +1298,4 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     main(args.opencode, args.legacy_plugin_dir)
+    host_fixture_probe(str(Path(args.opencode).resolve()))
