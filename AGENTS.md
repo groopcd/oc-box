@@ -18,6 +18,10 @@ portable: use example project paths and synthetic session IDs, not local data.
   native transcripts, private V2 service leases and credential refresh. Preserve
   V1 database/history; never save forwarded vault env in service config or
   connect workspace activity to the host shared service.
+- `plugin_compat.py` / `plugin_bridge.js`: bounded copied-V1-plugin adapters on
+  native V2 plugin APIs. Keep host originals and V1 behavior intact, propagate
+  refusal errors and preserve attachments/structured output; reject unsupported
+  hooks explicitly. Do not modify mainline tools or reactivate nested sandboxing.
 - `workspace_identity.py`: generic Linux VFS directory identity, capability-based
   persistent handles and strict fallback; shared by lifecycle/status checks.
 - `vault.py` / `credentials.py`: optional encrypted host vault and names-only

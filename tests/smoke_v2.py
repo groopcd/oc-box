@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import shutil
 import subprocess
 import sys
 import tarfile
@@ -47,7 +48,7 @@ def bounded(command, env, cwd, timeout=60):
     return output
 
 
-def main(binary):
+def main(binary, legacy_plugin_dir=None):
     binary = str(Path(binary).resolve())
     with tempfile.TemporaryDirectory(prefix="oc-box-native-v2-") as temporary:
         root = Path(temporary)
@@ -59,6 +60,8 @@ def main(binary):
             "LANG": "C.UTF-8",
             "OPENCODE_DISABLE_MODELS_FETCH": "1",
             "GIT_CONFIG_GLOBAL": "/dev/null",
+            "OPENCODE_TOOLDEF_REPORT": str(root / "tool-definitions.json"),
+            "OPENCODE_CLAMP_DIR": str(root / "clamped-output"),
         }
         for name in ("CONFIG", "DATA", "CACHE", "STATE"):
             env["XDG_" + name + "_HOME"] = str(root / name.lower())
@@ -73,9 +76,36 @@ def main(binary):
 
         source = root / "source-config/opencode"
         source.mkdir(parents=True)
+        legacy_plugins = source / "plugins"
+        legacy_plugins.mkdir()
+        (
+            legacy_plugins / "fixture.ts"
+        ).write_text("""import { tool } from "@opencode-ai/plugin"
+export const Fixture = async () => ({
+  "shell.env": async (_, output) => { output.env.OC_BOX_LEGACY_ENV = "bridged" },
+  "tool.execute.before": async (input, output) => {
+    if (input.tool === "bash" && output.args.command.includes("BLOCK_FIXTURE")) throw new Error("legacy tool block")
+  },
+  "tool.execute.after": async (input, output) => {
+    if (input.tool === "bash") output.output += "\\nLEGACY_AFTER_OK"
+  },
+  "tool.definition": async (_, output) => { output.description += " Legacy definition hook." },
+  config: async config => {
+    if (config.provider.lemonade) config.provider.lemonade.models = {
+      "discovered-fixture": { name: "Discovered", tool_call: true, limit: { context: 12345, output: 1024 } }
+    }
+  },
+  tool: { legacy_probe: tool({ description: "Legacy probe", args: { value: tool.schema.string() },
+    execute: async args => ({ title: "probe", output: "LEGACY_TOOL_OK " + args.value }) }) }
+})
+""")
+        if legacy_plugin_dir:
+            for plugin in Path(legacy_plugin_dir).glob("*.ts"):
+                shutil.copyfile(plugin, legacy_plugins / plugin.name)
         (source / "opencode.json").write_text(
             json.dumps(
                 {
+                    "plugins": ["opencode-sandbox@0.6.0"],
                     "agents": {
                         "build": {
                             "permissions": [
@@ -112,8 +142,15 @@ def main(binary):
             payload = box.config_archive(data)
         sync_config.sync_config(env["HOME"], payload, release)
         config = Path(env["HOME"]) / ".config/opencode"
+        bounded(
+            ["npm", "install", "--prefix", str(config), "--no-audit", "--no-fund"],
+            env,
+            project,
+            timeout=120,
+        )
         env["XDG_CONFIG_HOME"] = str(config.parent)
         env["OPENCODE_CONFIG"] = str(config / "oc-box-profile.json")
+        env["OPENCODE_DISABLE_SANDBOX"] = "1"
         env["OPENCODE_CONFIG_CONTENT"] = json.dumps(box.container_build_config(release))
         assert not (config / "service.json").exists()
         (project / "opencode.json").write_text(
@@ -155,6 +192,28 @@ def main(binary):
             def log_message(self, format, *args):
                 pass
 
+            def do_GET(self):
+                if self.path.endswith("/models"):
+                    data = {
+                        "data": [
+                            {
+                                "id": "lemonade-fixture",
+                                "labels": ["tool-calling", "vision"],
+                                "max_context_window": 32768,
+                                "recipe_options": {"ctx_size": 16384},
+                            }
+                        ]
+                    }
+                elif self.path.endswith("/health"):
+                    data = {"model_loaded": "lemonade-fixture"}
+                else:
+                    self.send_error(404)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(data).encode())
+
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 requests.append(body)
@@ -166,7 +225,8 @@ def main(binary):
                     for message in body.get("messages", [])
                 )
                 delta, finish = {"content": "Smoke complete"}, "stop"
-                if tools and completed < 4:
+                maximum = 9 if legacy_plugin_dir else 6
+                if tools and completed < maximum:
                     if completed == 0:
                         name, arguments = (
                             "patch",
@@ -182,13 +242,36 @@ def main(binary):
                         name, arguments = (
                             "shell",
                             {
-                                "command": 'test "$OC_BOX_SYNTHETIC_TOKEN" = synthetic-v2-secret && printf ENV_OK'
+                                "command": 'test "$OC_BOX_SYNTHETIC_TOKEN" = synthetic-v2-secret && test "$OC_BOX_LEGACY_ENV" = bridged && printf ENV_OK'
+                            },
+                        )
+                    elif completed == 3:
+                        name, arguments = (
+                            "execute",
+                            {"code": "return await tools.fixture.ping({})"},
+                        )
+                    elif completed == 4:
+                        name, arguments = "legacy_probe", {"value": "fixture"}
+                    elif completed == 5:
+                        name, arguments = (
+                            "shell",
+                            {"command": "printf BLOCK_FIXTURE > SHOULD_NOT_EXIST"},
+                        )
+                    elif completed == 6:
+                        name, arguments = "lemonade", {"action": "list"}
+                    elif completed == 7:
+                        name, arguments = (
+                            "shell",
+                            {
+                                "command": "python3 -c 'print(\"OUTPUT_CLAMP_FIXTURE\" * 1200)'"
                             },
                         )
                     else:
                         name, arguments = (
-                            "execute",
-                            {"code": "return await tools.fixture.ping({})"},
+                            "shell",
+                            {
+                                "command": 'test "$PIP_REQUIRE_VIRTUALENV" = 1 && test "$PYTHONDONTWRITEBYTECODE" = 1 && printf PYTHON_ISOLATION_OK'
+                            },
                         )
                     assert name in tools, list(tools)
                     delta = {
@@ -240,6 +323,18 @@ def main(binary):
             "snapshots": False,
             "update": "disable",
             "providers": {
+                "lemonade": {
+                    "package": "aisdk:@ai-sdk/openai-compatible",
+                    "settings": {
+                        "baseURL": f"http://127.0.0.1:{model.server_port}/api/v1"
+                    },
+                    "models": {
+                        "fallback": {
+                            "name": "Fallback",
+                            "limit": {"context": 32000, "output": 2000},
+                        }
+                    },
+                },
                 "fixture": {
                     "package": "aisdk:@ai-sdk/openai-compatible",
                     "settings": {
@@ -252,7 +347,7 @@ def main(binary):
                             "limit": {"context": 32000, "output": 2000},
                         }
                     },
-                }
+                },
             },
             "model": "fixture/gpt-smoke",
             "formatter": {
@@ -278,6 +373,61 @@ def main(binary):
                     bridge.main(["plugins", binary])
                 finally:
                     os.chdir(previous)
+            with (
+                patch.dict(os.environ, env, clear=True),
+                bridge.server(binary) as request,
+            ):
+                query = "?directory=" + quote(str(project), safe="")
+                request("GET", "/api/model/default" + query)
+                plugins = request("GET", "/api/plugin" + query)["data"]
+                assert all(item["state"]["status"] == "active" for item in plugins), (
+                    plugins
+                )
+                models = request("GET", "/api/model" + query)["data"]
+                model_id = (
+                    "lemonade-fixture" if legacy_plugin_dir else "discovered-fixture"
+                )
+                discovered = next(
+                    item
+                    for item in models
+                    if item["providerID"] == "lemonade" and item["id"] == model_id
+                )
+                assert discovered["limit"]["context"] == (
+                    16384 if legacy_plugin_dir else 12345
+                ), discovered
+            print(
+                "PASS: V1 custom tool, definition, shell environment, execution/output and provider-discovery hooks; sandbox container opt-out.",
+                flush=True,
+            )
+            if legacy_plugin_dir:
+                with (
+                    patch.dict(os.environ, env, clear=True),
+                    bridge.server(binary) as request,
+                ):
+                    query = "?directory=" + quote(str(project), safe="")
+                    request("GET", "/api/model/default" + query)
+                    plugins = request("GET", "/api/plugin" + query)["data"]
+                    failed = [
+                        item for item in plugins if item["state"]["status"] == "failed"
+                    ]
+                    assert not failed, failed
+                    models = request("GET", "/api/model" + query)["data"]
+                    discovered = next(
+                        item
+                        for item in models
+                        if item["providerID"] == "lemonade"
+                        and item["id"] == "lemonade-fixture"
+                    )
+                    assert discovered["limit"]["context"] == 16384, discovered
+                    assert any(
+                        item.get("id") == "oc-box.v1.opencode-sandbox"
+                        and item["state"]["status"] == "active"
+                        for item in plugins
+                    ), plugins
+                print(
+                    "PASS: actual copied user V1 plugins activate in V2; Lemonade discovery uses live capabilities/context.",
+                    flush=True,
+                )
             output = cli(
                 "run",
                 "--model",
@@ -285,7 +435,46 @@ def main(binary):
                 "Exercise native write/read and shell tools.",
             )
             assert target.is_file(), output
+            assert not (project / "SHOULD_NOT_EXIST").exists(), (
+                "Legacy before-hook refusal failed"
+            )
+            assert any(
+                message.get("role") == "tool"
+                and "legacy tool block" in str(message.get("content"))
+                for request in requests
+                for message in request.get("messages", [])
+            ), "Legacy refusal missing from native tool results"
             assert target.read_text() == "HELLO FORMATTER\n", output
+            assert any(
+                "Legacy definition hook." in tool["function"]["description"]
+                for request in requests
+                for tool in request.get("tools", [])
+            ), "Definition transform missing"
+            if legacy_plugin_dir:
+                messages = [
+                    message
+                    for request in requests
+                    for message in request.get("messages", [])
+                    if message.get("role") == "tool"
+                ]
+                assert any(
+                    "lemonade-fixture" in str(message.get("content"))
+                    for message in messages
+                ), "Live Lemonade tool result missing"
+                assert any(
+                    "PYTHON_ISOLATION_OK" in str(message.get("content"))
+                    for message in messages
+                ), "Python isolation environment missing"
+                assert any(
+                    "[output-clamp]" in str(message.get("content"))
+                    for message in messages
+                ), "Actual output clamp hook missing"
+                assert (root / "tool-definitions.json").is_file(), (
+                    "Actual tool-definition audit report missing"
+                )
+                assert list((root / "clamped-output").glob("*.txt")), (
+                    "Actual output clamp spill missing"
+                )
             assert any(
                 message.get("role") == "tool"
                 and "ENV_OK" in str(message.get("content"))
@@ -305,6 +494,18 @@ def main(binary):
                 for request in requests
                 for message in request.get("messages", [])
             ), "MCP Code Mode output missing"
+            assert any(
+                message.get("role") == "tool"
+                and "LEGACY_AFTER_OK" in str(message.get("content"))
+                for request in requests
+                for message in request.get("messages", [])
+            )
+            assert any(
+                message.get("role") == "tool"
+                and "LEGACY_TOOL_OK" in str(message.get("content"))
+                for request in requests
+                for message in request.get("messages", [])
+            )
             print(
                 "PASS: V2 native tools, formatter, MCP initialization and server/shell environment inheritance.",
                 flush=True,
@@ -498,4 +699,9 @@ def main(binary):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opencode", required=True)
-    main(parser.parse_args().opencode)
+    parser.add_argument(
+        "--legacy-plugin-dir",
+        help="optional local V1 plugin sources copied into disposable fixture storage",
+    )
+    args = parser.parse_args()
+    main(args.opencode, args.legacy_plugin_dir)

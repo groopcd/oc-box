@@ -75,7 +75,7 @@ provider/MCP config resolution.
 | Config/agents/skills | Existing files | Supported V1 fields and V2 files retained, `cli.json` copied |
 | Service settings | No shared service | `service*.json` excluded; no remote/hostname/env reactivation |
 | Build permissions | Private V1 hook | Native V2 agent/permission hooks; Plan/subagent rules preserved |
-| Plugins | V1 SDK/hooks | V2 SDK and directory entrypoint; external V1 plugins need porting |
+| Plugins | V1 SDK/hooks | Native V2 plugins plus bounded adapters for supported copied V1 hooks |
 | MCP | Native tools | Native V2 MCP and default Code Mode preserved |
 | Formatter | Native | Native |
 | LSP | Native language servers | Upstream 2.2.6 does not run LSP/diagnostics; use lint/typecheck/compiler tools |
@@ -85,14 +85,36 @@ provider/MCP config resolution.
 | Status/doctor/completion | Available | Available without starting OpenCode |
 | Maintenance terminal | No auth/config refresh | Same restricted semantics, no service/credential forwarding |
 
-The generated oc-box plugin is ported. User plugins are preserved and failed
-V2 activation gets a targeted message; old implementations cannot be translated
-automatically. Install their V2-compatible release or use upstream's plugin
-migration guide. Configured local V2 plugins must be directories. The cache uses
+The generated oc-box plugin is ported. Copied standalone V1 plugins importing
+`@opencode-ai/plugin` get generated native V2 entrypoints; the source remains
+byte-identical on the host and in a non-autodiscovered private module. V1 uses
+the original files. The bridge supports `shell.env`, `tool.execute.before/after`,
+`tool.definition`, text custom tools, provider-discovery `config` hooks, and
+`dispose`. Shell hooks translate V2 `shell` to V1 `bash`; refusal propagates as
+a native tool error. Result conversion retains nontext file attachments and
+structured output. Tool-definition callbacks apply at plugin activation, not on
+every MCP catalog refresh. Config edits outside provider discovery, V1 client
+DB/history APIs, auth/provider/chat/event hooks and multi-factory modules require
+a native V2 port and are reported rather than silently ignored.
+
+`opencode-sandbox` uses a generated entrypoint invoking its existing container
+opt-out (`OPENCODE_DISABLE_SANDBOX=1`). Podman remains the isolation boundary;
+no nested Bubblewrap or replacement tools are introduced. Package versions,
+options, and explicit removal entries are retained. Configured local sources
+are rewritten to their corresponding directory entrypoints. The cache uses
 `@opencode/plugin`, retaining custom dependencies and per-runtime cache identity.
 Cold V2 setup installs the copied config manifest with npm; warm launches reuse
 its lockfiles/modules instead of reinstalling. Supported SDK-only and custom
 dependencies are retained; they are never installed into host Python or Node.
+
+Copies of the reported Lemonade discovery/tool, no-nested-sandbox, output-clamp,
+Python isolation and tool-definition audit plugins all activated under native
+2.2.6 in a disposable fixture. Live Lemonade discovery/tool results, model
+capabilities/context, Python isolation variables, output clamping/spill files,
+and tool-definition audit reports were exercised against synthetic services.
+The packaged sandbox
+0.6.0 container opt-out and supported hooks also run in the regular V2 smoke.
+Host source files are never modified by this adaptation.
 
 ## History and downgrade strategy
 
@@ -132,6 +154,10 @@ Before merge/release, accept host-terminal testing in a disposable workspace:
 fresh/warm V2 TUI, env-file and selected-vault provider/MCP access, stop/resume,
 import/sync, full/portable backup restore, reset and V1 downgrade. This development
 container cannot validate host Podman. Keep the branch unmerged until accepted.
+Reported host testing has confirmed 1.x env/MCP operation and 2.2.6 MCP access,
+cold/warm startup, native TUI exit and host history sync; the external plugin
+failures prompted the adapter above and need a host retest. Selected-vault,
+full/portable restore, reset and downgrade host validation are still pending.
 
 ## Upstream references
 

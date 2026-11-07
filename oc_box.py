@@ -23,11 +23,19 @@ import time
 import uuid
 
 if __package__:
-    from . import credentials, dependencies, opencode_compat, vault, workspace_identity
+    from . import (
+        credentials,
+        dependencies,
+        opencode_compat,
+        plugin_compat,
+        vault,
+        workspace_identity,
+    )
 else:
     import credentials
     import dependencies
     import opencode_compat
+    import plugin_compat
     import vault
     import workspace_identity
 
@@ -1275,6 +1283,51 @@ def config_archive(data):
     )
     release = data.get("opencode_version", "1.0.0")
     v2 = opencode_compat.major(release) == 2
+    local_plugins = {}
+    replacements = {}
+    sandbox_version = None
+    config_home = data["home"] + "/.config/opencode"
+    if v2 and source.is_dir():
+        for folder in ("plugin", "plugins"):
+            for file in sorted((source / folder).glob("*")):
+                if (
+                    file.is_file()
+                    and file.suffix in (".ts", ".js")
+                    and "@opencode-ai/plugin" in file.read_text()
+                ):
+                    relative = file.relative_to(source)
+                    original, directory, script = plugin_compat.bridge_file(relative)
+                    if (source / original).exists() or (source / directory).exists():
+                        raise BoxError(
+                            "A generated V2 plugin adapter path conflicts with an existing config file; inspect the plugin directory before launching."
+                        )
+                    local_plugins[relative] = (original, directory, script)
+                    for alias in (
+                        str(file),
+                        "file://" + str(file),
+                        "./" + str(relative),
+                        str(relative),
+                    ):
+                        replacements[alias] = config_home + "/" + str(directory)
+                    replacements[config_home + "/" + str(relative)] = (
+                        config_home + "/" + str(directory)
+                    )
+        for filename in ("config.json", "opencode.json", "opencode.jsonc"):
+            file = source / filename
+            if file.is_file():
+                config = parse_jsonc(file.read_text())
+                for key in ("plugin", "plugins"):
+                    for entry in config.get(key, []):
+                        target = (
+                            entry
+                            if isinstance(entry, str)
+                            else entry[0]
+                            if isinstance(entry, list)
+                            else entry.get("package", "")
+                        )
+                        package = plugin_compat.package_target(target)
+                        if package:
+                            sandbox_version = package[1]
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
 
@@ -1291,15 +1344,35 @@ def config_archive(data):
                 or not file.is_file()
                 or relative == Path("AGENTS.md")
                 or (file.name.startswith("service") and file.suffix == ".json")
+                or (
+                    v2
+                    and (local_plugins or sandbox_version)
+                    and relative == Path("package.json")
+                )
             ):
                 continue
             content = file.read_bytes()
+            if relative in local_plugins:
+                original, directory, script = local_plugins[relative]
+                add_bytes(str(original), content, file.stat().st_mode & 0o777)
+                add_bytes(str(directory / "index.js"), script)
+                add_bytes(
+                    str(directory / "package.json"),
+                    b'{"type":"module","main":"index.js"}',
+                )
+                continue
             if len(relative.parts) == 1 and file.name in (
                 "config.json",
                 "opencode.json",
                 "opencode.jsonc",
             ):
                 config = rewrite_config(parse_jsonc(content.decode()))
+                if v2:
+                    plugin_compat.rewrite_plugins(
+                        config,
+                        replacements,
+                        config_home + "/plugins/oc-box-compat-sandbox",
+                    )
                 mcp = config.get("mcp", {})
                 for server in (mcp.get("servers", mcp)).values():
                     if isinstance(server, dict) and server.get("type") == "local":
@@ -1319,6 +1392,39 @@ def config_archive(data):
                     .encode()
                 )
             add_bytes(str(relative), content, file.stat().st_mode & 0o777)
+        if v2 and (local_plugins or sandbox_version):
+            if any(
+                (source / name).exists()
+                for name in ("oc-box-v1-bridge.js", "oc-box-v1-provider-config.json")
+            ):
+                raise BoxError(
+                    "Generated V2 plugin bridge resources conflict with existing host config files."
+                )
+            if sandbox_version and (source / "plugins/oc-box-compat-sandbox").exists():
+                raise BoxError(
+                    "Generated sandbox adapter conflicts with an existing host plugin."
+                )
+            add_bytes("oc-box-v1-bridge.js", (APP / "plugin_bridge.js").read_bytes())
+            manifest_file = source / "package.json"
+            manifest = (
+                parse_jsonc(manifest_file.read_text())
+                if manifest_file.is_file()
+                else {}
+            )
+            manifest.setdefault("dependencies", {}).setdefault(
+                "@opencode-ai/plugin", "1.19.5"
+            )
+            if sandbox_version:
+                manifest["dependencies"]["opencode-sandbox"] = sandbox_version
+                add_bytes(
+                    "plugins/oc-box-compat-sandbox/index.js",
+                    plugin_compat.sandbox_entry(),
+                )
+                add_bytes(
+                    "plugins/oc-box-compat-sandbox/package.json",
+                    b'{"type":"module","main":"index.js"}',
+                )
+            add_bytes("package.json", json.dumps(manifest).encode())
         note = (
             "\n\n# oc-box environment for this launch\n"
             "OpenCode and all tools, MCP servers, formatters, language servers, and plugins run INSIDE a rootless Podman container. "
@@ -1339,6 +1445,13 @@ def config_archive(data):
             file = source / filename
             if file.is_file():
                 merged.update(parse_jsonc(file.read_text()))
+        if v2 and (local_plugins or sandbox_version):
+            provider_config = rewrite_config(
+                {key: merged[key] for key in ("provider", "providers") if key in merged}
+            )
+            add_bytes(
+                "oc-box-v1-provider-config.json", json.dumps(provider_config).encode()
+            )
         overlay = {**container_build_config(release), "shell": "/bin/bash"}
         if v2:
             overlay["update"] = "disable"

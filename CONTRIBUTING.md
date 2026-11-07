@@ -30,6 +30,12 @@ For OpenCode 2.x compatibility, keep a separate native binary and run
 disposable host-terminal lifecycle, credentials, and backup/restore testing.
 See `docs/opencode-2.md` for upstream differences and the private-service env
 strategy. Never test against real host service/config/data from this container.
+`plugin_bridge.js` adapts only its enumerated V1 hooks. The offline Node fixture
+checks refusal and attachment/structured-output preservation; the native V2
+smoke exercises synthetic hooks and the sandbox package's container opt-out.
+To inspect installed local plugins without changing them, optionally add
+`--legacy-plugin-dir /path/to/copied-v1-plugins` to the V2 smoke. It copies source
+files into temporary storage and never uses host provider credentials.
 
 ## Bash completion
 

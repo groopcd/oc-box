@@ -75,9 +75,11 @@ exposed inside the container. Its service settings are not copied. V2 uses a
 separate container database/resume state seeded from a consistent V1 snapshot
 and migrated by upstream; V1 history is retained for downgrade.
 
-V2 plugins require the new API; supported legacy config and native V2 fields
-are retained, and the generated Build plugin is version-aware. MCP Code Mode
-and native formatting are preserved. Upstream 2.2.6 does not run language servers
+Native V2 plugins use the new API; copied V1 local plugins get bounded adapters
+for shell environment, tool execution/output/definition, text custom tools and
+provider discovery. Unsupported hooks still require native ports. Supported
+legacy config and V2 fields are retained; the Build plugin is version-aware.
+MCP Code Mode and native formatting are preserved. Upstream 2.2.6 does not run language servers
 or expose LSP diagnostics; native LSP remains on 1.x. See `docs/opencode-2.md`
 for environment strategy, migration limits, and pending host validation.
 

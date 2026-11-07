@@ -198,6 +198,19 @@ def main(argv):
                         + str(name)
                         + "; port this plugin to the V2 API or install its V2-compatible release."
                     )
+                    error = str(plugin.get("state", {}).get("error", ""))
+                    if "oc-box V1 adapter: unsupported hooks " in error:
+                        import re
+
+                        match = re.search(
+                            r"oc-box V1 adapter: unsupported hooks ([A-Za-z0-9., _-]+)",
+                            error,
+                        )
+                        if match:
+                            print(
+                                "oc-box: OpenCode 2.x plugin unavailable: unsupported legacy hooks: "
+                                + match[1][:300]
+                            )
     else:
         raise ValueError("Unknown private OpenCode operation.")
 

@@ -126,12 +126,14 @@ service settings are not copied.  V2 uses a separate container
 database/resume state seeded from a consistent V1 snapshot and migrated
 by upstream; V1 history is retained for downgrade.
 
-V2 plugins require the new API; supported legacy config and native V2
-fields are retained, and the generated Build plugin is version-aware.
-MCP Code Mode and native formatting are preserved.  Upstream 2.2.6 does
-not run language servers or expose LSP diagnostics; native LSP remains
-on 1.x.  See ‘docs/opencode-2.md’ for environment strategy, migration
-limits, and pending host validation.
+Native V2 plugins use the new API; copied V1 local plugins get bounded
+adapters for shell environment, tool execution/output/definition, text
+custom tools and provider discovery.  Unsupported hooks still require
+native ports.  Supported legacy config and V2 fields are retained; the
+Build plugin is version-aware.  MCP Code Mode and native formatting are
+preserved.  Upstream 2.2.6 does not run language servers or expose LSP
+diagnostics; native LSP remains on 1.x.  See ‘docs/opencode-2.md’ for
+environment strategy, migration limits, and pending host validation.
 
 
 File: oc-box.info,  Node: Commands,  Next: Options,  Prev: Description,  Up: Top
@@ -2244,21 +2246,21 @@ Node: Top210
 Node: Name769
 Node: Synopsis930
 Node: Description2438
-Node: Commands5243
-Node: Options45344
-Node: Lifecycle and persistence61801
-Node: Distribution images63554
-Node: Sessions and recovery68429
-Node: Devices and host permissions73717
-Node: Resource reports76063
-Node: Configuration and environment78174
-Node: Files82953
-Node: Exit status87419
-Node: Examples88230
-Node: Troubleshooting90316
-Node: Installation and manuals98387
-Node: Authors and license106000
-Node: See also106607
+Node: Commands5418
+Node: Options45519
+Node: Lifecycle and persistence61976
+Node: Distribution images63729
+Node: Sessions and recovery68604
+Node: Devices and host permissions73892
+Node: Resource reports76238
+Node: Configuration and environment78349
+Node: Files83128
+Node: Exit status87594
+Node: Examples88405
+Node: Troubleshooting90491
+Node: Installation and manuals98562
+Node: Authors and license106175
+Node: See also106782
 
 End Tag Table
 

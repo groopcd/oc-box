@@ -45,6 +45,8 @@ def check(directory, *, with_vault=False):
             "dependencies.py",
             "opencode_compat.py",
             "opencode_v2_io.py",
+            "plugin_compat.py",
+            "plugin_bridge.js",
             "backups.py",
             "backup_crypto.py",
             "backup_archive.py",
