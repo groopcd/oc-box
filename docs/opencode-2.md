@@ -308,6 +308,15 @@ seed history. It refuses fixtures with backup/restore evidence or missing
 executables; those need a new run after fixture-only cleanup. Resume does not
 accept replacement executable paths.
 
+Before container startup, both separate test executables are probed directly
+with `--version` in isolated host roots and checked against 1.19.5/2.2.6. Retry
+refreshes only the fixture-generated selector, checks both routed versions, and
+uses that selector's absolute path for host history/version operations instead
+of relying on a PATH-selected `opencode`. A mismatch reports the expected and
+detected version plus its executable path; it does not reinstall or modify those
+binaries automatically. If the retained executable itself has changed, inspect
+the reported path and prepare a new fixture with separate exact-version installs.
+
 #### Manual alternative
 
 Use only disposable projects, credential selections and backups:

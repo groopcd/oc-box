@@ -59,6 +59,22 @@ def host_fixture_probe(binary):
     assert spec is not None and spec.loader is not None
     fixture = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(fixture)
+    # Check retained version selection against actual native executables, not
+    # just scripts that print fixture versions. V1 is intentionally installed
+    # separately on PATH by the mainline CI job.
+    v1 = shutil.which("opencode")
+    assert v1 is not None
+    with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+        root = Path(temporary)
+        fixture.prepare_native_cli(root, Path(v1).resolve(), Path(binary).resolve())
+        (root / "host-major").write_text("2")
+        fixture.prepare_native_cli(
+            root, Path(v1).resolve(), Path(binary).resolve(), resume=True
+        )
+    print(
+        "PASS: fresh and retained fixture version routing with native OpenCode 1.19.5/2.2.6.",
+        flush=True,
+    )
     state = {
         "key": "synthetic-native-fixture-key",
         "markers": set(),

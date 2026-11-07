@@ -19,6 +19,7 @@ import re
 import secrets
 import shlex
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -39,6 +40,7 @@ PREFIX = "oc-box-live-v2-"
 KEY = "ACCEPTANCE_API_KEY"
 UNSELECTED = "ACCEPTANCE_UNSELECTED_TOKEN"
 LEGACY_ID = "ses_v1_acceptance_fixture"
+NATIVE_VERSIONS = {"1": "1.19.5", "2": "2.2.6"}
 MCP = """import json,os,sys
 for line in sys.stdin:
     message=json.loads(line); method=message.get('method'); result={}
@@ -86,9 +88,103 @@ def isolated_env(root):
     return env
 
 
-def write_wrapper(root, v1, v2):
+def native_env(root, major):
+    """Version checks share the wrapper's isolated roots, never host config."""
+    env = isolated_env(root)
+    for key in list(env):
+        if key.startswith("OPENCODE_"):
+            env.pop(key)
+    env["HOME"] = str(root / "host-home")
+    for name in ("CONFIG", "DATA", "CACHE", "STATE"):
+        env["XDG_" + name + "_HOME"] = str(
+            root / ("host-" + name.lower() + "-" + major)
+        )
+    env.update(
+        OPENCODE_TEST_HOME=env["HOME"],
+        OPENCODE_DISABLE_MODELS_FETCH="1",
+        OPENCODE_DISABLE_PROJECT_CONFIG="1",
+        OPENCODE_PURE="1",
+        OPENCODE_DISABLE_AUTOUPDATE="1",
+    )
+    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+        {"snapshot": False, "formatter": False, "lsp": False, "autoupdate": False}
+        if major == "1"
+        else {
+            "snapshots": False,
+            "formatter": False,
+            "update": "disable",
+            "policies": [{"action": "plugin.use", "resource": "*", "effect": "deny"}],
+        }
+    )
+    return env
+
+
+def check_native_version(root, binary, major):
+    result = box.run(
+        [str(binary), "--version"],
+        env=native_env(root, major),
+        stdin=subprocess.DEVNULL,
+        capture=True,
+        private=True,
+        timeout=15,
+    )
+    try:
+        found = compat.version(result.stdout)
+    except ValueError as exc:
+        raise ValueError(
+            f"Native fixture executable {binary} did not report a supported release version; expected {NATIVE_VERSIONS[major]}."
+        ) from exc
+    if found != NATIVE_VERSIONS[major]:
+        raise ValueError(
+            f"Native fixture executable mismatch: expected {NATIVE_VERSIONS[major]}, detected {found}, path {binary}. No test container was started; check or reinstall this separate test executable."
+        )
+    return found
+
+
+def prepare_native_cli(root, v1, v2, *, resume=False):
+    # Probe the recorded absolute executables before rewriting the selector or
+    # launching containers; a PATH-resolved opencode cannot stand in for them.
+    for major, binary in (("1", v1), ("2", v2)):
+        found = check_native_version(root, binary, major)
+        print(
+            f"oc-box fixture: Verified native {major}.x {found}: {binary}", flush=True
+        )
+    wrapper = write_wrapper(root, v1, v2, refresh=resume)
+    for major in ("1", "2"):
+        (root / "host-major").write_text(major)
+        result = box.run(
+            [str(wrapper), "--version"],
+            env=isolated_env(root),
+            stdin=subprocess.DEVNULL,
+            capture=True,
+            private=True,
+            timeout=15,
+        )
+        found = compat.version(result.stdout)
+        if found != NATIVE_VERSIONS[major]:
+            raise ValueError(
+                f"Fixture selector mismatch: expected {NATIVE_VERSIONS[major]}, detected {found}, wrapper {wrapper}."
+            )
+    (root / "host-major").write_text("1")
+    return wrapper
+
+
+def write_wrapper(root, v1, v2, *, refresh=False):
     binary = root / "bin/opencode"
-    binary.parent.mkdir()
+    binary.parent.mkdir(exist_ok=refresh)
+    if refresh:
+        if binary.is_symlink():
+            raise ValueError(
+                "Refusing to replace a symlinked retained fixture selector"
+            )
+        previous = binary.read_text()
+        if (
+            "paths=json.loads((root/'executables.json').read_text())" not in previous
+            or "os.execve(paths[major]" not in previous
+        ):
+            raise ValueError(
+                "Refusing to replace an unfamiliar retained fixture selector"
+            )
     code = """import json,os,pathlib,sys
 root=pathlib.Path(__file__).resolve().parents[1]
 major=(root/'host-major').read_text().strip()
@@ -103,7 +199,8 @@ env['OPENCODE_TEST_HOME']=env['HOME']
 env['OPENCODE_DISABLE_MODELS_FETCH']='1'
 env['OPENCODE_DISABLE_PROJECT_CONFIG']='1'
 env['OPENCODE_PURE']='1'
-env['OPENCODE_CONFIG_CONTENT']=json.dumps({'snapshot':False,'formatter':False,'lsp':False} if major=='1' else {'snapshots':False,'formatter':False,'update':'disable','policies':[{'action':'plugin.use','resource':'*','effect':'deny'}]})
+env['OPENCODE_DISABLE_AUTOUPDATE']='1'
+env['OPENCODE_CONFIG_CONTENT']=json.dumps({'snapshot':False,'formatter':False,'lsp':False,'autoupdate':False} if major=='1' else {'snapshots':False,'formatter':False,'update':'disable','policies':[{'action':'plugin.use','resource':'*','effect':'deny'}]})
 os.execve(paths[major],[paths[major],*sys.argv[1:]],env)
 """
     binary.write_text("#!" + sys.executable + "\n" + code)
@@ -559,8 +656,7 @@ def resume_fixture(root):
 
 
 def run(root, v1, v2, distro, *, resume=False):
-    if not resume:
-        write_wrapper(root, v1, v2)
+    wrapper = prepare_native_cli(root, v1, v2, resume=resume)
     state = {
         "key": "fixture-" + secrets.token_urlsafe(24),
         "markers": set(),
@@ -572,7 +668,7 @@ def run(root, v1, v2, distro, *, resume=False):
     reports = []
     source = root / "source"
     source.mkdir(exist_ok=resume)
-    (root / "host-home").mkdir(exist_ok=resume)
+    (root / "host-home").mkdir(exist_ok=True)
     config = root / "config/opencode"
     config.mkdir(parents=True, exist_ok=resume)
     settings = root / "config/oc-box"
@@ -587,22 +683,30 @@ def run(root, v1, v2, distro, *, resume=False):
             patch.dict(os.environ, isolated_env(root), clear=True),
             patch.object(vault, "vault_path", return_value=root / "vault/vault.json"),
             patch.object(Path, "home", return_value=root / "host-home"),
+            patch.object(
+                box,
+                "detect_opencode_release",
+                side_effect=lambda: compat.version(
+                    box.run(
+                        [str(wrapper), "--version"],
+                        capture=True,
+                        private=True,
+                        stdin=subprocess.DEVNULL,
+                        timeout=15,
+                    ).stdout
+                ),
+            ),
+            patch.object(
+                box,
+                "host_command",
+                side_effect=lambda data, *arguments: compat.command(
+                    data.get("opencode_version", "1.0.0"), str(wrapper), arguments
+                ),
+            ),
         ):
             box.check_backend(feature="launch")
             crypto.tools()
             vault.crypto()
-            for major in ("1", "2"):
-                (root / "host-major").write_text(major)
-                if (
-                    box.detect_opencode_release()
-                    != {"1": "1.19.5", "2": "2.2.6"}[major]
-                ):
-                    raise ValueError(
-                        "The supplied native executable does not match OpenCode "
-                        + major
-                        + ".x"
-                    )
-            (root / "host-major").write_text("1")
             config_value = fixture_config(server.server_port)
             (config / "opencode.json").write_text(json.dumps(config_value))
             if resume:
@@ -913,7 +1017,7 @@ def run(root, v1, v2, distro, *, resume=False):
                 "checks": reports,
                 "fixture_ids": ids,
                 "source_version": get_version_info(APP)["version"],
-                "native_versions": {"1": "1.19.5", "2": "2.2.6"},
+                "native_versions": dict(NATIVE_VERSIONS),
                 "synthetic_provider_requests": state["requests"],
                 "limits": "Synthetic native provider/MCP; TUI and vault prompt input scripted; real rootless lifecycle/storage and credential selection/decryption.",
             }

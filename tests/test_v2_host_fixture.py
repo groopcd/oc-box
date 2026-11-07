@@ -109,6 +109,113 @@ class V2HostFixtureTests(unittest.TestCase):
                 self.assertEqual(payload["home"], str(root / "host-home"))
                 self.assertIsNone(payload["db"])
 
+    def native_binaries(self, root):
+        paths = []
+        for major, version in fixture.NATIVE_VERSIONS.items():
+            binary = root / ("opencode-" + major)
+            binary.write_text(
+                "#!"
+                + sys.executable
+                + "\nprint("
+                + repr("opencode v" + version)
+                + ")\n"
+            )
+            binary.chmod(0o700)
+            paths.append(binary)
+        return paths
+
+    def test_native_cli_setup_and_retained_refresh_verify_both_absolute_versions(self):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            v1, v2 = self.native_binaries(root)
+            originals = {path: path.read_bytes() for path in (v1, v2)}
+            # Even a shadowing 2.x opencode on PATH must not take the place of
+            # the caller's separate native 1.x executable.
+            with (
+                patch.object(
+                    box, "detect_opencode_release", return_value="2.2.6"
+                ) as host_detect,
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                wrapper = fixture.prepare_native_cli(root, v1, v2)
+                (root / "host-major").write_text("2")
+                wrapper.write_text(
+                    wrapper.read_text() + "\n# previous generated fixture selector\n"
+                )
+                fixture.prepare_native_cli(root, v1, v2, resume=True)
+            host_detect.assert_not_called()
+            self.assertIn("Verified native 1.x 1.19.5", output.getvalue())
+            self.assertIn("Verified native 2.x 2.2.6", output.getvalue())
+            self.assertEqual((root / "host-major").read_text(), "1")
+            self.assertNotIn("previous generated", wrapper.read_text())
+            self.assertEqual(
+                json.loads((root / "executables.json").read_text()),
+                {"1": str(v1), "2": str(v2)},
+            )
+            for path, before in originals.items():
+                self.assertEqual(path.read_bytes(), before)
+
+    def test_native_mismatch_explains_expected_actual_version_and_path_before_changes(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            v1, v2 = self.native_binaries(root)
+            v1.write_text("#!" + sys.executable + "\nprint('opencode v2.2.6')\n")
+            with self.assertRaises(ValueError) as error:
+                fixture.prepare_native_cli(root, v1, v2)
+            for text in ("expected 1.19.5", "detected 2.2.6", str(v1)):
+                self.assertIn(text, str(error.exception))
+            self.assertFalse((root / "bin").exists())
+            self.assertFalse((root / "host-major").exists())
+
+    def test_native_version_probes_clear_host_settings_and_close_stdin(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "OPENCODE_CONFIG": "/host-config",
+                        "OPENCODE_DB": "real-host-db",
+                        "OPENAI_API_KEY": "real-provider",
+                    },
+                ),
+                patch.object(
+                    box,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 0, "1.19.5", ""),
+                ) as probe,
+            ):
+                self.assertEqual(
+                    fixture.check_native_version(root, Path("/native/v1"), "1"),
+                    "1.19.5",
+                )
+            self.assertEqual(probe.call_args.args[0], ["/native/v1", "--version"])
+            env = probe.call_args.kwargs["env"]
+            self.assertNotIn("OPENCODE_DB", env)
+            self.assertNotIn("OPENCODE_CONFIG", env)
+            self.assertNotIn("OPENAI_API_KEY", env)
+            self.assertEqual(env["XDG_DATA_HOME"], str(root / "host-data-1"))
+            self.assertEqual(probe.call_args.kwargs["stdin"], subprocess.DEVNULL)
+            self.assertTrue(probe.call_args.kwargs["private"])
+
+    def test_retained_wrapper_refresh_refuses_unfamiliar_or_symlinked_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            v1, v2 = self.native_binaries(root)
+            (root / "bin").mkdir()
+            wrapper = root / "bin/opencode"
+            wrapper.write_text("user file")
+            with self.assertRaisesRegex(ValueError, "unfamiliar"):
+                fixture.write_wrapper(root, v1, v2, refresh=True)
+            self.assertEqual(wrapper.read_text(), "user file")
+            wrapper.unlink()
+            wrapper.symlink_to(v1)
+            with self.assertRaisesRegex(ValueError, "symlinked"):
+                fixture.write_wrapper(root, v1, v2, refresh=True)
+            self.assertTrue(wrapper.is_symlink())
+
     def test_podman_storage_and_runroot_are_both_inside_the_disposable_fixture(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
