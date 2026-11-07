@@ -23,10 +23,11 @@ import time
 import uuid
 
 if __package__:
-    from . import credentials, dependencies, vault, workspace_identity
+    from . import credentials, dependencies, opencode_compat, vault, workspace_identity
 else:
     import credentials
     import dependencies
+    import opencode_compat
     import vault
     import workspace_identity
 
@@ -199,8 +200,8 @@ def distro_name(name):
 
 
 @contextlib.contextmanager
-def captured_output():
-    if credentials.has_unlocked_values():
+def captured_output(*, private=False):
+    if private or credentials.has_unlocked_values():
         # Captured subprocess output may contain a delivered credential. An
         # anonymous in-memory regular file preserves mainline's large-stdout
         # behavior without spilling that output to a plaintext temp file.
@@ -216,7 +217,7 @@ def captured_output():
             yield stream
 
 
-def run(argv, *, capture=False, check=True, **kwargs):
+def run(argv, *, capture=False, check=True, private=False, **kwargs):
     if getattr(argv, "environment", None) is not None:
         kwargs.setdefault("env", argv.environment)
     if kwargs.get("cwd"):
@@ -229,7 +230,10 @@ def run(argv, *, capture=False, check=True, **kwargs):
         if capture:
             # Mainline OpenCode can truncate large exports when stdout is a
             # pipe. Use regular files for captured CLI output instead.
-            with captured_output() as output, captured_output() as errors:
+            with (
+                captured_output(private=private) as output,
+                captured_output(private=private) as errors,
+            ):
                 result = subprocess.run(
                     command, text=True, stdout=output, stderr=errors, **kwargs
                 )
@@ -246,7 +250,11 @@ def run(argv, *, capture=False, check=True, **kwargs):
             f"{argv[0]} exceeded its {exc.timeout}s timeout; operation stopped."
         ) from exc
     if check and result.returncode:
-        detail = (result.stderr or result.stdout or "").strip() if capture else ""
+        detail = (
+            (result.stderr or result.stdout or "").strip()
+            if capture and not private
+            else ""
+        )
         detail = credentials.redact(detail)
         raise BoxError(
             f"{argv[0]} failed (exit {result.returncode})"
@@ -883,7 +891,13 @@ def stop_container(data, *, env=None):
 
 
 def session_file(path):
-    return path.with_name("sessions.json")
+    # Private per-major state keeps a V2 resume ID out of the retained V1 DB.
+    data = read_json(path) if path.is_file() else {}
+    return path.with_name(
+        "sessions-v2.json"
+        if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2
+        else "sessions.json"
+    )
 
 
 def session_state(path):
@@ -927,18 +941,71 @@ def host_cli_env(path):
     return env
 
 
-def container_build_config():
+def host_command(data, *arguments):
+    return opencode_compat.command(
+        data.get("opencode_version", "1.0.0"), "opencode", arguments
+    )
+
+
+def detect_opencode_release():
+    return opencode_compat.version(
+        run(["opencode", "--version"], capture=True, timeout=15).stdout
+    )
+
+
+def private_host_env(path, data):
+    env = host_cli_env(path)
+    if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+            {
+                "$schema": "https://opencode.ai/config.json",
+                "snapshots": False,
+                "formatter": False,
+                "update": "disable",
+                "policies": [
+                    {"action": "plugin.use", "resource": "*", "effect": "deny"}
+                ],
+            }
+        )
+    return env
+
+
+def container_build_config(release="1.0.0"):
     """Override only Build permissions in the container's final config scope."""
+    if opencode_compat.major(release) == 2:
+        return {
+            "$schema": "https://opencode.ai/config.json",
+            "agents": {
+                "build": {
+                    "permissions": [{"action": "*", "resource": "*", "effect": "allow"}]
+                }
+            },
+        }
     return {
         "$schema": "https://opencode.ai/config.json",
         "agent": {"build": {"permission": "allow"}},
     }
 
 
-def container_build_plugin():
+def container_build_plugin(release="1.0.0"):
     # Config sources deep-merge permission objects, so a later wildcard alone
     # can leave inherited tool-specific denials after it. Normalize Build only
     # after mainline has finished loading project configs and agent files.
+    if opencode_compat.major(release) == 2:
+        return """export default {
+  id: "oc-box.build-permissions",
+  async setup(ctx) {
+    await ctx.agent.transform(editor => {
+      editor.update("build", agent => {
+        agent.permissions = [{ action: "*", resource: "*", effect: "allow" }]
+      })
+    })
+    await ctx.permission.hook("evaluate", event => {
+      if (event.agent === "build") event.effect = "allow"
+    })
+  },
+}
+"""
     return """export default async () => ({
   config: async (config) => {
     config.agent ??= {}
@@ -997,7 +1064,11 @@ def container_env(data):
                 forwarded[key] = os.environ[key]
     env.update(credentials.forwarded(data, forwarded))
     # Apply after project/agent files, without lifting Plan or subagent rules.
-    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(container_build_config())
+    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
+        container_build_config(data.get("opencode_version", "1.0.0"))
+    )
+    if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
+        env["OPENCODE_DB"] = "oc-box-v2.db"
     result = {key: rewrite_localhost(value) for key, value in env.items()}
     # Do not rewrite encrypted values that happen to look like localhost URLs.
     result.update(credentials.active_values(data))
@@ -1149,6 +1220,7 @@ def exec_command(data, command, *, interactive=False):
         "OPENCODE_CONFIG",
         "OPENCODE_DISABLE_AUTOUPDATE",
         "OPENCODE_CONFIG_CONTENT",
+        "OPENCODE_DB",
     }
     for key, value in forwarded.items():
         if key in container_only:
@@ -1156,6 +1228,19 @@ def exec_command(data, command, *, interactive=False):
         else:
             environment[key] = value
             result.extend(["--env", key])
+    if command and command[0] == CONTAINER_OPENCODE:
+        command = (
+            opencode_compat.command(
+                data.get("opencode_version", "1.0.0"), command[0], command[1:]
+            )
+            if "--version" not in command
+            else command
+        )
+    if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
+        # Clear image/create-time environment first. Public variable NAMES are
+        # argv; values arrive only via Podman's inherited --env NAME mechanism.
+        bridge = "import os,sys; keys=sys.argv[1].split(','); env={k:os.environ[k] for k in keys if k in os.environ}; os.execvpe(sys.argv[2],sys.argv[2:],env)"
+        command = ["python3", "-c", bridge, ",".join([*forwarded, "PATH"]), *command]
     result.extend([data["container"], *command])
     return result
 
@@ -1188,6 +1273,8 @@ def config_archive(data):
         Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
         / "opencode"
     )
+    release = data.get("opencode_version", "1.0.0")
+    v2 = opencode_compat.major(release) == 2
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
 
@@ -1203,6 +1290,7 @@ def config_archive(data):
                 any(part in ("node_modules", ".git") for part in relative.parts)
                 or not file.is_file()
                 or relative == Path("AGENTS.md")
+                or (file.name.startswith("service") and file.suffix == ".json")
             ):
                 continue
             content = file.read_bytes()
@@ -1212,11 +1300,17 @@ def config_archive(data):
                 "opencode.jsonc",
             ):
                 config = rewrite_config(parse_jsonc(content.decode()))
-                for server in config.get("mcp", {}).values():
+                mcp = config.get("mcp", {})
+                for server in (mcp.get("servers", mcp)).values():
                     if isinstance(server, dict) and server.get("type") == "local":
                         # A fresh distro must download npx/uvx packages on first
                         # startup; retain explicit per-server overrides.
-                        server.setdefault("timeout", 120000)
+                        server.setdefault(
+                            "timeout",
+                            {"catalog": 120000, "execution": 120000}
+                            if "servers" in mcp
+                            else 120000,
+                        )
                 # The host config directory is copied, never mounted. Keep
                 # absolute local-plugin paths valid with custom XDG roots too.
                 content = (
@@ -1245,14 +1339,27 @@ def config_archive(data):
             file = source / filename
             if file.is_file():
                 merged.update(parse_jsonc(file.read_text()))
-        overlay = {**container_build_config(), "shell": "/bin/bash"}
-        for key in ("lsp", "formatter"):
+        overlay = {**container_build_config(release), "shell": "/bin/bash"}
+        if v2:
+            overlay["update"] = "disable"
+            overlay["plugins"] = [
+                data["home"] + "/.config/opencode/plugins/oc-box-build-permissions"
+            ]
+        for key in ("formatter",) if v2 else ("lsp", "formatter"):
             if key not in merged:
                 overlay[key] = True
         add_bytes("oc-box-profile.json", json.dumps(overlay).encode())
         add_bytes(
-            "plugins/oc-box-build-permissions.js", container_build_plugin().encode()
+            "plugins/oc-box-build-permissions/index.js"
+            if v2
+            else "plugins/oc-box-build-permissions.js",
+            container_build_plugin(release).encode(),
         )
+        if v2:
+            add_bytes(
+                "plugins/oc-box-build-permissions/package.json",
+                b'{"type":"module","main":"index.js"}',
+            )
     return buffer.getvalue()
 
 
@@ -1264,7 +1371,7 @@ def ensure_opencode_version(data, version):
         check=False,
         timeout=30,
     )
-    if current.returncode or current.stdout.strip() != version:
+    if current.returncode or opencode_compat.version(current.stdout) != version:
         run(
             exec_command(
                 data,
@@ -1272,11 +1379,12 @@ def ensure_opencode_version(data, version):
                     "npm",
                     "install",
                     "--global",
+                    "--force",  # V1 and V2 packages own the same CLI symlink.
                     "--prefix",
                     "/opt/oc-box/runtime",
                     "--no-audit",
                     "--no-fund",
-                    f"opencode-ai@{version}",
+                    f"{'@opencode/cli' if opencode_compat.major(version) == 2 else 'opencode-ai'}@{version}",
                 ],
             ),
             timeout=600,
@@ -1286,7 +1394,7 @@ def ensure_opencode_version(data, version):
             capture=True,
             timeout=30,
         ).stdout.strip()
-        if installed != version:
+        if opencode_compat.version(installed) != version:
             raise BoxError(
                 f"OpenCode version mismatch: host is {version}, container reports {installed!r}. Refusing to launch a different version."
             )
@@ -1297,6 +1405,16 @@ def prepare_runtime(path, data, version):
     # Install the unmodified upstream version currently installed on the host.
     # Node/npm/uv are also used by the user's ordinary MCP/LSP setup.
     ensure_opencode_version(data, version)
+    v2 = opencode_compat.major(version) == 2
+    if v2:
+        # Seed the V2-only database from a consistent SQLite snapshot once.
+        # Mainline performs its own supported migration; V1 bytes stay intact.
+        bridge = (APP / "opencode_v2_io.py").read_text()
+        run(
+            exec_command(data, ["python3", "-c", bridge, "seed", CONTAINER_OPENCODE]),
+            capture=True,
+            timeout=120,
+        )
     archive = config_archive(data)
     unpack = (APP / "sync_config.py").read_text()
     copy_command = exec_command(data, ["python3", "-c", unpack, version])
@@ -1322,6 +1440,24 @@ def prepare_runtime(path, data, version):
         proc.stdout.decode(errors="replace").strip()
         == "Reusing container plugin dependencies."
     )
+    if v2 and not reused:
+        # V2 can supply its SDK to local plugins, but unlike V1 it does not
+        # automatically install a copied config directory's custom manifest.
+        with loading_stage("Installing OpenCode 2.x plugin dependencies"):
+            run(
+                exec_command(
+                    data,
+                    [
+                        "npm",
+                        "install",
+                        "--prefix",
+                        data["home"] + "/.config/opencode",
+                        "--no-audit",
+                        "--no-fund",
+                    ],
+                ),
+                timeout=600,
+            )
     auth = (
         Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
         / "opencode/auth.json"
@@ -1329,7 +1465,7 @@ def prepare_runtime(path, data, version):
     auth_content = os.environ.get("OPENCODE_AUTH_CONTENT") or (
         auth.read_text() if auth.is_file() else None
     )
-    if auth_content:
+    if auth_content and not v2:
         json.loads(auth_content)
         target = "import os,pathlib,sys; p=pathlib.Path(os.environ['XDG_DATA_HOME'])/'opencode/auth.json'; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(sys.stdin.read()); p.chmod(0o600)"
         run(
@@ -1339,7 +1475,7 @@ def prepare_runtime(path, data, version):
             timeout=30,
         )
     mcp_auth = auth.with_name("mcp-auth.json")
-    if mcp_auth.is_file():
+    if mcp_auth.is_file() and not v2:
         target = "import os,pathlib,sys; p=pathlib.Path(os.environ['XDG_DATA_HOME'])/'opencode/mcp-auth.json'; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(sys.stdin.read()); p.chmod(0o600)"
         run(
             exec_command(data, ["python3", "-c", target]),
@@ -1347,7 +1483,39 @@ def prepare_runtime(path, data, version):
             capture=True,
             timeout=30,
         )
-    if not reused:
+    if v2:
+        # Credential values move through supported export/import commands and
+        # private in-memory capture/stdin, never argv or a host plaintext file.
+        exported = run(
+            host_command(data, "auth", "export"),
+            env=private_host_env(path, data),
+            cwd=path.parent / "controller",
+            capture=True,
+            private=True,
+            timeout=120,
+        )
+        entries = json.loads(exported.stdout)
+        if not isinstance(entries, list):
+            raise BoxError("Invalid OpenCode 2.x credential export.")
+        if os.environ.get("OPENCODE_AUTH_CONTENT"):
+            overrides = opencode_compat.legacy_credentials(
+                os.environ["OPENCODE_AUTH_CONTENT"]
+            )
+            replaced = {entry["integrationID"] for entry in overrides}
+            entries = [
+                entry for entry in entries if entry.get("integrationID") not in replaced
+            ] + overrides
+        if entries:
+            run(
+                exec_command(
+                    data, ["python3", "-c", bridge, "auth", CONTAINER_OPENCODE]
+                ),
+                input=json.dumps(entries),
+                capture=True,
+                private=True,
+                timeout=240,
+            )
+    if not reused and not v2:
         # Native config/plugin initialization resolves the SDK and enabled local
         # plugins. Run before terminal takeover so cold downloads have visible
         # elapsed-time feedback; warm launches skip this extra process.
@@ -1355,9 +1523,36 @@ def prepare_runtime(path, data, version):
             "Resolving OpenCode plugin dependencies (first run or changed configuration)"
         ):
             run(
-                exec_command(data, [CONTAINER_OPENCODE, "debug", "agent", "build"]),
+                exec_command(
+                    data,
+                    [CONTAINER_OPENCODE, "debug", "agent", "build"],
+                ),
                 capture=True,
                 timeout=180,
+            )
+    if v2:
+        # Resolve the public readiness boundary before inspecting plugin state;
+        # early agent/plugin snapshots can legitimately precede activation.
+        with loading_stage("Preparing OpenCode 2.x private service and plugins"):
+            initialized = run(
+                exec_command(
+                    data, ["python3", "-c", bridge, "plugins", CONTAINER_OPENCODE]
+                ),
+                capture=True,
+                private=True,
+                timeout=240,
+            )
+            for line in initialized.stdout.splitlines():
+                if line.startswith("oc-box: OpenCode 2.x plugin unavailable: "):
+                    print(credentials.redact(line), file=sys.stderr, flush=True)
+        if (
+            not session_file(path).exists()
+            and path.with_name("sessions.json").is_file()
+        ):
+            prior = read_json(path.with_name("sessions.json"))
+            atomic_json(
+                session_file(path),
+                {"sessions": prior.get("sessions", []), "last": prior.get("last")},
             )
     # Also support OpenCode versions that store auth separately from data.
     # Config-directory auth is already part of the config snapshot.
@@ -1397,7 +1592,7 @@ def valid_session_id(value):
 
 def restore_archive_directory(exported, project):
     """Verify a host archive's origin before undoing mainline's import rebinding."""
-    directory = Path(exported["info"]["directory"]).resolve()
+    directory = Path(opencode_compat.directory(exported)).resolve()
     folder = directory.parent
     if (
         directory.name != "controller"
@@ -1406,26 +1601,31 @@ def restore_archive_directory(exported, project):
     ):
         return False
     ident = exported["info"]["id"]
-    prefix = "ses_" + hashlib.sha256(folder.name.encode()).hexdigest()[:12] + "_"
     # Plain purge retains minimal archive provenance outside the active registry
     # so a host archive remains recoverable after retiring its old workspace.
     if not (folder / "workspace.json").is_file():
         folder = state_root() / "retired" / folder.name
     registry = folder / "workspace.json"
     saved = folder / "history" / (ident + ".json")
-    if not ident.startswith(prefix) or not registry.is_file() or not saved.is_file():
+    if not registry.is_file() or not saved.is_file():
         return False
     origin = read_json(registry)
     archive = read_json(saved)
     validate_session_export(archive, ident)
+    # A V1 archive may now be exported by V2 after upstream migration. Its
+    # saved origin determines the namespace, not the live export's schema.
+    namespace = folder.name + ("-v2" if opencode_compat.native(archive) else "")
+    prefix = "ses_" + hashlib.sha256(namespace.encode()).hexdigest()[:12] + "_"
+    if not ident.startswith(prefix):
+        return False
     if origin.get("id") != folder.name or any(
         not isinstance(value, str) or Path(value).resolve() != Path(project).resolve()
-        for value in (origin.get("project"), archive["info"].get("directory"))
+        for value in (origin.get("project"), opencode_compat.directory(archive))
     ):
         return False
     # Keep the current host transcript, including any work after its last sync.
     # The private registry/export establish the project, not the archive title.
-    exported["info"]["directory"] = str(project)
+    opencode_compat.set_directory(exported, project)
     print(
         "oc-box: Verified oc-box archive origin; restored its project directory for import.",
         flush=True,
@@ -1438,8 +1638,8 @@ def export_host_session(path, data, ident):
     if not valid_session_id(ident):
         raise BoxError("Invalid host session ID.")
     result = run(
-        ["opencode", "--pure", "export", ident],
-        env=host_cli_env(path),
+        host_command(data, "--pure", "export", ident),
+        env=private_host_env(path, data),
         cwd=path.parent / "controller",
         capture=True,
         timeout=60,
@@ -1453,7 +1653,7 @@ def export_host_session(path, data, ident):
     validate_session_export(exported, ident)
     if exported["info"].get("parentID"):
         raise BoxError("Import the parent conversation, not a subagent session.")
-    directory = exported["info"].get("directory")
+    directory = opencode_compat.directory(exported)
     if (
         not isinstance(directory, str)
         or Path(directory).resolve() != Path(data["project"]).resolve()
@@ -1477,6 +1677,12 @@ def validate_session_export(exported, ident):
         or not isinstance(exported.get("messages"), list)
     ):
         raise BoxError("Invalid session export.")
+    if opencode_compat.native(exported):
+        try:
+            opencode_compat.validate_native(exported, ident)
+        except ValueError as exc:
+            raise BoxError(str(exc)) from exc
+        return
     messages, parts = set(), set()
     for message in exported["messages"]:
         if not isinstance(message, dict) or not isinstance(message.get("info"), dict):
@@ -1512,14 +1718,30 @@ def export_container_session(data, ident):
     # Spool in-container too to avoid mainline's large-stdout truncation.
     spool = """import shutil,subprocess,sys,tempfile
 with tempfile.TemporaryFile() as output:
-    result=subprocess.run([sys.argv[2],'--pure','export',sys.argv[1]],stdout=output)
+    result=subprocess.run([sys.argv[2],*__import__('json').loads(sys.argv[3])],stdout=output)
     if result.returncode: sys.exit(result.returncode)
     output.seek(0)
     shutil.copyfileobj(output,sys.stdout.buffer)
     sys.stdout.buffer.flush()
 """
     result = run(
-        exec_command(data, ["python3", "-c", spool, ident, CONTAINER_OPENCODE]),
+        exec_command(
+            data,
+            [
+                "python3",
+                "-c",
+                spool,
+                ident,
+                CONTAINER_OPENCODE,
+                json.dumps(
+                    opencode_compat.command(
+                        data.get("opencode_version", "1.0.0"),
+                        CONTAINER_OPENCODE,
+                        ["--pure", "export", ident],
+                    )[1:]
+                ),
+            ],
+        ),
         capture=True,
         timeout=60,
     )
@@ -1537,6 +1759,16 @@ def verify_session_import(data, exported, imported):
     ident = exported["info"]["id"]
     validate_session_export(exported, ident)
     validate_session_export(imported, ident)
+    if opencode_compat.native(exported):
+        if (
+            not opencode_compat.native(imported)
+            or opencode_compat.directory(imported) != container_project(data)
+            or imported["messages"] != exported["messages"]
+        ):
+            raise BoxError(
+                "Imported OpenCode 2.x session verification failed: project or transcript differs."
+            )
+        return 0
     expected = {message["info"]["id"]: message for message in exported["messages"]}
     actual = {message["info"]["id"]: message for message in imported["messages"]}
     expected = json.loads(json.dumps(expected))
@@ -1577,7 +1809,11 @@ def import_host_session(path, data, exported):
     ident = exported["info"]["id"]
     validate_session_export(exported, ident)
     state = session_state(path)
-    backup = path.parent / "imports" / (ident + ".json")
+    backup = (
+        path.parent
+        / ("imports-v2" if opencode_compat.native(exported) else "imports")
+        / (ident + ".json")
+    )
     listed = run(
         exec_command(
             data, [CONTAINER_OPENCODE, "--pure", "session", "list", "--format", "json"]
@@ -1598,7 +1834,7 @@ def import_host_session(path, data, exported):
         # the container DB or replacing it with a newer host conversation.
         exported = read_json(backup)
         validate_session_export(exported, ident)
-        if exported["info"].get("directory") != data["project"]:
+        if opencode_compat.directory(exported) != data["project"]:
             raise BoxError(
                 "Recovery export belongs to another project; nothing was overwritten."
             )
@@ -1642,18 +1878,34 @@ with tempfile.TemporaryDirectory(prefix='oc-box-import-') as directory:
     with target.open('x') as output:
         target.chmod(0o600)
         output.write(sys.stdin.read())
-    result=subprocess.run([sys.argv[1],'--pure','import',str(target)])
+    args=__import__('json').loads(sys.argv[2]); args=[str(target) if arg=='OC_BOX_IMPORT_FILE' else arg for arg in args]
+    result=subprocess.run([sys.argv[1],*args])
     sys.exit(result.returncode)
 """
     payload = json.loads(json.dumps(exported))
-    payload["info"]["directory"] = container_project(data)
+    opencode_compat.set_directory(payload, container_project(data))
     # Import is workspace activity: otherwise a newer pre-existing conversation
     # would immediately displace this older imported session on the next launch.
     payload["info"].setdefault("time", {})["updated"] = max(
         int(time.time() * 1000), payload["info"].get("time", {}).get("updated", 0)
     )
     run(
-        exec_command(data, ["python3", "-c", transfer, CONTAINER_OPENCODE]),
+        exec_command(
+            data,
+            [
+                "python3",
+                "-c",
+                transfer,
+                CONTAINER_OPENCODE,
+                json.dumps(
+                    opencode_compat.command(
+                        data.get("opencode_version", "1.0.0"),
+                        CONTAINER_OPENCODE,
+                        ["--pure", "import", "OC_BOX_IMPORT_FILE"],
+                    )[1:]
+                ),
+            ],
+        ),
         input=json.dumps(payload),
         capture=True,
         timeout=60,
@@ -1681,6 +1933,12 @@ def archive_session(export, data):
         raise BoxError("Invalid container session export")
     if not valid_session_id(export["info"].get("id")):
         raise BoxError("Invalid container session ID")
+    if opencode_compat.native(export):
+        return opencode_compat.native_archive(
+            export,
+            data,
+            lambda ident, prefix: archive_id(data["id"] + "-v2", ident, prefix),
+        )
     # Only schema identity fields are changed; conversation/tool text is intact.
     result = json.loads(json.dumps(export))
     mapping = {}
@@ -1739,16 +1997,18 @@ def sync_sessions(path, data):
             # Mainline import appends new messages but does not update existing
             # parts or metadata. Replace only this namespaced archive copy.
             run(
-                ["opencode", "--pure", "session", "delete", archived["info"]["id"]],
-                env=host_cli_env(path),
+                host_command(
+                    data, "--pure", "session", "delete", archived["info"]["id"]
+                ),
+                env=private_host_env(path, data),
                 cwd=path.parent / "controller",
                 capture=True,
                 check=False,
                 timeout=60,
             )
         run(
-            ["opencode", "--pure", "import", str(target)],
-            env=host_cli_env(path),
+            host_command(data, "--pure", "import", str(target)),
+            env=private_host_env(path, data),
             cwd=path.parent / "controller",
             capture=True,
             timeout=60,
@@ -1790,11 +2050,10 @@ def launch(path, data, args):
 
 def launch_environment(path, data, args):
     with loading_stage("Checking OpenCode version"):
-        version = run(["opencode", "--version"], capture=True).stdout.strip()
-    if not re.fullmatch(r"1\.\d+\.\d+(?:[-+].*)?", version):
-        raise BoxError(
-            f"OpenCode {version} session import/export has not been checked (supported: 1.x)."
-        )
+        version = detect_opencode_release()
+    if data.get("opencode_version") != version:
+        data["opencode_version"] = version
+        atomic_json(path, data)
     exported = None
     if args.import_session:
         with loading_stage("Exporting host session"):
@@ -1815,11 +2074,54 @@ def launch_environment(path, data, args):
         else:
             with loading_stage("Finding workspace session"):
                 sessions = refresh_sessions(path, data)
-        command = [CONTAINER_OPENCODE, container_project(data)]
-        if not args.new and sessions.get("last"):
-            command.extend(["--session", sessions["last"]])
-        if args.model:
-            command.extend(["--model", args.model])
+        selected_session = sessions.get("last") if not args.new else None
+        if opencode_compat.major(version) == 2:
+            selected_model = opencode_compat.model(args.model) if args.model else None
+            if not selected_session and (args.new or selected_model):
+                payload = {"location": {"directory": container_project(data)}}
+                if selected_model:
+                    payload["model"] = selected_model
+                created = run(
+                    exec_command(
+                        data,
+                        [
+                            CONTAINER_OPENCODE,
+                            "api",
+                            "post",
+                            "/api/session",
+                            "--data",
+                            json.dumps(payload),
+                        ],
+                    ),
+                    capture=True,
+                    timeout=60,
+                )
+                selected_session = json.loads(created.stdout)["data"]["id"]
+                if not valid_session_id(selected_session):
+                    raise BoxError("Invalid OpenCode 2.x session creation response.")
+            elif selected_session and selected_model:
+                run(
+                    exec_command(
+                        data,
+                        [
+                            CONTAINER_OPENCODE,
+                            "api",
+                            "post",
+                            "/api/session/" + selected_session + "/model",
+                            "--data",
+                            json.dumps({"model": selected_model}),
+                        ],
+                    ),
+                    capture=True,
+                    timeout=60,
+                )
+        command = opencode_compat.tui(
+            version,
+            CONTAINER_OPENCODE,
+            container_project(data),
+            selected_session,
+            args.model,
+        )
         print(
             f"oc-box: {data['distro']} | {data['project']} | {'new session' if args.new or not sessions.get('last') else 'resuming ' + sessions['last']}",
             flush=True,
@@ -1883,16 +2185,17 @@ def remove_resources(data, *, keep_home=False):
 
 def retain_archive_provenance(path, data):
     """Keep private, verified recovery evidence, not an active workspace entry."""
-    prefix = "ses_" + hashlib.sha256(data["id"].encode()).hexdigest()[:12] + "_"
     retired = state_root() / "retired" / data["id"]
     count = 0
     for source in sorted((path.parent / "history").glob("*.json")):
         archive = read_json(source)
         ident = source.stem
         validate_session_export(archive, ident)
+        namespace = data["id"] + ("-v2" if opencode_compat.native(archive) else "")
+        prefix = "ses_" + hashlib.sha256(namespace.encode()).hexdigest()[:12] + "_"
         if (
             not ident.startswith(prefix)
-            or archive["info"].get("directory") != data["project"]
+            or opencode_compat.directory(archive) != data["project"]
         ):
             raise BoxError(
                 "Archive provenance does not match the selected workspace; refusing cleanup before history can be retained."
@@ -1932,6 +2235,14 @@ def purge(path, data, args):
             + data["id"]
             + "' to retain project files and host history."
         )
+    if not data.get("restore_incomplete") or args.all or args.delete_sessions:
+        release = detect_opencode_release()
+        if opencode_compat.major(release) != opencode_compat.major(
+            data.get("opencode_version", "1.0.0")
+        ):
+            raise BoxError(
+                "Host/container OpenCode major versions differ. Run a normal launch or 'oc-box sync' with the new host release before purge so history is migrated and verified; no resources were deleted."
+            )
     if not args.yes:
         summary = "sandbox resources and oc-box metadata"
         if args.delete_sessions or args.all:
@@ -1962,8 +2273,8 @@ def purge(path, data, args):
             if not re.fullmatch(r"ses[A-Za-z0-9_-]+", ident):
                 raise BoxError("Invalid stored session ID.")
             run(
-                ["opencode", "--pure", "session", "delete", ident],
-                env=host_cli_env(path),
+                host_command(data, "--pure", "session", "delete", ident),
+                env=private_host_env(path, data),
                 cwd=path.parent / "controller",
                 timeout=60,
             )
@@ -2642,6 +2953,8 @@ def main(argv=None):
                 launch_context.enter_context(credentials.unlocked(data))
             except vault.VaultError as exc:
                 raise BoxError(str(exc)) from exc
+            # Validate CLI compatibility before deleting a working container.
+            detect_opencode_release()
         if args.command in ("start", "reset", "sync", "terminal"):
             refresh_workspace_identity(path, data)
         if args.command == "terminal":

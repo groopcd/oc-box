@@ -247,6 +247,27 @@ class WorkspaceBackupTests(unittest.TestCase):
         assert path is not None and data is not None
         return path, data
 
+    def test_v2_backup_restore_retains_major_selection_and_both_databases(self):
+        self.data["opencode_version"] = "2.2.6"
+        box.atomic_json(self.path, self.data)
+        box.atomic_json(
+            box.session_file(self.path),
+            {"sessions": ["ses_native"], "last": "ses_native"},
+        )
+        (self.home / ".local/share/opencode/oc-box-v2.db").write_bytes(
+            b"synthetic-v2-db-bytes"
+        )
+        self.backup()
+        path, data = self.restore(self.root / "v2-restored")
+        self.assertEqual(data["opencode_version"], "2.2.6")
+        self.assertEqual(box.session_state(path)["last"], "ses_native")
+        home = self.volumes[data["home_volume"]]
+        self.assertEqual(
+            (home / ".local/share/opencode/oc-box-v2.db").read_bytes(),
+            b"synthetic-v2-db-bytes",
+        )
+        self.assertTrue((home / ".local/share/opencode/opencode.db").exists())
+
     def test_full_real_encrypted_roundtrip_preserves_project_home_and_session_ids(self):
         before = {
             path: path.read_bytes()
@@ -552,6 +573,7 @@ class WorkspaceBackupTests(unittest.TestCase):
         path, data = self.restore(self.root / "reset-restored")
         sessions = box.session_file(path).read_bytes()
         with (
+            patch.object(box, "detect_opencode_release", return_value="1.19.5"),
             patch.object(box, "check_backend"),
             patch.object(
                 box.credentials, "unlocked", return_value=contextlib.nullcontext({})

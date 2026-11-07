@@ -172,6 +172,8 @@ def safe_config(data):
     result["credentials"] = credentials.policy(data)
     result["devices"] = list(data.get("devices", []))
     result["podman_args"] = list(data.get("podman_args", []))
+    if data.get("opencode_version"):
+        result["opencode_version"] = data["opencode_version"]
     return result
 
 
@@ -421,6 +423,11 @@ def validate_manifest(box, value):
         or not all(isinstance(item, str) for item in config["podman_args"])
     ):
         raise BackupError("Invalid distro/private-home configuration in backup.")
+    if config.get("opencode_version") is not None:
+        try:
+            box.opencode_compat.version(config["opencode_version"])
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise BackupError("Invalid archived OpenCode release identity.") from exc
     if (
         len(config["devices"]) > 128
         or len(config["podman_args"]) > 128
@@ -594,6 +601,8 @@ def restore_backup(box, args):
             "restore_incomplete": True,
             "restore_staging_project": str(project_stage),
         }
+        if config.get("opencode_version"):
+            data["opencode_version"] = config["opencode_version"]
         volume_created = False
         registry_created = False
         container_created = False

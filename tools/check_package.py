@@ -43,6 +43,8 @@ def check(directory, *, with_vault=False):
         for name in (
             "oc_box.py",
             "dependencies.py",
+            "opencode_compat.py",
+            "opencode_v2_io.py",
             "backups.py",
             "backup_crypto.py",
             "backup_archive.py",

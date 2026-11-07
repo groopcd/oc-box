@@ -18,6 +18,8 @@ else:
 PROGRAM_FILES = (
     "oc_box.py",
     "dependencies.py",
+    "opencode_compat.py",
+    "opencode_v2_io.py",
     "backups.py",
     "backup_crypto.py",
     "backup_archive.py",
@@ -42,7 +44,7 @@ PROGRAM_FILES = (
     "LICENSE",
     "NOTICE",
 )
-MANUAL_FILES = ("cli.md", "oc-box.1", "oc-box.texi", "oc-box.info")
+MANUAL_FILES = ("cli.md", "oc-box.1", "oc-box.texi", "oc-box.info", "opencode-2.md")
 COMPLETION_FILE = "completions/oc-box"
 
 

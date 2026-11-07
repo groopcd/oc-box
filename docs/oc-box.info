@@ -85,11 +85,11 @@ File: oc-box.info,  Node: Description,  Next: Commands,  Prev: Synopsis,  Up: To
 *************
 
 oc-box starts unmodified OpenCode and its local MCP servers, plugins,
-formatters, language servers, shell, and file tools together inside a
-persistent development container.  It associates one environment with
-one canonical project directory.  The entire project, including hidden
-files, Git history, untracked files, and unfinished edits, is mounted
-writable at the same absolute path.
+formatters, shell, and file tools together inside a persistent
+development container.  It associates one environment with one canonical
+project directory.  The entire project, including hidden files, Git
+history, untracked files, and unfinished edits, is mounted writable at
+the same absolute path.
 
 The container HOME has the host user's home pathname but uses a private
 named volume.  It is not a mount of the host home.  The live OpenCode
@@ -113,6 +113,25 @@ kernel and can reach network services, including configured host
 services at ‘host.containers.internal’.  The project is intentionally
 writable and can be deleted by container commands.  Additional Podman
 options and devices explicitly extend these defaults.
+
+3.1 OpenCode versions
+=====================
+
+This compatibility branch supports OpenCode 1.x and 2.x, tested with
+1.19.5 and 2.2.6.  The host release selects the exact container package:
+‘opencode-ai’ for 1.x, ‘@opencode/cli’ for 2.x.  V2 uses ‘--standalone’
+with current env-file/vault selections at server startup; the host
+shared service is never restarted or exposed inside the container.  Its
+service settings are not copied.  V2 uses a separate container
+database/resume state seeded from a consistent V1 snapshot and migrated
+by upstream; V1 history is retained for downgrade.
+
+V2 plugins require the new API; supported legacy config and native V2
+fields are retained, and the generated Build plugin is version-aware.
+MCP Code Mode and native formatting are preserved.  Upstream 2.2.6 does
+not run language servers or expose LSP diagnostics; native LSP remains
+on 1.x.  See ‘docs/opencode-2.md’ for environment strategy, migration
+limits, and pending host validation.
 
 
 File: oc-box.info,  Node: Commands,  Next: Options,  Prev: Description,  Up: Top
@@ -1342,7 +1361,7 @@ upgrade rather than a package reinstall.
 
 | Feature | Host dependencies | | -- | -- | | Launch/reset/sync | Linux,
 running Python 3.10+, Podman, pasta (‘passt’), newuidmap/newgidmap,
-catatonit, conmon, crun or runc, host OpenCode 1.x | |
+catatonit, conmon, crun or runc, host OpenCode 1.x or 2.x | |
 Maintenance/stop/repair/purge | Linux, Python, Podman and UID helpers;
 history preservation/deletion additionally uses host OpenCode | |
 Full/portable backup | Linux, Python, rootless Podman/UID helpers,
@@ -1610,14 +1629,14 @@ caches and generated SDK locks are reused when host dependency inputs
 and runtime version are unchanged.  Cold plugin resolution has its own
 timed setup stage before the TUI opens.
 
-The generated profile selects Bash and enables native formatters/LSP
-when not explicitly configured.  A container-only plugin sets Build
-permissions to allow all.  Plan/subagent and plain host permissions are
-unchanged.  Other copied plugins may have independent checks.  Changes
-require exiting and restarting OpenCode; config is not hot-reloaded.
-Host-only executables must be installed inside the container.  Host
-provider/MCP auth is copied when available; refreshed container auth is
-not written back to host auth.
+The generated profile selects Bash and enables native formatting when
+not configured, plus native LSP on 1.x only.  A container-only plugin
+sets Build permissions to allow all.  Plan/subagent and plain host
+permissions are unchanged.  Other copied plugins may have independent
+checks.  Changes require exiting and restarting OpenCode; config is not
+hot-reloaded.  Host-only executables must be installed inside the
+container.  Host provider/MCP auth is copied when available; refreshed
+container auth is not written back to host auth.
 
 HTTP endpoint keys in global config using localhost, 127.0.0.1, or ::1
 are rewritten to ‘host.containers.internal’.  OAuth redirect URIs and
@@ -1731,11 +1750,12 @@ generation, dataset/subvolume, or other identifying information; oc-box
 neither decodes them nor selects a format by filesystem name.  The
 transient mount ID is not recorded.  The registry need not share the
 project's filesystem: no hard links or filesystem-specific utilities are
-used.  ‘sessions.json’ holds session IDs and archive associations.
-‘imports/’ holds private source exports; ‘history/’ holds private host
-archive JSON files.  ‘lock’ serializes mutating commands.  These files
-are outside the project and not mounted into the container.  Transcript
-files may contain private content.
+used.  ‘sessions.json’ (1.x) and ‘sessions-v2.json’ (2.x) hold separate
+session IDs and archive associations.  ‘imports/’ and ‘imports-v2/’ hold
+private source exports; ‘history/’ holds private host archive JSON
+files.  ‘lock’ serializes mutating commands.  These files are outside
+the project and not mounted into the container.  Transcript files may
+contain private content.
 
 ‘.oc-box-id’ in the project associates the directory with its registry.
 Do not edit or copy it to authorize a different mount.  Identity checks
@@ -2032,11 +2052,11 @@ File: oc-box.info,  Node: Installation and manuals,  Next: Authors and license, 
 
 Requires Linux, Python 3.10 or later, rootless Podman with pasta
 networking, delegated cgroup CPU/memory/PIDs controllers, and host
-OpenCode 1.x.  Session import/export compatibility was checked with
-OpenCode 1.19.5.  Other major OpenCode versions are rejected rather than
-assuming database/CLI compatibility.  Podman must work from the regular
-host user, not through sudo.  Network access is needed for initial
-distribution, runtime, and dependency downloads.
+OpenCode 1.x or 2.x.  Session import/export compatibility was checked
+with OpenCode 1.19.5 and 2.2.6.  Other major OpenCode versions are
+rejected rather than assuming database/CLI compatibility.  Podman must
+work from the regular host user, not through sudo.  Network access is
+needed for initial distribution, runtime, and dependency downloads.
 
 16.1 Bash completion
 ====================
@@ -2224,21 +2244,21 @@ Node: Top210
 Node: Name769
 Node: Synopsis930
 Node: Description2438
-Node: Commands4269
-Node: Options44370
-Node: Lifecycle and persistence60827
-Node: Distribution images62580
-Node: Sessions and recovery67448
-Node: Devices and host permissions72736
-Node: Resource reports75082
-Node: Configuration and environment77193
-Node: Files81957
-Node: Exit status86354
-Node: Examples87165
-Node: Troubleshooting89251
-Node: Installation and manuals97322
-Node: Authors and license104918
-Node: See also105525
+Node: Commands5243
+Node: Options45344
+Node: Lifecycle and persistence61801
+Node: Distribution images63554
+Node: Sessions and recovery68429
+Node: Devices and host permissions73717
+Node: Resource reports76063
+Node: Configuration and environment78174
+Node: Files82953
+Node: Exit status87419
+Node: Examples88230
+Node: Troubleshooting90316
+Node: Installation and manuals98387
+Node: Authors and license106000
+Node: See also106607
 
 End Tag Table
 

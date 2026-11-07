@@ -24,6 +24,13 @@ Tests use isolated temporary app data. Mainline model/MCP/LSP/formatter fixtures
 are local and bounded. These checks do not replace live host-side Podman tests.
 Do not run host lifecycle tests from inside the project's running container.
 
+For OpenCode 2.x compatibility, keep a separate native binary and run
+`python3 -B tests/smoke_v2.py --opencode /path/to/opencode-v2`. The branch
+`feature/opencode-2-compat` retains 1.x support and stays unmerged until accepted
+disposable host-terminal lifecycle, credentials, and backup/restore testing.
+See `docs/opencode-2.md` for upstream differences and the private-service env
+strategy. Never test against real host service/config/data from this container.
+
 ## Bash completion
 
 Bash completion lives in `completions/oc-box`, ships in both distribution

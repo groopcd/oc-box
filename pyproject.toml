@@ -47,6 +47,7 @@ include-package-data = false
 oc_box = [
   "LICENSE", "NOTICE", "README.md", "CONTRIBUTING.md", "SECURITY.md",
   "install.sh", "docs/cli.md", "docs/oc-box.1", "docs/oc-box.texi", "docs/oc-box.info",
+  "docs/opencode-2.md",
   "completions/oc-box",
 ]
 

@@ -45,7 +45,8 @@ the boundary and tradeoffs.
 
 - Linux, Python 3.10+, rootless Podman with pasta networking.
 - Delegated CPU, memory, and process cgroup controllers.
-- A host OpenCode 1.x installation. Integration checks use OpenCode 1.19.5.
+- A host OpenCode 1.x or 2.x installation on this compatibility branch.
+  Integration checks use 1.19.5 and 2.2.6; see [2.x compatibility](docs/opencode-2.md).
 - Git on the host for installation from GitHub and self-updates; curl for the
   one-line installer.
 - Network access for initial image, package, and plugin downloads.

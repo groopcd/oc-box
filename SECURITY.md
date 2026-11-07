@@ -31,6 +31,14 @@ quota, so project, image, and volume growth can exhaust host disk space.
 
 ## Optional host credential vault
 
+On the OpenCode 2.x compatibility branch, workspace clients use native private
+`--standalone` servers with per-launch environment snapshots. The host shared
+service is never exposed or restarted. Vault values are not saved in service
+config; copied OpenCode auth still belongs to the private container DB. Credential
+export/refresh uses private memfd/pipe transport and supported CLI/API operations.
+Original V1 container DB bytes are retained separately from the migrated V2
+snapshot. See `docs/opencode-2.md` for scope, limitations and pending host tests.
+
 The original env-file workflow remains the default: no vault initialization,
 password prompt, or crypto dependency is introduced by an ordinary upgrade.
 The opt-in vault uses cryptography's Scrypt KDF and AES-256-GCM; it does not

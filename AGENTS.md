@@ -14,6 +14,10 @@ portable: use example project paths and synthetic session IDs, not local data.
   early preflight guidance. Keep host and workspace-container scopes distinct;
   never install packages automatically from diagnostics.
 - `version_info.py`: commit-derived version and author/license information.
+- `opencode_compat.py` / `opencode_v2_io.py`: version-specific 1.x/2.x CLI,
+  native transcripts, private V2 service leases and credential refresh. Preserve
+  V1 database/history; never save forwarded vault env in service config or
+  connect workspace activity to the host shared service.
 - `workspace_identity.py`: generic Linux VFS directory identity, capability-based
   persistent handles and strict fallback; shared by lifecycle/status checks.
 - `vault.py` / `credentials.py`: optional encrypted host vault and names-only
@@ -83,11 +87,18 @@ the repository; installing oc-box must not require documentation build tools.
 ```bash
 uv run --no-project --with cryptography python -B -m unittest discover -s tests -v
 python3 -B tests/smoke_mainline.py
+python3 -B tests/smoke_v2.py --opencode /path/to/opencode-v2
 ```
 
 The smoke test uses temporary databases and offline fixture services, with
 bounded timeouts. It does not verify actual Podman isolation. Live Podman
 verification must run on the host, outside another container/sandbox.
+
+The V2 smoke uses unmodified 2.2.6 with private servers, native tool/formatter/MCP
+Code Mode execution, env delivery, credential rotation, large transcript sync,
+and upstream V1 migration from a retained snapshot. V2 lacks upstream native LSP.
+Keep `feature/opencode-2-compat` unmerged/unreleased until accepted disposable
+host-terminal V2 lifecycle/credential/backup validation; no real workspaces in tests.
 
 Package/dependency mappings must pass `.github/workflows/distros.yml` on all
 seven catalog images using `tools/test_dependency_distro.py`. That disposable

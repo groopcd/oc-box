@@ -41,3 +41,23 @@ jobs:
           "$RUNNER_TEMP/build/bin/python" -m build
           "$RUNNER_TEMP/build/bin/python" -m twine check dist/*
           python tools/check_package.py dist --with-vault
+  opencode-v2:
+    if: github.ref == 'refs/heads/feature/opencode-2-compat'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Install separate unmodified OpenCode versions in temporary storage
+        run: |
+          npm install --prefix "$RUNNER_TEMP/opencode-v1" --no-audit --no-fund opencode-ai@1.19.5
+          npm install --prefix "$RUNNER_TEMP/opencode-v2" --no-audit --no-fund @opencode/cli@2.2.6
+      - name: Offline V1 and V2 native integration
+        run: |
+          export PATH="$RUNNER_TEMP/opencode-v1/node_modules/.bin:$PATH"
+          python3 -B tests/smoke_mainline.py
+          python3 -B tests/smoke_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"

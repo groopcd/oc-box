@@ -39,7 +39,7 @@ rootless Podman; container root is mapped to the unprivileged host user.
 ## Description
 
 oc-box starts unmodified OpenCode and its local MCP servers, plugins,
-formatters, language servers, shell, and file tools together inside a persistent
+formatters, shell, and file tools together inside a persistent
 development container. It associates one environment with one canonical project
 directory. The entire project, including hidden files, Git history, untracked
 files, and unfinished edits, is mounted writable at the same absolute path.
@@ -64,6 +64,22 @@ There is no disk quota. Containers share the host kernel and can reach network
 services, including configured host services at `host.containers.internal`.
 The project is intentionally writable and can be deleted by container commands.
 Additional Podman options and devices explicitly extend these defaults.
+
+### OpenCode versions
+
+This compatibility branch supports OpenCode 1.x and 2.x, tested with 1.19.5 and
+2.2.6. The host release selects the exact container package: `opencode-ai` for
+1.x, `@opencode/cli` for 2.x. V2 uses `--standalone` with current env-file/vault
+selections at server startup; the host shared service is never restarted or
+exposed inside the container. Its service settings are not copied. V2 uses a
+separate container database/resume state seeded from a consistent V1 snapshot
+and migrated by upstream; V1 history is retained for downgrade.
+
+V2 plugins require the new API; supported legacy config and native V2 fields
+are retained, and the generated Build plugin is version-aware. MCP Code Mode
+and native formatting are preserved. Upstream 2.2.6 does not run language servers
+or expose LSP diagnostics; native LSP remains on 1.x. See `docs/opencode-2.md`
+for environment strategy, migration limits, and pending host validation.
 
 ## Commands
 
@@ -1172,7 +1188,7 @@ Python combination may need an OS upgrade rather than a package reinstall.
 
 | Feature | Host dependencies |
 | --- | --- |
-| Launch/reset/sync | Linux, running Python 3.10+, Podman, pasta (`passt`), newuidmap/newgidmap, catatonit, conmon, crun or runc, host OpenCode 1.x |
+| Launch/reset/sync | Linux, running Python 3.10+, Podman, pasta (`passt`), newuidmap/newgidmap, catatonit, conmon, crun or runc, host OpenCode 1.x or 2.x |
 | Maintenance/stop/repair/purge | Linux, Python, Podman and UID helpers; history preservation/deletion additionally uses host OpenCode |
 | Full/portable backup | Linux, Python, rootless Podman/UID helpers, age/age-keygen (both from `age`), memfd support |
 | Backup inspection | Linux, Python, age/age-keygen, memfd; no Podman/OpenCode/vault extra |
@@ -1413,8 +1429,8 @@ are removed from the copy. Container dependency caches and generated SDK locks
 are reused when host dependency inputs and runtime version are unchanged.
 Cold plugin resolution has its own timed setup stage before the TUI opens.
 
-The generated profile selects Bash and enables native formatters/LSP when not
-explicitly configured. A container-only plugin sets Build permissions to allow
+The generated profile selects Bash and enables native formatting when not
+configured, plus native LSP on 1.x only. A container-only plugin sets Build permissions to allow
 all. Plan/subagent and plain host permissions are unchanged. Other copied
 plugins may have independent checks. Changes require exiting and restarting
 OpenCode; config is not hot-reloaded. Host-only executables must be installed
@@ -1518,7 +1534,8 @@ can include generation, dataset/subvolume, or other identifying information;
 oc-box neither decodes them nor selects a format by filesystem name. The
 transient mount ID is not recorded. The registry need not share the project's
 filesystem: no hard links or filesystem-specific utilities are used.
-`sessions.json` holds session IDs and archive associations. `imports/` holds
+`sessions.json` (1.x) and `sessions-v2.json` (2.x) hold separate session IDs and
+archive associations. `imports/` and `imports-v2/` hold
 private source exports; `history/` holds private host archive JSON files.
 `lock` serializes mutating commands. These files are outside the project and
 not mounted into the container. Transcript files may contain private content.
@@ -1786,8 +1803,8 @@ workspace lock file to bypass the running process.
 ## Installation and manuals
 
 Requires Linux, Python 3.10 or later, rootless Podman with pasta networking,
-delegated cgroup CPU/memory/PIDs controllers, and host OpenCode 1.x. Session
-import/export compatibility was checked with OpenCode 1.19.5. Other major
+delegated cgroup CPU/memory/PIDs controllers, and host OpenCode 1.x or 2.x. Session
+import/export compatibility was checked with OpenCode 1.19.5 and 2.2.6. Other major
 OpenCode versions are rejected rather than assuming database/CLI compatibility.
 Podman must work from the regular host user, not through sudo. Network access
 is needed for initial distribution, runtime, and dependency downloads.

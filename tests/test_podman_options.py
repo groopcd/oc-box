@@ -350,6 +350,7 @@ class PodmanOptionsTests(unittest.TestCase):
         box.atomic_json(box.session_file(self.path), saved)
         home_volume = self.data["home_volume"]
         with (
+            patch.object(box, "detect_opencode_release", return_value="1.19.5"),
             patch.object(box, "check_backend"),
             patch.object(box, "check_resource_controllers"),
             patch.object(box, "remove_resources") as remove,

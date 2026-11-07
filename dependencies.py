@@ -316,7 +316,9 @@ def probe(key):
 def extra_guidance(keys):
     lines = []
     if "opencode" in keys:
-        lines.append("Install host OpenCode 1.x: https://opencode.ai/docs/#install")
+        lines.append(
+            "Install host OpenCode 1.x or 2.x: https://opencode.ai/docs/#install or https://opencode.ai/v2/docs/"
+        )
     if "cryptography" in keys:
         lines.extend(
             [
