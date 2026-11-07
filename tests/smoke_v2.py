@@ -856,7 +856,9 @@ export const Fixture = async () => ({
                                 if not sent and b"Smoke complete" in terminal_output:
                                     os.write(master, b"/exit\r")
                                     sent = True
-                            assert sent and process.poll() == 0, bytes(
+                            if sent:
+                                process.wait(timeout=5)
+                            assert sent and process.returncode == 0, bytes(
                                 terminal_output[-3000:]
                             )
                         finally:
