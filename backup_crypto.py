@@ -378,18 +378,97 @@ def decrypt_bytes(path, private):
         )
 
 
+def pipeline_error(processes, errors):
+    """Report only exit codes and fixed diagnostic categories, never tool text."""
+    stages = []
+    for index, (process, stream) in enumerate(zip(processes, errors)):
+        code = process.poll()
+        if code in (None, 0):
+            continue
+        name = "producer" if index == 0 else "consumer"
+        stream.seek(0, os.SEEK_END)
+        size = stream.tell()
+        stream.seek(max(0, size - 65536))
+        text = stream.read().lower()
+        category = next(
+            (
+                description
+                for patterns, description in (
+                    (
+                        (b"no space left on device", b"enospc"),
+                        "storage or temporary-image space exhausted; check free bytes and inodes",
+                    ),
+                    ((b"disk quota exceeded", b"edquot"), "storage quota exceeded"),
+                    (
+                        (b"read-only file system", b"erofs"),
+                        "destination filesystem is read-only",
+                    ),
+                    (
+                        (
+                            b"permission denied",
+                            b"operation not permitted",
+                            b"eacces",
+                            b"eperm",
+                        ),
+                        "filesystem or user-namespace permission denied; check storage ownership and rootless mappings",
+                    ),
+                    (
+                        (
+                            b"failed to decrypt",
+                            b"authentication failed",
+                            b"incorrect identity",
+                            b"no identity matched",
+                            b"failed to read header",
+                        ),
+                        "decryption/authentication failed; check backup integrity and identity",
+                    ),
+                    (
+                        (
+                            b"payload does not match",
+                            b"unsupported image format",
+                            b"invalid tar header",
+                            b"invalid checksum",
+                            b"unexpected eof",
+                        ),
+                        "archive/image loading was rejected; check integrity and Podman compatibility",
+                    ),
+                    (
+                        (
+                            b"database configuration mismatch",
+                            b"database static dir",
+                            b"database graph root",
+                            b"database run root",
+                        ),
+                        "Podman storage/database configuration mismatch",
+                    ),
+                    (
+                        (b"broken pipe", b"epipe"),
+                        "output pipe closed after the other stage failed",
+                    ),
+                )
+                if any(pattern in text for pattern in patterns)
+            ),
+            "tool failed; private output was not logged",
+        )
+        stages.append(f"{name} exit {code}: {category}")
+    return BackupError(
+        "Backup pipeline failed; partial data was not activated. " + "; ".join(stages)
+    )
+
+
 def stream_pipeline(
     first, second, *, source=None, destination=None, first_fds=(), timeout=3600.0
 ):
     """Pipe bytes directly; stderr is anonymous memory and never echoed."""
     processes = []
-    with memory_file() as errors:
+    with memory_file() as producer_errors, memory_file() as consumer_errors:
+        errors = (producer_errors, consumer_errors)
         try:
             producer = subprocess.Popen(
                 first,
                 stdin=subprocess.DEVNULL if source is None else source,
                 stdout=subprocess.PIPE,
-                stderr=errors,
+                stderr=producer_errors,
                 env=environment(),
                 pass_fds=first_fds,
                 start_new_session=True,
@@ -399,7 +478,7 @@ def stream_pipeline(
                 second,
                 stdin=producer.stdout,
                 stdout=destination or subprocess.DEVNULL,
-                stderr=errors,
+                stderr=consumer_errors,
                 env=environment(),
                 start_new_session=True,
             )
@@ -416,14 +495,10 @@ def stream_pipeline(
                         "Backup streaming operation timed out; partial data was not activated."
                     )
                 if any(code not in (None, 0) for code in codes):
-                    raise BackupError(
-                        "Backup stream/encryption failed; partial data was not activated. Check disk space, permissions, and backup integrity."
-                    )
+                    raise pipeline_error(processes, errors)
                 time.sleep(0.02)
             if any(process.returncode for process in processes):
-                raise BackupError(
-                    "Backup stream/encryption failed; partial data was not activated."
-                )
+                raise pipeline_error(processes, errors)
         except OSError as exc:
             raise BackupError(
                 "Cannot run backup tool; check age, Python, and Podman on the host."

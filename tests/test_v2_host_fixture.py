@@ -408,6 +408,177 @@ class V2HostFixtureTests(unittest.TestCase):
                 fixture.resume_fixture(root)
             self.assertEqual(box.read_json(path)["project"], data["project"])
 
+    def test_full_restore_retry_accepts_only_existing_private_backup_and_missing_destination(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            self.retained_source(root)
+            archive, identity = root / "full.ocbox", root / "age-identity.txt"
+            for file in (archive, identity):
+                file.write_bytes(b"retained fixture evidence")
+                file.chmod(0o600)
+            with patch.object(
+                fixture, "stopped_container", return_value={"State": {"Running": False}}
+            ):
+                self.assertEqual(
+                    fixture.resume_fixture(root, full_restore=True)[0], root
+                )
+            with self.assertRaisesRegex(
+                ValueError, "overwrite backup/restore evidence"
+            ):
+                fixture.resume_fixture(root)
+            (root / "restored-full").mkdir()
+            with self.assertRaisesRegex(
+                ValueError, "overwrite backup/restore evidence"
+            ):
+                fixture.resume_fixture(root, full_restore=True)
+            self.assertEqual(archive.read_bytes(), b"retained fixture evidence")
+
+    def test_full_restore_retry_refuses_insecure_identity_before_any_image_operation(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            self.retained_source(root)
+            for name in ("full.ocbox", "age-identity.txt"):
+                (root / name).write_bytes(b"retained fixture evidence")
+                (root / name).chmod(0o600)
+            (root / "age-identity.txt").chmod(0o644)
+            with self.assertRaisesRegex(ValueError, "private regular fixture files"):
+                fixture.resume_fixture(root, full_restore=True)
+
+    def test_full_restore_retry_authenticates_before_restore_and_preserves_encrypted_evidence(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            path, data = self.retained_source(root)
+            archive = root / "full.ocbox"
+            archive.write_bytes(b"retained encrypted archive evidence")
+            calls = []
+            manifest = {
+                "kind": "full",
+                "source_workspace_id": data["id"],
+                "project": data["project"],
+            }
+            fresh = {
+                **data,
+                "id": "f" * 32,
+                "project": str(root / "restored-full"),
+                "container_project": data["project"],
+            }
+            with (
+                patch.object(
+                    fixture,
+                    "resume_fixture",
+                    return_value=(
+                        root,
+                        Path(sys.executable),
+                        Path(sys.executable),
+                        "tumbleweed",
+                    ),
+                ),
+                patch.object(fixture, "workspace", return_value=(path, data)),
+                patch.object(fixture, "stopped_container"),
+                patch.object(
+                    fixture.crypto,
+                    "opened",
+                    return_value=contextlib.nullcontext(
+                        (manifest, root / "encrypted", b"private fixture key")
+                    ),
+                ),
+                patch.object(fixture.backups, "validate_manifest"),
+                patch.object(
+                    fixture.crypto,
+                    "decrypt_stream",
+                    side_effect=lambda *args: calls.append(("authenticate", args)),
+                ),
+                patch.object(
+                    fixture.backups,
+                    "restore_backup",
+                    side_effect=lambda *args: calls.append(("restore", args)),
+                ),
+                patch.object(
+                    box,
+                    "find_workspace",
+                    return_value=(root / "new/workspace.json", fresh),
+                ),
+                patch.object(
+                    box, "session_state", return_value={"last": fixture.LEGACY_ID}
+                ),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                fixture.retry_full_restore(root)
+            self.assertEqual([call[0] for call in calls], ["authenticate", "restore"])
+            self.assertEqual(calls[0][1][0], root / "encrypted/image.age")
+            self.assertNotIn("podman", calls[0][1][2])
+            args = calls[1][1][1]
+            self.assertEqual(args.file, archive)
+            self.assertEqual(args.project, root / "restored-full")
+            self.assertEqual(
+                archive.read_bytes(), b"retained encrypted archive evidence"
+            )
+            self.assertIn(
+                fresh["id"], json.loads((root / "fixture-ids.json").read_text())
+            )
+            self.assertEqual(
+                json.loads((root / "full-restore-result.json").read_text())["status"],
+                "restored",
+            )
+
+    def test_full_restore_authentication_failure_never_attempts_image_loading(self):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            path, data = self.retained_source(root)
+            archive = root / "full.ocbox"
+            archive.write_bytes(b"retained encrypted archive evidence")
+            manifest = {
+                "kind": "full",
+                "source_workspace_id": data["id"],
+                "project": data["project"],
+            }
+            with (
+                patch.object(
+                    fixture,
+                    "resume_fixture",
+                    return_value=(
+                        root,
+                        Path(sys.executable),
+                        Path(sys.executable),
+                        "tumbleweed",
+                    ),
+                ),
+                patch.object(fixture, "workspace", return_value=(path, data)),
+                patch.object(fixture, "stopped_container"),
+                patch.object(
+                    fixture.crypto,
+                    "opened",
+                    return_value=contextlib.nullcontext(
+                        (manifest, root / "encrypted", b"private fixture key")
+                    ),
+                ),
+                patch.object(fixture.backups, "validate_manifest"),
+                patch.object(
+                    fixture.crypto,
+                    "decrypt_stream",
+                    side_effect=fixture.crypto.BackupError(
+                        "fixture authentication failed"
+                    ),
+                ),
+                patch.object(fixture.backups, "restore_backup") as restore,
+                contextlib.redirect_stdout(io.StringIO()),
+                self.assertRaisesRegex(
+                    fixture.crypto.BackupError, "authentication failed"
+                ),
+            ):
+                fixture.retry_full_restore(root)
+            restore.assert_not_called()
+            self.assertEqual(
+                archive.read_bytes(), b"retained encrypted archive evidence"
+            )
+            self.assertFalse((root / "full-restore-result.json").exists())
+
     def test_fixture_cleanup_refuses_projects_outside_fixture_root(self):
         with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
             root = Path(temporary)

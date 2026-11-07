@@ -886,6 +886,14 @@ restore activation.
 4.19 restore
 ============
 
+Streaming failures identify the producer/consumer exit code and a fixed
+category (for example exhausted storage, permission denial or archive
+rejection); private tool stderr is never printed.  Full image load also
+needs Podman's host temporary image space (normally ‘/var/tmp’), in
+addition to destination image/private-home storage.  Keep the encrypted
+source archive after failure and use a new absent destination after
+incomplete-restore cleanup; no failed staging is activated.
+
 Restore into a **new, nonexistent** host project destination.  Never
 overwrites an existing directory or workspace; there is no
 -force/-replace mode.  Run on the host as your regular user after
@@ -2340,20 +2348,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2527
 Node: Commands5616
-Node: Options48897
-Node: Lifecycle and persistence66572
-Node: Distribution images68692
-Node: Sessions and recovery73567
-Node: Devices and host permissions78855
-Node: Resource reports81201
-Node: Configuration and environment83312
-Node: Files88091
-Node: Exit status92557
-Node: Examples93368
-Node: Troubleshooting95454
-Node: Installation and manuals103619
-Node: Authors and license111232
-Node: See also111839
+Node: Options49384
+Node: Lifecycle and persistence67059
+Node: Distribution images69179
+Node: Sessions and recovery74054
+Node: Devices and host permissions79342
+Node: Resource reports81688
+Node: Configuration and environment83799
+Node: Files88578
+Node: Exit status93044
+Node: Examples93855
+Node: Troubleshooting95941
+Node: Installation and manuals104106
+Node: Authors and license111719
+Node: See also112326
 
 End Tag Table
 

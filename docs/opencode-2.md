@@ -223,9 +223,12 @@ container cannot validate host Podman. Keep the branch unmerged until accepted.
 Accepted host testing confirms 1.x env/MCP operation and 2.2.6 MCP access,
 cold/warm startup, native TUI, web and persistent session-shell coexistence,
 detach/reattach, stop/resume, updated plugin behavior and host history sync.
-Selected-vault credentials, V2 full/portable backup and restore, reset and V1
-downgrade host validation are still pending. Automated fixtures verify those
-data/credential contracts but do not replace host rootless-Podman validation.
+The host fixture verified selected-vault provider/shell/MCP delivery, rotation
+and attach without unlock, and created a full backup. It stopped during full
+restore image loading before activation. V2 full/portable backup and restore,
+reset and V1 downgrade host validation are still pending. Automated fixtures
+verify those data/credential contracts but do not replace host rootless-Podman
+validation.
 
 ### Remaining release checks
 
@@ -316,6 +319,25 @@ of relying on a PATH-selected `opencode`. A mismatch reports the expected and
 detected version plus its executable path; it does not reinstall or modify those
 binaries automatically. If the retained executable itself has changed, inspect
 the reported path and prepare a new fixture with separate exact-version installs.
+
+If the source fixture reaches full backup creation but fails during image load,
+preserve its encrypted archive and retry only that restore:
+
+```sh
+git pull --ff-only
+uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
+  --retry-full-restore /tmp/oc-box-live-v2-EXAMPLE
+```
+
+This reports available bytes/inodes for fixture storage, `/var/tmp` (Podman's
+default image temporary location) and encrypted staging. It authenticates the
+entire image component into a discard stream, then retries the unchanged backup
+at the still-nonexistent `restored-full` destination. It refuses existing restore
+or completed-test evidence. Full restore success writes `full-restore-result.json`
+and records the fresh ID for cleanup; this limited retry is not proof of native
+restored inference, portable restore, reset or downgrade. Pipeline failures show
+producer/consumer exit codes and fixed diagnostic categories, never raw tool
+stderr or decrypted image bytes.
 
 #### Manual alternative
 

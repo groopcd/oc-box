@@ -777,6 +777,13 @@ outer envelope paths are rejected before restore activation.
 
 ### restore
 
+Streaming failures identify the producer/consumer exit code and a fixed category
+(for example exhausted storage, permission denial or archive rejection); private
+tool stderr is never printed. Full image load also needs Podman's host temporary
+image space (normally `/var/tmp`), in addition to destination image/private-home
+storage. Keep the encrypted source archive after failure and use a new absent
+destination after incomplete-restore cleanup; no failed staging is activated.
+
 Restore into a **new, nonexistent** host project destination. Never overwrites
 an existing directory or workspace; there is no --force/--replace mode. Run on
 the host as your regular user after installing age. The active source workspace

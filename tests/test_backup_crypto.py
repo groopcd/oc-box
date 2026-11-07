@@ -206,6 +206,68 @@ class AgeEnvelopeTests(unittest.TestCase):
                 timeout=0.1,
             )
 
+    def test_pipeline_error_identifies_consumer_storage_failure_without_revealing_stderr(
+        self,
+    ):
+        with self.assertRaises(crypto.BackupError) as error:
+            crypto.stream_pipeline(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout.buffer.write(b'fixture')",
+                ],
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdin.buffer.read(); sys.stderr.write('synthetic-secret: no space left on device /private/path'); sys.exit(125)",
+                ],
+            )
+        self.assertIn("consumer exit 125", str(error.exception))
+        self.assertIn("space exhausted", str(error.exception))
+        self.assertNotIn("synthetic-secret", str(error.exception))
+        self.assertNotIn("/private/path", str(error.exception))
+
+    def test_pipeline_error_identifies_producer_and_unknown_failures_without_tool_output(
+        self,
+    ):
+        for text, expected in (
+            ("synthetic-secret failed to decrypt", "decryption/authentication failed"),
+            ("synthetic-secret unrecognized failure", "private output was not logged"),
+        ):
+            with (
+                self.subTest(text=text),
+                self.assertRaises(crypto.BackupError) as error,
+            ):
+                crypto.stream_pipeline(
+                    [
+                        sys.executable,
+                        "-c",
+                        "import sys; sys.stderr.write(" + repr(text) + "); sys.exit(2)",
+                    ],
+                    [sys.executable, "-c", "import sys; sys.stdin.buffer.read()"],
+                )
+            self.assertIn("producer exit 2", str(error.exception))
+            self.assertIn(expected, str(error.exception))
+            self.assertNotIn("synthetic-secret", str(error.exception))
+
+    def test_pipeline_image_format_fallback_does_not_hide_disk_space_error(self):
+        with self.assertRaises(crypto.BackupError) as error:
+            crypto.stream_pipeline(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout.buffer.write(b'fixture-image')",
+                ],
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdin.buffer.read(); sys.stderr.write('payload does not match any formats: private-file: no space left on device'); sys.exit(125)",
+                ],
+            )
+        self.assertIn("consumer exit 125", str(error.exception))
+        self.assertIn("space exhausted", str(error.exception))
+        self.assertNotIn("private-file", str(error.exception))
+
     def test_age_passphrase_envelope_uses_real_tty_never_env_or_argv(self):
         # Exercise only synthetic data through the real age prompt and key
         # envelope, preserving the surrounding terminal on all paths.

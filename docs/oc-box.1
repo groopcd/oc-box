@@ -385,6 +385,8 @@ oc\-box backup\-info /backup/demo.ocbox \-\-identity ~/.config/backup\-age\-key.
 Inspection stages only encrypted envelope components while checking them. It authenticates the manifest and binds component ciphertext to it; restore also verifies every age data stream through its final authentication chunk. Wrong keys, corruption, missing/extra components, unsupported versions, or unsafe outer envelope paths are rejected before restore activation.
 .SS restore
 .PP
+Streaming failures identify the producer/consumer exit code and a fixed category (for example exhausted storage, permission denial or archive rejection); private tool stderr is never printed. Full image load also needs Podman's host temporary image space (normally \fB/\:var/\:tmp\fR), in addition to destination image/private\-home storage. Keep the encrypted source archive after failure and use a new absent destination after incomplete\-restore cleanup; no failed staging is activated.
+.PP
 Restore into a **new, nonexistent** host project destination. Never overwrites an existing directory or workspace; there is no \-\-force/\-\-replace mode. Run on the host as your regular user after installing age. The active source workspace does not need to be removed: this is a fresh independent environment.
 .PP
 .nf

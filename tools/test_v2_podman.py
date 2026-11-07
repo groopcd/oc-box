@@ -538,7 +538,7 @@ def cleanup(root):
     )
 
 
-def resume_fixture(root):
+def resume_fixture(root, *, full_restore=False):
     """Only retry a stopped source fixture that has not started backups yet."""
     if root.is_symlink() or not root.name.startswith(PREFIX):
         raise ValueError("Not a V2 acceptance fixture directory")
@@ -594,18 +594,32 @@ def resume_fixture(root):
             "Resume supports only a source fixture before backup/restore; use cleanup and a new fixture after later failures"
         )
     if any(
-        (root / name).exists()
+        (root / name).exists() or (root / name).is_symlink()
         for name in (
-            "full.ocbox",
+            *(("full.ocbox",) if not full_restore else ()),
             "portable.ocbox",
             "restored-full",
             "restored-portable",
             "result.json",
+            "full-restore-result.json",
         )
     ):
         raise ValueError(
             "Resume would overwrite backup/restore evidence; use cleanup and a new fixture"
         )
+    if full_restore:
+        for name in ("full.ocbox", "age-identity.txt"):
+            file = root / name
+            info = file.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_mode & 0o077
+                or info.st_nlink != 1
+            ):
+                raise ValueError(
+                    "Retained full backup and identity must be private regular fixture files"
+                )
     storage = (
         '[storage]\ndriver = "overlay"\nrunroot = '
         + json.dumps(str(root / "podman-run"))
@@ -653,6 +667,96 @@ def resume_fixture(root):
             box.refresh_workspace_identity(path, data)
             stopped_container(data)
     return root, *binaries, data["distro"]
+
+
+def retry_full_restore(root):
+    """Retry the retained full backup without regenerating/changing its source."""
+    root, _, _, _ = resume_fixture(root, full_restore=True)
+    archive, identity = root / "full.ocbox", root / "age-identity.txt"
+    before = crypto.digest(archive)
+    with (
+        patch.dict(os.environ, isolated_env(root), clear=True),
+        patch.object(vault, "vault_path", return_value=root / "vault/vault.json"),
+        patch.object(Path, "home", return_value=root / "host-home"),
+    ):
+        ident = json.loads((root / "fixture-ids.json").read_text())[0]
+        path, data = workspace(ident)
+        with box.workspace_lock(path):
+            stopped_container(data)
+            # Read filesystem capacity only; no predictable temporary file.
+            image_tmp = Path("/var/tmp")  # nosec B108
+            for label, location in (
+                ("fixture image storage", root / "data/containers/storage"),
+                ("Podman default temporary storage", image_tmp),
+                ("encrypted-component staging", Path(tempfile.gettempdir())),
+            ):
+                info = os.statvfs(location)
+                print(
+                    f"oc-box fixture: {label}: available {info.f_bavail * info.f_frsize // (1024 * 1024)} MiB, free inodes {info.f_favail}",
+                    flush=True,
+                )
+            with crypto.opened(archive, [identity]) as (manifest, encrypted, private):
+                backups.validate_manifest(box, manifest)
+                if (
+                    manifest["kind"] != "full"
+                    or manifest["source_workspace_id"] != ident
+                    or manifest["project"] != data["project"]
+                ):
+                    raise ValueError(
+                        "Encrypted full backup does not match the retained fixture source"
+                    )
+                with box.loading_stage(
+                    "Authenticating complete encrypted image component"
+                ):
+                    crypto.decrypt_stream(
+                        encrypted / "image.age",
+                        private,
+                        [
+                            sys.executable,
+                            "-B",
+                            "-c",
+                            "import sys; reader=sys.stdin.buffer; data=reader.read(1048576)\nwhile data: data=reader.read(1048576)",
+                        ],
+                    )
+            print(
+                "PASS: Complete image.age decrypted/authenticated without plaintext staging; retrying unchanged full backup.",
+                flush=True,
+            )
+            backups.restore_backup(
+                box,
+                argparse.Namespace(
+                    project=root / "restored-full", file=archive, identity=[identity]
+                ),
+            )
+            restored_path, restored = box.find_workspace(root / "restored-full")
+            if restored_path is None or restored is None:
+                raise AssertionError("Retried full restore was not registered")
+            recorded = json.loads((root / "fixture-ids.json").read_text())
+            recorded.append(restored["id"])
+            (root / "fixture-ids.json").write_text(json.dumps(recorded))
+            stopped_container(restored)
+            if (
+                box.session_state(restored_path)["last"] != LEGACY_ID
+                or box.container_project(restored) != data["project"]
+            ):
+                raise AssertionError(
+                    "Retried restore did not preserve selected session/internal path"
+                )
+    if crypto.digest(archive) != before:
+        raise AssertionError("The retained encrypted backup was changed")
+    result = {
+        "status": "restored",
+        "scope": "Full archive authentication and stopped restore; native relaunch, portable restore, reset/downgrade still require the complete host fixture",
+        "workspace_id": restored["id"],
+        "encrypted_backup": before,
+        "version": get_version_info(APP)["version"],
+    }
+    (root / "full-restore-result.json").write_text(json.dumps(result, indent=2) + "\n")
+    print(
+        "PASS: Retained full backup restored; source/archive unchanged. Report: "
+        + str(root / "full-restore-result.json"),
+        flush=True,
+    )
 
 
 def run(root, v1, v2, distro, *, resume=False):
@@ -1050,6 +1154,11 @@ def main(argv=None):
     parser.add_argument("--distro", choices=tuple(box.DISTROS), default="tumbleweed")
     parser.add_argument("--cleanup", type=Path)
     parser.add_argument(
+        "--retry-full-restore",
+        type=Path,
+        help="authenticate and retry a retained full backup into its still-absent restored-full destination without regenerating the backup",
+    )
+    parser.add_argument(
         "--resume",
         type=Path,
         help="retry a retained stopped source fixture before any backup/restore, reusing its native executables and container cache",
@@ -1061,9 +1170,24 @@ def main(argv=None):
             "Run this fixture from a regular HOST terminal, not sudo or inside oc-box.\n",
         )
     if args.cleanup:
-        if args.resume:
-            parser.error("--cleanup and --resume cannot be combined")
+        if args.resume or args.retry_full_restore:
+            parser.error("--cleanup cannot be combined with a retry")
         cleanup(args.cleanup)
+        return 0
+    if args.retry_full_restore:
+        if args.resume or args.opencode_v1 or args.opencode_v2:
+            parser.error(
+                "--retry-full-restore reuses fixture/archive metadata and cannot be combined with other retry/executable options"
+            )
+        try:
+            retry_full_restore(args.retry_full_restore)
+        except BaseException:
+            print(
+                "Fixture and encrypted backup retained for diagnosis: "
+                + str(args.retry_full_restore),
+                file=sys.stderr,
+            )
+            raise
         return 0
     if args.resume:
         if args.opencode_v1 or args.opencode_v2:
