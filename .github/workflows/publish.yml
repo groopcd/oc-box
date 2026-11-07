@@ -39,11 +39,15 @@ jobs:
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
-          python -m compileall -q oc_box.py bootstrap.py sync_config.py terminal_ui.py status_report.py workspace_identity.py installation.py updater.py version_info.py backups.py backup_crypto.py backup_archive.py
           python tools/build_docs.py --check
           python - <<'PY'
           import os
+          import py_compile
+          from installation import PROGRAM_FILES
           from version_info import get_version_info, public_version
+          for name in PROGRAM_FILES:
+              if name.endswith('.py'):
+                  py_compile.compile(name, doraise=True)
           build = get_version_info('.')
           expected = 'v' + public_version(build)
           assert build['commit'] and build['commit_count'], 'Full Git history is required'

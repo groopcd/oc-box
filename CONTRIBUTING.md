@@ -42,9 +42,14 @@ identity, event streaming and binary upgrades. Unit tests cover same-user leases
 concurrent attach without unlock, owner wait ordering, maintenance exclusion and
 port failure. Native session-shell PTY tests verify persistent identity, viewport,
 detach/reattach and shell state alongside web access. Host-terminal web/TUI/shell
-coexistence must still be validated. Copied plugin tests cover Unicode byte
+coexistence is accepted. Copied plugin tests cover Unicode byte
 budgets, primary-request JSON schemas, configured sources outside autoload
 directories, PDF/history transforms and model-variant request rewriting.
+Native V1/V2 integration runs continuously on master, feature branches and pull
+requests; package checks assert the compatibility guide, V2 runtime resources and
+offline JS fixtures ship through their intended distribution channels. Accepted
+host TUI/web/shell and plugin tests are recorded in `docs/opencode-2.md`; the
+remaining vault/backup/reset/downgrade host checks gate merge and publication.
 
 ## Bash completion
 

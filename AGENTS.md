@@ -111,6 +111,10 @@ Code Mode execution, env delivery, credential rotation, large transcript sync,
 and upstream V1 migration from a retained snapshot. V2 lacks upstream native LSP.
 Keep `feature/opencode-2-compat` unmerged/unreleased until accepted disposable
 host-terminal V2 lifecycle/credential/backup validation; no real workspaces in tests.
+Host TUI/web/persistent-shell coexistence, detach/reattach, stop/resume and updated
+plugin behavior are accepted. Selected-vault credentials, V2 full/portable
+backup/restore, reset and V1 downgrade still require host acceptance. Keep native
+V1/V2 integration enabled on master and pull requests after the feature merges.
 
 Package/dependency mappings must pass `.github/workflows/distros.yml` on all
 seven catalog images using `tools/test_dependency_distro.py`. That disposable

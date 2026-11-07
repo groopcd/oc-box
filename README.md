@@ -2,9 +2,10 @@
 
 **Persistent rootless Podman development environments for unmodified OpenCode.**
 
-Run OpenCode, MCP servers, formatters, language servers, plugins, and development
-tools together inside a container. Give the agent control of that environment
-while exposing only your selected project directory by default.
+Run OpenCode, MCP servers, formatters, plugins, and development tools together
+inside a container, with native language servers on OpenCode 1.x. Give the agent
+control of that environment while exposing only your selected project directory
+by default.
 
 Copyright (C) 2026 Paulo Dias <paulo.miguel.dias@gmail.com>.
 Licensed [GPL-3.0-or-later](LICENSE); see [NOTICE](NOTICE) for attribution and
@@ -24,7 +25,8 @@ The practical advantages for that workflow are:
 - **Install what the project needs:** compilers, SDKs, databases, and distro
   packages live inside the container rather than changing the host system.
 - **Keep integrations working:** OpenCode itself, MCP servers, formatters,
-  language servers, and plugins run together inside the same environment.
+  and plugins run together inside the same environment. OpenCode 1.x also runs
+  native language servers; upstream 2.2.6 does not provide native LSP.
 - **Choose the project's distro:** Tumbleweed, Leap, Ubuntu, Debian, Fedora,
   Arch, or Alpine, with dependencies specific to that project.
 - **Pick up where you left off:** installed tools, project files, and

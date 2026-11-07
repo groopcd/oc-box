@@ -42,7 +42,6 @@ jobs:
           "$RUNNER_TEMP/build/bin/python" -m twine check dist/*
           python tools/check_package.py dist --with-vault
   opencode-v2:
-    if: github.ref == 'refs/heads/feature/opencode-2-compat'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

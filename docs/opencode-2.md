@@ -1,7 +1,9 @@
 # OpenCode 1.x and 2.x compatibility
 
-Development branch: `feature/opencode-2-compat`. Released oc-box 1.0.7 supports
-OpenCode 1.x. Validation on this branch uses unmodified 1.19.5 and 2.2.6.
+Development branch: `feature/opencode-2-compat`, pending the remaining host
+lifecycle checks before merge/publication. The compatibility code supports
+unmodified OpenCode 1.19.5 and 2.2.6. Installing a previously published PyPI or
+GitHub release does not install this unmerged work.
 
 ## Environment and service plan
 
@@ -218,10 +220,38 @@ Before merge/release, accept host-terminal testing in a disposable workspace:
 fresh/warm V2 TUI, env-file and selected-vault provider/MCP access, stop/resume,
 import/sync, full/portable backup restore, reset and V1 downgrade. This development
 container cannot validate host Podman. Keep the branch unmerged until accepted.
-Reported host testing has confirmed 1.x env/MCP operation and 2.2.6 MCP access,
-cold/warm startup, native TUI exit, web access and host history sync. The session
-shell and new plugin fixes need a host retest. Selected-vault,
-full/portable restore, reset and downgrade host validation are still pending.
+Accepted host testing confirms 1.x env/MCP operation and 2.2.6 MCP access,
+cold/warm startup, native TUI, web and persistent session-shell coexistence,
+detach/reattach, stop/resume, updated plugin behavior and host history sync.
+Selected-vault credentials, V2 full/portable backup and restore, reset and V1
+downgrade host validation are still pending. Automated fixtures verify those
+data/credential contracts but do not replace host rootless-Podman validation.
+
+### Remaining release checks
+
+Use only disposable projects, credential selections and backups:
+
+- **Selected vault credentials:** launch V2 using a selected synthetic vault
+  value and verify it inside that workspace; change the value and relaunch to
+  verify refresh. Attached web/TUI/shell clients must retain the owning launch's
+  snapshot and must not unlock again.
+- **V2 backup/restore:** create both full and portable backups after the owner
+  and attached clients exit, restore to fresh destinations, then launch and
+  verify sessions, internal paths, private-home data and expected OS differences.
+  The older `tools/test_backup_podman.py` fixture verifies backup transport and
+  rootless ownership with synthetic database bytes; it does not by itself verify
+  restored native V2 inference or service lifecycle.
+- **Reset/downgrade:** reset a disposable V2 workspace and verify retained
+  project/private-home/session data. Select a separate host 1.19.5 executable and
+  launch to verify retained V1 history, then select 2.2.6 again and verify V2
+  progress was not reseeded or lost. Keep test configuration V1-compatible.
+
+After accepted results, remove the development-release notice, record the host
+evidence, regenerate manuals, and commit the release documentation. Continuous
+CI runs native V1/V2 integration on branches, pull requests and master, alongside
+regression/package checks and the seven-distro matrix. Fast-forward the tested
+commit into master, publish its matching commit-derived tag, and verify the
+GitHub/PyPI wheel/sdist source identity, installation and SHA256 checksums.
 
 ## Upstream references
 
