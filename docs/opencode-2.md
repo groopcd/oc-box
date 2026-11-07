@@ -238,8 +238,8 @@ publication waits for the host results below.
 Run `tools/test_v2_podman.py` from the repository root in your regular Linux host
 terminal. It cannot run from this development container: host Podman resources
 are not exposed, and nested Podman would not test the host lifecycle. The fixture
-creates a private temporary registry, config, host DBs and encrypted synthetic
-vault. It never uses the operator's vault, env-file/provider values, projects,
+creates private temporary Podman graphroot/runroot, registry, config, host DBs
+and encrypted synthetic vault. It never uses the operator's vault, env-file/provider values, projects,
 models, or shared OpenCode service. Use separate unmodified 1.19.5 and 2.2.6
 executables to avoid replacing your installed OpenCode. For example:
 
@@ -258,8 +258,9 @@ these setup commands; see `oc-box doctor`. The default test distro is Tumbleweed
 (`--distro NAME` selects another catalog distro). Expect image/package downloads,
 separate exact-version runtime installs and full encrypted image transfers;
 the run can take several minutes and needs room for three temporary workspaces
-plus encrypted backups. It invokes production commands against fixture-owned
-resources only. A host-loopback synthetic provider and container-local MCP verify
+plus encrypted backups. Its isolated Podman storage downloads test images even
+if your regular host storage has them cached. It invokes production commands
+against fixture-owned resources only. A host-loopback synthetic provider and container-local MCP verify
 native tool execution and selected-vault credentials, without real inference.
 
 Checks include credential rotation, attach without unlock, wrong-password reset

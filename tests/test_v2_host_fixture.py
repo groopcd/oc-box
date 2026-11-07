@@ -47,12 +47,15 @@ class V2HostFixtureTests(unittest.TestCase):
             {
                 "OPENAI_API_KEY": "real-provider-fixture",
                 "CUSTOM_SECRET": "real-custom-fixture",
+                "XDG_DATA_HOME": "/real-host-data",
             },
         ):
             env = fixture.isolated_env(Path("/tmp/example"))
         self.assertNotIn("OPENAI_API_KEY", env)
         self.assertNotIn("CUSTOM_SECRET", env)
         self.assertEqual(env["OPENCODE_AUTH_CONTENT"], "{}")
+        self.assertEqual(env["XDG_DATA_HOME"], "/tmp/example/data")
+        self.assertEqual(env["XDG_STATE_HOME"], "/tmp/example/state")
 
     def test_fixture_configuration_contains_only_synthetic_names_and_local_endpoints(
         self,
@@ -105,6 +108,17 @@ class V2HostFixtureTests(unittest.TestCase):
                 self.assertEqual(payload["state"], str(root / ("host-state-" + major)))
                 self.assertEqual(payload["home"], str(root / "host-home"))
                 self.assertIsNone(payload["db"])
+
+    def test_podman_storage_and_runroot_are_both_inside_the_disposable_fixture(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fixture.storage_config(root)
+            text = (root / "config/containers/storage.conf").read_text()
+            self.assertIn('driver = "overlay"', text)
+            self.assertIn("runroot = " + json.dumps(str(root / "podman-run")), text)
+            self.assertIn(
+                "graphroot = " + json.dumps(str(root / "data/containers/storage")), text
+            )
 
     def test_synthetic_provider_requires_current_vault_value_and_exercises_native_tools(
         self,

@@ -67,11 +67,14 @@ def stopped_container(data):
 
 
 def isolated_env(root):
-    """Keep host Podman storage/runtime discovery; isolate OpenCode via wrapper."""
+    """Keep host runtime discovery; isolate Podman storage and OpenCode data."""
     env = box.maintenance_host_env()
     env.update(
         OC_BOX_STATE_HOME=str(root / "registry"),
         XDG_CONFIG_HOME=str(root / "config"),
+        XDG_DATA_HOME=str(root / "data"),
+        XDG_STATE_HOME=str(root / "state"),
+        XDG_CACHE_HOME=str(root / "cache"),
         PATH=str(root / "bin") + ":" + env.get("PATH", "/usr/bin:/bin"),
         OC_BOX_CONTAINER="0",
         OPENCODE_DISABLE_MODELS_FETCH="1",
@@ -106,6 +109,20 @@ os.execve(paths[major],[paths[major],*sys.argv[1:]],env)
     (root / "executables.json").write_text(json.dumps({"1": str(v1), "2": str(v2)}))
     (root / "host-major").write_text("1")
     return binary
+
+
+def storage_config(root):
+    # Separate both persistent graphroot and transient runroot; sharing the
+    # host's /run/user/.../containers runroot can mix Libpod database identities.
+    target = root / "config/containers/storage.conf"
+    target.parent.mkdir(parents=True)
+    target.write_text(
+        '[storage]\ndriver = "overlay"\nrunroot = '
+        + json.dumps(str(root / "podman-run"))
+        + "\ngraphroot = "
+        + json.dumps(str(root / "data/containers/storage"))
+        + "\n"
+    )
 
 
 def legacy_session(project):
@@ -327,7 +344,7 @@ def cleanup(root):
         raise ValueError(
             "Fixture registry must not redirect cleanup outside its private root"
         )
-    with patch.dict(os.environ, {"OC_BOX_STATE_HOME": str(root / "registry")}):
+    with patch.dict(os.environ, isolated_env(root), clear=True):
         paths = list(box.workspace_paths())
         for path in paths:
             if path.is_symlink() or path.parent.is_symlink():
@@ -368,6 +385,7 @@ def run(root, v1, v2, distro):
     settings = root / "config/oc-box"
     settings.mkdir()
     (settings / "config.json").write_text(json.dumps({"default_distro": distro}))
+    storage_config(root)
     (root / "fixture-ids.json").write_text("[]")
     server, worker = make_provider(state)
     try:
