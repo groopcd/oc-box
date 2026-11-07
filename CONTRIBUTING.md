@@ -36,6 +36,11 @@ smoke exercises synthetic hooks and the sandbox package's container opt-out.
 To inspect installed local plugins without changing them, optionally add
 `--legacy-plugin-dir /path/to/copied-v1-plugins` to the V2 smoke. It copies source
 files into temporary storage and never uses host provider credentials.
+V2 shared-client tests use real temporary native servers and local Podman-transport
+substitutes for authenticated browser pairing/cookies, same-session/API process
+identity, event streaming and binary upgrades. Unit tests cover same-user leases,
+concurrent attach without unlock, owner wait ordering, maintenance exclusion and
+port failure. Host-terminal web/TUI/mini coexistence must still be validated.
 
 ## Bash completion
 

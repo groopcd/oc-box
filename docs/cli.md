@@ -12,12 +12,13 @@ oc-box stop [--project PATH | --workspace ID]
 oc-box sync [--project PATH | --workspace ID]
 oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS]
 oc-box repair [--project PATH | --workspace ID]
-oc-box terminal [--project PATH | --workspace ID]
+oc-box terminal [--project PATH | --workspace ID] [--maintenance]
 oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
 oc-box list
 oc-box distros
 oc-box doctor [--json] [--feature FEATURE ...]
 oc-box completion bash
+oc-box web [--project PATH | --workspace ID] [--port N] [--no-open]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
 oc-box upgrade [--check | --auto-update on|off]
@@ -69,8 +70,9 @@ Additional Podman options and devices explicitly extend these defaults.
 
 This compatibility branch supports OpenCode 1.x and 2.x, tested with 1.19.5 and
 2.2.6. The host release selects the exact container package: `opencode-ai` for
-1.x, `@opencode/cli` for 2.x. V2 uses `--standalone` with current env-file/vault
-selections at server startup; the host shared service is never restarted or
+1.x, `@opencode/cli` for 2.x. V2 uses a workspace-owned private stdio server with
+native `--server` clients and current env-file/vault selections at server startup;
+isolated setup/history probes use `--standalone`. The host shared service is never restarted or
 exposed inside the container. Its service settings are not copied. V2 uses a
 separate container database/resume state seeded from a consistent V1 snapshot
 and migrated by upstream; V1 history is retained for downgrade.
@@ -187,11 +189,55 @@ oc-box sync --project ~/devel/demo
 oc-box sync --workspace WORKSPACE_ID
 ```
 
+### web — browser interface
+
+Open the native OpenCode 2.x browser UI for a workspace. If its TUI or web owner
+is running, attach to that same private service/session without waiting for it
+to exit or unlocking/refreshing credentials. Otherwise perform a normal V2
+startup (including selected credential unlock) and own a foreground web lease.
+New projects can be created using the host's default distro. Requires host
+OpenCode 2.x; 1.x has no web command through this launcher.
+
+```sh
+oc-box --project ~/devel/demo
+# While it runs, use another host terminal:
+oc-box web --project ~/devel/demo
+oc-box terminal --project ~/devel/demo
+```
+
+The browser uses upstream's short-lived one-use pairing link and opens the same
+session through the native web app. A host relay binds only `127.0.0.1`, forwards
+HTTP/streaming/WebSocket bytes through Podman exec to container loopback, and
+does not publish a container port, allow LAN access, or join the host OpenCode
+service. Links grant access to the workspace service; do not share or log them.
+`--no-open` prints the link without launching a browser. `--port` defaults to 0
+(choose a free loopback port). Keep the web command open; Ctrl-C closes that
+relay. Browser commands use a sanitized host environment without provider/vault
+values; the server retains the owning launch's credential snapshot.
+
+The owner keeps the lifecycle lock and waits for attached terminal/web/TUI
+clients before final history sync and container stop. Closing one attached
+client does not stop the others. `oc-box stop` from another host terminal stops
+the whole workspace and disconnects all clients. Backup/reset/purge continue to
+require the lifecycle lock. Run normal `oc-box start --project PATH` to join a
+running web-owned session with the full TUI. Additional clients accept selectors
+(and start's `--resume`) only; change model/session/configuration when no owner
+is active. The owning foreground command is needed for web access; closing the
+browser tab alone does not close its relay or terminate the owner.
+
 ### terminal
+
+On V2, the default is OpenCode's compact terminal client attached to the active
+private service/session; it can run concurrently with the full TUI and web UI.
+It does not forward new host credentials, refresh config/auth, or take the
+exclusive lifecycle lock. A ready active V2 owner is required; start `oc-box`
+or `oc-box web` first. Exit the attached client to release its lease without
+stopping other clients. Use `--maintenance` for the shell described below.
+On V1 the existing maintenance-shell default is retained.
 
 Open an interactive maintenance shell in an existing workspace container
 instead of starting OpenCode. Select the current project, `--project PATH`, or
-`--workspace ID`. Only these selectors and help are accepted. Run from a real
+`--workspace ID`. Only these selectors, `--maintenance` and help are accepted. Run from a real
 host terminal with TTY input/output; piped or redirected input/output is refused.
 
 ```sh
@@ -244,7 +290,7 @@ terminal does not change create-time environment or undo earlier exposure.
 For example, after mapping an NPU in an earlier reset:
 
 ```sh
-oc-box terminal --project ~/devel/npu
+oc-box terminal --maintenance --project ~/devel/npu
 ls -l /dev/accel/accel0
 prlimit --pid $$ --memlock
 xrt-smi examine
@@ -826,6 +872,27 @@ support without requiring Podman or host OpenCode. With no selector, report all
 features and evaluate launch prerequisites for the exit status. Use
 `oc-box doctor --help` for the complete accepted names.
 
+### --maintenance
+
+Terminal-only. Open the restricted maintenance shell instead of a live V2
+session client. This retains the existing allowlisted environment, no host
+credential forwarding/unlock, no config/auth refresh, no startup profiles and
+no persistent shell history. Maintenance holds the exclusive workspace lock;
+exit the active owner first. Without this flag, terminal joins an active V2
+session with OpenCode's compact `mini` terminal interface; 1.x continues to use
+the existing maintenance shell.
+
+### --port N
+
+Web-only. Select the host-loopback relay port: 0 (default) chooses a free port;
+explicit ports are 1..65535. Binding failure is reported without replacing an
+existing listener. The container service's own random loopback port stays private.
+
+### --no-open
+
+Web-only. Print the native one-use browser pairing link instead of invoking the
+host browser. The foreground relay still runs until Ctrl-C or workspace stop.
+
 ### --project PATH
 
 Select an existing project directory; relative paths resolve from the host
@@ -1142,7 +1209,9 @@ Operation              Project   Private home/sessions   Container OS
 Exit OpenCode          kept      kept; archive sync     kept; stopped
 stop                   kept      kept                   kept; stopped
 sync                   kept      kept; archive sync     kept; stopped
-terminal               kept      kept; no archive sync  kept; prior run state
+terminal (V1/maintenance) kept     kept; no archive sync  kept; prior run state
+terminal (V2 attach)    kept      shared current session kept; owner controls stop
+web (V2)               kept      shared current session kept; sync/stop on last client
 reset                  kept      kept, same session ID  rebuilt
 purge                  kept      deleted                deleted
 purge --delete-sessions kept      deleted                deleted
@@ -1158,8 +1227,11 @@ system-wide packages do not. No command currently manages Btrfs snapshots.
 CPU, RAM, process, distro, and mapping changes require reset for existing
 containers. A stop/start alone reuses the old create-time settings. Avoid
 changing resources directly through Podman if metadata consistency is required.
-An active launcher holds a nonblocking workspace lock; start, sync, reset,
-repair, terminal, and purge require that launcher to exit. Read-only list/status and
+An active launcher holds a nonblocking workspace lock; sync, reset,
+repair, maintenance terminals, and purge require that launcher to exit. V1
+start also requires that launcher to exit. V2
+TUI/terminal/web attach clients use same-user leases and can coexist without
+refreshing credentials or taking the exclusive lock. Read-only list/status and
 explicit stop can run from a second terminal. A crash releases the lock when
 its process exits; an orphan still running can retain it.
 
@@ -1784,7 +1856,8 @@ when diagnosing a wait; reset discards the OS cache and can repeat cold setup.
 
 ### Active workspace lock or failed import
 
-Exit the active launcher before start/sync/reset/repair/terminal/purge. Status and stop remain
+Exit the active launcher before sync/reset/repair/maintenance/purge. Ordinary V2
+TUI, compact terminal and web clients can join the live owner. Status and stop remain
 available in another terminal. Do not delete the lock file to bypass a live
 process. For a failed import, retry the same flag with an updated launcher;
 recovery uses the saved export without overwriting existing container work.
@@ -1793,7 +1866,7 @@ volume. A deleted private volume cannot be recovered from session metadata alone
 
 ### Maintenance shell environment
 
-Use `oc-box terminal` to debug an existing container without launching OpenCode
+Use `oc-box terminal --maintenance` to debug an existing container without launching OpenCode
 or supplying host tokens. A missing command may need installing in that
 container; terminal does not install baseline tools automatically. Its shell
 deliberately skips user profiles, shell history, and normal credential forwarding.

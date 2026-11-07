@@ -20,7 +20,7 @@ def major(release):
     return int(version(release).split(".", 1)[0])
 
 
-def command(release, executable, arguments):
+def command(release, executable, arguments, *, server=None):
     args = list(arguments)
     if major(release) == 1:
         return [executable, *args]
@@ -29,19 +29,23 @@ def command(release, executable, arguments):
         args.insert(0, "session")
     if args[:2] == ["session", "list"] and "--max-count" not in args:
         args.extend(["--max-count", "2147483647"])
-    if "--standalone" not in args:
+    if server:
+        args = [arg for arg in args if arg != "--standalone"]
+        if "--server" not in args:
+            args.extend(["--server", server])
+    elif "--standalone" not in args and "--server" not in args:
         args.append("--standalone")
     return [executable, *args]
 
 
-def tui(release, executable, project, session=None, model=None):
+def tui(release, executable, project, session=None, model=None, *, server=None):
     args = [str(project)]
     if session:
         args.extend(["--session", session])
     if not model or major(release) == 1:
         if model:
             args.extend(["--model", model])
-        return command(release, executable, args)
+        return command(release, executable, args, server=server)
     # V2's full TUI has no --model flag. A launch-local config contribution
     # selects new sessions; callers update an existing session through the API.
     bridge = """import json,os,sys
@@ -49,7 +53,13 @@ content=json.loads(os.environ.get('OPENCODE_CONFIG_CONTENT','{}')); content['mod
 os.environ['OPENCODE_CONFIG_CONTENT']=json.dumps(content)
 os.execvpe(sys.argv[2],sys.argv[2:],os.environ)
 """
-    return ["python3", "-c", bridge, model, *command(release, executable, args)]
+    return [
+        "python3",
+        "-c",
+        bridge,
+        model,
+        *command(release, executable, args, server=server),
+    ]
 
 
 def model(value):

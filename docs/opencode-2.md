@@ -10,13 +10,43 @@ Providers, configuration, plugins, and MCP servers run in the service: connectin
 a terminal with a different environment does not replace a running service's
 environment.
 
-oc-box uses supported **`--standalone` private-server mode** in each workspace.
+oc-box owns a private authenticated stdio server in each active workspace.
+The full TUI, compact terminal and web clients use native **`--server`** against
+that same service. Isolated setup/history probes still use **`--standalone`**.
 The server inherits that launch's env-file/vault selections through Podman's
 `--env NAME` forwarding. Values never enter command arguments, host global
 environment, registry metadata, or plaintext service config. Upstream's private,
 authenticated stdio lease ties server lifetime to its client; container stop
 ends remaining processes. Each launch gets current values. The host shared
 service is never stopped, reconfigured, or exposed inside a workspace.
+
+### Concurrent web, terminal and full TUI clients
+
+```sh
+oc-box --project ~/devel/demo
+# In another host terminal while the TUI is active:
+oc-box web --project ~/devel/demo
+oc-box terminal --project ~/devel/demo
+```
+
+`web` opens the native browser UI through a host-loopback relay and a native
+one-use pairing link. `--no-open` prints the link; `--port N` selects a local
+port (default automatic). Keep the foreground web command open; Ctrl-C ends
+only that relay. It can also own a normal credential-aware V2 launch when no
+TUI is active. A later ordinary `oc-box --project PATH` joins with the full TUI.
+`terminal` joins with upstream's compact `mini` interface. Attached clients use
+the already-running server's config and credentials, not a new shell snapshot.
+
+Same-user clients obtain a memory-only lease through a private host runtime
+Unix socket; no endpoint/password is saved to registry or service config. The
+owner retains the lifecycle lock and waits for attached clients before history
+sync/container stop. Closing the TUI does not kill an attached web/terminal
+client. `oc-box stop` disconnects all; backup/reset/purge require owner exit.
+Web traffic travels over Podman exec streams to container loopback without port
+publication or LAN exposure. A printed pairing link grants service access;
+do not share it. The browser is launched with a sanitized host environment.
+`terminal --maintenance` retains the original restricted maintenance shell,
+with the lifecycle lock and no config/auth refresh or credential forwarding.
 
 Host history/auth operations also use private servers with the normal host DB
 and isolated config/state roots. Existing OpenCode provider credentials may be
@@ -70,7 +100,7 @@ provider/MCP config resolution.
 | Feature | 1.x | 2.x branch behavior |
 | --- | --- | --- |
 | Exact runtime | `opencode-ai@VERSION` | `@opencode/cli@VERSION`, decorated version output normalized |
-| TUI | Native 1.x | Native 2.x with `--standalone` |
+| TUI | Native 1.x | Native 2.x on the workspace-owned private service |
 | Env/vault | Per-exec forwarding | Fresh server startup environment, image leftovers cleared |
 | Config/agents/skills | Existing files | Supported V1 fields and V2 files retained, `cli.json` copied |
 | Service settings | No shared service | `service*.json` excluded; no remote/hostname/env reactivation |
@@ -83,7 +113,7 @@ provider/MCP config resolution.
 | Model/new/resume | V1 CLI flags | Session create/switch-model API and launch-local TUI config |
 | Backup/reset/restore | Complete private home | Both databases and major selection preserved, internal paths retained |
 | Status/doctor/completion | Available | Available without starting OpenCode |
-| Maintenance terminal | No auth/config refresh | Same restricted semantics, no service/credential forwarding |
+| Terminal/web | Maintenance shell | Concurrent compact terminal/full TUI/web on one service/session; `--maintenance` retains restricted shell |
 
 The generated oc-box plugin is ported. Copied standalone V1 plugins importing
 `@opencode-ai/plugin` get generated native V2 entrypoints; the source remains
@@ -149,6 +179,10 @@ services. It checks tools/formatting, MCP Code Mode execution, env substitution,
 Build/Plan behavior, large native history transfer, duplicate protection, host
 sync, credential rotation, and real upstream V1-to-V2 snapshot migration with
 unchanged V1 source bytes. It does not test real provider inference or Podman.
+It also checks a live foreground owner, same-user client leases, native compact
+terminal replay/exit while a browser relay is open, one-use browser pairing,
+cookies, shared process/session identity and event streaming. Binary upgrade
+traffic and lifecycle lock/close ordering have separate offline fixtures.
 
 Before merge/release, accept host-terminal testing in a disposable workspace:
 fresh/warm V2 TUI, env-file and selected-vault provider/MCP access, stop/resume,

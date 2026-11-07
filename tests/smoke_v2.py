@@ -5,11 +5,16 @@ No host registry, credentials, providers, or managed service is touched.
 """
 
 import argparse
+import base64
+import contextlib
+import http.cookiejar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import os
 from pathlib import Path
+import pty
+import select
 import signal
 import shutil
 import subprocess
@@ -17,7 +22,16 @@ import sys
 import tarfile
 import tempfile
 import threading
+import time
 from urllib.parse import quote
+from urllib.request import (
+    Request,
+    build_opener,
+    HTTPCookieProcessor,
+    HTTPHandler,
+    ProxyHandler,
+)
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
@@ -26,6 +40,7 @@ import oc_box as box
 import opencode_compat as compat
 import opencode_v2_io as bridge
 import sync_config
+import workspace_service
 
 
 def bounded(command, env, cwd, timeout=60):
@@ -136,6 +151,7 @@ export const Fixture = async () => ({
             "home": env["HOME"],
             "project": str(project),
             "id": "a" * 32,
+            "container": "oc-box-synthetic",
             "opencode_version": release,
         }
         with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(source.parent)}):
@@ -688,6 +704,177 @@ export const Fixture = async () => ({
                 "PASS: real V1-to-V2 snapshot migration with unchanged V1 database and downgrade export.",
                 flush=True,
             )
+            # Real foreground owner, same-user concurrent attach and browser
+            # transport; only the Podman exec transport is local in this fixture.
+            live_env = {
+                **env,
+                "XDG_RUNTIME_DIR": str(root),
+                "OC_BOX_STATE_HOME": str(root / "live-state"),
+            }
+            info = {
+                "State": {"Running": True},
+                "Mounts": [{"Source": str(project), "Destination": str(project)}],
+            }
+
+            def live_exec(_data, arguments, **_kwargs):
+                if arguments[0] == binary and "--version" not in arguments:
+                    arguments = compat.command(release, binary, arguments[1:])
+                trampoline = "import os,sys; os.chdir(os.environ['PWD']); os.execvpe(sys.argv[1],sys.argv[1:],os.environ)"
+                return box.ContainerCommand(
+                    [sys.executable, "-B", "-c", trampoline, *arguments],
+                    {**live_env, "PWD": str(project)},
+                )
+
+            original_client_command = workspace_service.client_command
+
+            def local_client(_box, _data, connection, arguments, **kwargs):
+                command = original_client_command(
+                    _box, _data, connection, arguments, **kwargs
+                )
+                begin = command.index(_data["container"]) + 1
+                environment = {
+                    **command.environment,
+                    "OPENCODE_PASSWORD": connection["password"],
+                }
+                return box.ContainerCommand(command[begin:], environment)
+
+            def local_relay(_box, _data, port):
+                return box.ContainerCommand(
+                    [sys.executable, "-B", "-c", workspace_service.PROXY, str(port)],
+                    box.maintenance_host_env(),
+                )
+
+            with (
+                patch.dict(os.environ, live_env, clear=True),
+                patch.object(box, "exec_command", side_effect=live_exec),
+                patch.object(box, "CONTAINER_OPENCODE", binary),
+                patch.object(
+                    workspace_service, "client_command", side_effect=local_client
+                ),
+                patch.object(
+                    workspace_service, "relay_command", side_effect=local_relay
+                ),
+                patch.object(workspace_service, "validate_workspace"),
+                workspace_service.Owner(box, registry, data) as owner,
+            ):
+                owner.publish(ident)
+                with workspace_service.attach(box, registry, data) as joined:
+                    assert joined["session"] == ident and owner.clients == 1
+                    workspace_service.api(
+                        box, data, joined, "GET", "/api/session/" + ident
+                    )
+                    with workspace_service.Gateway(box, data, joined) as gateway:
+                        authorization = (
+                            "Basic "
+                            + base64.b64encode(
+                                ("opencode:" + joined["password"]).encode()
+                            ).decode()
+                        )
+                        browser = build_opener(
+                            ProxyHandler({}),
+                            HTTPCookieProcessor(http.cookiejar.CookieJar()),
+                        )
+                        pair = workspace_service.api(
+                            box, data, joined, "POST", "/api/pair"
+                        )
+                        with browser.open(
+                            Request(
+                                gateway.url + "/auth/connect/" + pair["code"],
+                                headers={"Accept": "text/html"},
+                            ),
+                            timeout=15,
+                        ) as response:
+                            assert response.url.endswith(gateway.session_route()), (
+                                response.url
+                            )
+                            assert b"<html" in response.read().lower()
+                        with browser.open(
+                            gateway.url + "/api/session/" + ident, timeout=10
+                        ) as response:
+                            assert json.load(response)["data"]["id"] == ident
+                        stream = browser.open(gateway.url + "/api/event", timeout=10)
+                        assert (
+                            b"server.connected" in stream.readline() + stream.readline()
+                        )
+                        with browser.open(
+                            Request(
+                                gateway.url + "/api/info",
+                                headers={"Authorization": authorization},
+                            ),
+                            timeout=10,
+                        ) as response:
+                            assert json.load(response)["version"] == release
+                        stream.close()
+                        # Original server process identity is shared by CLI and
+                        # browser; no standalone service is started by attaches.
+                        first = workspace_service.api(
+                            box, data, joined, "GET", "/api/info"
+                        )
+                        with browser.open(
+                            gateway.url + "/api/info", timeout=10
+                        ) as response:
+                            assert json.load(response)["pid"] == first["pid"]
+                        # Attach the real compact terminal while the browser
+                        # relay and owner are still alive; exiting detaches
+                        # without terminating the shared session/service.
+                        master, slave = pty.openpty()
+                        compact = local_client(
+                            box,
+                            data,
+                            joined,
+                            [
+                                binary,
+                                "mini",
+                                "--server",
+                                joined["url"],
+                                "--session",
+                                ident,
+                            ],
+                        )
+                        process = subprocess.Popen(
+                            compact,
+                            env=compact.environment,
+                            cwd=project,
+                            stdin=slave,
+                            stdout=slave,
+                            stderr=slave,
+                            start_new_session=True,
+                        )
+                        os.close(slave)
+                        terminal_output = bytearray()
+                        sent = False
+                        try:
+                            deadline = time.monotonic() + 20
+                            while (
+                                process.poll() is None and time.monotonic() < deadline
+                            ):
+                                if select.select([master], [], [], 0.1)[0]:
+                                    try:
+                                        terminal_output.extend(os.read(master, 65536))
+                                    except OSError:
+                                        break
+                                if not sent and b"Smoke complete" in terminal_output:
+                                    os.write(master, b"/exit\r")
+                                    sent = True
+                            assert sent and process.poll() == 0, bytes(
+                                terminal_output[-3000:]
+                            )
+                        finally:
+                            if process.poll() is None:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            process.wait(timeout=5)
+                            os.close(master)
+                        assert (
+                            workspace_service.api(
+                                box, data, joined, "GET", "/api/info"
+                            )["pid"]
+                            == first["pid"]
+                        )
+                    print(
+                        "PASS: shared foreground V2 service, concurrent native compact terminal/browser/API, pairing/cookies, same-session replay and event streaming.",
+                        flush=True,
+                    )
+                owner.wait_clients()
             assert not (config / "service.json").exists()
             assert not (Path(env["XDG_STATE_HOME"]) / "opencode/service.json").exists()
         finally:

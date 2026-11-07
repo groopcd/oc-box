@@ -30,6 +30,7 @@ if __package__:
         plugin_compat,
         vault,
         workspace_identity,
+        workspace_service,
     )
 else:
     import credentials
@@ -38,6 +39,7 @@ else:
     import plugin_compat
     import vault
     import workspace_identity
+    import workspace_service
 
 APP = Path(__file__).resolve().parent
 LABEL = "io.oc-box.workspace"
@@ -1207,6 +1209,9 @@ def maintenance_terminal(path, data):
 
 def exec_command(data, command, *, interactive=False):
     forwarded = container_env(data)
+    live = workspace_service.live_connection()
+    if live and live["workspace"] == data["id"]:
+        forwarded["OPENCODE_PASSWORD"] = live["password"]
     environment = os.environ.copy()
     result = ContainerCommand(["podman", "exec", "-i"], environment)
     if interactive and sys.stdin.isatty() and sys.stdout.isatty():
@@ -1238,11 +1243,7 @@ def exec_command(data, command, *, interactive=False):
             result.extend(["--env", key])
     if command and command[0] == CONTAINER_OPENCODE:
         command = (
-            opencode_compat.command(
-                data.get("opencode_version", "1.0.0"), command[0], command[1:]
-            )
-            if "--version" not in command
-            else command
+            container_cli(data, command[1:]) if "--version" not in command else command
         )
     if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
         # Clear image/create-time environment first. Public variable NAMES are
@@ -1251,6 +1252,16 @@ def exec_command(data, command, *, interactive=False):
         command = ["python3", "-c", bridge, ",".join([*forwarded, "PATH"]), *command]
     result.extend([data["container"], *command])
     return result
+
+
+def container_cli(data, arguments):
+    live = workspace_service.live_connection()
+    return opencode_compat.command(
+        data.get("opencode_version", "1.0.0"),
+        CONTAINER_OPENCODE,
+        arguments,
+        server=live["url"] if live and live["workspace"] == data["id"] else None,
+    )
 
 
 def rewrite_localhost(value):
@@ -1846,13 +1857,7 @@ with tempfile.TemporaryFile() as output:
                 spool,
                 ident,
                 CONTAINER_OPENCODE,
-                json.dumps(
-                    opencode_compat.command(
-                        data.get("opencode_version", "1.0.0"),
-                        CONTAINER_OPENCODE,
-                        ["--pure", "export", ident],
-                    )[1:]
-                ),
+                json.dumps(container_cli(data, ["--pure", "export", ident])[1:]),
             ],
         ),
         capture=True,
@@ -2011,11 +2016,7 @@ with tempfile.TemporaryDirectory(prefix='oc-box-import-') as directory:
                 transfer,
                 CONTAINER_OPENCODE,
                 json.dumps(
-                    opencode_compat.command(
-                        data.get("opencode_version", "1.0.0"),
-                        CONTAINER_OPENCODE,
-                        ["--pure", "import", "OC_BOX_IMPORT_FILE"],
-                    )[1:]
+                    container_cli(data, ["--pure", "import", "OC_BOX_IMPORT_FILE"])[1:]
                 ),
             ],
         ),
@@ -2181,82 +2182,105 @@ def launch_environment(path, data, args):
             with loading_stage("Syncing session history"):
                 sync_sessions(path, data)
             return 0
-        if exported is not None:
-            with loading_stage("Importing and verifying host session"):
-                sessions = import_host_session(path, data, exported)
-        else:
-            with loading_stage("Finding workspace session"):
-                sessions = refresh_sessions(path, data)
-        selected_session = sessions.get("last") if not args.new else None
-        if opencode_compat.major(version) == 2:
-            selected_model = opencode_compat.model(args.model) if args.model else None
-            if not selected_session and (args.new or selected_model):
-                payload = {"location": {"directory": container_project(data)}}
-                if selected_model:
-                    payload["model"] = selected_model
-                created = run(
-                    exec_command(
-                        data,
-                        [
-                            CONTAINER_OPENCODE,
-                            "api",
-                            "post",
-                            "/api/session",
-                            "--data",
-                            json.dumps(payload),
-                        ],
-                    ),
-                    capture=True,
-                    timeout=60,
+        with contextlib.ExitStack() as services:
+            owner = (
+                services.enter_context(
+                    workspace_service.Owner(sys.modules[__name__], path, data)
                 )
-                selected_session = json.loads(created.stdout)["data"]["id"]
-                if not valid_session_id(selected_session):
-                    raise BoxError("Invalid OpenCode 2.x session creation response.")
-            elif selected_session and selected_model:
-                run(
-                    exec_command(
-                        data,
-                        [
-                            CONTAINER_OPENCODE,
-                            "api",
-                            "post",
-                            "/api/session/" + selected_session + "/model",
-                            "--data",
-                            json.dumps({"model": selected_model}),
-                        ],
-                    ),
-                    capture=True,
-                    timeout=60,
-                )
-        command = opencode_compat.tui(
-            version,
-            CONTAINER_OPENCODE,
-            container_project(data),
-            selected_session,
-            args.model,
-        )
-        print(
-            f"oc-box: {data['distro']} | {data['project']} | {'new session' if args.new or not sessions.get('last') else 'resuming ' + sessions['last']}",
-            flush=True,
-        )
-        print(
-            "oc-box: Opening OpenCode; plugins and MCP servers may need time to initialize.",
-            flush=True,
-        )
-        code = run_tui(exec_command(data, command, interactive=True))
-        try:
-            with loading_stage("Syncing session history"):
-                sync_sessions(path, data)
-        except (BoxError, ValueError, KeyError) as exc:
-            print(
-                f"oc-box: history sync pending: {exc}\nContainer data retained. Retry with 'oc-box sync'.",
-                file=sys.stderr,
+                if opencode_compat.major(version) == 2
+                else None
             )
-            return code or 1
-        return code
+            return launch_client(path, data, args, version, exported, owner)
     finally:
         with loading_stage("Stopping container"):
             stop_container(data)
+
+
+def launch_client(path, data, args, version, exported, owner=None):
+    if exported is not None:
+        with loading_stage("Importing and verifying host session"):
+            sessions = import_host_session(path, data, exported)
+    else:
+        with loading_stage("Finding workspace session"):
+            sessions = refresh_sessions(path, data)
+    selected_session = sessions.get("last") if not args.new else None
+    if owner:
+        selected_model = opencode_compat.model(args.model) if args.model else None
+        if not selected_session:
+            payload = {"location": {"directory": container_project(data)}}
+            if selected_model:
+                payload["model"] = selected_model
+            created = workspace_service.api(
+                sys.modules[__name__],
+                data,
+                owner.connection,
+                "POST",
+                "/api/session",
+                payload,
+            )
+            selected_session = created["data"]["id"]
+            if not valid_session_id(selected_session):
+                raise BoxError("Invalid OpenCode 2.x session creation response.")
+        elif selected_model:
+            workspace_service.api(
+                sys.modules[__name__],
+                data,
+                owner.connection,
+                "POST",
+                "/api/session/" + selected_session + "/model",
+                {"model": selected_model},
+            )
+        owner.publish(selected_session)
+    command = opencode_compat.tui(
+        version,
+        CONTAINER_OPENCODE,
+        container_project(data),
+        selected_session,
+        None if owner else args.model,
+        server=owner.connection["url"] if owner else None,
+    )
+    print(
+        f"oc-box: {data['distro']} | {data['project']} | {'new session' if args.new or not sessions.get('last') else 'resuming ' + sessions['last']}",
+        flush=True,
+    )
+    try:
+        if args.command == "web":
+            assert owner is not None
+            code = workspace_service.web_session(
+                sys.modules[__name__],
+                data,
+                {**owner.connection, "session": selected_session},
+                args,
+            )
+        else:
+            print(
+                "oc-box: Opening OpenCode; plugins and MCP servers may need time to initialize.",
+                flush=True,
+            )
+            code = run_tui(
+                workspace_service.client_command(
+                    sys.modules[__name__],
+                    data,
+                    owner.connection,
+                    command,
+                    interactive=True,
+                )
+                if owner
+                else exec_command(data, command, interactive=True)
+            )
+    finally:
+        if owner:
+            owner.wait_clients()
+    try:
+        with loading_stage("Syncing session history"):
+            sync_sessions(path, data)
+    except (BoxError, ValueError, KeyError) as exc:
+        print(
+            f"oc-box: history sync pending: {exc}\nContainer data retained. Retry with 'oc-box sync'.",
+            file=sys.stderr,
+        )
+        return code or 1
+    return code
 
 
 def resource_ids(kind, ident):
@@ -2440,6 +2464,7 @@ def parser():
             "reset",
             "repair",
             "terminal",
+            "web",
             "upgrade",
             "secrets",
             "credentials",
@@ -2483,6 +2508,11 @@ def parser():
         "--check",
         action="store_true",
         help="with upgrade, check GitHub for a changed version without installing",
+    )
+    result.add_argument(
+        "--maintenance",
+        action="store_true",
+        help="with terminal, open the restricted maintenance shell instead of a V2 live session client",
     )
     result.add_argument(
         "--auto-update",
@@ -2722,7 +2752,34 @@ def main(argv=None):
             raise BoxError(str(exc)) from exc
     if arguments and arguments[0] == "secrets":
         return secrets_command(arguments[1:])
-    args = parser().parse_args(argv)
+    if arguments and arguments[0] == "web":
+        web = workspace_service.web_parser().parse_args(arguments[1:])
+        if os.environ.get("OC_BOX_CONTAINER") == "1":
+            raise BoxError(
+                "Run 'oc-box web' from a host terminal; host workspace services are not exposed inside containers."
+            )
+        if not 0 <= web.port <= 65535:
+            raise BoxError("--port must be 0 (automatic) or 1..65535.")
+        selectors = (
+            ["--workspace", web.workspace]
+            if web.workspace
+            else ["--project", str(web.project or Path.cwd())]
+        )
+        args = parser().parse_args(["start", *selectors])
+        args.command, args.port, args.no_open = "web", web.port, web.no_open
+        if opencode_compat.major(detect_opencode_release()) != 2:
+            raise BoxError(
+                "'oc-box web' requires OpenCode 2.x; use the native TUI with 1.x."
+            )
+        workspace_service.preflight_port(web.port)
+    else:
+        args = parser().parse_args(argv)
+    if args.command == "web" and not hasattr(args, "port"):
+        raise BoxError(
+            "Use 'oc-box web' first, followed by --project/--workspace/--port/--no-open."
+        )
+    if args.maintenance and args.command != "terminal":
+        raise BoxError("--maintenance applies only to terminal.")
     if args.command == "completion":
         raise BoxError("Use 'oc-box completion bash' with no workspace options.")
     if args.command == "doctor":
@@ -3025,7 +3082,7 @@ def main(argv=None):
             **({"env": maintenance_host_env()} if args.command == "terminal" else {}),
             **(
                 {"feature": "launch"}
-                if args.command in ("start", "reset", "sync")
+                if args.command in ("start", "reset", "sync", "web")
                 else {}
             ),
         )
@@ -3034,7 +3091,7 @@ def main(argv=None):
         args.project, args.workspace, allow_identity_change=args.command == "repair"
     )
     if data is None:
-        if args.command != "start":
+        if args.command not in ("start", "web"):
             raise BoxError(
                 "No oc-box workspace registered here. Use 'oc-box list' or '--workspace ID'."
             )
@@ -3054,6 +3111,83 @@ def main(argv=None):
         stop_container(data)
         print("Container stopped; files, packages, and conversations retained.")
         return 0
+    if (
+        args.command in ("start", "terminal", "web")
+        and opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2
+    ):
+        if args.command == "terminal" and not args.maintenance:
+            with workspace_service.attach(
+                sys.modules[__name__], path, data
+            ) as connection:
+                command = workspace_service.client_command(
+                    sys.modules[__name__],
+                    data,
+                    connection,
+                    [
+                        CONTAINER_OPENCODE,
+                        "mini",
+                        "--server",
+                        connection["url"],
+                        "--session",
+                        connection["session"],
+                    ],
+                    interactive=True,
+                )
+                print(
+                    "oc-box: Attaching terminal client to session "
+                    + connection["session"]
+                    + "; the existing service and credentials are retained.",
+                    flush=True,
+                )
+                return run_tui(command)
+        if args.command == "start" and workspace_service.controller_running(
+            sys.modules[__name__], data
+        ):
+            if any(
+                (
+                    args.new,
+                    args.import_session,
+                    args.model,
+                    args.distro,
+                    args.cpus,
+                    args.memory,
+                    args.pids_limit is not None,
+                    args.device,
+                    args.podman_arg,
+                    args.clear_devices,
+                    args.clear_podman_args,
+                )
+            ):
+                raise BoxError(
+                    "An active V2 workspace accepts additional TUI clients with selectors/--resume only; change session/configuration after the owner exits."
+                )
+            with workspace_service.attach(
+                sys.modules[__name__], path, data
+            ) as connection:
+                command = workspace_service.client_command(
+                    sys.modules[__name__],
+                    data,
+                    connection,
+                    [
+                        CONTAINER_OPENCODE,
+                        container_project(data),
+                        "--server",
+                        connection["url"],
+                        "--session",
+                        connection["session"],
+                    ],
+                    interactive=True,
+                )
+                return run_tui(command)
+        if args.command == "web" and workspace_service.controller_running(
+            sys.modules[__name__], data
+        ):
+            with workspace_service.attach(
+                sys.modules[__name__], path, data
+            ) as connection:
+                return workspace_service.web_session(
+                    sys.modules[__name__], data, connection, args
+                )
     with workspace_lock(path), contextlib.ExitStack() as launch_context:
         if data.get("restore_incomplete") and args.command != "purge":
             raise BoxError(
@@ -3066,14 +3200,14 @@ def main(argv=None):
                 launch_context.enter_context(credentials.unlocked(data))
             except vault.VaultError as exc:
                 raise BoxError(str(exc)) from exc
-        if args.command in ("start", "reset", "sync", "terminal"):
+        if args.command in ("start", "reset", "sync", "terminal", "web"):
             refresh_workspace_identity(path, data)
         if args.command == "terminal":
             return maintenance_terminal(path, data)
         if args.command == "repair":
             repair_workspace(path, data)
             return 0
-        if args.command in ("start", "reset", "sync"):
+        if args.command in ("start", "reset", "sync", "web"):
             if (
                 args.command == "start"
                 and args.distro

@@ -12,6 +12,7 @@ import tempfile
 import unittest
 import backups
 import dependencies
+import workspace_service
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
@@ -43,6 +44,7 @@ class DocumentationTests(unittest.TestCase):
         parsers = [
             parser,
             dependencies.parser(),
+            workspace_service.web_parser(),
             box.secrets_parser(),
             box.completion_parser(),
             *(
@@ -60,7 +62,9 @@ class DocumentationTests(unittest.TestCase):
         commands = next(
             action.choices for action in parser._actions if action.dest == "command"
         )
-        self.assertTrue(set(commands).issubset(headings))
+        self.assertTrue(
+            set(commands).issubset({heading.split(" — ", 1)[0] for heading in headings})
+        )
         for name, (image, _) in box.DISTROS.items():
             self.assertIn(image, text, name)
         for alias in box.ALIASES:

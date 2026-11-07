@@ -45,6 +45,7 @@ def check(directory, *, with_vault=False):
             "dependencies.py",
             "opencode_compat.py",
             "opencode_v2_io.py",
+            "workspace_service.py",
             "plugin_compat.py",
             "plugin_bridge.js",
             "backups.py",
@@ -171,6 +172,8 @@ def check(directory, *, with_vault=False):
         assert doctor["features"][0]["id"] == "github-upgrade"
         assert "secrets" in run(cli, "--help")
         assert "--recipient" in run(cli, "backup", "--help")
+        assert "--no-open" in run(cli, "web", "--help")
+        assert "--maintenance" in run(cli, "--help")
         assert "--min-passphrase-length" in run(cli, "backup", "--help")
         assert "--identity" in run(cli, "restore", "--help")
         assert "--identity" in run(cli, "backup-info", "--help")

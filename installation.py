@@ -20,6 +20,7 @@ PROGRAM_FILES = (
     "dependencies.py",
     "opencode_compat.py",
     "opencode_v2_io.py",
+    "workspace_service.py",
     "plugin_compat.py",
     "plugin_bridge.js",
     "backups.py",

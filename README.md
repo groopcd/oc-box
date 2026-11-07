@@ -158,6 +158,22 @@ Published PyPI releases are selected separately from ordinary GitHub commits.
 Packaged manuals are in the package's `docs/` and the tool environment's
 `share/man`/`share/info`; those directories may need explicit reader paths.
 
+### OpenCode 2.x shared clients (compatibility branch)
+
+While a V2 workspace is running, open its same session from another host terminal:
+
+```sh
+oc-box web --project ~/devel/demo
+oc-box terminal --project ~/devel/demo
+```
+
+The web UI and compact terminal reuse the existing service/credentials without
+ending the TUI session. Web access is host-loopback-only with a native one-use
+pairing link; keep its foreground command open. The owner waits for attached
+clients before final sync/stop. `terminal --maintenance` retains the restricted
+shell, and 1.x retains its previous terminal behavior. See the
+[V2 client guide](docs/opencode-2.md#concurrent-web-terminal-and-full-tui-clients).
+
 ### Bash completion
 
 Enable command and option completion in your current Bash shell:

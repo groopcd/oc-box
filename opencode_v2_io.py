@@ -71,6 +71,9 @@ def server(binary):
                     body = response.read()
                     return json.loads(body) if body else None
 
+            request.endpoint = {"url": address, "password": password}
+            request.alive = lambda: child.poll() is None
+
             # Migration is asynchronous in upstream. Do not mistake an empty
             # session list for successful completion and lose the resume ID.
             deadline = time.monotonic() + 120
@@ -171,6 +174,16 @@ def main(argv):
     elif action == "ready":
         with server(binary):
             pass
+    elif action == "lease":
+        with server(binary) as request:
+            # Control credentials are returned only through the owner's pipe,
+            # kept in memory, and never written to the workspace or service.json.
+            print(json.dumps(request.endpoint), flush=True)
+            while request.alive():
+                if select.select([sys.stdin], [], [], 0.2)[0] and not os.read(
+                    sys.stdin.fileno(), 4096
+                ):
+                    break
     elif action == "plugins":
         with server(binary) as request:
             query = "?directory=" + quote(os.getcwd(), safe="")

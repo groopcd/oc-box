@@ -18,6 +18,11 @@ portable: use example project paths and synthetic session IDs, not local data.
   native transcripts, private V2 service leases and credential refresh. Preserve
   V1 database/history; never save forwarded vault env in service config or
   connect workspace activity to the host shared service.
+- `workspace_service.py`: foreground V2 owner, same-user runtime-socket client
+  leases and host-loopback HTTP/WebSocket relay. Control credentials remain
+  ephemeral memory only; no published container/LAN ports or shared host service.
+  Owners wait for attached clients before sync/stop, and lifecycle locks remain
+  exclusive against reset/purge/backup. Attach never refreshes credentials.
 - `plugin_compat.py` / `plugin_bridge.js`: bounded copied-V1-plugin adapters on
   native V2 plugin APIs. Keep host originals and V1 behavior intact, propagate
   refusal errors and preserve attachments/structured output; reject unsupported
@@ -135,9 +140,12 @@ physical identity on unsupported drivers or replace it with a copyable marker.
 Plain stale-workspace purge preserves project files, host history, and
 private archive-origin evidence under `retired/`; keep that recovery path tested.
 
-`terminal` is maintenance-only: no host credential/pass_env forwarding, no
-OpenCode/auth/config refresh, startup profiles, or persistent shell history.
-Keep its environment allowlisted and preserve the original container run state.
+V1 `terminal` and `terminal --maintenance` are maintenance-only: no host
+credential/pass_env forwarding, OpenCode/auth/config refresh, startup profiles,
+or persistent shell history. Preserve the original container run state.
+Default V2 terminal joins the current session using a clean compact client;
+it may coexist with TUI/web through same-user leases without changing lifecycle
+state. Browser/client processes must not inherit provider/vault values.
 
 Updates fetch the fixed public HTTPS upstream anonymously with sanitized Git
 configuration/environment. Never reuse publishing/provider credentials for

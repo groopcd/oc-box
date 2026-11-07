@@ -32,12 +32,22 @@ quota, so project, image, and volume growth can exhaust host disk space.
 ## Optional host credential vault
 
 On the OpenCode 2.x compatibility branch, workspace clients use native private
-`--standalone` servers with per-launch environment snapshots. The host shared
+workspace-owned stdio servers with per-launch environment snapshots; clients
+connect using native `--server`. The host shared
 service is never exposed or restarted. Vault values are not saved in service
 config; copied OpenCode auth still belongs to the private container DB. Credential
 export/refresh uses private memfd/pipe transport and supported CLI/API operations.
 Original V1 container DB bytes are retained separately from the migrated V2
 snapshot. See `docs/opencode-2.md` for scope, limitations and pending host tests.
+
+Concurrent clients obtain ephemeral control credentials through a private
+same-user host runtime socket, without copying provider/vault values or storing
+service passwords in workspace metadata. Browser access is limited to host
+loopback and native one-use pairing/cookies; the URL grants workspace access.
+The relay forwards HTTP/streams/WebSocket bytes over Podman exec, never publishes
+a container port or exposes a shared host service. Browser launch receives a
+sanitized environment. The owner retains the exclusive lifecycle lock until all
+attached clients finish; backup/reset/purge cannot race their writes.
 
 The original env-file workflow remains the default: no vault initialization,
 password prompt, or crypto dependency is introduced by an ordinary upgrade.

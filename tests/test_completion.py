@@ -17,6 +17,7 @@ import dependencies
 import installation
 import oc_box as box
 import vault
+import workspace_service
 
 APP = Path(__file__).resolve().parents[1]
 SCRIPT = APP / "completions/oc-box"
@@ -84,6 +85,7 @@ fi
             ("backup-info", backups.parser_for("backup-info")),
             ("restore", backups.parser_for("restore")),
             ("doctor", dependencies.parser()),
+            ("web", workspace_service.web_parser()),
             ("completion", box.completion_parser()),
         ):
             with self.subTest(command=name):

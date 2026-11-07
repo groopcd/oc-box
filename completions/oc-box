@@ -28,7 +28,7 @@ _oc_box()
 {
     local cur=${COMP_WORDS[COMP_CWORD]} prev='' prefix='' option=''
     local command='' action='' word skip=0 positional=0 ended=0 i
-    local commands='start stop sync reset repair terminal upgrade secrets credentials backup backup-info restore purge list distros status doctor completion'
+    local commands='start stop sync reset repair terminal web upgrade secrets credentials backup backup-info restore purge list distros status doctor completion'
     local selectors='--project --workspace'
     local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args'
     local help='-h --help' options
@@ -51,7 +51,7 @@ _oc_box()
         if (( ! ended )); then
             case $word in
                 --*=*) continue ;;
-                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--min-passphrase-length|--feature)
+                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--min-passphrase-length|--feature|--port)
                     skip=1; continue ;;
                 --status) command=status; continue ;;
                 -*) continue ;;
@@ -92,7 +92,7 @@ _oc_box()
                 _oc_box_words 'launch maintenance history backup backup-info restore vault github-upgrade bootstrap storage overlay manuals docs-build'; return 0 ;;
             --auto-update) _oc_box_words 'on off'; return 0 ;;
             --credential-mode) _oc_box_words 'env selected'; return 0 ;;
-            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length)
+            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port)
                 return 0 ;;
         esac
     fi
@@ -101,7 +101,9 @@ _oc_box()
         start) options="$help $selectors $launch" ;;
         reset) options="$help $selectors --distro --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args" ;;
         sync) options="$help $selectors" ;;
-        stop|repair|terminal) options="$help $selectors" ;;
+        stop|repair) options="$help $selectors" ;;
+        terminal) options="$help $selectors --maintenance" ;;
+        web) options="$help $selectors --port --no-open" ;;
         status) options="$help $selectors --json" ;;
         purge) options="$help $selectors --delete-sessions --all -y --yes" ;;
         credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;
@@ -121,7 +123,7 @@ _oc_box()
             options=$help
             (( positional == 0 )) && options+=' bash' ;;
         list|distros) options=$help ;;
-        *) options="$commands $help $selectors $launch --status --about --version --json --check --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes" ;;
+        *) options="$commands $help $selectors $launch --status --about --version --json --check --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --maintenance" ;;
     esac
     if (( ! ended )); then
         _oc_box_words "$options"
