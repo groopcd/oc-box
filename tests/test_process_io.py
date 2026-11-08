@@ -1,16 +1,10 @@
-import importlib.util
 import json
 from pathlib import Path
 import sys
 import unittest
+from oc_box import oc_box as box
 
 APP = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location(
-    "oc_box._capture_test", APP / "src/oc_box/oc_box.py"
-)
-assert spec is not None and spec.loader is not None
-box = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(box)
 
 
 class ProcessCaptureTests(unittest.TestCase):

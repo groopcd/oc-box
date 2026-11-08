@@ -6,7 +6,6 @@ This verifies plugin behavior, not host filesystem/network sandbox isolation.
 """
 
 import argparse
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import importlib.util
 import json
 import os
@@ -15,14 +14,13 @@ import subprocess
 import shutil
 import sys
 import tempfile
-import threading
 from unittest.mock import patch
 from urllib.parse import quote
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
 sys.path.insert(0, str(APP / "src"))
-from oc_box import opencode_v2_io as bridge, oc_box as box
+from oc_box import opencode_v2_io as bridge
 
 
 def module(name, filename):

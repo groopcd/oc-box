@@ -1,23 +1,17 @@
 import argparse
-import importlib.util
 import io
 import json
 import os
 from pathlib import Path
 import re
-import runpy
 import subprocess
 import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
+from oc_box import oc_box as box
 
 APP = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location(
-    "oc_box._workspace_test", APP / "src/oc_box/oc_box.py"
-)
-box = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(box)
 
 
 class WorkspaceTests(unittest.TestCase):
@@ -409,20 +403,6 @@ class WorkspaceTests(unittest.TestCase):
         self.assertNotIn(
             "synthetic-relay-credential", " ".join(relay.call_args.args[0])
         )
-
-    def test_installer_creates_working_standalone_launcher(self):
-        home = self.root / "install-home"
-        with patch.object(Path, "home", return_value=home):
-            from oc_box.install import main as install_main
-
-            self.assertEqual(install_main([]), 0)
-        binary = home / ".local/bin/oc-box"
-        self.assertTrue(os.access(binary, os.X_OK))
-        result = subprocess.run(
-            [str(binary), "distros"], capture_output=True, text=True, timeout=5
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("registry.opensuse.org/opensuse/tumbleweed:latest", result.stdout)
 
     def test_sync_replaces_only_namespaced_archive_and_keeps_source_id(self):
         source = {"info": {"id": "ses_source", "title": "Work"}, "messages": []}

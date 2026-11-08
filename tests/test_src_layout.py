@@ -129,3 +129,14 @@ class SourceLayoutTests(unittest.TestCase):
                 output.stdout.strip(),
                 "oc-box " + version_info.get_version_info(ROOT)["version"],
             )
+            output = subprocess.run(
+                [str(binary), "distros"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(output.returncode, 0, output.stderr)
+            self.assertIn(
+                "registry.opensuse.org/opensuse/tumbleweed:latest", output.stdout
+            )

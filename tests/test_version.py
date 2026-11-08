@@ -4,7 +4,6 @@ import io
 import json
 import os
 from pathlib import Path
-import runpy
 import subprocess
 import sys
 import tempfile
@@ -155,14 +154,15 @@ class VersionTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn("oc-box 1.5.", result.stdout)
 
-    def test_unknown_version_is_explicit_in_unversioned_source(self):
-        self.assertEqual(
-            version.get_version_info(self.root)["version"], "1.5.0+unknown"
-        )
-
-    def test_invalid_installed_metadata_does_not_crash_about(self):
-        (self.root / "build-info.json").write_text('{"partial":')
-        self.assertIn("1.5.0+unknown", version.about_text(self.root))
+    def test_missing_or_invalid_metadata_is_explicit_and_about_remains_readable(self):
+        for content in (None, '{"partial":', '{"other":"value"}'):
+            with self.subTest(content=content):
+                if content is not None:
+                    (self.root / "build-info.json").write_text(content)
+                self.assertEqual(
+                    version.get_version_info(self.root)["version"], "1.5.0+unknown"
+                )
+                self.assertIn("1.5.0+unknown", version.about_text(self.root))
 
     def test_license_is_complete_gpl3_with_project_later_version_notice(self):
         text = (APP / "LICENSE").read_text()

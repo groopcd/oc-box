@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 from urllib.parse import urlparse
-from urllib.request import Request, urlopen
+from urllib.request import urlopen
 
 from oc_box import oc_box as box, workspace_service as service, vault
 
@@ -102,16 +102,22 @@ class WorkspaceServiceTests(unittest.TestCase):
         self.assertIn("TERM", " ".join(command))
         self.assertNotIn("xterm\\nbad", " ".join(command))
 
-    def test_api_accepts_empty_success_and_preserves_json_response_values(self):
+    def test_api_response_matrix_preserves_empty_success_json_and_failures(self):
         command = box.ContainerCommand(["synthetic-native-api"], {})
-        for output, expected in (
-            ("", None),
-            ("\n", None),
-            (" \t\n", None),
-            ('{"data":{"id":"ses_synthetic"}}\n', {"data": {"id": "ses_synthetic"}}),
-            ("null\n", None),
-            ("false\n", False),
-            ("[]\n", []),
+        for output, expected, error in (
+            ("", None, None),
+            ("\n", None, None),
+            (" \t\n", None, None),
+            (
+                '{"data":{"id":"ses_synthetic"}}\n',
+                {"data": {"id": "ses_synthetic"}},
+                None,
+            ),
+            ("null\n", None, None),
+            ("false\n", False, None),
+            ("[]\n", [], None),
+            ("not JSON", None, json.JSONDecodeError),
+            (None, None, box.BoxError),
         ):
             with (
                 self.subTest(output=output),
@@ -120,38 +126,25 @@ class WorkspaceServiceTests(unittest.TestCase):
                     box,
                     "run",
                     return_value=subprocess.CompletedProcess(command, 0, output, ""),
+                    side_effect=box.BoxError("synthetic failed API command")
+                    if output is None
+                    else None,
                 ) as run,
             ):
-                self.assertEqual(
-                    service.api(
+
+                def invoke():
+                    return service.api(
                         box, self.data, self.connection, "POST", "/api/location/reload"
-                    ),
-                    expected,
-                )
+                    )
+
+                if error is None:
+                    self.assertEqual(invoke(), expected)
+                else:
+                    with self.assertRaises(error):
+                        invoke()
                 self.assertTrue(run.call_args.kwargs["capture"])
                 self.assertTrue(run.call_args.kwargs["private"])
                 self.assertNotIn("check", run.call_args.kwargs)
-
-    def test_api_does_not_suppress_nonempty_invalid_json_or_failed_commands(self):
-        command = box.ContainerCommand(["synthetic-native-api"], {})
-        with (
-            patch.object(service, "client_command", return_value=command),
-            patch.object(
-                box,
-                "run",
-                return_value=subprocess.CompletedProcess(command, 0, "not JSON", ""),
-            ),
-            self.assertRaises(json.JSONDecodeError),
-        ):
-            service.api(box, self.data, self.connection, "GET", "/api/info")
-        with (
-            patch.object(service, "client_command", return_value=command),
-            patch.object(
-                box, "run", side_effect=box.BoxError("synthetic failed API command")
-            ),
-            self.assertRaisesRegex(box.BoxError, "failed API command"),
-        ):
-            service.api(box, self.data, self.connection, "POST", "/api/location/reload")
 
     def test_live_terminal_joins_without_lifecycle_lock_unlock_refresh_or_stop(self):
         with (

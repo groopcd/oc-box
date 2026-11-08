@@ -2,7 +2,6 @@ import argparse
 import contextlib
 import ctypes
 import errno
-import importlib.util
 import io
 import json
 import os
@@ -13,15 +12,9 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from oc_box import status_report, workspace_identity as identity
+from oc_box import oc_box as box, status_report, workspace_identity as identity
 
 APP = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location(
-    "oc_box._identity_test", APP / "src/oc_box/oc_box.py"
-)
-assert spec is not None and spec.loader is not None
-box = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(box)
 
 
 def stable(fsid="filesystem-a", handle="01020304", kind=77):
@@ -73,16 +66,19 @@ class WorkspaceIdentityTests(unittest.TestCase):
         ):
             with self.subTest(observed=observed, fingerprint=fingerprint):
                 self.assertFalse(identity.matches(self.data, observed, fingerprint))
-
-    def test_btrfs_inode_256_in_another_subvolume_is_rejected(self):
-        self.data["project_identity"][1] = 256
+        # Inode 256 is shared by btrfs subvolume roots; the directory handle and
+        # filesystem identity, not an inode match, must distinguish them.
+        data = {**self.data, "project_identity": [47, 256]}
         for fsid, handle in (
             ("filesystem-a", "different-root-id"),
             ("other-fs", "01020304"),
         ):
-            self.assertFalse(
-                identity.matches(self.data, [48, 256], stable(fsid, handle))
-            )
+            self.assertFalse(identity.matches(data, [48, 256], stable(fsid, handle)))
+        for recorded in (None, {"method": "unknown"}):
+            data = {**self.data, identity.STABLE_IDENTITY_KEY: recorded}
+            with self.subTest(recorded=recorded):
+                self.assertFalse(identity.matches(data, self.before, stable()))
+        self.assertFalse(identity.matches(self.data, self.before, None))
 
     def test_driver_handle_formats_are_opaque_and_not_filesystem_allowlisted(self):
         # Driver capability fixtures, not a claim of live filesystem coverage.
@@ -102,13 +98,6 @@ class WorkspaceIdentityTests(unittest.TestCase):
                 }
                 self.assertTrue(identity.matches(data, [48, 123], fingerprint))
                 self.assertFalse(identity.matches(data, [48, 123], None))
-
-    def test_recorded_stable_identity_never_falls_back_to_matching_device_inode(self):
-        self.assertFalse(identity.matches(self.data, self.before, None))
-        self.data[identity.STABLE_IDENTITY_KEY] = None
-        self.assertFalse(identity.matches(self.data, self.before, stable()))
-        self.data[identity.STABLE_IDENTITY_KEY] = {"method": "unknown"}
-        self.assertFalse(identity.matches(self.data, self.before, stable()))
 
     def test_legacy_registration_uses_strict_device_inode_until_verified_or_repaired(
         self,

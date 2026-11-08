@@ -1,4 +1,3 @@
-import importlib.util
 import io
 import json
 import os
@@ -9,22 +8,9 @@ import tarfile
 import tempfile
 import time
 import unittest
+from oc_box import oc_box as box, sync_config as sync, terminal_ui as ui
 
 APP = Path(__file__).resolve().parents[1]
-
-
-def load(name):
-    spec = importlib.util.spec_from_file_location(
-        "oc_box." + name, APP / "src/oc_box" / (name + ".py")
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-box = load("oc_box")
-sync = load("sync_config")
-ui = load("terminal_ui")
 
 
 def archive(files):
@@ -91,17 +77,58 @@ class ConfigCacheTests(unittest.TestCase):
             self.assertFalse((config / "stale-plugin.ts").exists())
             self.assertTrue((config / "plugins/current.ts").is_file())
 
-    def test_changed_manifest_invalidates_cached_dependencies(self):
-        with tempfile.TemporaryDirectory() as name:
-            root = Path(name)
-            config = root / ".config/opencode"
-            (config / "node_modules").mkdir(parents=True)
-            (config / "package.json").write_text('{"dependencies":{"old":"1"}}')
-            (config / "node_modules/cached").write_text("old")
-            sync.sync_config(
-                root, archive({"package.json": '{"dependencies":{"new":"2"}}'})
-            )
-            self.assertFalse((config / "node_modules").exists())
+    def test_manifest_lock_and_runtime_changes_invalidate_cold_and_warm_caches(self):
+        manifest = '{"dependencies":{"example":"^1"}}'
+        sdk = '{"dependencies":{"@opencode-ai/plugin":"1.15.11"}}'
+        cases = (
+            (
+                "cold manifest",
+                {"package.json": '{"dependencies":{"old":"1"}}'},
+                {"package.json": '{"dependencies":{"new":"2"}}'},
+                None,
+                None,
+                False,
+            ),
+            (
+                "cold lock",
+                {"package.json": manifest, "package-lock.json": "old resolution"},
+                {"package.json": manifest, "package-lock.json": "new resolution"},
+                None,
+                None,
+                False,
+            ),
+            (
+                "recorded lock",
+                {"package.json": manifest, "package-lock.json": "old resolution"},
+                {"package.json": manifest, "package-lock.json": "new resolution"},
+                "1.19.5",
+                "1.19.5",
+                True,
+            ),
+            (
+                "recorded runtime",
+                {"package.json": sdk},
+                {"package.json": sdk},
+                "1.19.5",
+                "1.19.6",
+                True,
+            ),
+        )
+        for label, before, after, runtime, replacement, recorded in cases:
+            with self.subTest(case=label), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                config = root / ".config/opencode"
+                if recorded:
+                    sync.sync_config(root, archive(before), runtime)
+                else:
+                    config.mkdir(parents=True)
+                    for name, content in before.items():
+                        (config / name).write_text(content)
+                modules = config / "node_modules"
+                modules.mkdir()
+                (modules / "cached").write_text("old")
+                self.assertFalse(sync.sync_config(root, archive(after), replacement))
+                self.assertFalse(modules.exists())
 
     def test_unsafe_archive_does_not_remove_existing_config(self):
         with tempfile.TemporaryDirectory() as name:
@@ -118,23 +145,6 @@ class ConfigCacheTests(unittest.TestCase):
             root = Path(name)
             sync.sync_config(root, archive({"opencode.json": "{}"}))
             self.assertEqual((root / ".config/opencode").stat().st_mode & 0o777, 0o700)
-
-    def test_changed_lockfile_invalidates_cached_dependencies(self):
-        with tempfile.TemporaryDirectory() as name:
-            root = Path(name)
-            config = root / ".config/opencode"
-            (config / "node_modules").mkdir(parents=True)
-            manifest = '{"dependencies":{"example":"^1"}}'
-            (config / "package.json").write_text(manifest)
-            (config / "package-lock.json").write_text("old resolution")
-            (config / "node_modules/cached").write_text("old")
-            sync.sync_config(
-                root,
-                archive(
-                    {"package.json": manifest, "package-lock.json": "new resolution"}
-                ),
-            )
-            self.assertFalse((config / "node_modules").exists())
 
     def test_warm_sync_preserves_runtime_generated_sdk_and_lock(self):
         with tempfile.TemporaryDirectory() as name:
@@ -183,32 +193,6 @@ class ConfigCacheTests(unittest.TestCase):
                 ],
                 "1.19.5",
             )
-
-    def test_source_lock_change_invalidates_previously_recorded_cache(self):
-        with tempfile.TemporaryDirectory() as name:
-            root = Path(name)
-            config = root / ".config/opencode"
-            host = {
-                "package.json": '{"dependencies":{"example":"^1"}}',
-                "package-lock.json": "old resolution",
-            }
-            sync.sync_config(root, archive(host), "1.19.5")
-            (config / "node_modules").mkdir()
-            host["package-lock.json"] = "new resolution"
-            self.assertFalse(sync.sync_config(root, archive(host), "1.19.5"))
-            self.assertFalse((config / "node_modules").exists())
-
-    def test_runtime_upgrade_invalidates_previously_recorded_cache(self):
-        with tempfile.TemporaryDirectory() as name:
-            root = Path(name)
-            host = {
-                "package.json": '{"dependencies":{"@opencode-ai/plugin":"1.15.11"}}'
-            }
-            sync.sync_config(root, archive(host), "1.19.5")
-            modules = root / ".config/opencode/node_modules"
-            modules.mkdir()
-            self.assertFalse(sync.sync_config(root, archive(host), "1.19.6"))
-            self.assertFalse(modules.exists())
 
     def test_arbitrary_custom_dependencies_are_not_adopted_on_sdk_match(self):
         with tempfile.TemporaryDirectory() as name:

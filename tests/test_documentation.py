@@ -5,13 +5,11 @@ import json
 import os
 from pathlib import Path
 import re
-import runpy
 import shutil
 import subprocess
-import sys
 import tempfile
 import unittest
-from oc_box import backups, dependencies, workspace_service
+from oc_box import backups, dependencies, oc_box as box, workspace_service
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
@@ -27,40 +25,10 @@ def load(name, path):
     return module
 
 
-box = load("oc_box_docs", APP / "src/oc_box/oc_box.py")
 build = load("build_docs", APP / "tools/build_docs.py")
-version = load("version_info_docs", APP / "src/oc_box/version_info.py")
 
 
 class DocumentationTests(unittest.TestCase):
-    def test_global_vault_host_procedure_is_isolated_with_scoped_acceptance(self):
-        for name in ("docs/cli.md", "docs/opencode-2.md", "CONTRIBUTING.md"):
-            text = (APP / name).read_text()
-            normalized = " ".join(text.split())
-            with self.subTest(name=name):
-                self.assertIn("tools/test_global_vault_podman.py", text)
-                self.assertIn('--opencode-v2 "$(command -v opencode)"', text)
-                self.assertIn("--work-dir /var/tmp --temp-dir /var/tmp", text)
-                self.assertIn("graphroot/runroot", normalized)
-                self.assertIn("scripted", normalized)
-                self.assertIn("host", normalized)
-        guide = " ".join((APP / "docs/opencode-2.md").read_text().split())
-        for phrase in (
-            "Accepted full scripted host result",
-            "1.5.38+g0611104",
-            "061110489f946682a40106175ae49a1c668da94b",
-            "not interactive TUI acceptance",
-            "not entry-removal or every vault error/override edge case",
-            "Earlier failed fixtures and source-only retries remain failure/diagnostic evidence",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, guide.replace("**", ""))
-        self.assertNotIn("No live result for this fixture has been accepted yet", guide)
-        self.assertNotIn("`--no-vault` still need live", guide)
-        self.assertIn("does not install/upgrade your launcher", guide)
-        self.assertIn("normal provider accounts", guide)
-        self.assertIn("never runs global prune", guide)
-
     def test_v2_vault_examples_use_native_provider_and_mcp_env_references(self):
         for name in ("docs/cli.md", "docs/opencode-2.md"):
             with self.subTest(name=name):
@@ -83,91 +51,6 @@ class DocumentationTests(unittest.TestCase):
                     config["mcp"]["servers"]["example-tools"]["environment"],
                     {"MCP_API_KEY": "{env:MCP_API_KEY}"},
                 )
-
-    def test_vault_reference_documents_dynamic_mode_and_invocation_opt_out(self):
-        text = (APP / "docs/cli.md").read_text()
-        self.assertIn("### --credential-mode env|selected|vault\n", text)
-        self.assertIn("--credential-mode vault --clear-credentials", text)
-        section = text.split("### --no-vault\n", 1)[1].split("\n### ", 1)[0]
-        for phrase in (
-            "V2-only",
-            "owning",
-            "without changing the saved workspace policy",
-            "retain their env constraints",
-            "Attached TUI/web clients reject",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, section)
-        guide = (APP / "docs/opencode-2.md").read_text()
-        setup = guide.split(
-            "### Global vault-first from the first project launch\n", 1
-        )[1]
-        setup = setup.split("\n### ", 1)[0]
-        self.assertLess(
-            setup.index("oc-box secrets set ANTHROPIC_API_KEY"),
-            setup.index("oc-box --project ~/devel/demo"),
-        )
-        self.assertNotIn("oc-box credentials", setup)
-        self.assertNotRegex(text + guide, r"(?m)^oc-box\s+--(?:auto|standalone)\b")
-
-    def test_native_autoapproval_is_not_the_container_build_only_default(self):
-        text = " ".join((APP / "docs/opencode-2.md").read_text().split())
-        for phrase in (
-            "inside container Build mode only",
-            "All non-Build/Plan/child rules",
-            "opencode --auto --standalone",
-            "does not override explicit denials",
-            "session.permissions",
-            "oc-box does not enable it or modify normal host `cli.json`",
-            "no new interactive TUI permission-prompt/reload pass has been accepted",
-        ):
-            with self.subTest(phrase=phrase):
-                self.assertIn(phrase, text.replace("**", ""))
-
-    def test_global_vault_keeps_native_oauth_copying_independent(self):
-        for name in ("docs/cli.md", "docs/opencode-2.md"):
-            text = " ".join((APP / name).read_text().split())
-            with self.subTest(name=name):
-                self.assertIn(
-                    "Native OpenCode saved/OAuth credential refresh and copying "
-                    "remain independent in every credential mode, including global vault mode",
-                    text,
-                )
-                self.assertIn("structured OAuth refresh-token records", text)
-                self.assertIn("`OPENCODE_AUTH_CONTENT`", text)
-                self.assertIn("no plaintext opencode json secrets", text.lower())
-        for name in (
-            "README.md",
-            "SECURITY.md",
-            "CONTRIBUTING.md",
-            "AGENTS.md",
-            "docs/cli.md",
-            "docs/opencode-2.md",
-        ):
-            with self.subTest(name=name):
-                text = " ".join((APP / name).read_text().split())
-                self.assertNotIn("env/auth fallback", text)
-                self.assertNotIn("env-file/OpenCode-auth", text)
-
-    def test_v2_build_helper_preserves_denials_and_child_rules(self):
-        for name in ("docs/cli.md", "docs/opencode-2.md"):
-            text = " ".join((APP / name).read_text().split()).replace("**", "")
-            with self.subTest(name=name):
-                self.assertRegex(text, r"final `ask`(?: decision)? to `allow`")
-                self.assertIn("explicit permission event agent wins", text)
-                self.assertRegex(text, r"never(?: assumes)? the parent's agent")
-                self.assertIn("denials remain denied", text)
-                self.assertIn("Explicit session and mandatory policy denials", text)
-                self.assertIn("never overwrites a deny passed to it", text)
-                self.assertIn("including their configured denies, as before", text)
-                self.assertIn("existing final Build", text)
-                self.assertIn("Session permission arrays are not overwritten", text)
-                self.assertIn("Plan/child requests", text)
-                self.assertIn("elicitation prompts", text)
-                self.assertIn("`OPENCODE_CONFIG_CONTENT` overlay", text)
-                self.assertIn("managed policy still wins", text)
-                self.assertIn("No `--auto`", text)
-                self.assertIn("native evaluator/import/reload", text)
 
     def test_every_parser_command_and_option_has_its_own_reference_entry(self):
         text = (APP / "docs/cli.md").read_text()
@@ -206,58 +89,10 @@ class DocumentationTests(unittest.TestCase):
             self.assertIn(image, text, name)
         for alias in box.ALIASES:
             self.assertIn("`" + alias + "`", text)
-        for action in parser._actions:
-            if action.option_strings:
-                heading = next(
-                    heading
-                    for heading in headings
-                    if action.option_strings[0] in heading
-                )
-                section = (
-                    text.split("### " + heading + "\n", 1)[1]
-                    .split("\n### ", 1)[0]
-                    .split("\n## ", 1)[0]
-                )
-                self.assertGreater(len(section.strip()), 80, heading)
 
     def test_generated_sources_match_the_reference(self):
-        text = (APP / "docs/cli.md").read_text()
-        self.assertEqual((APP / "docs/oc-box.1").read_text(), build.render_man(text))
-        self.assertEqual(
-            (APP / "docs/oc-box.texi").read_text(), build.render_texinfo(text)
-        )
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(build.main(["--check"]), 0)
-
-    def test_info_includes_navigation_examples_and_lifecycle_details(self):
-        text = (APP / "docs/oc-box.info").read_text()
-        for phrase in (
-            "Node: Top",
-            "Node: Commands",
-            "Node: Options",
-            "Node: Lifecycle and persistence",
-            "oc-box reset --project",
-            "--import-session",
-            "--clear-podman-args",
-            "container_use_devices",
-            "not live updates",
-            "GPL-3.0-or-later",
-            "marker missing",
-            "marker mismatch",
-            "retired/ID/",
-            "name_to_handle_at",
-            "project_filesystem_identity",
-            "capability-based",
-            "filesystem-independent",
-            "auto_update",
-            "oc-box upgrade --check",
-            "curl -fsSL",
-            "oc-box backup",
-            "restore_incomplete",
-            "--recipient",
-            "container_project",
-        ):
-            self.assertIn(phrase, text)
 
     def test_public_examples_do_not_publish_development_session_ids_or_home_paths(self):
         for name in (
@@ -351,7 +186,6 @@ class DocumentationTests(unittest.TestCase):
             home = Path(temporary)
             with (
                 patch.object(Path, "home", return_value=home),
-                patch.dict(sys.modules, {"version_info": version}),
                 patch.object(shutil, "which", return_value=None),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
@@ -386,7 +220,6 @@ class DocumentationTests(unittest.TestCase):
             home = Path(temporary)
             with (
                 patch.object(Path, "home", return_value=home),
-                patch.dict(sys.modules, {"version_info": version}),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
                 from oc_box.install import main as install_main

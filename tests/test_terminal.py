@@ -1,5 +1,4 @@
 import contextlib
-import importlib.util
 import io
 import json
 import os
@@ -13,14 +12,9 @@ import termios
 import time
 import unittest
 from unittest.mock import patch
+from oc_box import oc_box as box
 
 APP = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location(
-    "oc_box._terminal_test", APP / "src/oc_box/oc_box.py"
-)
-assert spec is not None and spec.loader is not None
-box = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(box)
 
 
 class MaintenanceTerminalTests(unittest.TestCase):

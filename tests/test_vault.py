@@ -324,7 +324,7 @@ class VaultPolicyTests(VaultFixture):
         with self.assertRaisesRegex(box.BoxError, "init/passwd"):
             box.main(["secrets", "list", "--min-passphrase-length", "8"])
 
-    def test_env_workflow_is_default_and_never_opens_vault_or_loads_crypto(self):
+    def test_v1_env_default_never_opens_vault_or_loads_crypto(self):
         with (
             patch.dict(os.environ, {"EXAMPLE_TOKEN": VALUE}),
             patch.object(vault, "select") as unlock,

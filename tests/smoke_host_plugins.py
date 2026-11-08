@@ -9,9 +9,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
-import sys
 import tempfile
 from unittest.mock import patch
 from urllib.parse import quote

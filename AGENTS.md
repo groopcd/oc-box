@@ -128,6 +128,13 @@ the repository; installing oc-box must not require documentation build tools.
 
 ## Checks
 
+`docs/testing.md` owns the suite audit/strategy. Prefer behavior-focused tests,
+normal package imports and named matrices over duplicate runtime loads, prose
+snapshots or self-testing fixture setup. Do not retire a supported V1, data-loss,
+secret-lifetime, identity/ownership, permission or host-evidence regression just
+to lower a method count. Preserve unique cases/assertions and compare coverage;
+parent-process coverage does not replace native JS, process/TTY or host checks.
+
 ```bash
 uv run --no-project --with-editable . --with cryptography python -B -m unittest discover -s tests -v
 python3 -B tests/smoke_mainline.py

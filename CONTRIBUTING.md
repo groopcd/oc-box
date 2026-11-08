@@ -36,6 +36,10 @@ Offline src-layout checks do not establish a new live Podman lifecycle pass.
 
 ## Checks
 
+See [the test strategy and audit](docs/testing.md) before adding/removing tests.
+Keep distinct data-loss/security regressions; consolidate repeated cases and
+fixture/prose checks, not an arbitrary number of test methods.
+
 Python 3.10+ and stdlib run the base tests. Full vault coverage needs the optional
 cryptography library; backup integration tests need host age/age-keygen. CI
 installs age explicitly. The mainline smoke test also needs Git and OpenCode

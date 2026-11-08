@@ -4,7 +4,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from oc_box import installation, oc_box, updater
+from oc_box import oc_box
 
 APP = Path(__file__).resolve().parents[1]
 
@@ -21,14 +21,6 @@ class PackagingTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "oc-box: fixture failure\n")
         with patch.object(oc_box, "main", side_effect=KeyboardInterrupt):
             self.assertEqual(oc_box.entrypoint(), 130)
-
-    def test_github_installer_includes_package_import_compatibility_files(self):
-        self.assertIn("__init__.py", installation.PROGRAM_FILES)
-        self.assertIn("__main__.py", installation.PROGRAM_FILES)
-        for name in installation.PROGRAM_FILES:
-            self.assertTrue(installation.source_file(APP, name).is_file(), name)
-        with patch.object(updater, "editable_source_root", return_value=None):
-            self.assertFalse(updater.package_managed(APP))
 
     def test_package_metadata_and_workflow_keep_both_distribution_channels(self):
         metadata = (APP / "pyproject.toml").read_text()

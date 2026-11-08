@@ -6,12 +6,10 @@ No host registry, credentials, providers, or managed service is touched.
 
 import argparse
 import base64
-import contextlib
 import http.cookiejar
 import importlib.util
 import fcntl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import io
 import json
 import os
 from pathlib import Path
@@ -22,7 +20,6 @@ import shutil
 import struct
 import subprocess
 import sys
-import tarfile
 import tempfile
 import threading
 import time
@@ -32,10 +29,8 @@ from urllib.request import (
     Request,
     build_opener,
     HTTPCookieProcessor,
-    HTTPHandler,
     ProxyHandler,
 )
-from urllib.error import HTTPError
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
