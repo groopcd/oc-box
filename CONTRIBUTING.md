@@ -26,9 +26,9 @@ are local and bounded. These checks do not replace live host-side Podman tests.
 Do not run host lifecycle tests from inside the project's running container.
 
 For OpenCode 2.x compatibility, keep a separate native binary and run
-`python3 -B tests/smoke_v2.py --opencode /path/to/opencode-v2`. The branch
-`feature/opencode-2-compat` retains 1.x support and stays unmerged until accepted
-disposable host-terminal lifecycle, credentials, and backup/restore testing.
+`python3 -B tests/smoke_v2.py --opencode /path/to/opencode-v2`. The 1.5 release
+retains 1.x support and has accepted disposable host-terminal lifecycle,
+credentials, backup/restore, reset and downgrade validation.
 See `docs/opencode-2.md` for upstream differences and the private-service env
 strategy. Never test against real host service/config/data from this container.
 `plugin_bridge.js` adapts only its enumerated V1 hooks. The offline Node fixture
@@ -49,9 +49,9 @@ directories, PDF/history transforms and model-variant request rewriting.
 Native V1/V2 integration runs continuously on master, feature branches and pull
 requests; package checks assert the compatibility guide, V2 runtime resources and
 offline JS fixtures ship through their intended distribution channels. Accepted
-host TUI/web/shell and plugin tests are recorded in `docs/opencode-2.md`; the
-remaining vault/backup/reset/downgrade host checks gate merge and publication.
-Use `tools/test_v2_podman.py` for those remaining acceptance checks; setup and
+host TUI/web/shell, plugin and vault/backup/reset/downgrade tests are recorded in
+`docs/opencode-2.md`. Repeat relevant host checks before releasing lifecycle or
+credential changes. Use `tools/test_v2_podman.py` for host acceptance; setup and
 precise scope are in `docs/opencode-2.md`. It uses isolated synthetic resources,
 scripted prompt/TUI actions and real rootless lifecycle/native inference fixtures.
 Never run it under sudo, inside oc-box, or against real workspaces.

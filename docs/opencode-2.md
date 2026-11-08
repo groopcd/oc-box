@@ -1,9 +1,9 @@
 # OpenCode 1.x and 2.x compatibility
 
-Development branch: `feature/opencode-2-compat`, pending the remaining host
-lifecycle checks before merge/publication. The compatibility code supports
-unmodified OpenCode 1.19.5 and 2.2.6. Installing a previously published PyPI or
-GitHub release does not install this unmerged work.
+Available in oc-box 1.5.x, with retained OpenCode 1.x support. Validation uses
+unmodified OpenCode 1.19.5 and 2.2.6, plus accepted disposable Linux host/rootless
+Podman lifecycle tests. Upgrade through your normal GitHub/curl, uv, pipx or
+virtual-environment package channel to get the 1.5 release.
 
 ## Environment and service plan
 
@@ -65,11 +65,11 @@ supported CLI/API contracts, pipes and memfd; no host plaintext credential files
 
 ### Keep using an env file
 
-From a host terminal, source your existing file and launch the branch:
+From a host terminal, source your existing file and launch oc-box:
 
 ```sh
 . ~/.config/provider-credentials.env
-python3 oc_box.py --project ~/devel/demo
+oc-box --project ~/devel/demo
 ```
 
 Automatic `_TOKEN`/`_API_KEY` forwarding, `pass_env`, and workspace selections
@@ -106,7 +106,7 @@ provider/MCP config resolution.
 
 ## Compatibility map
 
-| Feature | 1.x | 2.x branch behavior |
+| Feature | 1.x | 2.x behavior |
 | --- | --- | --- |
 | Exact runtime | `opencode-ai@VERSION` | `@opencode/cli@VERSION`, decorated version output normalized |
 | TUI | Native 1.x | Native 2.x on the workspace-owned private service |
@@ -216,26 +216,41 @@ shell detach/replay/retained environment while a browser relay is open, one-use
 browser pairing, cookies, shared process/session identity and event streaming. Binary upgrade
 traffic and lifecycle lock/close ordering have separate offline fixtures.
 
-Before merge/release, accept host-terminal testing in a disposable workspace:
-fresh/warm V2 TUI, env-file and selected-vault provider/MCP access, stop/resume,
-import/sync, full/portable backup restore, reset and V1 downgrade. This development
-container cannot validate host Podman. Keep the branch unmerged until accepted.
-Accepted host testing confirms 1.x env/MCP operation and 2.2.6 MCP access,
-cold/warm startup, native TUI, web and persistent session-shell coexistence,
-detach/reattach, stop/resume, updated plugin behavior and host history sync.
-The host fixture verified selected-vault provider/shell/MCP delivery, rotation
-and attach without unlock. A disk-backed rerun advanced through full/portable
-restore and reset to the V1 downgrade check. That run rejected normal V1 database
-metadata writes because it compared database bytes after native V1 reopened it.
-The corrected check verifies exact V1 message/part history and that V1 never
-writes the V2 database. V2 return remains pending the targeted host retry/final
-acceptance evidence. Automated fixtures do not replace host rootless-Podman tests.
+Accepted host testing for the 1.5 release covers:
 
-### Remaining release checks
+- 1.x env/MCP operation and 2.2.6 MCP access, cold/warm startup, native TUI,
+  web and persistent session-shell coexistence, detach/reattach, stop/resume,
+  updated plugin behavior and host history sync.
+- Selected synthetic vault provider/shell/MCP delivery, rotation and attach
+  without unlock, exercised by the real rootless-Podman fixture.
+- Full/portable restore with fresh IDs, stopped containers, exact private-home
+  database bytes before reopen, retained session/internal paths, source
+  preservation and expected OS-state differences. Reset preserved project/home/
+  history and rebuilt the catalog OS; wrong-password reset preserved resources.
+- Native V1 downgrade preserving exact original messages/parts and leaving V2
+  database bytes unchanged, followed by return to V2 with all existing native
+  messages intact and new synthetic provider/shell/MCP execution. V2 left the
+  retained V1 database bytes unchanged.
 
-The next published version uses **1.5.N**, preserving the original commit-count
-patch baseline and upgrade ordering. This branch is prepared for that series;
-publication waits for the host results below.
+The initial full-image load hit a quota in system temporary storage. A fresh
+disk-backed run completed restore/reset, then a targeted retry completed the
+downgrade/V2 return after correcting an overly strict active-V1 byte comparison.
+The targeted retry did not repeat the earlier restore/reset checks. Native V1
+updates project/access metadata on normal reads; exact transcript comparison
+checks history once V1 itself reopens the database. Inactive-major database bytes
+and unopened backup/restore transport remain separately verified.
+
+The provider/MCP fixture is synthetic, with scripted TUI/password input and real
+selection/decryption, forwarding, locks, services, tools and rootless storage.
+Interactive host testing covers the native client UI separately. These checks
+do not claim restored real-project model inference or universal filesystem/OS
+certification. Automated offline fixtures do not replace host Podman validation.
+
+### Repeatable host validation
+
+Versions use **1.5.N**, preserving the original commit-count patch baseline and
+upgrade ordering. Repeat relevant host validation before lifecycle/credential
+releases, using only isolated disposable resources.
 
 #### Automated disposable host fixture
 
@@ -424,10 +439,10 @@ Use only disposable projects, credential selections and backups:
   launch to verify retained V1 history, then select 2.2.6 again and verify V2
   progress was not reseeded or lost. Keep test configuration V1-compatible.
 
-After accepted results, remove the development-release notice, record the host
-evidence, regenerate manuals, and commit the release documentation. Continuous
-CI runs native V1/V2 integration on branches, pull requests and master, alongside
-regression/package checks and the seven-distro matrix. Fast-forward the tested
+Record host evidence, regenerate changed manuals, and commit release documentation
+after checks. Continuous CI runs native V1/V2 integration on branches, pull
+requests and master, alongside regression/package checks and the seven-distro
+matrix. Fast-forward the tested
 commit into master, publish its matching commit-derived tag, and verify the
 GitHub/PyPI wheel/sdist source identity, installation and SHA256 checksums.
 

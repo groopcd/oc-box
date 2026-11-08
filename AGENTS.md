@@ -111,16 +111,15 @@ verification must run on the host, outside another container/sandbox.
 The V2 smoke uses unmodified 2.2.6 with private servers, native tool/formatter/MCP
 Code Mode execution, env delivery, credential rotation, large transcript sync,
 and upstream V1 migration from a retained snapshot. V2 lacks upstream native LSP.
-Keep `feature/opencode-2-compat` unmerged/unreleased until accepted disposable
-host-terminal V2 lifecycle/credential/backup validation; no real workspaces in tests.
-Host TUI/web/persistent-shell coexistence, detach/reattach, stop/resume and updated
-plugin behavior are accepted. The host fixture verified selected-vault provider,
-shell/MCP delivery, rotation and attach without unlock before full image restore
-failed in the first fixture. A disk-backed rerun reached the V1 downgrade after
-full/portable restore and reset, then hit an overly strict V1 database-byte check.
-Final downgrade/V2-return host evidence and acceptance remain pending. Keep native
-V1/V2 integration enabled on master and pull requests after the feature merges.
-`tools/test_v2_podman.py` is the opt-in host acceptance fixture for these remaining
+The 1.5 V2 release has accepted disposable host-terminal validation: TUI/web/
+persistent-shell coexistence, detach/reattach, stop/resume, updated plugins,
+selected-vault provider/shell/MCP delivery, rotation and attach without unlock.
+A disk-backed fixture passed full/portable restore and reset; a targeted retry
+passed exact V1 history preservation, inactive-major database-byte preservation
+and V2 return with retained native messages plus synthetic tool execution. The
+retry did not repeat earlier restore/reset stages. Keep native V1/V2 integration
+enabled on master and pull requests. No real workspaces in tests.
+`tools/test_v2_podman.py` is the opt-in host acceptance fixture for these
 checks: isolated synthetic vault/provider/MCP, native version executables, real
 rootless backup/reset/downgrade. Prompt/TUI actions are scripted; do not claim a
 live pass from its offline unit tests or run it inside this container.

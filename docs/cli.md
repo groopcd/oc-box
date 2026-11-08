@@ -68,7 +68,7 @@ Additional Podman options and devices explicitly extend these defaults.
 
 ### OpenCode versions
 
-This compatibility branch supports OpenCode 1.x and 2.x, tested with 1.19.5 and
+oc-box 1.5 supports OpenCode 1.x and 2.x, tested with 1.19.5 and
 2.2.6. The host release selects the exact container package: `opencode-ai` for
 1.x, `@opencode/cli` for 2.x. V2 uses a workspace-owned private stdio server with
 native `--server` clients and current env-file/vault selections at server startup;
@@ -84,7 +84,7 @@ provider discovery. Unsupported hooks still require native ports. Supported
 legacy config and V2 fields are retained; the Build plugin is version-aware.
 MCP Code Mode and native formatting are preserved. Upstream 2.2.6 does not run language servers
 or expose LSP diagnostics; native LSP remains on 1.x. See `docs/opencode-2.md`
-for environment strategy, migration limits, and pending host validation.
+for environment strategy, migration limits, and accepted host validation.
 
 ## Commands
 

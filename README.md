@@ -47,7 +47,7 @@ the boundary and tradeoffs.
 
 - Linux, Python 3.10+, rootless Podman with pasta networking.
 - Delegated CPU, memory, and process cgroup controllers.
-- A host OpenCode 1.x or 2.x installation on this compatibility branch.
+- A host OpenCode 1.x or 2.x installation (2.x support requires oc-box 1.5+).
   Integration checks use 1.19.5 and 2.2.6; see [2.x compatibility](docs/opencode-2.md).
 - Git on the host for installation from GitHub and self-updates; curl for the
   one-line installer.
@@ -160,7 +160,7 @@ Published PyPI releases are selected separately from ordinary GitHub commits.
 Packaged manuals are in the package's `docs/` and the tool environment's
 `share/man`/`share/info`; those directories may need explicit reader paths.
 
-### OpenCode 2.x shared clients (compatibility branch)
+### OpenCode 2.x shared clients
 
 While a V2 workspace is running, open its same session from another host terminal:
 

@@ -31,14 +31,14 @@ quota, so project, image, and volume growth can exhaust host disk space.
 
 ## Optional host credential vault
 
-On the OpenCode 2.x compatibility branch, workspace clients use native private
+With OpenCode 2.x, workspace clients use native private
 workspace-owned stdio servers with per-launch environment snapshots; clients
 connect using native `--server`. The host shared
 service is never exposed or restarted. Vault values are not saved in service
 config; copied OpenCode auth still belongs to the private container DB. Credential
 export/refresh uses private memfd/pipe transport and supported CLI/API operations.
 Original V1 container DB bytes are retained separately from the migrated V2
-snapshot. See `docs/opencode-2.md` for scope, limitations and pending host tests.
+snapshot. See `docs/opencode-2.md` for scope, limitations and accepted validation.
 
 Concurrent clients obtain ephemeral control credentials through a private
 same-user host runtime socket, without copying provider/vault values or storing
@@ -170,7 +170,7 @@ and mainline import/export, without running project plugins in the host archive
 controller. Transcript files may contain commands, source, paths, or secrets;
 they are private, not release artifacts. Synchronization is not live replication
 or an independent backup. Version compatibility is tested against specific
-mainline versions; accepting 1.x does not prove every future release compatible.
+mainline versions; accepting 1.x/2.x does not prove every future release compatible.
 Plain purge retains private archive JSON and minimal origin metadata under the
 state root's `retired/` directory, without retaining an active workspace or
 container storage. Those files may contain sensitive history, have no automatic
