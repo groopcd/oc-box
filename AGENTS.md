@@ -57,6 +57,9 @@ portable: use example project paths and synthetic session IDs, not local data.
   plugin audit and explicit native replacement. Keep unrelated config/data intact,
   take one private safety snapshot, refuse unknown implementations/overrides, and
   never treat an inactive plugin as proof of host sandbox enforcement.
+  Native host foreground allow/deny write and network probes are accepted;
+  reload/background cleanup remain separate host checks. Do not generalize this
+  shell-tool sandbox to native file tools, MCPs, plugin processes or session PTYs.
 - `docs/cli.md`: canonical command reference; `tools/build_docs.py` generates
   the committed man/Texinfo/Info manuals from it.
 

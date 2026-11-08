@@ -71,7 +71,9 @@ profile; it never edits the source profile, host databases, or installed CLI.
 `tools/host_sandbox.js` is a separate host shell-tool port using the maintained
 sandbox runtime, not the container opt-out bridge. Native profile tests use a
 mocked runtime; real host filesystem/network enforcement remains a manual
-acceptance check. See `docs/host-plugins.md`. Keep defaults fail-closed, avoid
+acceptance check. Foreground native host project/outside-project write and
+allowed/disallowed network probes are accepted; reload/background behavior remain
+separate host checks. See `docs/host-plugins.md`. Keep defaults fail-closed, avoid
 Build permission overrides, preserve source-relative supporting files, and
 reject unsupported migration paths instead of silently disabling protection.
 `tools/port_host_plugins.py` is the V2-only path: reviewed known-source replacements,

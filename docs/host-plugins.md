@@ -14,7 +14,7 @@ are not changed by the tool.
 
 | Plugin | Decision and reason |
 | --- | --- |
-| opencode-sandbox | Keep; native V2 shell hooks and maintained sandbox engine preserve host policy. Host enforcement still needs validation. |
+| opencode-sandbox | Keep; native V2 shell hooks and maintained sandbox engine preserve host policy. Reported host foreground allow/deny checks passed; reload/background cleanup remain separate checks. |
 | python-isolation | Keep; pip/uv isolation remains useful, particularly with a readonly sandbox home. Private writable caches and native shell environment hook. |
 | output-clamp | Keep; native 8/12 KiB selective UTF-8 budgets are stricter than V2's built-in 50 KiB/2,000-line limit. Full spill text, files and structured data are preserved. |
 | lemonade-models | Keep; V2 does not automatically discover your configured compatible local server's live model inventory/capabilities/context. No models are loaded except explicit load/unload tool calls. |
@@ -112,10 +112,34 @@ python3 -B tests/smoke_native_host_port.py --opencode /path/to/opencode-v2
 Native fixture checks run with no V1 SDK/bridge and verify inference/MCP, live
 synthetic Lemonade inventory, unwrapped stored commands, selected reasoning
 settings at a Responses endpoint and real PDF fallback bytes. The sandbox engine
-is mocked inside this container; **real host filesystem/network enforcement must
-be validated using the Required host test section below before trusting it**.
+is mocked inside this container; that is not host isolation proof. Reported host
+foreground tests confirmed allowed project writes, denied outside-project writes,
+an allowed PyPI request and an explicit example.com allowlist denial. Reload and
+background-job cleanup have not yet been reported as tested on the host.
 If the native sandbox is inactive or dependencies fail to load, do not assume
 its fail-closed runtime hooks are present. Stop and fix activation first.
+
+## Accepted native-host foreground smoke results
+
+All six native plugins were reported loaded in the normal host V2 setup. The
+operator ran shell-tool tests with actual execution, not pre-execution OpenCode
+permission refusals:
+
+| Probe | Reported result |
+| --- | --- |
+| Write/read synthetic file inside disposable project | `sandbox-positive`, exit 0 |
+| Create random empty file outside project in HOME | Child reported permission/read-only denial; no dummy file created |
+| HTTPS request to allowed PyPI | HTTP 200, exit 0 |
+| HTTPS request to disallowed example.com | curl exit 22; tunnel response HTTP 403 with `X-Proxy-Error: blocked-by-allowlist` |
+
+These are accepted foreground shell-tool smoke results for the tested policy,
+paths and endpoints, not exhaustive sandbox certification. There were no config
+changes, installations, real credential reads, or hand-written sandbox wrappers
+in these probes. The successful project test file is disposable test data, not
+source or evidence to commit. Before recording reload or background cleanup as
+accepted, finish background jobs, run `/reload` and repeat the same checks; test
+background completion separately if relevant. Native file tools, MCPs, plugins
+and interactive PTYs remain outside this shell-tool sandbox's claimed boundary.
 
 ## Older option: separate compatibility profile
 
@@ -217,8 +241,9 @@ are sandboxed. oc-box remains the option for containing all those integrations.
 ### Required host test
 
 The generated profile and local hooks pass native V2 offline tests; sandbox policy,
-refusal and cleanup pass mocked-runtime tests. **Real host sandbox enforcement
-is not validated inside this development container.** Before trusting it, check:
+refusal and cleanup pass mocked-runtime tests. Real host foreground enforcement
+was reported passed for the normal native setup above, not exercised inside this
+development container. Repeat these checks for changed policies/implementations:
 
 1. `/plugins` reports the migrated local plugins and `oc-box.host-sandbox` active.
 2. Run a harmless shell tool in a disposable test project; it should execute.
