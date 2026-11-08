@@ -15,11 +15,14 @@ import oc_box as box
 import vault
 import workspace_service
 
+PREFERRED_TEMP = Path("/tmp/opencode")
+
 
 class GlobalVaultLaunchTests(TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(
-            prefix="oc-box-global-launch-", dir="/tmp/opencode"
+            prefix="oc-box-global-launch-",
+            dir=PREFERRED_TEMP if PREFERRED_TEMP.is_dir() else None,
         )
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
@@ -61,6 +64,20 @@ class GlobalVaultLaunchTests(TestCase):
             patch.object(box, "detect_opencode_release", return_value="2.2.6")
         )
         self.stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+
+    def test_missing_preferred_temp_directory_uses_standard_fallback(self):
+        missing = self.root / "missing-temp-parent"
+        self.assertFalse(missing.exists())
+        fixture = GlobalVaultLaunchTests(
+            "test_v1_still_forwards_environment_and_never_unlocks_global_vault"
+        )
+        try:
+            with patch(__name__ + ".PREFERRED_TEMP", missing):
+                fixture.setUp()
+            self.assertEqual(fixture.root.parent, Path(tempfile.gettempdir()))
+            self.assertFalse(missing.exists())
+        finally:
+            fixture.doCleanups()
 
     def existing(self, release="2.2.6"):
         path, data = box.create_workspace(self.project, "tumbleweed")
