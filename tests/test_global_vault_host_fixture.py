@@ -14,6 +14,8 @@ from unittest.mock import patch
 
 import oc_box as box
 import backup_crypto as crypto
+import backups
+import vault
 
 APP = Path(__file__).resolve().parents[1]
 SCRIPT = APP / "tools/test_global_vault_podman.py"
@@ -126,7 +128,13 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
             timeout=15,
         )
         self.assertEqual(help_result.returncode, 0, help_result.stderr)
-        for option in ("--opencode-v2", "--work-dir", "--temp-dir", "--cleanup"):
+        for option in (
+            "--opencode-v2",
+            "--work-dir",
+            "--temp-dir",
+            "--cleanup",
+            "--diagnose",
+        ):
             self.assertIn(option, help_result.stdout)
         denied = subprocess.run(
             [sys.executable, "-I", "-B", str(SCRIPT), "--work-dir", str(self.root)],
@@ -383,6 +391,81 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
             self.assertEqual(fixture.cleanup(self.root), {"source-a": source["id"]})
         podman.assert_not_called()
         self.assertEqual((self.root / "bin/podman").read_bytes(), original)
+
+    def test_diagnostics_inspect_checkpoints_without_unlock_start_or_secret_output(
+        self,
+    ):
+        self.complete_fixture_metadata()
+        path, source = self.record("source-a", "a" * 32)
+        source["ready"] = False
+        box.atomic_json(path, source)
+        fixture.record_ids(self.root)
+        before = path.read_bytes()
+        ledger = (self.root / "fixture-ids.json").read_bytes()
+        secret = "synthetic-sensitive-string-not-for-diagnostic-output"
+        info = {
+            "State": {
+                "Status": "exited",
+                "ExitCode": 125,
+                "Error": "systemd cgroup failure " + secret,
+                "Running": False,
+            },
+            "Config": {"Env": ["EXAMPLE_TOKEN=" + secret]},
+        }
+        volume = {
+            "Name": source["home_volume"],
+            "Mountpoint": str(
+                self.root
+                / "data/containers/storage/volumes"
+                / source["home_volume"]
+                / "_data"
+            ),
+        }
+        with (
+            patch.object(fixture, "host_guard"),
+            patch.object(fixture, "validate_store"),
+            patch.object(backups, "owned_container", return_value=info),
+            patch.object(backups, "owned_volume", return_value=volume),
+            patch.object(
+                box, "podman", return_value=subprocess.CompletedProcess([], 0, "", "")
+            ) as podman,
+            patch.object(
+                vault,
+                "is_present",
+                side_effect=AssertionError("No diagnostic vault probe"),
+            ),
+            patch.object(
+                vault, "select_all", side_effect=AssertionError("No diagnostic unlock")
+            ),
+            patch.object(
+                box,
+                "start_container",
+                side_effect=AssertionError("No diagnostic start"),
+            ),
+            patch.object(
+                box, "exec_command", side_effect=AssertionError("No diagnostic exec")
+            ),
+        ):
+            result = fixture.diagnose(self.root)
+        self.assertEqual(result["status"], "diagnostic-only")
+        checkpoint = result["workspaces"]["source-a"]
+        self.assertFalse(checkpoint["baseline_ready"])
+        self.assertEqual(checkpoint["container_exit_code"], 125)
+        self.assertEqual(checkpoint["container_error_category"], "cgroup-runtime")
+        self.assertTrue(checkpoint["private_home_present"])
+        self.assertNotIn(secret, json.dumps(result))
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual((self.root / "fixture-ids.json").read_bytes(), ledger)
+        self.assertEqual(
+            podman.call_args.args, ("volume", "exists", source["home_volume"])
+        )
+
+    def test_unknown_state_error_text_never_appears_in_diagnostic_category(self):
+        self.assertEqual(
+            fixture.state_error_category("private unexpected message"), "unclassified"
+        )
+        self.assertIsNone(fixture.state_error_category(""))
+        self.assertIsNone(fixture.state_error_category(None))
 
     def test_cleanup_validates_all_labels_before_any_removal(self):
         self.complete_fixture_metadata()

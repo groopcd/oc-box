@@ -484,6 +484,21 @@ native engine path. Cleanup validates that recorded identity instead of the
 current virtual environment; those recorded binaries must remain available.
 It never rewrites an unrecognized selector to bypass validation.
 
+For an unsuccessful owning launch, inspect retained checkpoints without
+starting/executing a container, unlocking the vault, syncing or replaying:
+
+```sh
+uv run --isolated --no-project --with cryptography python -I -B tools/test_global_vault_podman.py \
+  --diagnose /var/tmp/oc-box-gv-host-EXAMPLE
+```
+
+Use the exact retained path printed by your run; do not combine this with
+cleanup, executable or work/temp placement options. The diagnostic validates
+the private store and labels, then returns only readiness/state/exit-code and
+import/session checkpoints. Container error text is reduced to fixed categories,
+never printed alongside env/config values. It cannot recover an exception that
+the original run discarded, and inspection does not establish acceptance.
+
 **No live result for this fixture has been accepted yet.** Unit and native
 offline tests do not substitute for executing it on a host. Keep the important
 project untouched until the desired validation passes.

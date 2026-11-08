@@ -1818,6 +1818,93 @@ def cleanup(root):
     return ids
 
 
+def state_error_category(message):
+    """Fixed categories only; never return private container error text."""
+    if not isinstance(message, str) or not message:
+        return None
+    text = message.lower()
+    for terms, category in (
+        (("cgroup", "systemd"), "cgroup-runtime"),
+        (("quota", "no space left", "storage"), "storage"),
+        (("permission denied", "operation not permitted"), "permission"),
+        (("mount", "selinux"), "mount-or-label"),
+        (("executable", "not found"), "missing-runtime-file"),
+    ):
+        if any(term in text for term in terms):
+            return category
+    return "unclassified"
+
+
+def diagnose(root):
+    """Inspect retained checkpoints; never start/exec, unlock, sync or replay."""
+    host_guard()
+    root = validate_fixture(root, allow_unrecorded=True)
+    result = {
+        "status": "diagnostic-only",
+        "scope": "Read-only retained fixture metadata/resource inspection; no replay or host acceptance.",
+        "fixture_root": str(root),
+        "source_version": get_version_info(APP)["version"],
+        "workspaces": {},
+    }
+    with patch.dict(os.environ, isolated_env(root), clear=True):
+        validate_store(root, allow_unrecorded=True)
+        for name, (path, data) in workspace_records(root).items():
+            info = backups.owned_container(box, data)
+            state = {} if info is None else info.get("State", {})
+            status = state.get("Status")
+            allowed = {
+                "configured",
+                "created",
+                "running",
+                "stopped",
+                "exited",
+                "paused",
+                "stopping",
+            }
+            volume = box.podman(
+                "volume",
+                "exists",
+                data["home_volume"],
+                capture=True,
+                private=True,
+                check=False,
+                timeout=30,
+            )
+            require(volume.returncode in (0, 1), "diagnostic-volume")
+            if volume.returncode == 0:
+                owned = backups.owned_volume(box, data)
+                require(
+                    owned.get("Name") == data["home_volume"]
+                    and no_symlinks(owned["Mountpoint"])
+                    == root
+                    / "data/containers/storage/volumes"
+                    / data["home_volume"]
+                    / "_data",
+                    "private-volume",
+                )
+            imports = path.parent / "imports-v2"
+            result["workspaces"][name] = {
+                "id": data["id"],
+                "native_version": data.get("opencode_version"),
+                "baseline_ready": bool(data.get("ready")),
+                "container_present": info is not None,
+                "container_status": status
+                if status in allowed
+                else ("other" if info is not None else None),
+                "container_running": bool(state.get("Running")),
+                "container_exit_code": state.get("ExitCode")
+                if isinstance(state.get("ExitCode"), int)
+                else None,
+                "container_error_category": state_error_category(state.get("Error")),
+                "private_home_present": volume.returncode == 0,
+                "selected_session": box.session_state(path).get("last"),
+                "native_import_exports": len(list(imports.glob("*.json")))
+                if imports.is_dir()
+                else 0,
+            }
+    return result
+
+
 class FixtureArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         self.exit(
@@ -1848,6 +1935,11 @@ def parser():
         type=Path,
         help="Remove only owned resources in this fixture's verified private store; preserve all files/images",
     )
+    value.add_argument(
+        "--diagnose",
+        type=Path,
+        help="Read-only checkpoints for a retained fixture; no container start, vault unlock or replay",
+    )
     return value
 
 
@@ -1870,6 +1962,24 @@ def main(argv=None):
 
     try:
         host_guard()
+        if args.diagnose is not None:
+            require(
+                args.cleanup is None
+                and args.work_dir is None
+                and args.temp_dir is None
+                and args.opencode_v2 is None
+                and not any(
+                    value == "--distro" or value.startswith("--distro=")
+                    for value in arguments
+                ),
+                "diagnostic-options",
+            )
+            root = validate_fixture(args.diagnose, allow_unrecorded=True)
+            phase = "diagnostic-inspection"
+            with private_output():
+                result = diagnose(root)
+            print(json.dumps(result, indent=2), file=output)
+            return 0
         if args.cleanup is not None:
             require(
                 args.work_dir is None
