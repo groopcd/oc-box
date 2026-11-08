@@ -40,17 +40,12 @@ oc-box = "oc_box.oc_box:entrypoint"
 
 [tool.setuptools]
 packages = ["oc_box"]
-package-dir = { oc_box = "." }
+package-dir = { "" = "src" }
 include-package-data = false
 
 [tool.setuptools.package-data]
 oc_box = [
-  "LICENSE", "NOTICE", "README.md", "CONTRIBUTING.md", "SECURITY.md",
-  "install.sh", "docs/cli.md", "docs/oc-box.1", "docs/oc-box.texi", "docs/oc-box.info",
-  "docs/opencode-2.md",
-  "docs/host-plugins.md",
   "plugin_bridge.js",
-  "completions/oc-box",
 ]
 
 [tool.setuptools.data-files]

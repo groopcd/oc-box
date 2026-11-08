@@ -9,8 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import oc_box as box
-import plugin_compat
+from oc_box import oc_box as box, plugin_compat
 
 
 class PluginCompatibilityTests(unittest.TestCase):
@@ -27,7 +26,7 @@ class PluginCompatibilityTests(unittest.TestCase):
                 "--experimental-vm-modules",
                 "--no-warnings",
                 str(app / "tests/plugin_bridge_fixture.mjs"),
-                str(app / "plugin_bridge.js"),
+                str(box.PACKAGE / "plugin_bridge.js"),
             ],
             capture_output=True,
             text=True,

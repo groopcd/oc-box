@@ -5,7 +5,9 @@ import sys
 import unittest
 
 APP = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("oc_box_capture", APP / "oc_box.py")
+spec = importlib.util.spec_from_file_location(
+    "oc_box._capture_test", APP / "src/oc_box/oc_box.py"
+)
 assert spec is not None and spec.loader is not None
 box = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(box)

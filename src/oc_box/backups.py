@@ -77,7 +77,7 @@ def owned_container(box, data):
 
 
 def archive_command(box, action, root, *, private=False, limit=None):
-    result = [sys.executable, str(box.APP / "backup_archive.py"), action, str(root)]
+    result = [sys.executable, str(box.PACKAGE / "backup_archive.py"), action, str(root)]
     if private:
         result = ["podman", "unshare", *result]
     if limit is not None:

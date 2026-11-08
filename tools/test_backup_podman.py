@@ -18,9 +18,8 @@ import tempfile
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
-import backups
-import backup_crypto as crypto
-import oc_box as box
+sys.path.insert(0, str(APP / "src"))
+from oc_box import backups, backup_crypto as crypto, oc_box as box
 
 
 def run(root, image):

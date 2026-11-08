@@ -4,6 +4,11 @@ import json
 from pathlib import Path
 import subprocess
 
+if __package__:
+    from .paths import source_root
+else:
+    from paths import source_root
+
 VERSION_SERIES = "1.5"
 # Retain the original stable patch-count baseline across the 1.5 transition.
 # Absolute counts still order upgrades from installed 0.1/1.0-series launchers.
@@ -20,7 +25,7 @@ def public_version(build):
 
 
 def get_version_info(root):
-    root = Path(root).resolve()
+    root = source_root(root)
     if (root / ".git").exists():
 
         def git(*args):
@@ -65,6 +70,7 @@ def get_version_info(root):
 
 
 def about_text(root):
+    root = source_root(root)
     build = get_version_info(root)
     return "\n".join(
         (

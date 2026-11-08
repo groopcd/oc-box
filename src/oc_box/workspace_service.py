@@ -246,7 +246,7 @@ class Owner:
                     raise box.BoxError(
                         "A private workspace service already owns this workspace."
                     )
-        script = (box.APP / "opencode_v2_io.py").read_text()
+        script = (box.PACKAGE / "opencode_v2_io.py").read_text()
         command = box.exec_command(
             self.data, ["python3", "-c", script, "lease", box.CONTAINER_OPENCODE]
         )

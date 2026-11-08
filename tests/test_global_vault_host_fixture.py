@@ -12,10 +12,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-import oc_box as box
-import backup_crypto as crypto
-import backups
-import vault
+from oc_box import oc_box as box, backup_crypto as crypto, backups, vault
 
 APP = Path(__file__).resolve().parents[1]
 SCRIPT = APP / "tools/test_global_vault_podman.py"

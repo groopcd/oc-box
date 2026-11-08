@@ -10,7 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("oc_box_repair", APP / "oc_box.py")
+spec = importlib.util.spec_from_file_location(
+    "oc_box._repair_test", APP / "src/oc_box/oc_box.py"
+)
 assert spec is not None and spec.loader is not None
 box = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(box)

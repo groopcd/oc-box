@@ -11,25 +11,25 @@ import subprocess
 import sys
 import tempfile
 import unittest
-import backups
-import dependencies
-import workspace_service
+from oc_box import backups, dependencies, workspace_service
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
 
 
 def load(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
+    spec = importlib.util.spec_from_file_location(
+        "oc_box." + name if path.parent.name == "oc_box" else name, path
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-box = load("oc_box_docs", APP / "oc_box.py")
+box = load("oc_box_docs", APP / "src/oc_box/oc_box.py")
 build = load("build_docs", APP / "tools/build_docs.py")
-version = load("version_info_docs", APP / "version_info.py")
+version = load("version_info_docs", APP / "src/oc_box/version_info.py")
 
 
 class DocumentationTests(unittest.TestCase):
@@ -355,7 +355,9 @@ class DocumentationTests(unittest.TestCase):
                 patch.object(shutil, "which", return_value=None),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
-                runpy.run_path(str(APP / "install.py"))
+                from oc_box.install import main as install_main
+
+                self.assertEqual(install_main([]), 0)
             expected = {
                 home / ".local/share/man/man1/oc-box.1": APP / "docs/oc-box.1",
                 home / ".local/share/info/oc-box.info": APP / "docs/oc-box.info",
@@ -387,8 +389,10 @@ class DocumentationTests(unittest.TestCase):
                 patch.dict(sys.modules, {"version_info": version}),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
-                runpy.run_path(str(APP / "install.py"))
-                runpy.run_path(str(APP / "install.py"))
+                from oc_box.install import main as install_main
+
+                self.assertEqual(install_main([]), 0)
+                self.assertEqual(install_main([]), 0)
             index = (home / ".local/share/info/dir").read_text()
             self.assertEqual(index.count("* oc-box:"), 1)
             self.assertIn("(oc-box)", index)

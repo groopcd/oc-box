@@ -10,10 +10,7 @@ import tempfile
 from unittest import TestCase
 from unittest.mock import patch
 
-import credentials
-import oc_box as box
-import vault
-import workspace_service
+from oc_box import credentials, oc_box as box, vault, workspace_service
 
 PREFERRED_TEMP = Path("/tmp/opencode")
 

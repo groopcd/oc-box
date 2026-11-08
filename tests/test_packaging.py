@@ -4,9 +4,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-import installation
-import oc_box
-import updater
+from oc_box import installation, oc_box, updater
 
 APP = Path(__file__).resolve().parents[1]
 
@@ -28,8 +26,9 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("__init__.py", installation.PROGRAM_FILES)
         self.assertIn("__main__.py", installation.PROGRAM_FILES)
         for name in installation.PROGRAM_FILES:
-            self.assertTrue((APP / name).is_file(), name)
-        self.assertFalse(updater.package_managed(APP))
+            self.assertTrue(installation.source_file(APP, name).is_file(), name)
+        with patch.object(updater, "editable_source_root", return_value=None):
+            self.assertFalse(updater.package_managed(APP))
 
     def test_package_metadata_and_workflow_keep_both_distribution_channels(self):
         metadata = (APP / "pyproject.toml").read_text()

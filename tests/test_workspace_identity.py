@@ -13,11 +13,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import status_report
-import workspace_identity as identity
+from oc_box import status_report, workspace_identity as identity
 
 APP = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("oc_box_identity", APP / "oc_box.py")
+spec = importlib.util.spec_from_file_location(
+    "oc_box._identity_test", APP / "src/oc_box/oc_box.py"
+)
 assert spec is not None and spec.loader is not None
 box = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(box)
@@ -233,7 +234,7 @@ class WorkspaceIdentityTests(unittest.TestCase):
             patch.object(
                 box, "podman", return_value=subprocess.CompletedProcess([], 0, "", "")
             ) as podman,
-            patch("terminal_ui.run_tui", return_value=0) as shell,
+            patch("oc_box.terminal_ui.run_tui", return_value=0) as shell,
             contextlib.redirect_stdout(io.StringIO()),
         ):
             box.start_container(self.path, self.data)

@@ -12,10 +12,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import backups
-import backup_crypto as crypto
-import oc_box as box
-import vault
+from oc_box import backups, backup_crypto as crypto, oc_box as box, vault
 
 
 @unittest.skipUnless(

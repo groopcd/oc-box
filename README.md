@@ -754,13 +754,20 @@ warm resume, host-session import, MCP connection, and mapped NPU access have
 been exercised. The automated mainline test uses temporary databases and local
 model/MCP/LSP/formatter fixtures; it does not prove Podman isolation or certify
 every distro/runtime/device combination.
-The earlier selected-vault host provider/MCP/shell, rotation and attach probes
-are accepted; the new global-vault defaults and `--no-vault` still require live
-host/rootless-Podman acceptance. New unit/native offline checks must not be
-reported as a real global-vault lifecycle pass.
+The earlier selected-vault probes and separate full scripted global-vault run
+on `1.5.38+g0611104` are accepted at their documented scopes. The src-layout
+refactor's new offline checks do not establish a new live Podman lifecycle pass.
+
+Runtime code lives in `src/oc_box/`, with tests/tools/docs in their conventional
+top-level directories. Root installer/build entrypoints remain for compatibility.
+Run the source CLI without installing into project/system/user Python:
 
 ```sh
-uv run --no-project --with cryptography python -B -m unittest discover -s tests -v
+uv run --no-project --with-editable . oc-box --version
+```
+
+```sh
+uv run --no-project --with-editable . --with cryptography python -B -m unittest discover -s tests -v
 python3 -B tests/smoke_mainline.py
 python3 -B tools/build_docs.py --check
 ```

@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import backup_archive
+from oc_box import backup_archive
 
 APP = Path(__file__).resolve().parents[1]
 
@@ -47,7 +47,12 @@ class BackupArchiveTests(unittest.TestCase):
         os.link(source / "unfinished", source / "hardlink")
         (source / "external-link").symlink_to("/unavailable/external")
         result = subprocess.run(
-            [sys.executable, str(APP / "backup_archive.py"), "create", str(source)],
+            [
+                sys.executable,
+                str(APP / "src/oc_box/backup_archive.py"),
+                "create",
+                str(source),
+            ],
             capture_output=True,
             timeout=10,
             check=True,
@@ -135,7 +140,12 @@ class BackupArchiveTests(unittest.TestCase):
         source.mkdir()
         os.mkfifo(source / "fifo")
         result = subprocess.run(
-            [sys.executable, str(APP / "backup_archive.py"), "create", str(source)],
+            [
+                sys.executable,
+                str(APP / "src/oc_box/backup_archive.py"),
+                "create",
+                str(source),
+            ],
             capture_output=True,
             timeout=10,
         )

@@ -11,8 +11,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-import oc_box as box
-import vault
+from oc_box import oc_box as box, vault
 
 APP = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(

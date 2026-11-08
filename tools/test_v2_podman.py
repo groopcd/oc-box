@@ -28,14 +28,17 @@ from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
-import backup_crypto as crypto
-import backups
-import credentials
-import oc_box as box
-import opencode_compat as compat
-import vault
-import workspace_service
-from version_info import get_version_info
+sys.path.insert(0, str(APP / "src"))
+from oc_box import (
+    backup_crypto as crypto,
+    backups,
+    credentials,
+    oc_box as box,
+    opencode_compat as compat,
+    vault,
+    workspace_service,
+)
+from oc_box.version_info import get_version_info
 
 PREFIX = "oc-box-live-v2-"
 KEY = "ACCEPTANCE_API_KEY"

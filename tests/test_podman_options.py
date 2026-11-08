@@ -10,7 +10,9 @@ import unittest
 from unittest.mock import call, patch
 
 APP = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("oc_box_options", APP / "oc_box.py")
+spec = importlib.util.spec_from_file_location(
+    "oc_box._options_test", APP / "src/oc_box/oc_box.py"
+)
 assert spec is not None and spec.loader is not None
 box = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(box)

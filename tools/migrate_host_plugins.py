@@ -21,8 +21,8 @@ import tempfile
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
-import oc_box as box
-import plugin_compat
+sys.path.insert(0, str(APP / "src"))
+from oc_box import oc_box as box, plugin_compat
 
 MAX_FILE = 8 * 1024 * 1024
 EXTENSIONS = (".ts", ".js", ".mts", ".mjs")
@@ -255,7 +255,7 @@ def make_profile(source, output=None):
                 )
         config["plugins"] = migrated
         write_file(destination / name, (json.dumps(config, indent=2) + "\n").encode())
-    bridge = (APP / "plugin_bridge.js").read_bytes()
+    bridge = (box.PACKAGE / "plugin_bridge.js").read_bytes()
     bridge = bridge.replace(
         b"./oc-box-v1-provider-config.json", b"./host-providers.json"
     )

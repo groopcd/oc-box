@@ -293,6 +293,7 @@ def main(argv=None):
         if not (repo / "tools/test_global_vault_podman.py").is_file():
             raise ValueError("fixture unavailable")
         sys.path.insert(0, str(repo))
+        sys.path.insert(0, str(repo / "src"))
         from tools import test_global_vault_podman as fixture
 
         binary = args.opencode_v2.expanduser().resolve(strict=True)

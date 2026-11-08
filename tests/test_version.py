@@ -11,10 +11,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import installation
+from oc_box import installation
 
 APP = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("version_info", APP / "version_info.py")
+spec = importlib.util.spec_from_file_location(
+    "oc_box._version_test", APP / "src/oc_box/version_info.py"
+)
 assert spec is not None and spec.loader is not None
 version = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(version)
@@ -109,12 +111,14 @@ class VersionTests(unittest.TestCase):
             patch.object(installation, "get_version_info", version.get_version_info),
             contextlib.redirect_stdout(io.StringIO()),
         ):
-            runpy.run_path(str(APP / "install.py"))
+            from oc_box.install import main as install_main
+
+            self.assertEqual(install_main([]), 0)
         installed = home / ".local/share/oc-box"
         self.assertEqual(version.get_version_info(installed), expected)
         self.assertEqual(
             (installed / "workspace_identity.py").read_bytes(),
-            (APP / "workspace_identity.py").read_bytes(),
+            (APP / "src/oc_box/workspace_identity.py").read_bytes(),
         )
         self.assertEqual(
             (installed / "LICENSE").read_bytes(), (APP / "LICENSE").read_bytes()
@@ -142,7 +146,7 @@ class VersionTests(unittest.TestCase):
         for flag in ("--version", "--about"):
             with self.subTest(flag=flag):
                 result = subprocess.run(
-                    [sys.executable, "-B", str(APP / "oc_box.py"), flag],
+                    [sys.executable, "-B", str(APP / "src/oc_box/oc_box.py"), flag],
                     env={**os.environ, "PATH": "/not-installed"},
                     capture_output=True,
                     text=True,

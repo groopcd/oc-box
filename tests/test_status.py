@@ -15,14 +15,16 @@ APP = Path(__file__).resolve().parents[1]
 
 
 def load(name):
-    spec = importlib.util.spec_from_file_location(name, APP / (name + ".py"))
+    spec = importlib.util.spec_from_file_location(
+        "oc_box." + name, APP / "src/oc_box" / (name + ".py")
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
 box = load("oc_box")
-status = load("status_report")
+from oc_box import status_report as status
 
 
 class StatusTests(unittest.TestCase):
@@ -32,7 +34,7 @@ class StatusTests(unittest.TestCase):
         )
         prerequisites.start()
         self.addCleanup(prerequisites.stop)
-        modules = patch.dict(sys.modules, {"status_report": status})
+        modules = patch.dict(sys.modules, {"oc_box.status_report": status})
         modules.start()
         self.addCleanup(modules.stop)
         self.tmp = tempfile.TemporaryDirectory(prefix="oc-box-status-")

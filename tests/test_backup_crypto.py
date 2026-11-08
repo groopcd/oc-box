@@ -13,7 +13,7 @@ import subprocess
 import unittest
 from unittest.mock import patch
 
-import backup_crypto as crypto
+from oc_box import backup_crypto as crypto
 
 
 @unittest.skipUnless(
@@ -336,7 +336,7 @@ class AgeEnvelopeTests(unittest.TestCase):
         master, slave = pty.openpty()
         original = termios.tcgetattr(slave)
         output = self.root / "passphrase.age"
-        code = "import fcntl,os,sys,termios; os.setsid(); fcntl.ioctl(0,termios.TIOCSCTTY,0); sys.path.insert(0,sys.argv[1]); import backup_crypto as c; from pathlib import Path; c.generate_key([],Path(sys.argv[2]),minimum=8); p=c.load_key(Path(sys.argv[2]),[]); assert b'AGE-SECRET-KEY-1' in p; print('PASSPHRASE_ROUNDTRIP_OK',flush=True)"
+        code = "import fcntl,os,sys,termios; os.setsid(); fcntl.ioctl(0,termios.TIOCSCTTY,0); sys.path.insert(0,sys.argv[1]+'/src'); from oc_box import backup_crypto as c; from pathlib import Path; c.generate_key([],Path(sys.argv[2]),minimum=8); p=c.load_key(Path(sys.argv[2]),[]); assert b'AGE-SECRET-KEY-1' in p; print('PASSPHRASE_ROUNDTRIP_OK',flush=True)"
         process = subprocess.Popen(
             [
                 sys.executable,
@@ -431,8 +431,8 @@ class BackupEnvironmentTests(unittest.TestCase):
                     crypto.passphrase_minimum([])
 
     def test_backup_creation_policy_rejects_bad_options_before_backend_access(self):
-        import backups
-        import oc_box as box
+        from oc_box import backups
+        from oc_box import oc_box as box
 
         for options in (
             ["--min-passphrase-length", "7"],

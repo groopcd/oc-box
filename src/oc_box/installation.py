@@ -11,11 +11,13 @@ import tempfile
 import venv
 
 if __package__:
+    from .paths import runtime_root, source_root
     from .version_info import get_version_info
 else:
+    from paths import runtime_root, source_root
     from version_info import get_version_info
 
-PROGRAM_FILES = (
+RUNTIME_FILES = (
     "oc_box.py",
     "dependencies.py",
     "opencode_compat.py",
@@ -37,10 +39,13 @@ PROGRAM_FILES = (
     "terminal_ui.py",
     "status_report.py",
     "version_info.py",
+    "paths.py",
     "workspace_identity.py",
     "installation.py",
     "updater.py",
     "install.py",
+)
+RESOURCE_FILES = (
     "install.sh",
     "README.md",
     "CONTRIBUTING.md",
@@ -48,6 +53,7 @@ PROGRAM_FILES = (
     "LICENSE",
     "NOTICE",
 )
+PROGRAM_FILES = RUNTIME_FILES + RESOURCE_FILES
 MANUAL_FILES = (
     "cli.md",
     "oc-box.1",
@@ -57,6 +63,11 @@ MANUAL_FILES = (
     "host-plugins.md",
 )
 COMPLETION_FILE = "completions/oc-box"
+
+
+def source_file(source, name):
+    source = source_root(source)
+    return (runtime_root(source) if name in RUNTIME_FILES else source) / name
 
 
 def atomic_file(path, content, mode=0o644):
@@ -117,7 +128,7 @@ def optional_crypto_runtime(release):
 
 
 def install(source, home=None, *, with_vault=False):
-    source = Path(source).resolve()
+    source = source_root(source)
     if (source / "distribution.json").is_file():
         raise ValueError(
             "This copy is managed by a Python package installer; use pipx/uv/pip to upgrade, not install.py. The GitHub installer remains available separately."
@@ -126,7 +137,7 @@ def install(source, home=None, *, with_vault=False):
     target = home / ".local/share/oc-box"
     # Validate all inputs before changing an existing installation.
     inputs = [
-        *(source / name for name in PROGRAM_FILES),
+        *(source_file(source, name) for name in PROGRAM_FILES),
         *(source / "docs" / name for name in MANUAL_FILES),
         source / COMPLETION_FILE,
     ]
@@ -167,7 +178,7 @@ def install(source, home=None, *, with_vault=False):
         activated = False
         try:
             for name in PROGRAM_FILES:
-                shutil.copyfile(source / name, release / name)
+                shutil.copyfile(source_file(source, name), release / name)
                 (release / name).chmod(0o644)
             (release / "docs").mkdir()
             for name in MANUAL_FILES:

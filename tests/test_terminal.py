@@ -15,7 +15,9 @@ import unittest
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("oc_box_terminal", APP / "oc_box.py")
+spec = importlib.util.spec_from_file_location(
+    "oc_box._terminal_test", APP / "src/oc_box/oc_box.py"
+)
 assert spec is not None and spec.loader is not None
 box = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(box)
@@ -55,7 +57,7 @@ class MaintenanceTerminalTests(unittest.TestCase):
             patch.object(box, "inspect_owned", return_value=self.info),
             patch.object(box, "podman") as podman,
             patch.object(box, "stop_container") as stop,
-            patch("terminal_ui.run_tui", return_value=relay_code) as relay,
+            patch("oc_box.terminal_ui.run_tui", return_value=relay_code) as relay,
             patch.object(box, "prepare_runtime") as prepare,
             patch.object(box, "start_container") as start,
             patch.object(box, "sync_sessions") as sync,
@@ -180,7 +182,7 @@ class MaintenanceTerminalTests(unittest.TestCase):
                 patch.object(box, "inspect_owned", return_value=self.info),
                 patch.object(box, "podman"),
                 patch.object(box, "stop_container") as stop,
-                patch("terminal_ui.run_tui", side_effect=error),
+                patch("oc_box.terminal_ui.run_tui", side_effect=error),
                 contextlib.redirect_stderr(io.StringIO()),
                 contextlib.redirect_stdout(io.StringIO()),
             ):
@@ -199,7 +201,7 @@ class MaintenanceTerminalTests(unittest.TestCase):
                 patch.object(box, "inspect_owned", return_value=info),
                 patch.object(box, "podman") as podman,
                 patch.object(box, "create_container") as create,
-                patch("terminal_ui.run_tui") as relay,
+                patch("oc_box.terminal_ui.run_tui") as relay,
             ):
                 with self.assertRaises(box.BoxError):
                     box.maintenance_terminal(self.path, self.data)
@@ -344,7 +346,7 @@ class MaintenanceTerminalTests(unittest.TestCase):
             "ENV": str(home / ".profile"),
             "PROMPT_COMMAND": "touch " + str(marker),
         }
-        wrapper = "import json,sys; sys.path.insert(0,sys.argv[1]); import oc_box; from terminal_ui import run_tui; c=oc_box.maintenance_command(json.loads(sys.argv[2])); sys.exit(run_tui(c,env=c.environment,show_loading=False,refresh=0.03))"
+        wrapper = "import json,sys; sys.path.insert(0,sys.argv[1]+'/src'); from oc_box import oc_box; from oc_box.terminal_ui import run_tui; c=oc_box.maintenance_command(json.loads(sys.argv[2])); sys.exit(run_tui(c,env=c.environment,show_loading=False,refresh=0.03))"
         process = subprocess.Popen(
             [sys.executable, "-B", "-c", wrapper, str(APP), json.dumps(self.data)],
             stdin=slave,

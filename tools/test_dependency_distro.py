@@ -17,7 +17,8 @@ import tempfile
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import dependencies as deps
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from oc_box import dependencies as deps
 
 
 def verify(distro, install=False):

@@ -5,6 +5,19 @@ portable: use example project paths and synthetic session IDs, not local data.
 
 ## Architecture
 
+Runtime implementation is under `src/oc_box/`; module names below refer to that
+directory. `paths.py` separates runtime files from checkout/sdist metadata and
+documentation. Wheels bundle resources alongside the package; the GitHub
+installer retains its immutable flat release layout. Root `install.py`,
+`install.sh` and `setup.py` are compatibility/build entrypoints, not application
+implementation. Build implementation is `src/_oc_box_build.py`. Preserve older
+installer/update callers; do not remove these compatibility entrypoints.
+Tests/tools stay in their conventional top-level directories. Do not remove
+ignored caches, environments or `.oc-box-id` as part of source-layout cleanup.
+The src-layout refactor's offline checks are not a new live Podman acceptance.
+Editable source installations must also refuse the GitHub self-updater; keep
+their checkout ownership distinct from unrelated source and flat installations.
+
 - `oc_box.py`: external rootless-Podman launcher and workspace lifecycle.
 - `bootstrap.py`: baseline tools installed inside the container.
 - `sync_config.py`: container-only config refresh with dependency-cache reuse.
@@ -43,7 +56,7 @@ portable: use example project paths and synthetic session IDs, not local data.
 - `backups.py` / `backup_crypto.py` / `backup_archive.py`: host-only encrypted
   backup/restore feature; use established age streaming encryption, no plaintext
   archive staging, fresh restore IDs, and no archived privilege reactivation.
-- `install.py`: copies the launcher to `~/.local/share/oc-box` and creates
+- `install.py` (under the package): copies the launcher to `~/.local/share/oc-box` and creates
   `~/.local/bin/oc-box`.
 - `installation.py`: staged immutable installed copies and launcher activation.
 - `completions/oc-box`: standalone Bash command/option completion, emitted by
@@ -116,7 +129,7 @@ the repository; installing oc-box must not require documentation build tools.
 ## Checks
 
 ```bash
-uv run --no-project --with cryptography python -B -m unittest discover -s tests -v
+uv run --no-project --with-editable . --with cryptography python -B -m unittest discover -s tests -v
 python3 -B tests/smoke_mainline.py
 python3 -B tests/smoke_v2.py --opencode /path/to/opencode-v2
 ```

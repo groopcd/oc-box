@@ -8,12 +8,14 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import backup_crypto
-import backups
-import dependencies as deps
-import oc_box as box
-import updater
-import vault
+from oc_box import (
+    backup_crypto,
+    backups,
+    dependencies as deps,
+    oc_box as box,
+    updater,
+    vault,
+)
 
 
 class DependencyTests(unittest.TestCase):
@@ -234,7 +236,7 @@ class DependencyTests(unittest.TestCase):
             self.assertEqual(deps.executable("oci-runtime"), "/usr/bin/runc")
 
     def test_storage_scan_explains_optional_coreutils_fix_without_running_du(self):
-        import status_report
+        from oc_box import status_report
 
         with (
             patch.object(deps, "probe", return_value=(False, "BusyBox")),

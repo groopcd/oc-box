@@ -8,11 +8,8 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT))
-spec = importlib.util.spec_from_file_location("oc_box", ROOT / "oc_box.py")
-assert spec is not None and spec.loader is not None
-box = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(box)
+sys.path.insert(0, str(ROOT / "src"))
+from oc_box import oc_box as box
 
 
 def differences(expected, actual, path="", limit=20):

@@ -12,12 +12,14 @@ import time
 import unittest
 from unittest.mock import patch
 
-import backups
-import dependencies
-import installation
-import oc_box as box
-import vault
-import workspace_service
+from oc_box import (
+    backups,
+    dependencies,
+    installation,
+    oc_box as box,
+    vault,
+    workspace_service,
+)
 
 APP = Path(__file__).resolve().parents[1]
 SCRIPT = APP / "completions/oc-box"

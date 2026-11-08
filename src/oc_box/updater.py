@@ -1,6 +1,7 @@
 """Public HTTPS/Git updates without forwarding provider/publishing credentials."""
 
 import fcntl
+from importlib import metadata
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,7 @@ import re
 import subprocess
 import sys
 import tempfile
+from urllib.parse import unquote, urlparse
 
 if __package__:
     from . import dependencies
@@ -26,11 +28,44 @@ class UpdateError(Exception):
     pass
 
 
+def editable_source_root():
+    """PEP 610 editable ownership is distinct from unrelated source checkouts."""
+    try:
+        value = metadata.distribution("oc-box").read_text("direct_url.json")
+        if not value:
+            return None
+        direct = json.loads(value)
+        url = urlparse(direct["url"])
+        if (
+            direct.get("dir_info", {}).get("editable") is True
+            and url.scheme == "file"
+            and not url.netloc
+        ):
+            return Path(unquote(url.path)).resolve()
+    except (
+        metadata.PackageNotFoundError,
+        ValueError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        OSError,
+    ):
+        pass
+    return None
+
+
 def package_managed(root):
-    return (Path(root) / "distribution.json").is_file()
+    root = Path(root).resolve()
+    return (root / "distribution.json").is_file() or editable_source_root() == root
 
 
-def package_upgrade_message():
+def package_upgrade_message(root=None):
+    if root is not None and editable_source_root() == Path(root).resolve():
+        return (
+            "This is an editable source installation. Update the source checkout and rerun "
+            "your development command; the GitHub self-updater is disabled. "
+            "Normal packaged installations upgrade through pipx/uv/pip."
+        )
     prefix = Path(sys.prefix)
     if (prefix / "pipx_metadata.json").is_file():
         command = "pipx upgrade oc-box"
@@ -109,7 +144,7 @@ def current_install(root):
 
 def upgrade(root, *, check=False):
     if package_managed(root):
-        raise UpdateError(package_upgrade_message())
+        raise UpdateError(package_upgrade_message(root))
     if os.geteuid() == 0:
         raise UpdateError(
             "Run oc-box upgrade on the host as your regular user, without sudo."

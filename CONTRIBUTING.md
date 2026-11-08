@@ -7,6 +7,33 @@ to the 1.5 series without resetting that patch-count baseline. Changes should ke
 mainline OpenCode unmodified and preserve MCPs, formatters, language servers, plugins, and
 the host/container storage boundary.
 
+## Source layout
+
+Application Python modules and the plugin bridge live in `src/oc_box/`.
+`src/_oc_box_build.py` contains the build integration. Tests, developer/host
+fixtures, documentation and completions remain in `tests/`, `tools/`, `docs/`
+and `completions/`. Root `install.py`, `install.sh` and `setup.py` remain small
+compatibility/build entrypoints: older GitHub/curl callers must still work.
+Canonical docs/licenses stay at the root and are bundled into wheels/releases
+by the build/installer, not duplicated in the source package.
+
+Use an ephemeral editable environment to run the source CLI without creating a
+project or home venv:
+
+```sh
+uv run --no-project --with-editable . oc-box --version
+uv run --no-project --with-editable . python -B -m oc_box --help
+```
+
+The stdlib-only alternative is `PYTHONPATH=src python3 -B -m oc_box`. Native
+fixture scripts add the source package path themselves. Existing installed
+launchers keep their immutable flat GitHub-release/package-resource layouts.
+Editable source installs are package-managed and cannot invoke the GitHub
+self-updater; update the checkout and rerun the development command instead.
+Ignored `.venv`, bytecode and egg-info directories are not source files and
+must not be deleted or moved merely to make this refactor's tree look cleaner.
+Offline src-layout checks do not establish a new live Podman lifecycle pass.
+
 ## Checks
 
 Python 3.10+ and stdlib run the base tests. Full vault coverage needs the optional
@@ -15,7 +42,7 @@ installs age explicitly. The mainline smoke test also needs Git and OpenCode
 (integration checked with 1.19.5):
 
 ```sh
-uv run --no-project --with cryptography python -B -m unittest discover -s tests -v
+uv run --no-project --with-editable . --with cryptography python -B -m unittest discover -s tests -v
 python3 -B tests/smoke_mainline.py
 python3 -B tools/build_docs.py --check
 git diff --check

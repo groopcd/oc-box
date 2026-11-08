@@ -21,8 +21,15 @@ if not (target / "uv").is_file():
         payload = response.read(64 * 1024 * 1024)
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         for name in ("uv", "uvx"):
-            member = next(item for item in archive.getmembers() if item.name.endswith("/" + name) and item.isfile())
-            with archive.extractfile(member) as source, (target / name).open("wb") as destination:
+            member = next(
+                item
+                for item in archive.getmembers()
+                if item.name.endswith("/" + name) and item.isfile()
+            )
+            with (
+                archive.extractfile(member) as source,
+                (target / name).open("wb") as destination,
+            ):
                 shutil.copyfileobj(source, destination)
             (target / name).chmod(0o755)
 # The user's existing MCP config refers to /usr/bin/uvx. Keep that path valid.

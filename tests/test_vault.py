@@ -13,11 +13,7 @@ import unittest
 import time
 from unittest.mock import patch
 
-import credentials
-import oc_box as box
-import vault
-import secret_prompt
-import installation
+from oc_box import credentials, oc_box as box, vault, secret_prompt, installation
 
 try:
     vault.crypto()
@@ -246,7 +242,7 @@ class EncryptedVaultTests(VaultFixture):
         if pid == 0:
             os.execve(
                 sys.executable,
-                [sys.executable, "-B", str(box.APP / "oc_box.py"), *command],
+                [sys.executable, "-B", str(box.PACKAGE / "oc_box.py"), *command],
                 env,
             )
         output = bytearray()

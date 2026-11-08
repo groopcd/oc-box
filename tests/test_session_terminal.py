@@ -4,7 +4,7 @@ import struct
 import unittest
 from unittest.mock import Mock, patch
 
-import session_terminal as terminal
+from oc_box import session_terminal as terminal
 
 
 def frame(payload, opcode=2, final=True):

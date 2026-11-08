@@ -22,8 +22,8 @@ import tempfile
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
-import oc_box as box
-import plugin_compat
+sys.path.insert(0, str(APP / "src"))
+from oc_box import oc_box as box, plugin_compat
 
 KEEP = {
     "opencode-sandbox": "Keep: host shell isolation; native V2 port, existing policy retained.",

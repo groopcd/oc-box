@@ -40,11 +40,14 @@ from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
-import oc_box as box
-import opencode_compat as compat
-import opencode_v2_io as bridge
-import sync_config
-import workspace_service
+sys.path.insert(0, str(APP / "src"))
+from oc_box import (
+    oc_box as box,
+    opencode_compat as compat,
+    opencode_v2_io as bridge,
+    sync_config,
+    workspace_service,
+)
 
 
 def host_fixture_probe(binary):
@@ -1232,7 +1235,7 @@ export const Fixture = async () => ({
                                 sys.executable,
                                 "-B",
                                 "-c",
-                                (APP / "session_terminal.py").read_text(),
+                                (box.PACKAGE / "session_terminal.py").read_text(),
                                 joined["url"],
                                 ident,
                                 str(project),

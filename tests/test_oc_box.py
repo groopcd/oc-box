@@ -13,7 +13,9 @@ import unittest
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
-spec = importlib.util.spec_from_file_location("oc_box", APP / "oc_box.py")
+spec = importlib.util.spec_from_file_location(
+    "oc_box._workspace_test", APP / "src/oc_box/oc_box.py"
+)
 box = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(box)
 
@@ -398,7 +400,7 @@ class WorkspaceTests(unittest.TestCase):
             os.environ, {"PERSONAL_GITHUB_TOKEN": "synthetic-relay-credential"}
         ):
             command = box.exec_command(self.data, ["opencode"])
-        with patch("terminal_ui.run_tui", return_value=0) as relay:
+        with patch("oc_box.terminal_ui.run_tui", return_value=0) as relay:
             self.assertEqual(box.run_tui(command), 0)
         self.assertEqual(
             relay.call_args.kwargs["env"]["PERSONAL_GITHUB_TOKEN"],
@@ -411,7 +413,9 @@ class WorkspaceTests(unittest.TestCase):
     def test_installer_creates_working_standalone_launcher(self):
         home = self.root / "install-home"
         with patch.object(Path, "home", return_value=home):
-            runpy.run_path(str(APP / "install.py"))
+            from oc_box.install import main as install_main
+
+            self.assertEqual(install_main([]), 0)
         binary = home / ".local/bin/oc-box"
         self.assertTrue(os.access(binary, os.X_OK))
         result = subprocess.run(

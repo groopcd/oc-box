@@ -16,9 +16,7 @@ from unittest.mock import Mock, patch
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
-import oc_box as box
-import workspace_service as service
-import vault
+from oc_box import oc_box as box, workspace_service as service, vault
 
 
 class WorkspaceServiceTests(unittest.TestCase):
@@ -165,7 +163,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             patch.object(
                 service, "attach", return_value=contextlib.nullcontext(self.connection)
             ),
-            patch("terminal_ui.run_tui", return_value=7) as relay,
+            patch("oc_box.terminal_ui.run_tui", return_value=7) as relay,
             patch.object(vault, "hidden") as prompt,
             patch.object(box, "prepare_runtime") as prepare,
             patch.object(box, "stop_container") as stop,

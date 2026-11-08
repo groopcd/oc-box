@@ -29,7 +29,7 @@ spec = importlib.util.spec_from_file_location(
 assert spec and spec.loader
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
-import opencode_v2_io as bridge
+from oc_box import opencode_v2_io as bridge
 
 
 def main(binary, copied_sources=None):

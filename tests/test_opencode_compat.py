@@ -11,10 +11,12 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-import oc_box as box
-import opencode_compat as compat
-import opencode_v2_io as v2
-import sync_config
+from oc_box import (
+    oc_box as box,
+    opencode_compat as compat,
+    opencode_v2_io as v2,
+    sync_config,
+)
 
 
 class OpenCodeCompatibilityTests(unittest.TestCase):

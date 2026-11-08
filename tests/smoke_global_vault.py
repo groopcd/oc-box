@@ -364,11 +364,14 @@ def scan_storage(root, sensitive):
 
 def main(binary):
     sys.path.insert(0, str(APP))
-    import credentials
-    import oc_box as box
-    import opencode_compat
-    import vault
-    import workspace_service
+    sys.path.insert(0, str(APP / "src"))
+    from oc_box import (
+        credentials,
+        oc_box as box,
+        opencode_compat,
+        vault,
+        workspace_service,
+    )
 
     try:
         vault.crypto()

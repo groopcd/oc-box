@@ -7,13 +7,12 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from types import ModuleType
 import unittest
 from unittest.mock import patch
 
-import installation
-import oc_box as box
-import updater
-from version_info import get_version_info
+from oc_box import installation, oc_box as box, updater
+from oc_box.version_info import get_version_info
 
 APP = Path(__file__).resolve().parents[1]
 
@@ -23,6 +22,11 @@ class UpdateTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="oc-box-update-test-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
+        # Most fixtures deliberately simulate the GitHub installation channel,
+        # even when the test runner itself is an editable development install.
+        editable = patch.object(updater, "editable_source_root", return_value=None)
+        editable.start()
+        self.addCleanup(editable.stop)
         self.home = self.root / "home"
         self.home.mkdir()
         self.identity = patch.object(Path, "home", return_value=self.home)
@@ -419,11 +423,48 @@ class UpdateTests(unittest.TestCase):
         self.assertEqual((target / "custom-note").read_text(), "user note")
 
     def test_real_git_upgrade_from_private_fixture_does_not_touch_source_checkout(self):
+        self.exercise_real_git_upgrade(src_layout=False, legacy_updater=False)
+
+    def test_released_updater_installs_new_src_layout_without_changing_its_protocol(
+        self,
+    ):
+        self.exercise_real_git_upgrade(src_layout=True, legacy_updater=True)
+
+    def exercise_real_git_upgrade(self, *, src_layout, legacy_updater):
+        active = updater
+        if legacy_updater:
+            archived = subprocess.run(
+                ["git", "-C", str(APP), "show", "v1.5.39:updater.py"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if archived.returncode:
+                self.skipTest(
+                    "Released updater comparison requires the full v1.5.39 Git tag."
+                )
+            original = archived.stdout
+            active = ModuleType("oc_box._released_updater_fixture")
+            active.__package__ = "oc_box"
+            exec(compile(original, "released-updater-fixture", "exec"), active.__dict__)
         remote = self.root / "fixture-source"
         remote.mkdir()
         for name in installation.PROGRAM_FILES:
-            shutil.copyfile(APP / name, remote / name)
-        version_file = remote / "version_info.py"
+            target = (
+                remote
+                / (
+                    "src/oc_box"
+                    if src_layout and name in installation.RUNTIME_FILES
+                    else ""
+                )
+                / name
+            )
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(installation.source_file(APP, name), target)
+        if src_layout:
+            shutil.copyfile(APP / "install.py", remote / "install.py")
+            shutil.copyfile(APP / "pyproject.toml", remote / "pyproject.toml")
+        version_file = installation.source_file(remote, "version_info.py")
         version_file.write_text(
             version_file.read_text().replace(
                 "VERSION_BASE_COMMIT_COUNT = 29", "VERSION_BASE_COMMIT_COUNT = 1"
@@ -476,12 +517,12 @@ class UpdateTests(unittest.TestCase):
         def transport(arguments, temporary, **kwargs):
             calls.append(arguments)
             arguments = [
-                str(remote) if item == updater.UPSTREAM else item for item in arguments
+                str(remote) if item == active.UPSTREAM else item for item in arguments
             ]
             return subprocess.run(
                 ["git", *arguments],
                 cwd=temporary,
-                env=updater.public_git_env(temporary),
+                env=active.public_git_env(temporary),
                 capture_output=True,
                 text=True,
                 check=True,
@@ -489,11 +530,11 @@ class UpdateTests(unittest.TestCase):
             ).stdout.strip()
 
         with (
-            patch.object(updater.os, "geteuid", return_value=1000),
-            patch.object(updater, "git", side_effect=transport),
+            patch.object(active.os, "geteuid", return_value=1000),
+            patch.object(active, "git", side_effect=transport),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
-            second = updater.upgrade(APP)
+            second = active.upgrade(APP)
         self.assertIn("Installed oc-box: 0.1.1+g", output.getvalue())
         self.assertIn("Installed oc-box: 1.5.1+g", output.getvalue())
         self.assertIsNotNone(second)

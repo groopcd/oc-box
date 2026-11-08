@@ -1,9 +1,9 @@
 include README.md CONTRIBUTING.md SECURITY.md LICENSE NOTICE
-include AGENTS.md pyproject.toml setup.py MANIFEST.in install.sh
+include AGENTS.md pyproject.toml setup.py MANIFEST.in install.py install.sh
 recursive-include .github/workflows *.yml
 recursive-include docs *.md *.1 *.texi *.info
 include completions/oc-box
-include plugin_bridge.js
+recursive-include src *.py *.js
 recursive-include tests *.py *.mjs
 include tools/host_sandbox.js
 recursive-include tools/native_plugins *.js

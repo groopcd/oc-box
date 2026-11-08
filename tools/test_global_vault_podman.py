@@ -40,14 +40,17 @@ from urllib.parse import quote
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
-import backup_crypto as crypto
-import backups
-import credentials
-import oc_box as box
-import opencode_compat as compat
-import opencode_v2_io as bridge
-import vault
-import workspace_service
+sys.path.insert(0, str(APP / "src"))
+from oc_box import (
+    backup_crypto as crypto,
+    backups,
+    credentials,
+    oc_box as box,
+    opencode_compat as compat,
+    opencode_v2_io as bridge,
+    vault,
+    workspace_service,
+)
 from tools.test_v2_podman import (
     check_native_version,
     digest_home,
@@ -56,7 +59,7 @@ from tools.test_v2_podman import (
     temporary_location,
     verify_v2_progress,
 )
-from version_info import get_version_info
+from oc_box.version_info import get_version_info
 
 PREFIX = "oc-box-gv-host-"
 FORMAT = "oc-box-global-vault-host-acceptance"

@@ -13,9 +13,7 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-import credentials
-import oc_box as box
-import vault
+from oc_box import credentials, oc_box as box, vault
 
 
 HAS_CRYPTO = importlib.util.find_spec("cryptography") is not None

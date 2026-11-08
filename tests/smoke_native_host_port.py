@@ -21,8 +21,8 @@ from urllib.parse import quote
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
-import opencode_v2_io as bridge
-import oc_box as box
+sys.path.insert(0, str(APP / "src"))
+from oc_box import opencode_v2_io as bridge, oc_box as box
 
 
 def module(name, filename):

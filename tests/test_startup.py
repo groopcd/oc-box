@@ -14,7 +14,9 @@ APP = Path(__file__).resolve().parents[1]
 
 
 def load(name):
-    spec = importlib.util.spec_from_file_location(name, APP / (name + ".py"))
+    spec = importlib.util.spec_from_file_location(
+        "oc_box." + name, APP / "src/oc_box" / (name + ".py")
+    )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -291,7 +293,7 @@ class StartupProgressTests(unittest.TestCase):
             "os.write(1,b'KEY='+key+(' SIZE=%dx%d'%(size.columns,size.lines)).encode()); "
             "time.sleep(0.15); os.write(1,b'\\x1b[?1049l')"
         )
-        relay = "import os,sys; sys.path.insert(0,sys.argv[1]); from terminal_ui import run_tui; sys.exit(run_tui([sys.executable,'-c',sys.argv[2]],env={**os.environ,'OC_BOX_RELAY_CHECK':'present'},refresh=0.03))"
+        relay = "import os,sys; sys.path.insert(0,sys.argv[1]+'/src'); from oc_box.terminal_ui import run_tui; sys.exit(run_tui([sys.executable,'-c',sys.argv[2]],env={**os.environ,'OC_BOX_RELAY_CHECK':'present'},refresh=0.03))"
         process = subprocess.Popen(
             [sys.executable, "-B", "-c", relay, str(APP), fixture],
             stdin=slave,

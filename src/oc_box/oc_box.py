@@ -27,6 +27,7 @@ if __package__:
         credentials,
         dependencies,
         opencode_compat,
+        paths,
         plugin_compat,
         vault,
         workspace_identity,
@@ -36,12 +37,14 @@ else:
     import credentials
     import dependencies
     import opencode_compat
+    import paths
     import plugin_compat
     import vault
     import workspace_identity
     import workspace_service
 
-APP = Path(__file__).resolve().parent
+PACKAGE = Path(__file__).resolve().parent
+APP = paths.source_root(PACKAGE)
 LABEL = "io.oc-box.workspace"
 MARKER = ".oc-box-id"
 CONTAINER_OPENCODE = "/opt/oc-box/runtime/bin/opencode"
@@ -863,7 +866,7 @@ def start_container(path, data):
                 data["container"],
                 "python3",
                 "-",
-                input=(APP / "bootstrap.py").read_text(),
+                input=(PACKAGE / "bootstrap.py").read_text(),
                 timeout=600,
             )
         except BaseException:
@@ -1455,7 +1458,9 @@ def config_archive(data):
                 raise BoxError(
                     "Generated sandbox adapter conflicts with an existing host plugin."
                 )
-            add_bytes("oc-box-v1-bridge.js", (APP / "plugin_bridge.js").read_bytes())
+            add_bytes(
+                "oc-box-v1-bridge.js", (PACKAGE / "plugin_bridge.js").read_bytes()
+            )
             manifest_file = source / "package.json"
             manifest = (
                 parse_jsonc(manifest_file.read_text())
@@ -1573,14 +1578,14 @@ def prepare_runtime(path, data, version):
     if v2:
         # Seed the V2-only database from a consistent SQLite snapshot once.
         # Mainline performs its own supported migration; V1 bytes stay intact.
-        bridge = (APP / "opencode_v2_io.py").read_text()
+        bridge = (PACKAGE / "opencode_v2_io.py").read_text()
         run(
             exec_command(data, ["python3", "-c", bridge, "seed", CONTAINER_OPENCODE]),
             capture=True,
             timeout=120,
         )
     archive = config_archive(data)
-    unpack = (APP / "sync_config.py").read_text()
+    unpack = (PACKAGE / "sync_config.py").read_text()
     copy_command = exec_command(data, ["python3", "-c", unpack, version])
     # binary input requires the binary subprocess mode here.
     try:
@@ -2983,10 +2988,10 @@ def main(argv=None):
         if package_managed(APP):
             if args.auto_update == "on":
                 raise BoxError(
-                    package_upgrade_message()
+                    package_upgrade_message(APP)
                     + " GitHub automatic updates cannot manage a Python-package installation."
                 )
-            print(package_upgrade_message())
+            print(package_upgrade_message(APP))
             return 0
         if os.environ.get("OC_BOX_CONTAINER") == "1":
             raise BoxError(
@@ -3235,7 +3240,7 @@ def main(argv=None):
                     [
                         "python3",
                         "-c",
-                        (APP / "session_terminal.py").read_text(),
+                        (PACKAGE / "session_terminal.py").read_text(),
                         connection["url"],
                         connection["session"],
                         container_project(data),

@@ -15,7 +15,7 @@ import time
 import unittest
 from unittest.mock import patch
 
-import secret_prompt
+from oc_box import secret_prompt
 
 APP = Path(__file__).resolve().parents[1]
 VALUE = "synthetic-PromptValue-0987"
@@ -170,8 +170,8 @@ class InteractivePromptTests(unittest.TestCase):
         program = """import fcntl,json,os,signal,sys,termios
 os.setsid()
 fcntl.ioctl(0,termios.TIOCSCTTY,0)
-sys.path.insert(0,sys.argv[1])
-from secret_prompt import read_secret
+sys.path.insert(0,sys.argv[1]+'/src')
+from oc_box.secret_prompt import read_secret
 from pathlib import Path
 try:
     values=[read_secret('Secret value: ',allow_reveal=sys.argv[3]=='yes',maximum=int(sys.argv[4])) for _ in range(int(sys.argv[5]))]
@@ -427,7 +427,7 @@ else:
         self.assertEqual(self.finish(), {"values": [VALUE]})
 
     def test_no_controlling_terminal_does_not_read_stdin_or_echo(self):
-        program = "import sys; sys.path.insert(0,sys.argv[1]); from secret_prompt import read_secret; read_secret('Secret: ')"
+        program = "import sys; sys.path.insert(0,sys.argv[1]+'/src'); from oc_box.secret_prompt import read_secret; read_secret('Secret: ')"
         result = subprocess.run(
             [sys.executable, "-B", "-c", program, str(APP)],
             input=VALUE + "\n",

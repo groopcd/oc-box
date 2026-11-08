@@ -13,6 +13,9 @@ on:
 permissions:
   contents: read
 
+env:
+  PYTHONPATH: ${{ github.workspace }}/src
+
 concurrency:
   group: pypi-${{ github.ref }}
   cancel-in-progress: false
@@ -43,11 +46,11 @@ jobs:
           python - <<'PY'
           import os
           import py_compile
-          from installation import PROGRAM_FILES
-          from version_info import get_version_info, public_version
+          from oc_box.installation import PROGRAM_FILES, source_file
+          from oc_box.version_info import get_version_info, public_version
           for name in PROGRAM_FILES:
               if name.endswith('.py'):
-                  py_compile.compile(name, doraise=True)
+                  py_compile.compile(str(source_file('.', name)), doraise=True)
           build = get_version_info('.')
           expected = 'v' + public_version(build)
           assert build['commit'] and build['commit_count'], 'Full Git history is required'
