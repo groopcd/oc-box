@@ -57,8 +57,8 @@ class VersionTests(unittest.TestCase):
         self.git("commit", "-m", "First")
         first = version.get_version_info(self.root)
         self.assertEqual(first["commit_count"], 1)
-        self.assertTrue(first["version"].startswith("1.5.0+g"))
-        self.assertEqual(version.public_version(first), "1.5.0")
+        self.assertTrue(first["version"].startswith(version.VERSION_SERIES + ".0+g"))
+        self.assertEqual(version.public_version(first), version.VERSION_SERIES + ".0")
         source.write_text("second")
         self.assertTrue(
             version.get_version_info(self.root)["version"].endswith(".dirty")
@@ -67,8 +67,8 @@ class VersionTests(unittest.TestCase):
         self.git("commit", "-m", "Second")
         second = version.get_version_info(self.root)
         self.assertEqual(second["commit_count"], 2)
-        self.assertTrue(second["version"].startswith("1.5.1+g"))
-        self.assertEqual(version.public_version(second), "1.5.1")
+        self.assertTrue(second["version"].startswith(version.VERSION_SERIES + ".1+g"))
+        self.assertEqual(version.public_version(second), version.VERSION_SERIES + ".1")
         self.assertNotEqual(first["commit"], second["commit"])
         (self.root / "placeholder").touch()
         self.assertEqual(version.get_version_info(self.root), second)
@@ -82,7 +82,10 @@ class VersionTests(unittest.TestCase):
             self.assertIsNone(version.get_version_info(self.root)["commit"])
         shallow = self.root / "shallow"
         self.git("clone", "--depth=1", self.root.as_uri(), str(shallow))
-        self.assertEqual(version.get_version_info(shallow)["version"], "1.5.0+unknown")
+        self.assertEqual(
+            version.get_version_info(shallow)["version"],
+            version.VERSION_SERIES + ".0+unknown",
+        )
         self.assertIsNone(version.get_version_info(shallow)["commit_count"])
 
     def test_legacy_embedded_metadata_retains_its_original_identity(self):
@@ -100,6 +103,24 @@ class VersionTests(unittest.TestCase):
         (self.root / "build-info.json").write_text(json.dumps(legacy))
         self.assertEqual(version.get_version_info(self.root), legacy)
         self.assertEqual(version.public_version(legacy), "1.0.7")
+        legacy["version"] = "1.5.39+gb9b9ec1"
+        legacy["commit_count"] = 68
+        (self.root / "build-info.json").write_text(json.dumps(legacy))
+        self.assertEqual(version.get_version_info(self.root), legacy)
+        self.assertEqual(version.public_version(legacy), "1.5.39")
+
+    def test_minor_series_change_preserves_patch_count_and_source_provenance(self):
+        self.git("init")
+        (self.root / "source").write_text("fixture")
+        self.git("add", "source")
+        self.git("commit", "-m", "Fixture")
+        with patch.object(version, "VERSION_SERIES", "1.5"):
+            before = version.get_version_info(self.root)
+        with patch.object(version, "VERSION_SERIES", "1.6"):
+            after = version.get_version_info(self.root)
+        self.assertEqual(before["version"].replace("1.5.", "1.6.", 1), after["version"])
+        for name in ("commit", "commit_count", "dirty"):
+            self.assertEqual(before[name], after[name])
 
     def test_installed_copy_keeps_source_version_without_git(self):
         home = self.root / "home"
@@ -152,7 +173,7 @@ class VersionTests(unittest.TestCase):
                     timeout=10,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertIn("oc-box 1.5.", result.stdout)
+                self.assertIn("oc-box " + version.VERSION_SERIES + ".", result.stdout)
 
     def test_missing_or_invalid_metadata_is_explicit_and_about_remains_readable(self):
         for content in (None, '{"partial":', '{"other":"value"}'):
@@ -160,9 +181,12 @@ class VersionTests(unittest.TestCase):
                 if content is not None:
                     (self.root / "build-info.json").write_text(content)
                 self.assertEqual(
-                    version.get_version_info(self.root)["version"], "1.5.0+unknown"
+                    version.get_version_info(self.root)["version"],
+                    version.VERSION_SERIES + ".0+unknown",
                 )
-                self.assertIn("1.5.0+unknown", version.about_text(self.root))
+                self.assertIn(
+                    version.VERSION_SERIES + ".0+unknown", version.about_text(self.root)
+                )
 
     def test_license_is_complete_gpl3_with_project_later_version_notice(self):
         text = (APP / "LICENSE").read_text()

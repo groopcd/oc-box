@@ -12,7 +12,7 @@ import unittest
 from unittest.mock import patch
 
 from oc_box import installation, oc_box as box, updater
-from oc_box.version_info import get_version_info
+from oc_box.version_info import VERSION_SERIES, get_version_info
 
 APP = Path(__file__).resolve().parents[1]
 
@@ -536,13 +536,13 @@ class UpdateTests(unittest.TestCase):
         ):
             second = active.upgrade(APP)
         self.assertIn("Installed oc-box: 0.1.1+g", output.getvalue())
-        self.assertIn("Installed oc-box: 1.5.1+g", output.getvalue())
+        self.assertIn("Installed oc-box: " + VERSION_SERIES + ".1+g", output.getvalue())
         self.assertIsNotNone(second)
         target = self.home / ".local/share/oc-box"
         build = get_version_info(target)
         self.assertEqual(build["commit"], expected)
         self.assertEqual(build["commit_count"], 2)
-        self.assertTrue(build["version"].startswith("1.5.1+g"))
+        self.assertTrue(build["version"].startswith(VERSION_SERIES + ".1+g"))
         self.assertEqual(get_version_info(first)["commit"], first_commit)
         self.assertEqual(local("status", "--porcelain"), "")
         self.assertEqual(local("rev-parse", "HEAD"), expected)

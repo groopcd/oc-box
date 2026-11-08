@@ -1199,7 +1199,7 @@ lifecycle selectors/options.
 =============
 
 Print oc-box's commit-derived version and exit without Podman.  The
-format is ‘1.5.N+gHASH’, with N the full-history commit count minus 29
+format is ‘1.6.N+gHASH’, with N the full-history commit count minus 29
 (the original 1.0.0 baseline).  Each later commit advances N; shallow
 history cannot supply a release identity.  Tracked uncommitted changes
 add ‘.dirty’.  Untracked files do not.  Installed copies retain their
@@ -1207,18 +1207,18 @@ installation-time identity in ‘build-info.json’; reinstall to update it.
 This is separate from the host OpenCode version matched inside
 containers.  Use alone, for example: ‘oc-box --version’.
 
-The OpenCode V2-compatible release moves to series 1.5 while retaining
-the existing commit-derived patch count; its first published patch is
+The OpenCode V2-compatible 1.5 series and the 1.6 refactoring series
+retain the same commit-derived patch count; a first published patch is
 not required to be zero.  Installed older copies keep their original
-0.1/1.0 identity.  PyPI distribution metadata uses only ‘1.5.N’, because
-public PyPI versions cannot contain the local ‘+gHASH’ suffix.  Its
-packaged build-info still includes the full source identity displayed by
-this command, so the exact Git commit is retained even in a wheel/source
-distribution installed without Git.  Existing 0.1/1.0 installations
-retain their original embedded identity until upgraded through their
-usual channel.  The absolute commit count remains in metadata for
-upgrade ordering; no workspace reset or database migration is required
-for the version-series transition.
+0.1/1.0/1.5 identity.  PyPI distribution metadata uses only ‘1.6.N’,
+because public PyPI versions cannot contain the local ‘+gHASH’ suffix.
+Its packaged build-info still includes the full source identity
+displayed by this command, so the exact Git commit is retained even in a
+wheel/source distribution installed without Git.  Existing 0.1/1.0
+installations retain their original embedded identity until upgraded
+through their usual channel.  The absolute commit count remains in
+metadata for upgrade ordering; no workspace reset or database migration
+is required for the version-series transition.
 
 5.13 -distro NAME
 =================
@@ -2633,19 +2633,19 @@ Node: Synopsis930
 Node: Description2540
 Node: Commands6045
 Node: Options55981
-Node: Lifecycle and persistence75307
-Node: Distribution images77427
-Node: Sessions and recovery82302
-Node: Devices and host permissions87590
-Node: Resource reports89936
-Node: Configuration and environment92047
-Node: Files103310
-Node: Exit status107920
-Node: Examples108731
-Node: Troubleshooting110817
-Node: Installation and manuals120145
-Node: Authors and license128092
-Node: See also128699
+Node: Lifecycle and persistence75309
+Node: Distribution images77429
+Node: Sessions and recovery82304
+Node: Devices and host permissions87592
+Node: Resource reports89938
+Node: Configuration and environment92049
+Node: Files103312
+Node: Exit status107922
+Node: Examples108733
+Node: Troubleshooting110819
+Node: Installation and manuals120147
+Node: Authors and license128094
+Node: See also128701
 
 End Tag Table
 

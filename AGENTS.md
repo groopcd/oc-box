@@ -109,16 +109,16 @@ without modifying the parent environment. Verify `gh api user` reports
 `groopcd` before publishing. Pass Git credential helpers per command rather
 than storing tokens or changing global authentication settings.
 
-Version `1.5.N+gHASH` is derived from the full Git history, with N the commit
+Version `1.6.N+gHASH` is derived from the full Git history, with N the commit
 count minus the 1.0.0 baseline (29); every later commit advances N automatically.
-The 1.5 series deliberately retains this baseline; do not reset the patch count
-or rewrite embedded 0.1/1.0 identities when preparing the V2 release.
+The 1.5 and 1.6 series deliberately retain this baseline; do not reset the patch
+count or rewrite embedded 0.1/1.0/1.5 identities when preparing a release.
 Keep the absolute `commit_count` for old updater compatibility, require full
 history, and fast-forward tested release commits into master. The installer
 embeds the source identity in its private `build-info.json`. Original project
 code/documentation is GPL-3.0-or-later;
 retain LICENSE and NOTICE when distributing/installing it.
-PyPI uses the public `1.5.N` version; retain the full `+gHASH` identity in package
+PyPI uses the public `1.6.N` version; retain the full `+gHASH` identity in package
 resources. Python-package installations upgrade through pipx/uv/pip, never the
 GitHub self-updater. Preserve the normal curl/GitHub update path in parallel.
 

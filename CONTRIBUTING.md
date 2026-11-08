@@ -1,9 +1,9 @@
 # Contributing
 
-Use the full Git history: the release identity is `1.5.N+gHASH`, with N the
+Use the full Git history: the release identity is `1.6.N+gHASH`, with N the
 commit count minus the 1.0.0 baseline (29). Keep the absolute `commit_count` in
-metadata for upgrade compatibility with 0.1/1.0 releases. The V2 release moves
-to the 1.5 series without resetting that patch-count baseline. Changes should keep
+metadata for upgrade compatibility with 0.1/1.0/1.5 releases. The 1.6 refactoring
+release preserves that patch-count baseline, just as 1.5 did. Changes should keep
 mainline OpenCode unmodified and preserve MCPs, formatters, language servers, plugins, and
 the host/container storage boundary.
 
@@ -347,11 +347,11 @@ GitHub installer. Standard build produces the wheel from the sdist to verify
 that it works without Git. Do not publish a dirty working tree.
 
 PyPI rejects local `+gHASH` version suffixes: the distribution version is
-`1.5.N` from full-history commit count minus `VERSION_BASE_COMMIT_COUNT`, and
-packaged `build-info.json` keeps `1.5.N+gHASH` plus the full commit and absolute
+`1.6.N` from full-history commit count minus `VERSION_BASE_COMMIT_COUNT`, and
+packaged `build-info.json` keeps `1.6.N+gHASH` plus the full commit and absolute
 commit count. The original stable release has count 29 and version 1.0.0; every
 subsequent commit advances the patch automatically. Version calculation rejects
-shallow history. The 1.5 series keeps that baseline; its first published patch
+shallow history. The 1.5 and 1.6 series keep that baseline; a first published patch
 need not be zero. Embedded older series retain their identity until upgrade.
 Fast-forward the tested release commit into master so merging
 does not add an extra version increment. Each selected release needs a unique
@@ -371,7 +371,7 @@ Actions are pinned by commit. The user must create/own the PyPI account and
 configure the matching publisher; pending publishers do not reserve names.
 
 First run the workflow with its `publish` input false to verify a build-only
-run. A published GitHub release named `v1.5.N` (matching `public_version(build)`)
+run. A published GitHub release named `v1.6.N` (matching `public_version(build)`)
 builds, validates, and publishes to PyPI. Alternatively manually dispatch
 `publish.yml` on a reviewed commit with `publish` true. Environment protection
 rules may require owner approval. Do not publish from untrusted pull requests.

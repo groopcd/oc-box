@@ -1,6 +1,6 @@
 # OpenCode 1.x and 2.x compatibility
 
-Available in oc-box 1.5.x, with retained OpenCode 1.x support. Validation uses
+Available since oc-box 1.5.x, with retained OpenCode 1.x support in 1.6. Validation uses
 unmodified OpenCode 1.19.5 and 2.2.6, plus accepted disposable Linux host/rootless
 Podman lifecycle tests for selected-vault and default global-vault workflows.
 The separate scripted global-vault fixture passed first launch/import, new-owner
@@ -596,7 +596,7 @@ project's recovery archive.
 
 ### Repeatable host validation
 
-Versions use **1.5.N**, preserving the original commit-count patch baseline and
+Versions now use **1.6.N**, preserving the original commit-count patch baseline and
 upgrade ordering. Repeat relevant host validation before lifecycle/credential
 releases, using only isolated disposable resources.
 
