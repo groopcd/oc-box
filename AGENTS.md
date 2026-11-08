@@ -143,6 +143,10 @@ from offline safety/native helper tests. Leave encrypted evidence on failure.
 Its initial host run failed during the first owning launch, not an accepted pass.
 Use --diagnose for validated read-only checkpoints; never print raw errors/env
 or treat inspection as replay/acceptance. Keep the retained fixture intact.
+Store refusals retain fixed-category selector/native version/info diagnostics,
+with both private config selectors on direct native queries. Never inspect
+resources after an initial refusal or use probe success to bypass validation;
+no raw stdout/stderr, config rewrite, engine reset or workspace launch.
 --retry-source is limited to a stopped baseline-ready, already-imported source
 with verified private store/identity and no later backup/restore evidence. Use
 new companion synthetic vault/config/report files; never overwrite original

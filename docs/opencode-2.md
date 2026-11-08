@@ -498,6 +498,16 @@ the private store and labels, then returns only readiness/state/exit-code and
 import/session checkpoints. Container error text is reduced to fixed categories,
 never printed alongside env/config values. It cannot recover an exception that
 the original run discarded, and inspection does not establish acceptance.
+If store validation fails, it exits nonzero with `status: diagnostic-failed`
+and fixed-category `engine_probes` instead of discarding the engine failure.
+These compare the recorded selector/native `--version` and private `info`
+queries in normal, maintenance and backup environments. Direct native queries
+retain both validated private config selectors; they never query the operator's
+normal store. Output includes only exit codes, output-presence flags, fixed
+categories, validated numeric versions and store-verification booleans. Raw
+stdout/stderr stays in anonymous memory. No resources are inspected after the
+initial refusal, even if a comparison succeeds; no launch, unlock, reset,
+cleanup, selector/config rewrite or acceptance follows from these probes.
 
 If the retained source is stopped, baseline-ready and already has its verified
 seed recorded, a narrowly scoped owning retry can capture the failing substep:

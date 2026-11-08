@@ -530,6 +530,176 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
         self.assertIsNone(fixture.state_error_category(""))
         self.assertIsNone(fixture.state_error_category(None))
 
+    def test_engine_categories_are_fixed_including_errors_without_old_keywords(self):
+        secret = "synthetic-sensitive-engine-message"
+        for text, category in (
+            ("Error: EOF", "unexpected-end"),
+            ("unexpected end of JSON input", "unexpected-end"),
+            ("Error: error parsing TOML", "invalid-data"),
+            ("Error: sqlite database is locked", "engine-database"),
+            ("Error: cannot clone", "engine-namespace"),
+            ("Error: conmon failed", "engine-helper"),
+            ("Error: unknown flag", "invalid-command"),
+            ("panic: unexpected fault", "engine-panic"),
+            ("private unknown problem", "unclassified"),
+        ):
+            with self.subTest(text=text):
+                actual = fixture.stderr_category(text + " " + secret)
+                self.assertEqual(actual, category)
+                self.assertIn(actual, fixture.STDERR_CATEGORIES)
+                self.assertNotIn(secret, actual)
+                self.assertEqual(
+                    fixture.stderr_category((text + " " + secret).encode()), actual
+                )
+        self.assertEqual(fixture.stderr_category("a" * 65536 + " EOF"), "unclassified")
+
+    def test_exact_native_probe_includes_classifier_dependencies(self):
+        scope = {"__name__": "fixture_offline_compile_only"}
+        # The probe deliberately runs main unconditionally under python -c.
+        # Execute only its exact imports/classifier, never the native client.
+        exec(fixture.NATIVE_PROBE.split("\ndef main():", 1)[0], scope)
+        self.assertEqual(scope["stderr_category"]("Error: EOF"), "unexpected-end")
+
+    def test_failed_store_diagnostic_compares_selectors_without_resource_access(self):
+        path, _, _ = self.retained_source()
+        before = fixture.source_evidence_digests(self.root, path)
+        session = box.session_file(path).read_bytes()
+        secret = "synthetic-sensitive-store-error"
+        native = fixture.private_json(self.root, "podman-executable.json")["podman"]
+        wrapper = str(self.root / "bin/podman")
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append((command, kwargs))
+            self.assertIn(command[0], (wrapper, native))
+            self.assertIn(command[1:], (["--version"], ["info", "--format", "json"]))
+            self.assertTrue(kwargs["private"])
+            self.assertTrue(kwargs["capture"])
+            self.assertFalse(kwargs["check"])
+            self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+            self.assertLessEqual(kwargs["timeout"], 30)
+            self.assertEqual(kwargs["env"]["HOME"], str(self.root / "host-home"))
+            self.assertNotIn("EXAMPLE_TOKEN", kwargs["env"])
+            self.assertNotIn("CONTAINER_HOST", kwargs["env"])
+            if command[0] == native:
+                for name, relative in (
+                    ("CONTAINERS_CONF", "config/containers/containers.conf"),
+                    ("CONTAINERS_STORAGE_CONF", "config/containers/storage.conf"),
+                ):
+                    self.assertEqual(kwargs["env"][name], str(self.root / relative))
+            if command == [native, "--version"]:
+                return subprocess.CompletedProcess(
+                    command, 0, "podman version 6.1.4\n", ""
+                )
+            return subprocess.CompletedProcess(
+                command, 125, secret, "Error: EOF " + secret
+            )
+
+        with (
+            patch.dict(os.environ, {"EXAMPLE_TOKEN": secret, "CONTAINER_HOST": secret}),
+            patch.object(fixture, "host_guard"),
+            patch.object(fixture, "validate_store", side_effect=box.BoxError(secret)),
+            patch.object(box, "run", side_effect=run),
+            patch.object(backups, "owned_container") as container,
+            patch.object(backups, "owned_volume") as volume,
+            patch.object(box, "podman") as podman,
+            patch.object(fixture, "launcher") as launch,
+            patch.object(vault, "select_all") as unlock,
+        ):
+            result = fixture.diagnose(self.root)
+        self.assertEqual(result["status"], "diagnostic-failed")
+        self.assertEqual(result["failed_stage"], "private-store")
+        self.assertEqual(result["workspaces"], {})
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(result["engine_probes"][1]["version"], "6.1.4")
+        self.assertTrue(
+            all(
+                item.get("stderr_category") == "unexpected-end"
+                for index, item in enumerate(result["engine_probes"])
+                if index != 1
+            )
+        )
+        for mock in (container, volume, podman, launch, unlock):
+            mock.assert_not_called()
+        self.assertNotIn(secret, json.dumps(result))
+        self.assertEqual(fixture.source_evidence_digests(self.root, path), before)
+        self.assertEqual(box.session_file(path).read_bytes(), session)
+
+    def test_probe_success_does_not_bypass_original_store_refusal(self):
+        self.retained_source()
+        private = self.info()
+        escaped = copy.deepcopy(private)
+        escaped["store"]["graphRoot"] = str(self.parent)
+        replies = [
+            subprocess.CompletedProcess([], 0, "podman version 6.1.4", ""),
+            subprocess.CompletedProcess([], 0, "private-version-string", ""),
+            subprocess.CompletedProcess([], 0, json.dumps(private), ""),
+            subprocess.CompletedProcess([], 0, json.dumps(escaped), ""),
+            subprocess.CompletedProcess([], 0, "private-invalid-json", ""),
+            subprocess.CompletedProcess([], 0, json.dumps(private), ""),
+        ]
+        with (
+            patch.object(fixture, "host_guard"),
+            patch.object(
+                fixture, "validate_store", side_effect=box.BoxError("private")
+            ),
+            patch.object(box, "run", side_effect=replies),
+            patch.object(backups, "owned_container") as container,
+        ):
+            result = fixture.diagnose(self.root)
+        container.assert_not_called()
+        self.assertEqual(result["status"], "diagnostic-failed")
+        probes = result["engine_probes"]
+        self.assertIsNone(probes[1]["version"])
+        self.assertTrue(probes[2]["private_store_verified"])
+        self.assertEqual(probes[3]["validation_category"], "private-store")
+        self.assertEqual(probes[4]["error_class"], "invalid-data")
+        self.assertNotIn("private-invalid-json", json.dumps(result))
+
+    def test_diagnostic_probes_bound_timeout_and_do_not_echo_exception_text(self):
+        self.retained_source()
+        secret = "synthetic-sensitive-timeout"
+        with patch.object(
+            box,
+            "run",
+            side_effect=subprocess.TimeoutExpired([secret], 30, stderr=secret),
+        ) as run:
+            probes = fixture.diagnostic_store_probes(self.root)
+        self.assertEqual(run.call_count, 6)
+        self.assertTrue(all(item["error_class"] == "timeout" for item in probes))
+        self.assertNotIn(secret, json.dumps(probes))
+
+    def test_diagnostic_cli_prints_structured_failure_and_exits_nonzero(self):
+        self.retained_source()
+        program = """import importlib.util,sys
+from unittest.mock import patch
+spec=importlib.util.spec_from_file_location('fixture',sys.argv[1])
+fixture=importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+result={'status':sys.argv[3], 'engine_probes':[]}
+with patch.object(fixture,'host_guard'), patch.object(fixture,'diagnose',return_value=result):
+    sys.exit(fixture.main(['--diagnose',sys.argv[2]]))
+"""
+        for status, code in (("diagnostic-only", 0), ("diagnostic-failed", 1)):
+            with self.subTest(status=status):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-B",
+                        "-c",
+                        program,
+                        str(SCRIPT),
+                        str(self.root),
+                        status,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertEqual(json.loads(result.stdout)["status"], status)
+                self.assertEqual(result.stderr, "")
+
     def test_source_retry_requires_verified_selection_and_rejects_later_evidence(self):
         path, data, baseline = self.retained_source()
         result = fixture.validate_source_retry(self.root)

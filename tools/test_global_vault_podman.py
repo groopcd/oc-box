@@ -138,7 +138,32 @@ def stderr_category(message):
     if isinstance(text, bytes):
         text = text.decode("utf-8", errors="replace")
     text = text.lower()
+    if re.search(r"\beof\b|unexpected end", text):
+        return "unexpected-end"
     for terms, category in (
+        (
+            (
+                "database configuration mismatch",
+                "database is locked",
+                "sqlite",
+                "boltdb",
+            ),
+            "engine-database",
+        ),
+        (
+            ("error parsing", "error decoding", "invalid character", "toml"),
+            "invalid-data",
+        ),
+        (
+            ("cannot re-exec", "cannot clone", "invalid internal status", "unshare"),
+            "engine-namespace",
+        ),
+        (("conmon", "crun", "runc"), "engine-helper"),
+        (
+            ("unknown flag", "unknown command", "unrecognized argument"),
+            "invalid-command",
+        ),
+        (("panic:", "fatal error:"), "engine-panic"),
         (("cgroup", "systemd"), "cgroup-runtime"),
         (("quota", "no space left", "storage"), "storage"),
         (("mount", "selinux"), "mount-or-label"),
@@ -185,6 +210,13 @@ STDERR_CATEGORIES = frozenset(
     {
         "empty",
         "unclassified",
+        "unexpected-end",
+        "engine-database",
+        "invalid-data",
+        "engine-namespace",
+        "engine-helper",
+        "invalid-command",
+        "engine-panic",
         "cgroup-runtime",
         "storage",
         "mount-or-label",
@@ -229,7 +261,7 @@ ERROR_CLASSES = frozenset(
 # /proc cannot safely interpret namespace PIDs. This runs the real native client
 # with stdin EOF, no --auto, and retains private output in anonymous memory only.
 NATIVE_PROBE = (
-    """import base64,json,os,subprocess,sys,threading
+    """import base64,json,os,re,subprocess,sys,threading
 from urllib.request import Request,build_opener,ProxyHandler
 """
     + STDERR_CLASSIFIER
@@ -2064,6 +2096,86 @@ def state_error_category(message):
     return "unclassified"
 
 
+def diagnostic_store_probes(root):
+    """Bounded selector/native comparisons; raw output stays in anonymous memory.
+
+    Only info/--version are allowed. Even the direct native call retains BOTH
+    audited private config selectors; never fall back to the operator's store.
+    These results explain a refusal, never authorize resource inspection.
+    """
+    root = validate_fixture(root, allow_unrecorded=True)
+    mapping = private_json(root, "podman-executable.json")
+    native = str(validate_native_podman(mapping["podman"], root))
+    wrapper = str(safe_path(root, "bin/podman"))
+    normal = isolated_env(root)
+    with patch.dict(os.environ, normal, clear=True):
+        environments = (
+            ("normal-store", wrapper, normal),
+            ("maintenance-store", wrapper, box.maintenance_host_env()),
+            ("backup-store", wrapper, crypto.environment()),
+            ("recorded-native-store", native, normal),
+        )
+    probes = [
+        ("recorded-wrapper-version", wrapper, normal, ["--version"]),
+        ("recorded-native-version", native, normal, ["--version"]),
+        *[
+            (label, binary, env, ["info", "--format", "json"])
+            for label, binary, env in environments
+        ],
+    ]
+    results = []
+    for label, binary, env, arguments in probes:
+        item = {"probe": label}
+        try:
+            completed = box.run(
+                [binary, *arguments],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture=True,
+                private=True,
+                check=False,
+                timeout=15 if arguments == ["--version"] else 30,
+            )
+            item.update(
+                exit_code=completed.returncode,
+                stdout_present=bool(completed.stdout),
+                stderr_present=bool(completed.stderr),
+                stderr_category=stderr_category(completed.stderr),
+            )
+            if completed.returncode == 0:
+                if arguments == ["--version"]:
+                    version = re.fullmatch(
+                        r"podman version ([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})\s*",
+                        completed.stdout[:128],
+                    )
+                    item["version"] = version[1] if version else None
+                else:
+                    validate_store_info(
+                        root, json.loads(completed.stdout), env["TMPDIR"]
+                    )
+                    item["private_store_verified"] = True
+        except Exception as error:
+            item["error_class"] = safe_error_class(error)
+            # A fixture assertion's label is safe only when explicitly listed.
+            item["validation_category"] = (
+                str(error)
+                if isinstance(error, FixtureError)
+                and str(error)
+                in {
+                    "private-store",
+                    "rootless",
+                    "remote-engine",
+                    "storage-driver",
+                    "store-info-shape",
+                    "temporary-path",
+                    "image-temporary-path",
+                }
+                else "operation-failed"
+            )
+        results.append(item)
+    return results
+
+
 def diagnose(root):
     """Inspect retained checkpoints; never start/exec, unlock, sync or replay."""
     host_guard()
@@ -2076,7 +2188,18 @@ def diagnose(root):
         "workspaces": {},
     }
     with patch.dict(os.environ, isolated_env(root), clear=True):
-        validate_store(root, allow_unrecorded=True)
+        try:
+            validate_store(root, allow_unrecorded=True)
+        except Exception as error:
+            result.update(
+                status="diagnostic-failed",
+                failed_stage="private-store",
+                error_class=safe_error_class(error),
+                engine_probes=diagnostic_store_probes(root),
+            )
+            # NEVER inspect containers/volumes or alter evidence after refusal,
+            # even if one of the comparison probes happened to succeed.
+            return result
         for name, (path, data) in workspace_records(root).items():
             info = backups.owned_container(box, data)
             state = {} if info is None else info.get("State", {})
@@ -2966,7 +3089,7 @@ def main(argv=None):
             with private_output():
                 result = diagnose(root)
             print(json.dumps(result, indent=2), file=output)
-            return 0
+            return 1 if result["status"] == "diagnostic-failed" else 0
         if args.cleanup is not None:
             require(
                 args.work_dir is None
