@@ -1991,6 +1991,26 @@ archives; an unrelated replacement directory will not be deleted.
 
 ## Troubleshooting
 
+For a disposable host validation of V2 global-vault first-launch delivery,
+Build approvals/reload and full backup/restore, use the source-checkout fixture:
+
+```sh
+uv run --isolated --no-project --with cryptography python -I -B tools/test_global_vault_podman.py \
+  --opencode-v2 "$(command -v opencode)" \
+  --distro tumbleweed --work-dir /var/tmp --temp-dir /var/tmp
+```
+
+Run from the repository root in a regular host terminal, outside oc-box and
+other shell sandboxes, without sudo. This creates fresh private synthetic
+vault/history/projects and verified separate Podman graphroot/runroot state;
+it does not install a launcher or use normal host credentials/services. Choose
+existing disk-backed work/temp parents with enough space/quota. TUI/prompt input
+is scripted; this is not interactive TUI or comprehensive security proof. The
+fixture retains its report, resources and encrypted evidence. Use only its
+printed label/store-validated cleanup command, never global prune or manual
+marker deletion. See `docs/opencode-2.md` for exact scope. No new live result is
+accepted merely by preparing the fixture or passing its offline unit tests.
+
 ### Reboot, remount, and directory identity changes
 
 Clearing `~/.cache` does not erase the oc-box registry (normally under

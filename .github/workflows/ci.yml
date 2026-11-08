@@ -68,3 +68,4 @@ jobs:
           "$RUNNER_TEMP/global-vault-tests/bin/python" -m pip install 'cryptography>=44'
           "$RUNNER_TEMP/global-vault-tests/bin/python" -B tests/smoke_global_vault.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           "$RUNNER_TEMP/global-vault-tests/bin/python" -B tests/smoke_build_permissions_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          "$RUNNER_TEMP/global-vault-tests/bin/python" -B tests/smoke_global_vault_host_helpers.py --opencode-v2 "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"

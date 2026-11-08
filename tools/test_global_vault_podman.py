@@ -1,0 +1,1967 @@
+#!/usr/bin/env python3
+"""Opt-in, disposable HOST acceptance for V2's default global encrypted vault.
+
+Uses repository launcher code, unmodified OpenCode 2.2.6 and a private rootless
+Podman store. Provider, MCP, vault, host history, config and projects are entirely
+synthetic. Only TUI exit and masked prompt input are scripted. There is no paid
+inference, host installation/update, shared native service, V1 requirement or
+retry mode. Evidence is retained, including on failure. --cleanup removes only
+verified fixture-owned containers/volumes/networks, never files or images.
+
+Run on a regular host, not inside oc-box, with an existing disk-backed parent:
+  python3 -B tools/test_global_vault_podman.py --work-dir /path/to/fixtures \
+      --opencode-v2 /path/to/unmodified/opencode
+"""
+
+import argparse
+import base64
+import contextlib
+import hashlib
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import io
+import json
+import os
+from pathlib import Path
+import re
+import secrets
+import shlex
+import shutil
+import stat
+import subprocess
+import sys
+import tarfile
+import tempfile
+import threading
+from unittest.mock import patch
+from urllib.parse import quote
+
+APP = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(APP))
+import backup_crypto as crypto
+import backups
+import credentials
+import oc_box as box
+import opencode_compat as compat
+import opencode_v2_io as bridge
+import vault
+import workspace_service
+from tools.test_v2_podman import (
+    check_native_version,
+    digest_home,
+    native_env,
+    storage_config,
+    temporary_location,
+    verify_v2_progress,
+)
+from version_info import get_version_info
+
+PREFIX = "oc-box-gv-host-"
+FORMAT = "oc-box-global-vault-host-acceptance"
+NATIVE_VERSION = "2.2.6"
+PODMAN_CONFIGFILE_OMISSIONS = frozenset({"6.1.4"})
+PROJECTS = ("source-a", "source-b", "restored-full")
+KEY = "ACCEPTANCE_API_KEY"
+SIDE = "ACCEPTANCE_SIDE_SECRET"
+ADDED = "ACCEPTANCE_ADDED_SECRET"
+AMBIENT = "ACCEPTANCE_AMBIENT_TOKEN"
+PASS_ENV = "ACCEPTANCE_CUSTOM_FORWARD"
+KNOWN = (KEY, SIDE, ADDED, AMBIENT, PASS_ENV)
+ACTION = "ocbox_permission_probe"
+TOOL_MARKER = "BUILD_PERMISSION_TOOL_COMPLETED"
+SHELL_MARKER = "GLOBAL_VAULT_SHELL_OK"
+MCP_MARKER = "GLOBAL_VAULT_MCP_OK"
+DONE_MARKER = "GLOBAL_VAULT_NATIVE_COMPLETED"
+SEED_TEXT = "GLOBAL_VAULT_SEED_RETAINED"
+OS_FILE = "/etc/oc-box-global-vault-fixture"
+ASK_RULES = [
+    {"action": "*", "resource": "*", "effect": "ask"},
+    {"action": ACTION, "resource": "session-denied", "effect": "deny"},
+]
+
+# Deliberately omits agent, exercising native current-session/default resolution.
+# No secrets, external packages or fixture-driven permission approvals live here.
+TOOL_SOURCE = """export default {
+  id: "oc-box.fixture-global-vault-permission",
+  async setup(ctx) {
+    await ctx.tool.transform(editor => {
+      editor.add({
+        name: "ocbox_permission_probe",
+        description: "Assert a synthetic permission without an agent field.",
+        options: { codemode: false },
+        input: {
+          type: "object", properties: { resource: { type: "string" } },
+          required: ["resource"], additionalProperties: false,
+        },
+        execute: async (input, context) => {
+          await ctx.permission.assert({
+            sessionID: context.sessionID,
+            source: { type: "tool", messageID: context.messageID, id: context.id },
+            action: "ocbox_permission_probe", resources: [input.resource],
+          })
+          return { content: "BUILD_PERMISSION_TOOL_COMPLETED" }
+        },
+      })
+    })
+  },
+}
+"""
+
+# Expected hashes are tool input, not plaintext values or an inherited host file.
+MCP = """import hashlib,json,os,sys
+known=('ACCEPTANCE_API_KEY','ACCEPTANCE_SIDE_SECRET','ACCEPTANCE_ADDED_SECRET','ACCEPTANCE_AMBIENT_TOKEN','ACCEPTANCE_CUSTOM_FORWARD')
+for line in sys.stdin:
+    message=json.loads(line); method=message.get('method'); result={}
+    if method=='initialize':
+        result={'protocolVersion':message['params']['protocolVersion'],'capabilities':{'tools':{}},'serverInfo':{'name':'global-vault-fixture','version':'1'}}
+    elif method=='tools/list':
+        result={'tools':[{'name':'check','description':'Check synthetic environment hashes and aliases without revealing values','inputSchema':{'type':'object','properties':{'expected':{'type':'object','additionalProperties':{'anyOf':[{'type':'string'},{'type':'null'}]}}},'required':['expected'],'additionalProperties':False}}]}
+    elif method=='tools/call':
+        expected=message['params']['arguments']['expected']; assert set(expected)==set(known)
+        for name in known:
+            actual=os.environ.get(name)
+            assert (actual is None) if expected[name] is None else (actual is not None and hashlib.sha256(actual.encode()).hexdigest()==expected[name])
+        assert os.environ['FIXTURE_MCP_KEY']==os.environ['ACCEPTANCE_API_KEY']
+        result={'content':[{'type':'text','text':'GLOBAL_VAULT_MCP_OK'}]}
+    if 'id' in message:
+        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':result}),flush=True)
+"""
+
+# Observe the authenticated event stream INSIDE the fixture container. Host
+# /proc cannot safely interpret namespace PIDs. This runs the real native client
+# with stdin EOF, no --auto, and retains private output in anonymous memory only.
+NATIVE_PROBE = """import base64,json,os,subprocess,sys,threading
+from urllib.request import Request,build_opener,ProxyHandler
+url,ident=sys.argv[1:3]; command=sys.argv[3:]
+assert '--server' in command and '--auto' not in command
+assert command[command.index('--server')+1]==url
+ready=threading.Event(); done=threading.Event(); events=[]; failures=[]
+def observe():
+    auth=base64.b64encode(('opencode:'+os.environ['OPENCODE_PASSWORD']).encode()).decode()
+    request=Request(url+'/api/event',headers={'Authorization':'Basic '+auth,'Accept':'text/event-stream'})
+    try:
+        with build_opener(ProxyHandler({})).open(request,timeout=200) as response:
+            data=[]
+            for raw in response:
+                line=raw.decode().rstrip('\\r\\n')
+                if line.startswith('data:'): data.append(line[5:].lstrip())
+                elif not line and data:
+                    event=json.loads('\\n'.join(data)); data=[]
+                    if event['type']=='server.connected': ready.set()
+                    if event.get('data',{}).get('sessionID')==ident:
+                        events.append(event['type'])
+                        if event['type'] in ('session.execution.succeeded','session.execution.failed','session.execution.interrupted'): break
+    except Exception:
+        failures.append('event-stream')
+    finally:
+        done.set()
+worker=threading.Thread(target=observe,daemon=True); worker.start()
+assert ready.wait(10)
+with os.fdopen(os.memfd_create('fixture-native-output',os.MFD_CLOEXEC),'w+b') as output, os.fdopen(os.memfd_create('fixture-native-errors',os.MFD_CLOEXEC),'w+b') as errors:
+    result=subprocess.run(command,stdin=subprocess.DEVNULL,stdout=output,stderr=errors,timeout=180)
+    assert result.returncode==0
+assert done.wait(10); worker.join(timeout=2)
+assert not failures and 'session.execution.succeeded' in events and 'permission.asked' not in events
+print(json.dumps({'completed':True,'permission_asked':0}))
+"""
+
+
+class FixtureError(Exception):
+    """Only fixed, public categories may reach the terminal."""
+
+
+def require(condition, category):
+    if not condition:
+        raise FixtureError(category)
+
+
+def host_guard():
+    """Must precede placement, binary probing, configuration and Podman access."""
+    require(
+        os.geteuid() != 0
+        and os.environ.get("OC_BOX_CONTAINER") != "1"
+        and not Path("/.dockerenv").exists()
+        and not Path("/run/.containerenv").exists(),
+        "host-only",
+    )
+
+
+def no_symlinks(path):
+    """Reject redirects in every existing ancestor, not just the final leaf."""
+    path = Path(path).absolute()
+    require(".." not in path.parts, "unsafe-path")
+    require(not any(char in str(path) for char in ("\0", "\r", "\n")), "unsafe-path")
+    for component in (*reversed(path.parents), path):
+        try:
+            info = component.lstat()
+        except FileNotFoundError:
+            continue
+        require(not stat.S_ISLNK(info.st_mode), "unsafe-path")
+        if component != path:
+            require(stat.S_ISDIR(info.st_mode), "unsafe-path")
+    return path
+
+
+def existing_directory(path):
+    path = no_symlinks(Path(path).expanduser())
+    require(path.is_dir(), "placement")
+    return path.resolve(strict=True)
+
+
+def safe_path(root, relative, *, directory=False, optional=False):
+    path = no_symlinks(root / relative)
+    require(path.is_relative_to(root) and path != root, "unsafe-path")
+    if optional and not path.exists():
+        return path
+    info = path.lstat()
+    require(
+        stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode),
+        "unsafe-path",
+    )
+    return path
+
+
+def private_json(root, relative):
+    path = safe_path(root, relative)
+    info = path.stat()
+    require(
+        info.st_uid == os.getuid()
+        and not info.st_mode & 0o077
+        and info.st_nlink == 1
+        and info.st_size <= crypto.MAX_SMALL,
+        "unsafe-metadata",
+    )
+    return json.loads(path.read_text())
+
+
+def write_json_new(path, value):
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as output:
+        json.dump(value, output, indent=2)
+        output.write("\n")
+
+
+def launcher(arguments):
+    require(box.main(arguments) == 0, "launcher-exit")
+
+
+def isolated_env(root, baseline=None):
+    """Positive runtime allowlist; never inspect ambient credential values."""
+    baseline = box.maintenance_host_env() if baseline is None else baseline
+    env = {
+        name: baseline[name] for name in ("PATH", "USER", "LOGNAME") if name in baseline
+    }
+    runtime = baseline.get("XDG_RUNTIME_DIR")
+    require(isinstance(runtime, str) and Path(runtime).is_absolute(), "host-runtime")
+    runtime = no_symlinks(runtime)
+    info = runtime.stat()
+    require(
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.getuid()
+        and not info.st_mode & 0o077,
+        "host-runtime",
+    )
+    env["XDG_RUNTIME_DIR"] = str(runtime)
+    bus = baseline.get("DBUS_SESSION_BUS_ADDRESS")
+    if bus is not None:
+        require(
+            isinstance(bus, str)
+            and re.fullmatch(
+                re.escape("unix:path=" + str(runtime / "bus"))
+                + r"(?:,guid=[0-9a-f]{32})?",
+                bus,
+            )
+            is not None,
+            "host-runtime-bus",
+        )
+        env["DBUS_SESSION_BUS_ADDRESS"] = bus
+    env.update(
+        HOME=str(root / "host-home"),
+        XDG_CONFIG_HOME=str(root / "config"),
+        XDG_DATA_HOME=str(root / "data"),
+        XDG_STATE_HOME=str(root / "state"),
+        XDG_CACHE_HOME=str(root / "cache"),
+        OC_BOX_STATE_HOME=str(root / "registry"),
+        CONTAINERS_STORAGE_CONF=str(root / "config/containers/storage.conf"),
+        CONTAINERS_CONF=str(root / "config/containers/containers.conf"),
+        PATH=str(root / "bin") + ":" + env.get("PATH", "/usr/bin:/bin"),
+        TMPDIR=str(root / "temporary"),
+        OC_BOX_CONTAINER="0",
+        OC_BOX_UPDATE_CHECKED="1",
+        LANG="C.UTF-8",
+        TERM="xterm-256color",
+        PYTHONDONTWRITEBYTECODE="1",
+        GIT_CONFIG_GLOBAL="/dev/null",
+        GIT_CONFIG_NOSYSTEM="1",
+        OPENCODE_DISABLE_MODELS_FETCH="1",
+        OPENCODE_DISABLE_AUTOUPDATE="1",
+    )
+    return env
+
+
+@contextlib.contextmanager
+def private_output():
+    """Suppress Python and inherited subprocess output without plaintext logs."""
+    sys.stdout.flush()
+    sys.stderr.flush()
+    saved = [os.dup(number) for number in (1, 2)]
+    with os.fdopen(
+        os.memfd_create("global-vault-fixture-log", os.MFD_CLOEXEC), "w+"
+    ) as stream:
+        try:
+            for number in (1, 2):
+                os.dup2(stream.fileno(), number)
+            with contextlib.redirect_stdout(stream), contextlib.redirect_stderr(stream):
+                yield
+        finally:
+            stream.flush()
+            for number, descriptor in zip((1, 2), saved):
+                os.dup2(descriptor, number)
+                os.close(descriptor)
+
+
+def containers_config(root):
+    # Rootless systemd/cgroups still use the validated HOST runtime. Engine
+    # databases, temporary state and volumes remain inside this fresh fixture.
+    return (
+        "[engine]\nremote = false\ntmp_dir = "
+        + json.dumps(str(root / "podman-tmp"))
+        + "\nstatic_dir = "
+        + json.dumps(str(root / "data/libpod"))
+        + "\nvolume_path = "
+        + json.dumps(str(root / "data/containers/storage/volumes"))
+        + '\nhooks_dir = []\n[containers]\nnetns = "private"\nenv = []\nmounts = []\ndevices = []\n'
+    )
+
+
+def podman_wrapper_source(interpreter=None):
+    return (
+        "#!"
+        + (str(Path(sys.executable).resolve()) if interpreter is None else interpreter)
+        + "\n"
+        + """import json,os,pathlib,sys
+root=pathlib.Path(__file__).resolve().parents[1]
+binary=json.loads((root/'podman-executable.json').read_text())['podman']
+assert pathlib.Path(binary).is_absolute() and pathlib.Path(binary).resolve()==pathlib.Path(binary)
+assert not pathlib.Path(binary).is_relative_to(root)
+env=dict(os.environ)
+env.pop('CONTAINERS_CONF_OVERRIDE',None)
+env['CONTAINERS_STORAGE_CONF']=str(root/'config/containers/storage.conf')
+env['CONTAINERS_CONF']=str(root/'config/containers/containers.conf')
+os.execve(binary,[binary,*sys.argv[1:]],env)
+"""
+    )
+
+
+def validate_native_podman(binary, root):
+    binary = Path(binary)
+    require(
+        binary.is_absolute()
+        and binary.resolve(strict=True) == binary
+        and binary.is_file()
+        and os.access(binary, os.X_OK)
+        and not binary.is_relative_to(root),
+        "native-podman",
+    )
+    with binary.open("rb") as stream:
+        require(stream.read(4) == b"\x7fELF", "native-podman")
+    return binary
+
+
+def prepare_podman_cli(root, binary):
+    """Restore ONLY private selectors around the real, read-only native engine."""
+    binary = validate_native_podman(binary, root)
+    # The wrapper needs only stdlib. Record the real base interpreter instead
+    # of a disposable uv/venv symlink, and never infer it from cleanup's Python.
+    interpreter = str(Path(sys.executable).resolve(strict=True))
+    validate_native_podman(interpreter, root)
+    write_json_new(
+        root / "podman-executable.json",
+        {"podman": str(binary), "interpreter": interpreter},
+    )
+    wrapper = root / "bin/podman"
+    with wrapper.open("x") as output:
+        output.write(podman_wrapper_source(interpreter))
+    wrapper.chmod(0o700)
+    return wrapper
+
+
+def expected_storage(root):
+    return (
+        '[storage]\ndriver = "overlay"\nrunroot = '
+        + json.dumps(str(root / "podman-run"))
+        + "\ngraphroot = "
+        + json.dumps(str(root / "data/containers/storage"))
+        + "\n"
+    )
+
+
+def validate_fixture(root, *, allow_unrecorded=False):
+    """Pure fixture metadata/path checks; no Podman, vault or native operations."""
+    root = no_symlinks(root)
+    require(root.name.startswith(PREFIX) and root.is_dir(), "fixture-root")
+    info = root.stat()
+    require(info.st_uid == os.getuid() and not info.st_mode & 0o077, "fixture-root")
+    root = root.resolve(strict=True)
+    require(
+        private_json(root, "fixture.json")
+        == {"format": FORMAT, "version": 1, "projects": list(PROJECTS)},
+        "fixture-format",
+    )
+    for relative in (
+        "host-home",
+        "config",
+        "config/containers",
+        "data",
+        "data/containers",
+        "data/containers/storage",
+        "podman-run",
+        "podman-tmp",
+        "data/libpod",
+        "data/containers/storage/volumes",
+        "registry",
+        "registry/workspaces",
+        "state",
+        "cache",
+        "bin",
+        "temporary",
+    ):
+        safe_path(root, relative, directory=True)
+    require(
+        safe_path(root, "config/containers/storage.conf").read_text()
+        == expected_storage(root),
+        "storage-config",
+    )
+    require(
+        safe_path(root, "config/containers/containers.conf").read_text()
+        == containers_config(root),
+        "storage-config",
+    )
+    mapping = private_json(root, "podman-executable.json")
+    require(
+        isinstance(mapping, dict)
+        and set(mapping) == {"podman", "interpreter"}
+        and isinstance(mapping["podman"], str)
+        and isinstance(mapping["interpreter"], str),
+        "native-podman",
+    )
+    validate_native_podman(mapping["podman"], root)
+    validate_native_podman(mapping["interpreter"], root)
+    wrapper = safe_path(root, "bin/podman")
+    require(
+        wrapper.read_text() == podman_wrapper_source(mapping["interpreter"])
+        and os.access(wrapper, os.X_OK),
+        "podman-selector",
+    )
+    records = workspace_records(root)
+    ids = private_json(root, "fixture-ids.json")
+    actual = {name: data["id"] for name, (_, data) in records.items()}
+    require(
+        isinstance(ids, dict)
+        and all(actual.get(name) == ident for name, ident in ids.items()),
+        "fixture-ids",
+    )
+    require(allow_unrecorded or ids == actual, "unrecorded-journal")
+    return root
+
+
+def validate_store_info(root, info, temporary=None):
+    """Independent native Podman proof; labels alone never authorize cleanup."""
+    require(isinstance(info, dict), "private-store")
+    require(
+        info.get("host", {}).get("security", {}).get("rootless") is True, "rootless"
+    )
+    require(info.get("host", {}).get("serviceIsRemote") is False, "remote-engine")
+    store = info.get("store", {})
+    require(store.get("graphDriverName") == "overlay", "storage-driver")
+    for field, relative in (
+        ("graphRoot", "data/containers/storage"),
+        ("runRoot", "podman-run"),
+        ("volumePath", "data/containers/storage/volumes"),
+    ):
+        expected = safe_path(root, relative, directory=True)
+        actual = store.get(field)
+        require(isinstance(actual, str) and Path(actual) == expected, "private-store")
+        require(no_symlinks(actual).resolve(strict=True) == expected, "private-store")
+    # Podman 5.6.2 exposes configFile. The separately audited v6.1.4
+    # libpod/define/info.go removes it; define/version.go reports Version with
+    # that exact capitalization. Only that verified omission is supported:
+    # https://github.com/containers/podman/blob/v6.1.4/libpod/define/info.go
+    # Unknown omissions fail closed. Exposed fields are ALWAYS validated, even
+    # for 6.1.4. This exception also revalidates the exact selector source,
+    # native executable mapping and private config; it is not label-only proof.
+    if "configFile" in store:
+        config = store["configFile"]
+        require(
+            isinstance(config, str)
+            and no_symlinks(config) == root / "config/containers/storage.conf",
+            "store-info-shape",
+        )
+    else:
+        version = info.get("version")
+        require(
+            isinstance(version, dict)
+            and version.get("Version") in PODMAN_CONFIGFILE_OMISSIONS,
+            "store-info-shape",
+        )
+        validate_fixture(root, allow_unrecorded=True)
+    temporary = no_symlinks(temporary or root / "temporary")
+    info = temporary.stat()
+    require(
+        stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.getuid()
+        and not info.st_mode & 0o077,
+        "temporary-path",
+    )
+    image_tmp = store.get("imageCopyTmpDir")
+    require(
+        isinstance(image_tmp, str)
+        and no_symlinks(image_tmp).resolve(strict=True)
+        == temporary.resolve(strict=True),
+        "image-temporary-path",
+    )
+
+
+def validate_store(root, *, allow_unrecorded=False):
+    """Verify actual rootless store selection in normal and sanitized envs."""
+    root = validate_fixture(root, allow_unrecorded=allow_unrecorded)
+    normal = isolated_env(root)
+    # temporary_location deliberately sets both env and Python's tempfile cache.
+    # Only an already-isolated fixture caller may contribute this optional path.
+    if os.environ.get("OC_BOX_STATE_HOME") == str(root / "registry"):
+        normal["TMPDIR"] = str(
+            existing_directory(os.environ.get("TMPDIR", str(root / "temporary")))
+        )
+    with patch.dict(os.environ, normal, clear=True):
+        for env in (normal, box.maintenance_host_env(), crypto.environment()):
+            result = box.run(
+                ["podman", "info", "--format", "json"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture=True,
+                private=True,
+                timeout=30,
+            )
+            validate_store_info(root, json.loads(result.stdout), env["TMPDIR"])
+
+
+def prepare_root(root, distro):
+    for relative in (
+        "host-home",
+        "config/opencode",
+        "config/oc-box",
+        "state",
+        "cache",
+        "registry/workspaces",
+        "temporary",
+        "podman-run",
+        "podman-tmp",
+        "data/libpod",
+        "data/containers/storage/volumes",
+        "data/containers/storage",
+        "bin",
+        "source-a",
+        "source-b",
+    ):
+        (root / relative).mkdir(parents=True, mode=0o700, exist_ok=True)
+    storage_config(root)
+    (root / "config/containers/containers.conf").write_text(containers_config(root))
+    write_json_new(
+        root / "fixture.json",
+        {"format": FORMAT, "version": 1, "projects": list(PROJECTS)},
+    )
+    write_json_new(root / "fixture-ids.json", {})
+    write_json_new(
+        root / "config/oc-box/config.json",
+        {
+            "default_distro": distro,
+            "pass_env": [PASS_ENV],
+            "auto_update": False,
+        },
+    )
+    for name in ("source-a", "source-b"):
+        (root / name / "unfinished.txt").write_text("PROJECT_RETAINED\n")
+
+
+def prepare_native_cli(root, binary):
+    """A single-version selector, never a host installation or service client."""
+    check_native_version(root, binary, "2")
+    for name in ("config", "data", "state", "cache"):
+        (root / ("host-" + name + "-2")).mkdir(mode=0o700, exist_ok=True)
+    write_json_new(root / "executables.json", {"2": str(binary)})
+    code = """import json,os,pathlib,sys
+root=pathlib.Path(__file__).resolve().parents[1]
+binary=json.loads((root/'executables.json').read_text())['2']
+env={key:os.environ[key] for key in ('PATH','USER','LOGNAME','LANG','TERM','TMPDIR','XDG_RUNTIME_DIR') if key in os.environ}
+env['HOME']=str(root/'host-home')
+for name in ('CONFIG','DATA','CACHE','STATE'):
+    env['XDG_'+name+'_HOME']=str(root/('host-'+name.lower()+'-2'))
+env.update(OPENCODE_TEST_HOME=env['HOME'],OPENCODE_DISABLE_MODELS_FETCH='1',OPENCODE_DISABLE_PROJECT_CONFIG='1',OPENCODE_PURE='1',OPENCODE_DISABLE_AUTOUPDATE='1')
+env['OPENCODE_CONFIG_CONTENT']=json.dumps({'snapshots':False,'formatter':False,'update':'disable','policies':[{'action':'plugin.use','resource':'*','effect':'deny'}]})
+os.execve(binary,[binary,*sys.argv[1:]],env)
+"""
+    wrapper = root / "bin/opencode"
+    with wrapper.open("x") as output:
+        output.write("#!" + sys.executable + "\n" + code)
+    wrapper.chmod(0o700)
+    release = compat.version(
+        box.run(
+            [str(wrapper), "--version"],
+            stdin=subprocess.DEVNULL,
+            capture=True,
+            private=True,
+            timeout=15,
+        ).stdout
+    )
+    require(release == NATIVE_VERSION, "native-version")
+    return wrapper
+
+
+def seed_native_history(root, binary):
+    """Seed BEFORE box.main creates a workspace, using native export/import APIs."""
+    project = root / "source-a"
+    env = native_env(root, "2")
+    previous = Path.cwd()
+    try:
+        os.chdir(project)
+        # Direct binary is essential: the selector intentionally clears the
+        # bridge's OPENCODE_PASSWORD and cannot authenticate this private lease.
+        with (
+            patch.dict(os.environ, env, clear=True),
+            bridge.server(str(binary)) as request,
+        ):
+            session = request(
+                "POST",
+                "/api/session",
+                {
+                    "location": {"directory": str(project)},
+                    "agent": "build",
+                    "permissions": ASK_RULES,
+                },
+            )["data"]
+            ident = session["id"]
+            skeleton = request("GET", "/api/experimental/session/" + ident + "/export")[
+                "data"
+            ]
+            require(skeleton["messages"] == [], "native-seed")
+            skeleton["messages"] = [
+                {
+                    "id": "msg_global_vault_seed_" + secrets.token_hex(12),
+                    "type": "user",
+                    "text": SEED_TEXT,
+                    "time": {"created": 1},
+                }
+            ]
+            request("DELETE", "/api/session/" + ident)
+            imported = request(
+                "POST",
+                "/api/experimental/session/import",
+                {
+                    **skeleton,
+                    "location": {"directory": str(project)},
+                },
+            )["data"]
+            require(imported["id"] == ident, "native-seed")
+            baseline = request("GET", "/api/experimental/session/" + ident + "/export")[
+                "data"
+            ]
+            require(baseline["messages"] == skeleton["messages"], "native-seed")
+            require(baseline["info"].get("permissions") == ASK_RULES, "native-seed")
+            box.validate_session_export(baseline, ident)
+    finally:
+        os.chdir(previous)
+    write_json_new(root / "seed-baseline.json", baseline)
+    return baseline
+
+
+def fixture_config(port, root=None):
+    return {
+        "$schema": "https://opencode.ai/config.json",
+        "snapshots": False,
+        "formatter": False,
+        "update": "disable",
+        "default_agent": "build",
+        "plugins": [
+            {
+                "package": str(
+                    root / "config/opencode/plugins/fixture-global-vault-permission"
+                )
+                if root is not None
+                else "./plugins/fixture-global-vault-permission"
+            }
+        ],
+        "agents": {
+            "fixture-child": {
+                "mode": "subagent",
+                "permissions": [
+                    {"action": ACTION, "resource": "*", "effect": "ask"},
+                ],
+            }
+        },
+        "policies": [
+            {"action": "provider.use", "resource": "*", "effect": "deny"},
+            {"action": "provider.use", "resource": "fixture", "effect": "allow"},
+            {
+                "action": "tool.use",
+                "resource": ACTION + ":policy-denied",
+                "effect": "deny",
+            },
+        ],
+        "providers": {
+            "fixture": {
+                "package": "aisdk:@ai-sdk/openai-compatible",
+                "settings": {
+                    "baseURL": f"http://host.containers.internal:{port}/v1",
+                    "apiKey": "{env:" + KEY + "}",
+                },
+                "models": {
+                    "gpt-smoke": {
+                        "name": "Synthetic global vault acceptance",
+                        "limit": {"context": 32000, "output": 2000},
+                    }
+                },
+            }
+        },
+        "model": "fixture/gpt-smoke",
+        "mcp": {
+            "servers": {
+                "fixture": {
+                    "type": "local",
+                    "command": ["python3", "-c", MCP],
+                    "environment": {"FIXTURE_MCP_KEY": "{env:" + KEY + "}"},
+                }
+            }
+        },
+    }
+
+
+def write_plugin(root):
+    directory = root / "config/opencode/plugins/fixture-global-vault-permission"
+    directory.mkdir(parents=True, mode=0o700)
+    (directory / "package.json").write_text('{"type":"module","main":"index.js"}\n')
+    (directory / "index.js").write_text(TOOL_SOURCE)
+
+
+def expected_hashes(values):
+    require(set(values).issubset(KNOWN) and KEY in values, "synthetic-contract")
+    return {
+        name: hashlib.sha256(values[name].encode()).hexdigest()
+        if name in values
+        else None
+        for name in KNOWN
+    }
+
+
+def shell_program(expected):
+    return (
+        "import hashlib,json,os; expected=json.loads("
+        + repr(json.dumps(expected))
+        + "); actual={name:(hashlib.sha256(os.environ[name].encode()).hexdigest() if name in os.environ else None) for name in expected}; assert actual==expected; print('"
+        + SHELL_MARKER
+        + "')"
+    )
+
+
+def make_provider(state):
+    class Provider(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            pass
+
+        def do_GET(self):
+            if self.path != "/health":
+                self.send_error(404, "Fixture endpoint unavailable")
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b'{"fixture":"oc-box-global-vault"}')
+
+        def do_POST(self):
+            try:
+                self.connection.settimeout(10)
+                require(self.path == "/v1/chat/completions", "provider-endpoint")
+                require(
+                    self.headers.get("Authorization")
+                    == "Bearer " + state["values"][KEY],
+                    "provider-auth",
+                )
+                length = int(self.headers["Content-Length"])
+                require(0 < length < 2_000_000, "provider-size")
+                body = json.loads(self.rfile.read(length))
+                state["requests"] += 1
+                require(
+                    state["requests"] <= 80
+                    and state["requests"] - state["before"] <= 12,
+                    "provider-bound",
+                )
+                messages = body.get("messages", [])
+                last = max(
+                    (
+                        i
+                        for i, item in enumerate(messages)
+                        if item.get("role") == "user"
+                    ),
+                    default=-1,
+                )
+                results = [
+                    item for item in messages[last + 1 :] if item.get("role") == "tool"
+                ]
+                names = {item["function"]["name"] for item in body.get("tools", [])}
+                markers = (SHELL_MARKER, MCP_MARKER, TOOL_MARKER)
+                require(len(results) <= 3, "provider-tools")
+                for index, item in enumerate(results):
+                    require(
+                        markers[index] in json.dumps(item.get("content")),
+                        "provider-tool-result",
+                    )
+                    state["markers"].add(markers[index])
+                delta, finish = {"content": DONE_MARKER}, "stop"
+                if names and len(results) < 3:
+                    expected = expected_hashes(state["values"])
+                    actions = (
+                        (
+                            "shell",
+                            {
+                                "command": "python3 -c "
+                                + shlex.quote(shell_program(expected))
+                            },
+                        ),
+                        (
+                            "execute",
+                            {
+                                "code": "return await tools.fixture.check({expected: "
+                                + json.dumps(expected)
+                                + "})"
+                            },
+                        ),
+                        (ACTION, {"resource": "native-tool-ask"}),
+                    )
+                    name, arguments = actions[len(results)]
+                    require(name in names, "provider-tool-unavailable")
+                    delta = {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_global_vault_" + str(len(results)),
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": json.dumps(arguments),
+                                },
+                            }
+                        ]
+                    }
+                    finish = "tool_calls"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.end_headers()
+                for choice in (
+                    {"index": 0, "delta": delta, "finish_reason": None},
+                    {"index": 0, "delta": {}, "finish_reason": finish},
+                ):
+                    chunk = {
+                        "id": "chatcmpl-global-vault",
+                        "object": "chat.completion.chunk",
+                        "model": "gpt-smoke",
+                        "choices": [choice],
+                        "usage": {
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2,
+                        },
+                    }
+                    self.wfile.write(("data: " + json.dumps(chunk) + "\n\n").encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+            except Exception:
+                state["errors"] += 1
+                self.send_error(500, "Synthetic fixture contract failed")
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
+    server.daemon_threads = True
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    return server, worker
+
+
+def workspace_records(root):
+    """Validate all registry paths before any resource inspection/removal."""
+    directory = safe_path(root, "registry/workspaces", directory=True)
+    records = {}
+    for folder in sorted(directory.iterdir()):
+        require(
+            re.fullmatch(r"[0-9a-f]{32}", folder.name) is not None,
+            "workspace-allowlist",
+        )
+        safe_path(root, folder.relative_to(root), directory=True)
+        path = folder / "workspace.json"
+        data = private_json(root, path.relative_to(root))
+        project = data.get("project")
+        require(isinstance(project, str), "workspace-allowlist")
+        project_path = no_symlinks(project)
+        name = project_path.name
+        require(
+            project_path == root / name and name in PROJECTS and name not in records,
+            "workspace-allowlist",
+        )
+        safe_path(
+            root,
+            name,
+            directory=True,
+            optional=name == "restored-full" and data.get("restore_incomplete"),
+        )
+        require(
+            data.get("id") == folder.name
+            and data.get("version") == 2
+            and data.get("home") == str(root / "host-home")
+            and data.get("container") == "oc-box-" + folder.name
+            and data.get("home_volume") == "oc-box-home-" + folder.name
+            and data.get("distro") in box.DISTROS
+            and not data.get("devices")
+            and not data.get("podman_args"),
+            "workspace-allowlist",
+        )
+        require(
+            data.get("opencode_version", NATIVE_VERSION) == NATIVE_VERSION,
+            "workspace-allowlist",
+        )
+        require(
+            data.get("container_project", project)
+            == str(root / ("source-a" if name == "restored-full" else name)),
+            "workspace-allowlist",
+        )
+        if "credentials" in data:
+            require(
+                data["credentials"] == {"mode": "vault", "env": [], "vault": []},
+                "workspace-policy",
+            )
+        if name == "restored-full":
+            origin = data.get("restored_from", {})
+            require(
+                origin.get("kind") == "full"
+                and isinstance(origin.get("workspace_id"), str),
+                "workspace-allowlist",
+            )
+        if data.get("restore_staging_project"):
+            staging = no_symlinks(data["restore_staging_project"])
+            require(
+                staging.parent == root and staging.name.startswith(".oc-box-restore-"),
+                "workspace-allowlist",
+            )
+        # Check every metadata descendant, including lock/import/history files.
+        for child in folder.rglob("*"):
+            no_symlinks(child)
+            require(child.resolve().is_relative_to(folder), "unsafe-metadata")
+        marker = project_path / box.MARKER
+        if project_path.exists():
+            safe_path(root, marker.relative_to(root))
+            require(marker.read_text().strip() == data["id"], "workspace-marker")
+        records[name] = (path, data)
+    # Directory IDs have no project ordering; validate provenance only once the
+    # complete, bounded registry allowlist is available.
+    if "restored-full" in records:
+        require("source-a" in records, "workspace-allowlist")
+        require(
+            records["restored-full"][1]["restored_from"]["workspace_id"]
+            == records["source-a"][1]["id"],
+            "workspace-allowlist",
+        )
+    return records
+
+
+def record_ids(root):
+    records = workspace_records(root)
+    ids = {name: data["id"] for name, (_, data) in records.items()}
+    previous = private_json(root, "fixture-ids.json")
+    require(
+        isinstance(previous, dict)
+        and all(ids.get(name) == ident for name, ident in previous.items()),
+        "fixture-ids",
+    )
+    box.atomic_json(root / "fixture-ids.json", ids)
+    return ids
+
+
+def workspace(root, name):
+    records = workspace_records(root)
+    require(name in records, "workspace-missing")
+    return records[name]
+
+
+def verify_owned_resources(root, data, *, stopped=False):
+    info = backups.owned_container(box, data)
+    require(
+        info is not None and (not stopped or not info["State"]["Running"]),
+        "workspace-state",
+    )
+    require(info.get("Name", "").lstrip("/") == data["container"], "resource-allowlist")
+    volume = backups.owned_volume(box, data)
+    require(volume.get("Name") == data["home_volume"], "resource-allowlist")
+    mountpoint = no_symlinks(volume["Mountpoint"])
+    require(
+        mountpoint
+        == root / "data/containers/storage/volumes" / data["home_volume"] / "_data",
+        "private-volume",
+    )
+    require(not info.get("HostConfig", {}).get("PortBindings"), "published-ports")
+    approved = {
+        (data["project"], box.container_project(data)),
+        (str(mountpoint), data["home"]),
+    }
+    mounts = {
+        (item.get("Source"), item.get("Destination"))
+        for item in info.get("Mounts", [])
+        if item.get("Type") in ("bind", "volume")
+    }
+    require(mounts == approved, "resource-mounts")
+    return info
+
+
+def request_for(data, connection):
+    def request(method, target, value=None):
+        return workspace_service.api(box, data, connection, method, target, value)
+
+    return request
+
+
+def selected_session(command, path, expected=None):
+    """The live endpoint has no session field; validate the actual client ID."""
+    require("--session" in command, "selected-session")
+    index = command.index("--session")
+    require(index + 1 < len(command), "selected-session")
+    ident = command[index + 1]
+    require(box.valid_session_id(ident), "selected-session")
+    last = box.session_state(path).get("last")
+    require(last == ident or (last is None and expected is None), "selected-session")
+    require(expected is None or ident == expected, "selected-session")
+    return ident
+
+
+def assert_plugins(request, project):
+    query = "?directory=" + quote(str(project), safe="")
+    request("GET", "/api/model/default" + query)
+    plugins = request("GET", "/api/plugin" + query)["data"]
+    indexed = {item["id"]: item for item in plugins}
+    for ident in ("oc-box.build-permissions", "oc-box.fixture-global-vault-permission"):
+        require(
+            indexed.get(ident, {}).get("state", {}).get("status") == "active",
+            "fixture-plugin-readiness",
+        )
+    require(
+        not any(item.get("state", {}).get("status") == "failed" for item in plugins),
+        "fixture-plugin-readiness",
+    )
+
+
+def create_session(request, project, *, agent=None, parent=None, permissions=None):
+    value = {
+        "location": {"directory": str(project)},
+        "permissions": ASK_RULES if permissions is None else permissions,
+    }
+    if agent is not None:
+        value["agent"] = agent
+    if parent is not None:
+        value["parentID"] = parent
+    return request("POST", "/api/session", value)["data"]
+
+
+def evaluate(request, ident, expected, *, agent=None, resource="ask-target"):
+    target = "/api/session/" + ident + "/permission"
+    require(request("GET", target)["data"] == [], "pending-permission")
+    value = {"action": ACTION, "resources": [resource]}
+    if agent is not None:
+        value["agent"] = agent
+    result = request("POST", target, value)["data"]
+    pending = request("GET", target)["data"]
+    try:
+        require(result.get("effect") == expected, "permission-effect")
+        if expected == "ask":
+            require(
+                len(pending) == 1
+                and pending[0]["id"] == result["id"]
+                and pending[0]["sessionID"] == ident,
+                "pending-permission",
+            )
+        else:
+            require(pending == [], "pending-permission")
+    finally:
+        # Reject even unexpected asks. Never grant once/always or alter policy.
+        for item in pending:
+            request(
+                "POST", target + "/" + item["id"] + "/reply", {"decision": "reject"}
+            )
+    require(request("GET", target)["data"] == [], "pending-permission")
+
+
+def permission_matrix(request, project, primary):
+    assert_plugins(request, project)
+    original = request("GET", "/api/session/" + primary)["data"]
+    require(original.get("permissions") == ASK_RULES, "session-asks")
+    own = []
+    try:
+        bare = create_session(request, project)
+        own.append(bare)
+        require("agent" not in bare, "missing-agent-fixture")
+        plan = create_session(request, project, agent="plan", parent=primary)
+        own.append(plan)
+        child = create_session(request, project, agent="fixture-child", parent=primary)
+        own.append(child)
+        unknown = create_session(
+            request, project, agent="fixture-unknown", permissions=[]
+        )
+        own.append(unknown)
+        for ident, agent, effect in (
+            (primary, "build", "allow"),
+            (primary, None, "allow"),
+            (bare["id"], None, "allow"),
+            (primary, "plan", "ask"),
+            (primary, "fixture-child", "ask"),
+            (plan["id"], None, "ask"),
+            (child["id"], None, "ask"),
+            (primary, "fixture-unknown", "ask"),
+            (unknown["id"], None, "deny"),
+            (unknown["id"], "fixture-unknown", "deny"),
+        ):
+            evaluate(request, ident, effect, agent=agent)
+        for agent in (None, "build", "plan", "fixture-child"):
+            evaluate(request, primary, "deny", agent=agent, resource="session-denied")
+            evaluate(request, primary, "deny", agent=agent, resource="policy-denied")
+        for session in [original, *own]:
+            current = request("GET", "/api/session/" + session["id"])["data"]
+            require(
+                current.get("permissions") == session.get("permissions")
+                and current.get("agent") == session.get("agent")
+                and current.get("parentID") == session.get("parentID"),
+                "permission-preservation",
+            )
+        query = "?directory=" + quote(str(project), safe="")
+        require(
+            request("GET", "/api/permission/request" + query)["data"] == [],
+            "pending-permission",
+        )
+        require(
+            request("GET", "/api/permission/saved" + query)["data"] == [],
+            "saved-permission",
+        )
+    finally:
+        for session in reversed(own):
+            request("DELETE", "/api/session/" + session["id"])
+
+
+def default_plan_fallback(root, data, request):
+    """Probe default Plan at the owner's final step, then remove our new file.
+
+    Native V2 may cache a removed project config for this location's lifetime.
+    We do not claim a reverse/default-Build reload: this owner performs no more
+    model runs, and later owners start with the fixture-owned file absent.
+    """
+    project = box.container_project(data)
+    file = safe_path(
+        root, Path(data["project"]).relative_to(root) / "opencode.json", optional=True
+    )
+    require(not file.exists(), "default-plan-fixture")
+    session = create_session(request, project)
+    require("agent" not in session, "missing-agent-fixture")
+    evaluate(request, session["id"], "allow")
+    created = False
+    try:
+        write_json_new(file, {"default_agent": "plan"})
+        created = True
+        request("POST", "/api/location/reload")
+        assert_plugins(request, project)
+        query = "?directory=" + quote(str(project), safe="")
+        selectable = [
+            item
+            for item in request("GET", "/api/agent" + query)["data"]
+            if item["mode"] != "subagent" and not item.get("hidden")
+        ]
+        require(selectable and selectable[0]["id"] == "plan", "default-plan-fixture")
+        evaluate(request, session["id"], "ask")
+        evaluate(request, session["id"], "allow", agent="build")
+        evaluate(request, session["id"], "deny", resource="session-denied")
+        current = request("GET", "/api/session/" + session["id"])["data"]
+        require(
+            current.get("permissions") == ASK_RULES and "agent" not in current,
+            "permission-preservation",
+        )
+    finally:
+        if created:
+            safe_path(root, file.relative_to(root)).unlink()
+        try:
+            request("POST", "/api/location/reload")
+        finally:
+            request("DELETE", "/api/session/" + session["id"])
+    assert_plugins(request, project)
+
+
+def run_native(data, connection, ident, state, port, values):
+    assert_plugins(request_for(data, connection), box.container_project(data))
+    health = "import json,sys; from urllib.request import build_opener,ProxyHandler; assert json.load(build_opener(ProxyHandler({})).open(sys.argv[1],timeout=5))=={'fixture':'oc-box-global-vault'}"
+    box.run(
+        box.exec_command(
+            data,
+            ["python3", "-c", health, f"http://host.containers.internal:{port}/health"],
+        ),
+        input="",
+        capture=True,
+        private=True,
+        timeout=15,
+    )
+    state.update(values=dict(values), markers=set(), before=state["requests"])
+    args = [
+        box.CONTAINER_OPENCODE,
+        "run",
+        "--server",
+        connection["url"],
+        "--session",
+        ident,
+        "--model",
+        "fixture/gpt-smoke",
+        "--agent",
+        "build",
+        "Exercise the three synthetic global vault fixture tools.",
+    ]
+    require("--auto" not in args, "client-autoaccept")
+    command = workspace_service.client_command(
+        box,
+        data,
+        connection,
+        [
+            "python3",
+            "-c",
+            NATIVE_PROBE,
+            connection["url"],
+            ident,
+            *args,
+        ],
+    )
+    result = box.run(command, input="", capture=True, private=True, timeout=215)
+    require(
+        json.loads(result.stdout) == {"completed": True, "permission_asked": 0},
+        "native-events",
+    )
+    require(
+        state["errors"] == 0
+        and state["markers"] == {SHELL_MARKER, MCP_MARKER, TOOL_MARKER},
+        "native-tools",
+    )
+    request = request_for(data, connection)
+    require(
+        request("GET", "/api/session/" + ident + "/permission")["data"] == [],
+        "pending-permission",
+    )
+    exported = box.export_container_session(data, ident)
+    require(exported["info"].get("permissions") == ASK_RULES, "permission-preservation")
+    tools = [
+        part
+        for message in exported["messages"]
+        if message["type"] == "assistant"
+        for part in message["content"]
+        if part.get("type") == "tool"
+    ]
+    for name, marker in (
+        ("shell", SHELL_MARKER),
+        ("execute", MCP_MARKER),
+        (ACTION, TOOL_MARKER),
+    ):
+        require(
+            any(
+                part.get("name") == name
+                and part.get("state", {}).get("status") == "completed"
+                and marker in json.dumps(part["state"])
+                for part in tools
+            ),
+            "native-transcript",
+        )
+    require(DONE_MARKER in json.dumps(exported["messages"]), "native-transcript")
+    return exported
+
+
+@contextlib.contextmanager
+def no_vault_probe():
+    # Spies retain actual presence/read behavior. Only masked prompt input is
+    # replaced; selection, decryption and credential logic are never substituted.
+    with (
+        patch.object(vault, "is_present", wraps=vault.is_present) as present,
+        patch.object(vault, "read_envelope", wraps=vault.read_envelope) as read,
+        patch.object(vault, "hidden", side_effect=FixtureError("unexpected-unlock")),
+    ):
+        yield
+        require(
+            present.call_count == 0 and read.call_count == 0, "unexpected-vault-probe"
+        )
+
+
+def write_vault(values, password):
+    with vault.locked(vault.vault_path(), create=True):
+        vault.write_encrypted(vault.vault_path(), values, password)
+
+
+def assert_host_clean():
+    require(not credentials.has_unlocked_values(), "host-value-retention")
+    require(all(name not in os.environ for name in KNOWN), "host-value-leak")
+
+
+def tree_digest(root):
+    result = {}
+    for path in sorted(root.rglob("*")):
+        no_symlinks(path)
+        if path.is_file():
+            result[str(path.relative_to(root))] = crypto.digest(path)
+    return result
+
+
+def os_sentinel(data):
+    content = crypto.small(
+        ["podman", "cp", data["container"] + ":" + OS_FILE, "-"], timeout=30
+    )
+    with tarfile.open(fileobj=io.BytesIO(content), mode="r:*") as archive:
+        members = archive.getmembers()
+        require(len(members) == 1 and members[0].isfile(), "os-sentinel")
+        with archive.extractfile(members[0]) as stream:
+            require(stream.read() == b"OS_RETAINED\n", "os-sentinel")
+
+
+def snapshot_source(root, path, data):
+    verify_owned_resources(root, data, stopped=True)
+    os_sentinel(data)
+    return {
+        "project": tree_digest(root / "source-a"),
+        "registry": tree_digest(path.parent),
+        "home": {
+            name: digest_home(data, name)
+            for name in (".local/share/opencode/oc-box-v2.db", "acceptance-home.txt")
+        },
+    }
+
+
+def full_backup_restore(root, baseline, expected, state, port, password, report):
+    path, source = workspace(root, "source-a")
+    before = snapshot_source(root, path, source)
+    vault_before = crypto.digest(vault.vault_path())
+    identity = root / "age-identity.txt"
+    descriptor = os.open(identity, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(crypto.small(["age-keygen"]))
+    recipient = crypto.small(["age-keygen", "-y", str(identity)]).decode().strip()
+    crypto.validate_recipients([recipient])
+    archive = root / "full.ocbox"
+    with no_vault_probe():
+        launcher(
+            [
+                "backup",
+                "--workspace",
+                source["id"],
+                "--output",
+                str(archive),
+                "--recipient",
+                recipient,
+            ]
+        )
+        launcher(["backup-info", str(archive), "--identity", str(identity)])
+        with crypto.opened(archive, [identity]) as (manifest, _, _):
+            backups.validate_manifest(box, manifest)
+            require(
+                manifest["kind"] == "full"
+                and manifest["source_workspace_id"] == source["id"]
+                and manifest["project"] == source["project"]
+                and manifest["container_project"] == source["project"]
+                and manifest["configuration"]["credentials"]
+                == {"mode": "vault", "env": [], "vault": []}
+                and manifest["sessions"]["last"] == baseline["info"]["id"]
+                and set(manifest["components"])
+                == {"project.age", "home.age", "registry.age", "image.age"},
+                "backup-manifest",
+            )
+        archive_before = crypto.digest(archive)
+        destination = root / "restored-full"
+        safe_path(root, "restored-full", directory=True, optional=True)
+        require(not destination.exists(), "restore-destination")
+        launcher(
+            [
+                "restore",
+                str(archive),
+                "--project",
+                str(destination),
+                "--identity",
+                str(identity),
+            ]
+        )
+    record_ids(root)
+    restored_path, restored = workspace(root, "restored-full")
+    verify_owned_resources(root, restored, stopped=True)
+    require(
+        restored["id"] != source["id"]
+        and restored["container"] != source["container"]
+        and restored["home_volume"] != source["home_volume"]
+        and box.container_project(restored) == source["project"]
+        and box.session_state(restored_path)["last"] == baseline["info"]["id"],
+        "restore-identity",
+    )
+    # This comparison happens before any restored native service/database open.
+    require(
+        all(
+            digest_home(restored, name) == digest
+            for name, digest in before["home"].items()
+        ),
+        "restore-database-bytes",
+    )
+    require(
+        tree_digest(restored_path.parent / "recovered-registry") == before["registry"],
+        "restore-registry-bytes",
+    )
+    require(
+        (destination / "unfinished.txt").read_text() == "PROJECT_RETAINED\n",
+        "restore-project",
+    )
+    os_sentinel(restored)
+    require(snapshot_source(root, path, source) == before, "restore-source-changed")
+    require(
+        crypto.digest(archive) == archive_before
+        and crypto.digest(vault.vault_path()) == vault_before,
+        "restore-evidence-changed",
+    )
+    report("restored-stopped-byte-exact")
+
+    def relaunched(command):
+        require("--auto" not in command, "client-autoaccept")
+        current_path, current = workspace(root, "restored-full")
+        connection = workspace_service.live_connection()
+        require(connection is not None, "restored-session")
+        ident = selected_session(command, current_path, baseline["info"]["id"])
+        prior = box.export_container_session(current, ident)
+        verify_v2_progress(prior, baseline)
+        run_native(current, connection, ident, state, port, expected)
+        permission_matrix(
+            request_for(current, connection),
+            box.container_project(current),
+            ident,
+        )
+        verify_v2_progress(box.export_container_session(current, ident), baseline)
+        return 0
+
+    with (
+        patch.object(vault, "hidden", return_value=password) as hidden,
+        patch.object(box, "run_tui", side_effect=relaunched),
+    ):
+        launcher(["start", "--workspace", restored["id"]])
+        require(hidden.call_count == 1, "unlock-count")
+    assert_host_clean()
+    restored_path, restored = workspace(root, "restored-full")
+    verify_owned_resources(root, restored, stopped=True)
+    os_sentinel(restored)
+    require(snapshot_source(root, path, source) == before, "restore-source-changed")
+    require(
+        crypto.digest(archive) == archive_before
+        and crypto.digest(vault.vault_path()) == vault_before,
+        "restore-evidence-changed",
+    )
+    report("restored-latest-host-vault-history-os")
+
+
+def run(root, binary, distro, report=None):
+    host_guard()
+    address = (
+        Path(isolated_env(root)["XDG_RUNTIME_DIR"])
+        / ("oc-box-live-" + str(os.getuid()))
+        / ("x" * 24 + ".sock")
+    )
+    require(len(os.fsencode(address)) < 108, "runtime-path-too-long")
+    if report is None:
+
+        def report(name):
+            if name != "passed":
+                report.checks.append(name)
+            print("global-vault fixture: " + name, flush=True)
+
+        report.checks = []
+    validate_store(root)  # No workspace/resource use is allowed before this proof.
+    box.check_backend(feature="launch")
+    crypto.tools()
+    vault.crypto()
+    prepare_native_cli(root, binary)
+    report("private-store-native-version")
+    report("native-host-seed")
+    baseline = seed_native_history(root, binary)
+    require(workspace_records(root) == {}, "first-launch-fixture")
+    password = secrets.token_urlsafe(32)
+    initial = {
+        KEY: "fixture-" + secrets.token_urlsafe(24),
+        SIDE: "fixture-" + secrets.token_urlsafe(24),
+    }
+    latest = {
+        KEY: "fixture-" + secrets.token_urlsafe(24),
+        SIDE: initial[SIDE],
+        ADDED: "fixture-" + secrets.token_urlsafe(24),
+    }
+    ambient = {
+        AMBIENT: "synthetic-ambient-control",
+        PASS_ENV: "synthetic-pass-env-control",
+    }
+    compatibility = {KEY: "synthetic-env-compatibility-only", **ambient}
+    require(
+        all(
+            value not in compatibility.values()
+            for value in [*initial.values(), *latest.values()]
+        ),
+        "synthetic-contract",
+    )
+    # The encrypted vault exists before the FIRST launch/create/import, with no
+    # saved name list and no credentials.configure call anywhere in this fixture.
+    write_vault(initial, password)
+    state = {"values": {}, "requests": 0, "before": 0, "markers": set(), "errors": 0}
+    server, worker = make_provider(state)
+    try:
+        write_json_new(
+            root / "config/opencode/opencode.json",
+            fixture_config(server.server_port, root),
+        )
+        write_plugin(root)
+        progress = {}
+
+        def first_owner(command):
+            require("--auto" not in command, "client-autoaccept")
+            record_ids(root)
+            current_path, data = workspace(root, "source-a")
+            require("credentials" not in data, "first-launch-default")
+            verify_owned_resources(root, data)
+            connection = workspace_service.live_connection()
+            ident = baseline["info"]["id"]
+            require(connection is not None, "first-import-session")
+            selected_session(command, current_path, ident)
+            imported = box.export_container_session(data, ident)
+            require(
+                imported["messages"] == baseline["messages"], "first-import-transcript"
+            )
+            verify_v2_progress(imported, baseline)
+            request = request_for(data, connection)
+            run_native(data, connection, ident, state, server.server_port, initial)
+            permission_matrix(request, box.container_project(data), ident)
+            before_prompts = hidden.call_count
+            write_vault(latest, password)
+            # A running owner's launch snapshot survives rotation AND reload.
+            run_native(data, connection, ident, state, server.server_port, initial)
+            request("POST", "/api/location/reload")
+            run_native(data, connection, ident, state, server.server_port, initial)
+            permission_matrix(request, box.container_project(data), ident)
+            default_plan_fallback(root, data, request)
+            require(hidden.call_count == before_prompts == 1, "rotation-unlock")
+            with (
+                no_vault_probe(),
+                workspace_service.attach(
+                    box, workspace(root, "source-a")[0], data
+                ) as attached,
+            ):
+                require(attached["session"] == ident, "attach-session")
+                workspace_service.api(box, data, attached, "GET", "/api/info")
+            sentinel = (
+                "import os,pathlib; pathlib.Path(os.environ['HOME'],'acceptance-home.txt').write_text('HOME_RETAINED\\n'); pathlib.Path('"
+                + OS_FILE
+                + "').write_text('OS_RETAINED\\n')"
+            )
+            box.run(
+                box.exec_command(data, ["python3", "-c", sentinel]),
+                input="",
+                capture=True,
+                private=True,
+                timeout=30,
+            )
+            progress["source-a"] = box.export_container_session(data, ident)
+            verify_v2_progress(progress["source-a"], baseline)
+            return 0
+
+        with (
+            patch.dict(os.environ, ambient),
+            patch.object(vault, "hidden", return_value=password) as hidden,
+            patch.object(box, "run_tui", side_effect=first_owner),
+        ):
+            report("first-global-owning-launch")
+            launcher(
+                [
+                    "start",
+                    "--project",
+                    str(root / "source-a"),
+                    "--distro",
+                    distro,
+                    "--import-session",
+                    baseline["info"]["id"],
+                ]
+            )
+            require(hidden.call_count == 1, "unlock-count")
+        assert_host_clean()
+        verify_owned_resources(root, workspace(root, "source-a")[1], stopped=True)
+        report("first-import-all-entries-build-asks")
+        report("running-owner-rotation-reload-attach")
+        report("mandatory-denials-unknown-agent-default-plan")
+
+        def second_owner(command):
+            require("--auto" not in command, "client-autoaccept")
+            record_ids(root)
+            current_path, data = workspace(root, "source-b")
+            require("credentials" not in data, "new-owner-default")
+            verify_owned_resources(root, data)
+            connection = workspace_service.live_connection()
+            require(connection is not None, "private-owner")
+            request = request_for(data, connection)
+            selected = selected_session(command, current_path)
+            require(
+                request("GET", "/api/session/" + selected)["data"]["location"][
+                    "directory"
+                ]
+                == box.container_project(data),
+                "selected-session",
+            )
+            session = create_session(
+                request, box.container_project(data), agent="build"
+            )
+            run_native(
+                data, connection, session["id"], state, server.server_port, latest
+            )
+            permission_matrix(request, box.container_project(data), session["id"])
+            return 0
+
+        with (
+            patch.dict(os.environ, ambient),
+            patch.object(vault, "hidden", return_value=password) as hidden,
+            patch.object(box, "run_tui", side_effect=second_owner),
+        ):
+            report("second-global-owning-launch")
+            launcher(["start", "--project", str(root / "source-b"), "--distro", distro])
+            require(hidden.call_count == 1, "unlock-count")
+        assert_host_clean()
+        verify_owned_resources(root, workspace(root, "source-b")[1], stopped=True)
+        report("new-owner-rotated-and-added-all-entries")
+        before_policy = workspace(root, "source-b")[1].get("credentials")
+        vault_before = crypto.digest(vault.vault_path())
+
+        def opt_out(command):
+            require("--auto" not in command, "client-autoaccept")
+            current_path, data = workspace(root, "source-b")
+            connection = workspace_service.live_connection()
+            require(connection is not None, "private-owner")
+            request = request_for(data, connection)
+            selected = selected_session(command, current_path)
+            require(
+                request("GET", "/api/session/" + selected)["data"]["location"][
+                    "directory"
+                ]
+                == box.container_project(data),
+                "selected-session",
+            )
+            session = create_session(
+                request, box.container_project(data), agent="build"
+            )
+            run_native(
+                data,
+                connection,
+                session["id"],
+                state,
+                server.server_port,
+                compatibility,
+            )
+            permission_matrix(request, box.container_project(data), session["id"])
+            return 0
+
+        with (
+            patch.dict(os.environ, compatibility),
+            no_vault_probe(),
+            patch.object(box, "run_tui", side_effect=opt_out),
+        ):
+            report("no-vault-owning-launch")
+            launcher(
+                [
+                    "start",
+                    "--workspace",
+                    workspace(root, "source-b")[1]["id"],
+                    "--no-vault",
+                ]
+            )
+        assert_host_clean()
+        _, source_b = workspace(root, "source-b")
+        verify_owned_resources(root, source_b, stopped=True)
+        require(
+            source_b.get("credentials") == before_policy
+            and "credentials" not in source_b,
+            "opt-out-policy-changed",
+        )
+        require(
+            crypto.digest(vault.vault_path()) == vault_before, "opt-out-vault-changed"
+        )
+        report("no-vault-env-controls-no-stale-entries-no-probe")
+        report("full-encrypted-backup-restore")
+        full_backup_restore(
+            root,
+            progress["source-a"],
+            latest,
+            state,
+            server.server_port,
+            password,
+            report,
+        )
+        ids = record_ids(root)
+        require(
+            set(ids) == set(PROJECTS) and len(set(ids.values())) == 3, "fixture-ids"
+        )
+        write_json_new(
+            root / "result.json",
+            {
+                "status": "passed",
+                "checks": report.checks,
+                "source_identity": get_version_info(APP),
+                "native_version": NATIVE_VERSION,
+                "podman_info_schema": {
+                    "exposed_configFile": "exact private storage.conf required",
+                    "audited_configFile_omissions": sorted(PODMAN_CONFIGFILE_OMISSIONS),
+                    "omission_requirement": "exact native Version plus fully validated private selector/config and rootless/nonremote/overlay/store/temp paths in every environment",
+                },
+                "workspace_ids": ids,
+                "scope": "Scripted TUI exit and masked prompt input; real rootless lifecycle, native Build tools and full encrypted backup/restore. Not interactive TUI acceptance or a security certification.",
+            },
+        )
+        report("passed")
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=3)
+
+
+def cleanup(root):
+    host_guard()
+    root = validate_fixture(root, allow_unrecorded=True)
+    with patch.dict(os.environ, isolated_env(root), clear=True):
+        validate_store(root, allow_unrecorded=True)
+        records = workspace_records(root)
+        # Validate the entire resource allowlist BEFORE removing its first item.
+        pending = []
+        with contextlib.ExitStack() as stack:
+            for path, data in records.values():
+                stack.enter_context(box.workspace_lock(path))
+                for kind, expected in (
+                    ("container", data["container"]),
+                    ("volume", data["home_volume"]),
+                    ("network", "oc-box-" + data["id"]),
+                ):
+                    found = box.resource_ids(kind, data["id"])
+                    require(len(found) <= 1, "cleanup-allowlist")
+                    for ident in found:
+                        info = json.loads(
+                            box.podman(
+                                kind,
+                                "inspect",
+                                ident,
+                                capture=True,
+                                private=True,
+                                timeout=30,
+                            ).stdout
+                        )[0]
+                        labels = (
+                            info.get(
+                                "Labels",
+                                info.get(
+                                    "labels", info.get("Config", {}).get("Labels", {})
+                                ),
+                            )
+                            or {}
+                        )
+                        name = info.get("Name", info.get("name", "")).lstrip("/")
+                        require(
+                            name == expected and labels.get(box.LABEL) == data["id"],
+                            "cleanup-allowlist",
+                        )
+                        if kind == "volume":
+                            require(
+                                no_symlinks(info["Mountpoint"])
+                                == root
+                                / "data/containers/storage/volumes"
+                                / expected
+                                / "_data",
+                                "private-volume",
+                            )
+                        if kind == "container":
+                            expected_home = str(
+                                root
+                                / "data/containers/storage/volumes"
+                                / data["home_volume"]
+                                / "_data"
+                            )
+                            mounts = {
+                                (item.get("Source"), item.get("Destination"))
+                                for item in info.get("Mounts", [])
+                                if item.get("Type") in ("bind", "volume")
+                            }
+                            require(
+                                mounts
+                                == {
+                                    (data["project"], box.container_project(data)),
+                                    (expected_home, data["home"]),
+                                },
+                                "cleanup-mounts",
+                            )
+                            require(
+                                not info.get("HostConfig", {}).get("PortBindings"),
+                                "published-ports",
+                            )
+                        pending.append((kind, ident))
+            validate_store(root, allow_unrecorded=True)
+            # SIGKILL can precede the fixture's finally journal. Reconcile only
+            # the complete, strictly validated production journals after ALL
+            # resource candidates and the actual private store have passed.
+            ids = record_ids(root)
+            for kind, ident in pending:
+                box.podman(
+                    kind,
+                    "rm",
+                    *(["--force"] if kind == "container" else []),
+                    ident,
+                    capture=True,
+                    private=True,
+                    timeout=60,
+                )
+    return ids
+
+
+class FixtureArgumentParser(argparse.ArgumentParser):
+    def error(self, message):
+        self.exit(
+            2, "global-vault fixture: FAILED phase=arguments category=invalid-options\n"
+        )
+
+
+def parser():
+    value = FixtureArgumentParser(description=__doc__)
+    value.add_argument(
+        "--opencode-v2",
+        type=Path,
+        help="Read-only unmodified OpenCode 2.2.6 executable; defaults to PATH discovery",
+    )
+    value.add_argument(
+        "--work-dir",
+        type=Path,
+        help="Existing disk-backed parent for a fresh private retained fixture (required for a new run)",
+    )
+    value.add_argument(
+        "--temp-dir",
+        type=Path,
+        help="Existing parent for private temporary image/encrypted staging; defaults inside the fixture",
+    )
+    value.add_argument("--distro", choices=tuple(box.DISTROS), default="tumbleweed")
+    value.add_argument(
+        "--cleanup",
+        type=Path,
+        help="Remove only owned resources in this fixture's verified private store; preserve all files/images",
+    )
+    return value
+
+
+def main(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    args = parser().parse_args(arguments)  # --help is harmless inside containers.
+    root = None
+    phase = "host-guard"
+    old_umask = os.umask(0o077)
+    output = os.fdopen(os.dup(1), "w", buffering=1)
+
+    def report(name):
+        nonlocal phase
+        phase = name
+        if name != "passed":
+            report.checks.append(name)
+        print("global-vault fixture: " + name, file=output, flush=True)
+
+    report.checks = []
+
+    try:
+        host_guard()
+        if args.cleanup is not None:
+            require(
+                args.work_dir is None
+                and args.temp_dir is None
+                and args.opencode_v2 is None
+                and not any(
+                    value == "--distro" or value.startswith("--distro=")
+                    for value in arguments
+                ),
+                "cleanup-options",
+            )
+            root = validate_fixture(args.cleanup, allow_unrecorded=True)
+            phase = "cleanup-validation"
+            with private_output():
+                ids = cleanup(root)
+            print(
+                "global-vault fixture: owned resources removed; evidence and images retained",
+                file=output,
+            )
+            print("Retained root: " + str(root), file=output)
+            for name, ident in sorted(ids.items()):
+                print("Workspace " + name + ": " + ident, file=output)
+            return 0
+        require(args.work_dir is not None, "work-dir-required")
+        parent = existing_directory(args.work_dir)
+        if args.temp_dir is not None:
+            existing_directory(args.temp_dir)
+        discovered = args.opencode_v2 or shutil.which(
+            "opencode", path=box.maintenance_host_env().get("PATH", "/usr/bin:/bin")
+        )
+        require(discovered is not None, "native-executable")
+        binary = Path(discovered).expanduser().resolve(strict=True)
+        require(binary.is_file() and os.access(binary, os.X_OK), "native-executable")
+        native_podman = shutil.which(
+            "podman", path=box.maintenance_host_env().get("PATH", "/usr/bin:/bin")
+        )
+        require(native_podman is not None, "native-podman")
+        native_podman = Path(native_podman).resolve(strict=True)
+        root = Path(tempfile.mkdtemp(prefix=PREFIX, dir=parent))
+        root.chmod(0o700)
+        print("Retained root: " + str(root), file=output)
+        phase = "fixture-preparation"
+        with private_output():
+            prepare_root(root, args.distro)
+            prepare_podman_cli(root, native_podman)
+            with (
+                patch.dict(os.environ, isolated_env(root), clear=True),
+                temporary_location(root, args.temp_dir),
+            ):
+                try:
+                    run(root, binary, args.distro, report)
+                finally:
+                    # Journal production-created IDs even after a later failure.
+                    record_ids(root)
+        ids = private_json(root, "fixture-ids.json")
+        for name, ident in sorted(ids.items()):
+            print("Workspace " + name + ": " + ident, file=output)
+        print("Report: " + str(root / "result.json"), file=output)
+        return 0
+    except BaseException as error:
+        category = (
+            str(error)
+            if isinstance(error, FixtureError)
+            else (
+                "interrupted"
+                if isinstance(error, (KeyboardInterrupt, SystemExit))
+                else "operation-failed"
+            )
+        )
+        print(
+            "global-vault fixture: FAILED phase=" + phase + " category=" + category,
+            file=output,
+        )
+        if root is not None:
+            print("Retained root: " + str(root), file=output)
+            try:
+                ids = private_json(root, "fixture-ids.json")
+                if isinstance(ids, dict):
+                    for name, ident in sorted(ids.items()):
+                        if (
+                            name in PROJECTS
+                            and isinstance(ident, str)
+                            and re.fullmatch(r"[0-9a-f]{32}", ident)
+                        ):
+                            print("Workspace " + name + ": " + ident, file=output)
+            except Exception:
+                pass
+        return 1
+    finally:
+        os.umask(old_umask)
+        output.close()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

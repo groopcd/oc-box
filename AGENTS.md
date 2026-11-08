@@ -133,6 +133,13 @@ persistent-shell coexistence, detach/reattach, stop/resume, updated plugins,
 selected-vault provider/shell/MCP delivery, rotation and attach without unlock.
 Those accepted host probes do not validate the new V2 global vault default or
 `--no-vault`; unit/native offline checks are not a new live Podman lifecycle pass.
+`tools/test_global_vault_podman.py` is the focused V2-only host fixture for first
+global-vault import/new project delivery, scoped Build approvals/reload, opt-out
+and full backup/restore. Require private synthetic state, verified isolated
+graphroot/runroot and label-checked cleanup; no real credentials/projects or
+normal host service. Its scripted TUI/prompt is not an interactive TUI pass.
+Do not run it in this container, move retained storage, or infer live acceptance
+from offline safety/native helper tests. Leave encrypted evidence on failure.
 A disk-backed fixture passed full/portable restore and reset; a targeted retry
 passed exact V1 history preservation, inactive-major database-byte preservation
 and V2 return with retained native messages plus synthetic tool execution. The

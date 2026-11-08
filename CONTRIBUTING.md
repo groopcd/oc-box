@@ -66,6 +66,26 @@ or relabeled by that targeted retry.
 
 ### V2 global-vault acceptance (pending)
 
+Use the focused V2-only host fixture before important project imports:
+
+```sh
+uv run --isolated --no-project --with cryptography python -I -B tools/test_global_vault_podman.py \
+  --opencode-v2 "$(command -v opencode)" \
+  --distro tumbleweed --work-dir /var/tmp --temp-dir /var/tmp
+```
+
+It creates fresh private project/history/vault and Podman graphroot/runroot
+state, validates store isolation before resources, and uses a synthetic local
+provider/MCP. No installation, real credentials or normal host OpenCode service
+is used. TUI and password input are scripted; the owning launcher, decryption,
+native tools, full backup/restore and resource lifecycle use production code.
+Run only on the regular host, never inside this container or another shell
+sandbox. Existing disk-backed work/temp parents must have sufficient free space
+and quota. Keep reports/evidence until reviewed; the printed cleanup command
+only removes validated fixture-owned resources, retaining its files/archives.
+See `docs/opencode-2.md` for precise scope. Preparing this fixture is not a live
+host pass and does not repeat the older V1/selected-vault acceptance stages.
+
 V1 keeps legacy env-file defaults. V2 without an explicit policy is global
 vault-first; saved env/selected policies remain intentional overrides. Unit and
 native offline checks for the new global default and `--no-vault` must be

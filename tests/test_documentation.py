@@ -33,6 +33,23 @@ version = load("version_info_docs", APP / "version_info.py")
 
 
 class DocumentationTests(unittest.TestCase):
+    def test_global_vault_host_procedure_is_isolated_and_not_a_live_pass(self):
+        for name in ("docs/cli.md", "docs/opencode-2.md", "CONTRIBUTING.md"):
+            text = (APP / name).read_text()
+            normalized = " ".join(text.split())
+            with self.subTest(name=name):
+                self.assertIn("tools/test_global_vault_podman.py", text)
+                self.assertIn('--opencode-v2 "$(command -v opencode)"', text)
+                self.assertIn("--work-dir /var/tmp --temp-dir /var/tmp", text)
+                self.assertIn("graphroot/runroot", normalized)
+                self.assertIn("scripted", normalized)
+                self.assertIn("host", normalized)
+        guide = " ".join((APP / "docs/opencode-2.md").read_text().split())
+        self.assertIn("No live result for this fixture has been accepted yet", guide)
+        self.assertIn("does not install/upgrade your launcher", guide)
+        self.assertIn("normal provider accounts", guide)
+        self.assertIn("never runs global prune", guide)
+
     def test_v2_vault_examples_use_native_provider_and_mcp_env_references(self):
         for name in ("docs/cli.md", "docs/opencode-2.md"):
             with self.subTest(name=name):

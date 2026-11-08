@@ -431,6 +431,63 @@ Interactive host testing covers the native client UI separately. These checks
 do not claim restored real-project model inference or universal filesystem/OS
 certification. Automated offline fixtures do not replace host Podman validation.
 
+### Isolated global-vault and Build approval host validation
+
+Before using a new credential-default build with important work, run the
+V2-only fixture from a regular **host terminal**, outside oc-box and other
+shell sandboxes, without sudo. It runs the source checkout directly; it does
+not install/upgrade your launcher, replace the host OpenCode binary, or use your
+normal provider accounts, encrypted vault, configuration or conversation DB.
+
+```sh
+uv run --isolated --no-project --with cryptography python -I -B tools/test_global_vault_podman.py \
+  --opencode-v2 "$(command -v opencode)" \
+  --distro tumbleweed --work-dir /var/tmp --temp-dir /var/tmp
+```
+
+The native executable must be unmodified OpenCode 2.2.6. No separate V1 binary
+is needed for this focused fixture. `--work-dir` and `--temp-dir` must be
+existing disk-backed parent directories; the fixture creates fresh private
+children. Choose another suitable filesystem if `/var/tmp` has insufficient
+space/quota. Allow space for two cold environments, the captured OS image,
+encrypted staging and a full restore; a full backup can be several GiB. Neither
+option relocates retained Podman storage or encrypted evidence.
+
+The preflight checks the native engine's actual rootless/local status, overlay
+driver, graphroot/runroot, named-volume location and temporary-image location.
+Podman 6.1.4 is explicitly supported although its info response no longer
+includes `store.configFile`: the validated private selector and configuration
+remain mandatory, and actual paths are checked in every subprocess environment.
+Other unverified omissions fail closed; do not bypass that check to run a test.
+
+The fixture creates an isolated Podman graphroot/runroot and verifies the
+effective store before managed resources. It uses synthetic encrypted vault
+entries, private host history and disposable project directories. It exercises
+first-project conversation import with global entries, a second project's
+dynamic entries/rotation, an active owner's unchanged startup values, scoped
+Build approvals and reload, a one-off `--no-vault` compatibility launch, and
+encrypted full backup/restore with fresh IDs, retained internal paths,
+database bytes before reopen and native resumed history. TUI interaction and
+vault prompt input are scripted; OpenCode, credential decryption, tool execution
+and rootless lifecycle/storage are real. This is not live interactive TUI or
+comprehensive sandbox certification.
+
+Success writes a private `result.json` and prints the retained fixture path.
+Failure also retains its resources and evidence; do not move the graphroot,
+overwrite an archive, or delete markers to retry. Review the report before
+recording a host acceptance result. Cleanup is explicit: use the exact printed
+`tools/test_global_vault_podman.py --cleanup` command. It verifies the isolated
+store and owned resource labels, never runs global prune, and leaves synthetic
+projects, encrypted archives and their fixture-only identity for inspection.
+The private Podman selector records its canonical base Python interpreter and
+native engine path. Cleanup validates that recorded identity instead of the
+current virtual environment; those recorded binaries must remain available.
+It never rewrites an unrecognized selector to bypass validation.
+
+**No live result for this fixture has been accepted yet.** Unit and native
+offline tests do not substitute for executing it on a host. Keep the important
+project untouched until the desired validation passes.
+
 ### Repeatable host validation
 
 Versions use **1.5.N**, preserving the original commit-count patch baseline and
