@@ -50,6 +50,9 @@ portable: use example project paths and synthetic session IDs, not local data.
   namespace, resources, public versions, and source metadata.
 - `.github/workflows/publish.yml`: selected PyPI releases via Trusted Publishing.
 - `tests/`: stdlib unit tests and bounded offline mainline integration fixtures.
+- `tools/migrate_host_plugins.py` / `tools/host_sandbox.js`: opt-in plain-host
+  V2 profile preparation; never edit originals or reuse container sandbox opt-out
+  as host protection. Mocked runtime tests are not real sandbox validation.
 - `docs/cli.md`: canonical command reference; `tools/build_docs.py` generates
   the committed man/Texinfo/Info manuals from it.
 

@@ -89,6 +89,12 @@ after changing values or config so its private server picks up the new snapshot.
 
 ### Plain host OpenCode 2.x
 
+The oc-box plugin adapters apply only to its copied container config, not your
+ordinary host `opencode --standalone` setup. To prepare host legacy plugins, use
+the opt-in source utility described in [host plugin migration](host-plugins.md).
+It creates an independent V2 profile, keeps the original files untouched and
+uses a separate host sandbox port; real host sandbox enforcement needs validation.
+
 For a one-off host launch with the current shell's environment:
 
 ```sh

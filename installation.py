@@ -48,7 +48,14 @@ PROGRAM_FILES = (
     "LICENSE",
     "NOTICE",
 )
-MANUAL_FILES = ("cli.md", "oc-box.1", "oc-box.texi", "oc-box.info", "opencode-2.md")
+MANUAL_FILES = (
+    "cli.md",
+    "oc-box.1",
+    "oc-box.texi",
+    "oc-box.info",
+    "opencode-2.md",
+    "host-plugins.md",
+)
 COMPLETION_FILE = "completions/oc-box"
 
 

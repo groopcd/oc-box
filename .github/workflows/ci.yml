@@ -60,3 +60,4 @@ jobs:
           export PATH="$RUNNER_TEMP/opencode-v1/node_modules/.bin:$PATH"
           python3 -B tests/smoke_mainline.py
           python3 -B tests/smoke_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_host_plugins.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"

@@ -64,6 +64,17 @@ read; compare exact messages/parts after reopening while keeping the inactive
 major's database bytes unchanged. Earlier restore/reset evidence is not rerun
 or relabeled by that targeted retry.
 
+## Plain host plugin migration
+
+`tools/migrate_host_plugins.py` creates an opt-in independent native V2 host
+profile; it never edits the source profile, host databases, or installed CLI.
+`tools/host_sandbox.js` is a separate host shell-tool port using the maintained
+sandbox runtime, not the container opt-out bridge. Native profile tests use a
+mocked runtime; real host filesystem/network enforcement remains a manual
+acceptance check. See `docs/host-plugins.md`. Keep defaults fail-closed, avoid
+Build permission overrides, preserve source-relative supporting files, and
+reject unsupported migration paths instead of silently disabling protection.
+
 ## Bash completion
 
 Bash completion lives in `completions/oc-box`, ships in both distribution
