@@ -138,6 +138,8 @@ def stderr_category(message):
     if isinstance(text, bytes):
         text = text.decode("utf-8", errors="replace")
     text = text.lower()
+    if "current system boot id differs from cached boot id" in text:
+        return "runtime-boot-mismatch"
     if re.search(r"\beof\b|unexpected end", text):
         return "unexpected-end"
     for terms, category in (
@@ -210,6 +212,7 @@ STDERR_CATEGORIES = frozenset(
     {
         "empty",
         "unclassified",
+        "runtime-boot-mismatch",
         "unexpected-end",
         "engine-database",
         "invalid-data",
@@ -625,6 +628,59 @@ def validate_fixture(root, *, allow_unrecorded=False):
     return root
 
 
+def system_boot_id():
+    with Path("/proc/sys/kernel/random/boot_id").open("rb") as stream:
+        return stream.read(129)
+
+
+def runtime_boot_checkpoint(root):
+    """File-only proof of the retained engine's boot; never emit either ID.
+
+    Podman 6.1.4 checkBootID compares these exact bytes. A disk-backed TmpDir
+    can outlive a reboot, where info refuses with advice to delete directories.
+    Never follow that advice here or rewrite the marker to conceal the mismatch.
+    https://github.com/containers/podman/blob/v6.1.4/libpod/runtime_linux.go
+    """
+    marker = safe_path(root, "podman-tmp/alive", optional=True)
+    cached = None
+    if marker.exists():
+        descriptor = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            require(
+                stat.S_ISREG(info.st_mode)
+                and info.st_uid == os.getuid()
+                and info.st_nlink == 1
+                and info.st_size <= 128,
+                "runtime-boot-marker",
+            )
+            cached = stream.read(129)
+    current = system_boot_id()
+    pattern = rb"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\n?"
+    valid_cached = isinstance(cached, bytes) and bool(re.fullmatch(pattern, cached))
+    valid_current = isinstance(current, bytes) and bool(re.fullmatch(pattern, current))
+    matches = (cached == current) if valid_cached and valid_current else None
+    return {
+        "cached_marker_present": cached is not None,
+        "cached_marker_empty": cached == b"",
+        "cached_id_valid": valid_cached,
+        "current_id_valid": valid_current,
+        "boot_ids_match": matches,
+    }
+
+
+def require_runtime_boot(root, *, allow_uninitialized=False):
+    checkpoint = runtime_boot_checkpoint(root)
+    require(checkpoint["current_id_valid"], "runtime-boot-current")
+    if allow_uninitialized and (
+        not checkpoint["cached_marker_present"] or checkpoint["cached_marker_empty"]
+    ):
+        return checkpoint
+    require(checkpoint["cached_id_valid"], "runtime-boot-marker")
+    require(checkpoint["boot_ids_match"] is True, "runtime-boot-mismatch")
+    return checkpoint
+
+
 def validate_store_info(root, info, temporary=None):
     """Independent native Podman proof; labels alone never authorize cleanup."""
     require(isinstance(info, dict), "private-store")
@@ -685,6 +741,9 @@ def validate_store_info(root, info, temporary=None):
 def validate_store(root, *, allow_unrecorded=False):
     """Verify actual rootless store selection in normal and sanitized envs."""
     root = validate_fixture(root, allow_unrecorded=allow_unrecorded)
+    # New fixtures initialize an empty runtime; retained operations separately
+    # require an existing matching marker. A known mismatch NEVER reaches info.
+    require_runtime_boot(root, allow_uninitialized=not workspace_records(root))
     normal = isolated_env(root)
     # temporary_location deliberately sets both env and Python's tempfile cache.
     # Only an already-isolated fixture caller may contribute this optional path.
@@ -1779,62 +1838,106 @@ def run(root, binary, distro, report=None):
         progress = {}
 
         def first_owner(command):
-            require("--auto" not in command, "client-autoaccept")
-            record_ids(root)
-            current_path, data = workspace(root, "source-a")
-            require("credentials" not in data, "first-launch-default")
-            verify_owned_resources(root, data)
-            connection = workspace_service.live_connection()
-            ident = baseline["info"]["id"]
-            require(connection is not None, "first-import-session")
-            selected_session(command, current_path, ident)
-            imported = box.export_container_session(data, ident)
-            require(
-                imported["messages"] == baseline["messages"], "first-import-transcript"
-            )
-            verify_v2_progress(imported, baseline)
-            request = request_for(data, connection)
-            run_native(data, connection, ident, state, server.server_port, initial)
-            permission_matrix(request, box.container_project(data), ident)
-            before_prompts = hidden.call_count
-            write_vault(latest, password)
-            # A running owner's launch snapshot survives rotation AND reload.
-            run_native(data, connection, ident, state, server.server_port, initial)
-            request("POST", "/api/location/reload")
-            run_native(data, connection, ident, state, server.server_port, initial)
-            permission_matrix(request, box.container_project(data), ident)
-            default_plan_fallback(root, data, request)
-            require(hidden.call_count == before_prompts == 1, "rotation-unlock")
-            with (
-                no_vault_probe(),
-                workspace_service.attach(
-                    box, workspace(root, "source-a")[0], data
-                ) as attached,
-            ):
-                require(attached["session"] == ident, "attach-session")
-                workspace_service.api(box, data, attached, "GET", "/api/info")
-            sentinel = (
-                "import os,pathlib; pathlib.Path(os.environ['HOME'],'acceptance-home.txt').write_text('HOME_RETAINED\\n'); pathlib.Path('"
-                + OS_FILE
-                + "').write_text('OS_RETAINED\\n')"
-            )
-            box.run(
-                box.exec_command(data, ["python3", "-c", sentinel]),
-                input="",
-                capture=True,
-                private=True,
-                timeout=30,
-            )
-            progress["source-a"] = box.export_container_session(data, ident)
-            verify_v2_progress(progress["source-a"], baseline)
+            with trace.checkpoint("callback"):
+                require("--auto" not in command, "client-autoaccept")
+                record_ids(root)
+                current_path, data = workspace(root, "source-a")
+                require("credentials" not in data, "first-launch-default")
+                with trace.checkpoint("source-resources"):
+                    verify_owned_resources(root, data)
+                with trace.checkpoint("private-owner"):
+                    connection = workspace_service.live_connection()
+                    require(connection is not None, "first-import-session")
+                ident = baseline["info"]["id"]
+                with trace.checkpoint("selected-session"):
+                    selected_session(command, current_path, ident)
+                with trace.checkpoint("retained-transcript"):
+                    imported = box.export_container_session(data, ident)
+                    require(
+                        imported["messages"] == baseline["messages"],
+                        "first-import-transcript",
+                    )
+                    verify_v2_progress(imported, baseline)
+                request = request_for(data, connection)
+                run_native(
+                    data,
+                    connection,
+                    ident,
+                    state,
+                    server.server_port,
+                    initial,
+                    trace=trace,
+                )
+                permission_matrix(
+                    request, box.container_project(data), ident, trace=trace
+                )
+                trace.completed()
+                before_prompts = hidden.call_count
+                with trace.checkpoint("vault-rotation"):
+                    write_vault(latest, password)
+                # A running owner's launch snapshot survives rotation AND reload.
+                run_native(
+                    data,
+                    connection,
+                    ident,
+                    state,
+                    server.server_port,
+                    initial,
+                    trace=trace,
+                )
+                with trace.checkpoint("config-reload"):
+                    request("POST", "/api/location/reload")
+                run_native(
+                    data,
+                    connection,
+                    ident,
+                    state,
+                    server.server_port,
+                    initial,
+                    trace=trace,
+                )
+                permission_matrix(
+                    request, box.container_project(data), ident, trace=trace
+                )
+                trace.completed()
+                with trace.checkpoint("default-plan"):
+                    default_plan_fallback(root, data, request)
+                    require(hidden.call_count == before_prompts == 1, "rotation-unlock")
+                with trace.checkpoint("attach-session"):
+                    with (
+                        no_vault_probe(),
+                        workspace_service.attach(
+                            box, workspace(root, "source-a")[0], data
+                        ) as attached,
+                    ):
+                        require(attached["session"] == ident, "attach-session")
+                        workspace_service.api(box, data, attached, "GET", "/api/info")
+                with trace.checkpoint("workspace-sentinels"):
+                    sentinel = (
+                        "import os,pathlib; pathlib.Path(os.environ['HOME'],'acceptance-home.txt').write_text('HOME_RETAINED\\n'); pathlib.Path('"
+                        + OS_FILE
+                        + "').write_text('OS_RETAINED\\n')"
+                    )
+                    box.run(
+                        box.exec_command(data, ["python3", "-c", sentinel]),
+                        input="",
+                        capture=True,
+                        private=True,
+                        timeout=30,
+                    )
+                with trace.checkpoint("retained-transcript"):
+                    progress["source-a"] = box.export_container_session(data, ident)
+                    verify_v2_progress(progress["source-a"], baseline)
             return 0
 
         with (
+            first_launch_trace(root) as trace,
             patch.dict(os.environ, ambient),
             patch.object(vault, "hidden", return_value=password) as hidden,
             patch.object(box, "run_tui", side_effect=first_owner),
         ):
             report("first-global-owning-launch")
+            trace("owning-launch")
             launcher(
                 [
                     "start",
@@ -1846,9 +1949,14 @@ def run(root, binary, distro, report=None):
                     baseline["info"]["id"],
                 ]
             )
-            require(hidden.call_count == 1, "unlock-count")
-        assert_host_clean()
-        verify_owned_resources(root, workspace(root, "source-a")[1], stopped=True)
+            with trace.checkpoint("unlock-count"):
+                require(hidden.call_count == 1, "unlock-count")
+            with trace.checkpoint("host-clean"):
+                assert_host_clean()
+            with trace.checkpoint("source-resources"):
+                verify_owned_resources(
+                    root, workspace(root, "source-a")[1], stopped=True
+                )
         report("first-import-all-entries-build-asks")
         report("running-owner-rotation-reload-attach")
         report("mandatory-denials-unknown-agent-default-plan")
@@ -1979,14 +2087,28 @@ def run(root, binary, distro, report=None):
         )
         report("passed")
     finally:
-        server.shutdown()
-        server.server_close()
-        worker.join(timeout=3)
+        primary = sys.exc_info()[1]
+        for stage, action in (
+            ("provider-shutdown", server.shutdown),
+            ("provider-close", server.server_close),
+            ("provider-join", lambda: worker.join(timeout=3)),
+        ):
+            try:
+                action()
+            except BaseException as error:
+                if not isinstance(primary, FirstLaunchFailure):
+                    raise
+                # The first-launch report is already frozen. Retain secondary
+                # provider cleanup separately in the final fixed public summary.
+                primary.shutdown_errors.append(
+                    {"stage": stage, "error_class": safe_error_class(error)}
+                )
 
 
 def cleanup(root):
     host_guard()
     root = validate_fixture(root, allow_unrecorded=True)
+    require_runtime_boot(root)
     with patch.dict(os.environ, isolated_env(root), clear=True):
         validate_store(root, allow_unrecorded=True)
         records = workspace_records(root)
@@ -2104,6 +2226,7 @@ def diagnostic_store_probes(root):
     These results explain a refusal, never authorize resource inspection.
     """
     root = validate_fixture(root, allow_unrecorded=True)
+    require_runtime_boot(root)
     mapping = private_json(root, "podman-executable.json")
     native = str(validate_native_podman(mapping["podman"], root))
     wrapper = str(safe_path(root, "bin/podman"))
@@ -2182,11 +2305,38 @@ def diagnose(root):
     root = validate_fixture(root, allow_unrecorded=True)
     result = {
         "status": "diagnostic-only",
-        "scope": "Read-only retained fixture metadata/resource inspection; no replay or host acceptance.",
+        "scope": "Retained fixture inspection with a file-only boot guard and same-boot informational engine queries; no launch/replay or host acceptance, not database-byte immutability.",
         "fixture_root": str(root),
         "source_version": get_version_info(APP)["version"],
         "workspaces": {},
     }
+    # info can initialize/refresh Podman state; it is not a byte-read-only
+    # filesystem reader. Refuse an old/missing/invalid boot marker before any
+    # engine command, rather than repeatedly probing or implicitly refreshing.
+    try:
+        checkpoint = require_runtime_boot(root)
+    except Exception as error:
+        result.update(
+            status="diagnostic-failed",
+            failed_stage="runtime-boot",
+            error_class=safe_error_class(error),
+            error_category=str(error)
+            if isinstance(error, FixtureError)
+            and str(error)
+            in {
+                "runtime-boot-current",
+                "runtime-boot-marker",
+                "runtime-boot-mismatch",
+            }
+            else "runtime-boot-inspection",
+            engine_probes=[],
+        )
+        # The checkpoint itself contains only booleans/None. Read it again only
+        # for a classified mismatch; unsafe or unreadable files stay refused.
+        if result["error_category"] == "runtime-boot-mismatch":
+            result["runtime_boot"] = runtime_boot_checkpoint(root)
+        return result
+    result["runtime_boot"] = checkpoint
     with patch.dict(os.environ, isolated_env(root), clear=True):
         try:
             validate_store(root, allow_unrecorded=True)
@@ -2279,6 +2429,11 @@ SOURCE_STAGES = (
         "owning-launch",
         "private-owner",
         "callback",
+        "vault-rotation",
+        "config-reload",
+        "default-plan",
+        "attach-session",
+        "workspace-sentinels",
         "selected-session",
         "retained-transcript",
         "plugin-readiness",
@@ -2374,7 +2529,7 @@ def probe_diagnostic(message):
 
 
 class SourceRetryTrace:
-    """One source-only diagnostic, frozen before the launcher's finally cleanup."""
+    """Owning-launch diagnostics, frozen before the launcher's finally cleanup."""
 
     def __init__(self):
         self.stage = "source-validation"
@@ -2398,6 +2553,16 @@ class SourceRetryTrace:
             ):
                 step["state"] = "completed"
                 break
+
+    @contextlib.contextmanager
+    def checkpoint(self, stage):
+        self(stage)
+        try:
+            yield
+            self.completed(stage)
+        except BaseException as error:
+            self.fail(error)
+            raise
 
     def observe(self, command, exit_code, stderr, error_class="subprocess-exit"):
         self.subprocess_failure = {
@@ -2523,6 +2688,56 @@ class SourceRetryTrace:
             patch.object(workspace_service.Owner, "shutdown", owner_shutdown),
         ):
             yield
+
+
+class FirstLaunchFailure(FixtureError):
+    """Only fixed diagnostics cross the fixture's public output boundary."""
+
+    def __init__(self, diagnostic, report_written, report_error):
+        super().__init__("first-owning-launch-failed")
+        self.diagnostic = diagnostic
+        self.report_written = report_written
+        self.report_error = report_error
+        self.shutdown_errors = []
+
+
+@contextlib.contextmanager
+def first_launch_trace(root):
+    """Retain NEW first-launch failures; never overwrite an earlier report."""
+    report = safe_path(root, "first-launch-failure.json", optional=True)
+    require(not report.exists(), "first-launch-report-exists")
+    trace = SourceRetryTrace()
+    with trace.installed():
+        try:
+            yield trace
+        except BaseException as error:
+            trace.fail(error)
+            result = {
+                "status": "failed",
+                "scope": "new-fixture-first-owning-launch",
+                "acceptance": "Failed first owning launch; no full fixture acceptance and no replay of an earlier fixture.",
+                "source_identity": None,
+                "error": trace.failure,
+                "steps": trace.steps,
+                "cleanup_errors": trace.cleanup_errors,
+            }
+            report_written = False
+            report_error = None
+            try:
+                result["source_identity"] = get_version_info(APP)
+            except Exception as journal_error:
+                report_error = safe_error_class(journal_error)
+                result["report_error_class"] = report_error
+            try:
+                write_json_new(report, result)
+                report_written = True
+            except Exception as journal_error:
+                # Do not mask the primary launch failure with a report-write
+                # failure or overwrite an independently created report.
+                report_error = safe_error_class(journal_error)
+            raise FirstLaunchFailure(
+                trace.failure, report_written, report_error
+            ) from None
 
 
 def validate_source_retry(root):
@@ -2664,6 +2879,8 @@ def validate_source_retry(root):
         and info.st_size <= vault.MAX_FILE,
         "retry-original-vault",
     )
+    checkpoint = runtime_boot_checkpoint(root)
+    require(checkpoint["boot_ids_match"] is True, "retry-runtime-boot")
     return root, path, data, baseline, binary
 
 
@@ -3002,7 +3219,7 @@ def parser():
     value.add_argument(
         "--diagnose",
         type=Path,
-        help="Read-only checkpoints for a retained fixture; no container start, vault unlock or replay",
+        help="Retained checkpoints with a file-only boot guard and same-boot informational engine queries; no container start, vault unlock or replay",
     )
     value.add_argument(
         "--retry-source",
@@ -3150,7 +3367,30 @@ def main(argv=None):
         print("Report: " + str(root / "result.json"), file=output)
         return 0
     except BaseException as error:
-        if args.retry_source is not None:
+        if isinstance(error, FirstLaunchFailure):
+            diagnostic = error.diagnostic
+            print(
+                "global-vault fixture: FAILED phase=first-global-owning-launch stage="
+                + diagnostic["stage"]
+                + " class="
+                + diagnostic["error_class"]
+                + " program="
+                + diagnostic["program"]
+                + " exit_code="
+                + str(diagnostic["exit_code"])
+                + " stderr_category="
+                + diagnostic["stderr_category"]
+                + " report_error_class="
+                + str(error.report_error),
+                file=output,
+            )
+            if error.shutdown_errors:
+                print(
+                    "First-launch secondary cleanup: "
+                    + json.dumps(error.shutdown_errors),
+                    file=output,
+                )
+        elif args.retry_source is not None:
             # Refusals before attempt creation have no report. Do not echo even
             # FixtureError text unless it is one of these fixed public labels.
             refusals = {
@@ -3167,6 +3407,7 @@ def main(argv=None):
                 "retry-source-config",
                 "retry-source-plugin",
                 "retry-original-vault",
+                "retry-runtime-boot",
                 "retry-directory",
             }
             category = (
@@ -3199,6 +3440,20 @@ def main(argv=None):
             )
         if root is not None:
             print("Retained root: " + str(root), file=output)
+            if (
+                args.diagnose is None
+                and args.cleanup is None
+                and args.retry_source is None
+                and (not isinstance(error, FirstLaunchFailure) or error.report_written)
+            ):
+                try:
+                    first_report = safe_path(
+                        root, "first-launch-failure.json", optional=True
+                    )
+                    if first_report.exists():
+                        print("Report: " + str(first_report), file=output)
+                except Exception:
+                    pass
             try:
                 ids = private_json(root, "fixture-ids.json")
                 if isinstance(ids, dict):

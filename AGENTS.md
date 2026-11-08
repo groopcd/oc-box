@@ -147,6 +147,14 @@ Store refusals retain fixed-category selector/native version/info diagnostics,
 with both private config selectors on direct native queries. Never inspect
 resources after an initial refusal or use probe success to bypass validation;
 no raw stdout/stderr, config rewrite, engine reset or workspace launch.
+Compare the retained engine's cached/current boot IDs using files before any
+engine command; report booleans only. Refuse stale/absent/invalid retained
+markers for diagnose/retry/cleanup, without deletion, marker rewriting or store
+movement. Disk-backed fixture runtime state is original-boot-only; a fresh
+synthetic fixture is separate acceptance, never a replay of retained evidence.
+Podman info can initialize/refresh runtime metadata, not guarantee byte-level
+immutability. New first-launch failures retain fixed primary substeps separately
+from cleanup/reporting errors; never overwrite an earlier failure report.
 --retry-source is limited to a stopped baseline-ready, already-imported source
 with verified private store/identity and no later backup/restore evidence. Use
 new companion synthetic vault/config/report files; never overwrite original

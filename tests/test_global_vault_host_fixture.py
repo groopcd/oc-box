@@ -55,6 +55,10 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
         )
         environment.start()
         self.addCleanup(environment.stop)
+        self.boot = b"00000000-0000-0000-0000-000000000001\n"
+        boot_reader = patch.object(fixture, "system_boot_id", return_value=self.boot)
+        boot_reader.start()
+        self.addCleanup(boot_reader.stop)
         for relative in (
             "host-home",
             "registry/workspaces",
@@ -100,6 +104,7 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
         (self.root / "config/containers/containers.conf").write_text(
             fixture.containers_config(self.root)
         )
+        (self.root / "podman-tmp/alive").write_bytes(self.boot)
         fixture.write_json_new(
             self.root / "fixture.json",
             {
@@ -533,6 +538,10 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
     def test_engine_categories_are_fixed_including_errors_without_old_keywords(self):
         secret = "synthetic-sensitive-engine-message"
         for text, category in (
+            (
+                'Error: current system boot ID differs from cached boot ID; an unhandled reboot has occurred. Please delete directories "private-a" and "private-b" and re-run Podman',
+                "runtime-boot-mismatch",
+            ),
             ("Error: EOF", "unexpected-end"),
             ("unexpected end of JSON input", "unexpected-end"),
             ("Error: error parsing TOML", "invalid-data"),
@@ -699,6 +708,301 @@ with patch.object(fixture,'host_guard'), patch.object(fixture,'diagnose',return_
                 self.assertEqual(result.returncode, code, result.stderr)
                 self.assertEqual(json.loads(result.stdout)["status"], status)
                 self.assertEqual(result.stderr, "")
+
+    def test_stale_boot_refuses_all_engine_operations_and_preserves_evidence(self):
+        path, _, _ = self.retained_source()
+        marker = self.root / "podman-tmp/alive"
+        stale = b"00000000-0000-0000-0000-000000000002\n"
+        marker.write_bytes(stale)
+        before = fixture.source_evidence_digests(self.root, path)
+        sessions = box.session_file(path).read_bytes()
+        with (
+            patch.object(fixture, "host_guard"),
+            patch.object(box, "run") as run,
+            patch.object(box, "podman") as podman,
+            patch.object(fixture, "launcher") as launch,
+            patch.object(backups, "owned_container") as container,
+            patch.object(vault, "select_all") as unlock,
+        ):
+            result = fixture.diagnose(self.root)
+            self.assertEqual(result["failed_stage"], "runtime-boot")
+            self.assertEqual(result["error_category"], "runtime-boot-mismatch")
+            self.assertFalse(result["runtime_boot"]["boot_ids_match"])
+            self.assertEqual(result["engine_probes"], [])
+            for operation in (
+                fixture.validate_store,
+                fixture.diagnostic_store_probes,
+                fixture.cleanup,
+            ):
+                with (
+                    self.subTest(operation=operation.__name__),
+                    self.assertRaisesRegex(
+                        fixture.FixtureError, "runtime-boot-mismatch"
+                    ),
+                ):
+                    operation(self.root)
+            with self.assertRaisesRegex(fixture.FixtureError, "retry-runtime-boot"):
+                fixture.retry_source(self.root)
+        for mock in (run, podman, launch, container, unlock):
+            mock.assert_not_called()
+        self.assertEqual(marker.read_bytes(), stale)
+        self.assertEqual(fixture.source_evidence_digests(self.root, path), before)
+        self.assertEqual(box.session_file(path).read_bytes(), sessions)
+        self.assertFalse((self.root / "source-retries").exists())
+        self.assertNotIn(stale.decode().strip(), json.dumps(result))
+        self.assertNotIn(self.boot.decode().strip(), json.dumps(result))
+
+    def test_boot_checkpoint_matches_exact_bytes_and_rejects_invalid_or_missing_marker(
+        self,
+    ):
+        self.retained_source()
+        marker = self.root / "podman-tmp/alive"
+        self.assertTrue(fixture.require_runtime_boot(self.root)["boot_ids_match"])
+        for content, category in (
+            (self.boot.rstrip(b"\n"), "runtime-boot-mismatch"),
+            (b"", "runtime-boot-marker"),
+            (b"synthetic-private-invalid-marker", "runtime-boot-marker"),
+        ):
+            with self.subTest(content=content):
+                marker.write_bytes(content)
+                with self.assertRaisesRegex(fixture.FixtureError, category):
+                    fixture.require_runtime_boot(self.root)
+        marker.unlink()
+        with self.assertRaisesRegex(fixture.FixtureError, "runtime-boot-marker"):
+            fixture.require_runtime_boot(self.root)
+        with patch.object(box, "run") as run:
+            with self.assertRaisesRegex(fixture.FixtureError, "runtime-boot-marker"):
+                fixture.validate_store(self.root)
+        run.assert_not_called()
+        self.assertFalse(marker.exists())
+
+    def test_uninitialized_fresh_fixture_can_initialize_but_invalid_current_boot_cannot(
+        self,
+    ):
+        self.complete_fixture_metadata()
+        marker = self.root / "podman-tmp/alive"
+        marker.unlink()
+        with patch.object(
+            box,
+            "run",
+            return_value=subprocess.CompletedProcess(
+                [], 0, json.dumps(self.info()), ""
+            ),
+        ) as run:
+            fixture.validate_store(self.root)
+        self.assertEqual(run.call_count, 3)
+        with (
+            patch.object(
+                fixture, "system_boot_id", return_value=b"private-invalid-current"
+            ),
+            patch.object(box, "run") as run,
+        ):
+            with self.assertRaisesRegex(fixture.FixtureError, "runtime-boot-current"):
+                fixture.validate_store(self.root)
+        run.assert_not_called()
+
+    def test_boot_marker_redirect_and_unreadable_current_id_fail_closed(self):
+        self.retained_source()
+        marker = self.root / "podman-tmp/alive"
+        marker.unlink()
+        marker.symlink_to(self.parent / "foreign-boot-marker")
+        with patch.object(box, "run") as run:
+            with self.assertRaises(fixture.FixtureError):
+                fixture.diagnostic_store_probes(self.root)
+        run.assert_not_called()
+        marker.unlink()
+        marker.write_bytes(self.boot)
+        with (
+            patch.object(fixture, "host_guard"),
+            patch.object(
+                fixture, "system_boot_id", side_effect=OSError("private-boot-error")
+            ),
+            patch.object(box, "run") as run,
+        ):
+            result = fixture.diagnose(self.root)
+        run.assert_not_called()
+        self.assertEqual(result["error_category"], "runtime-boot-inspection")
+        self.assertNotIn("private-boot-error", json.dumps(result))
+
+    def test_first_launch_trace_retains_primary_substep_without_private_output(self):
+        self.complete_fixture_metadata()
+        secret = "synthetic-private-first-launch-error"
+        original = fixture.private_json(self.root, "fixture-ids.json")
+        with self.assertRaises(fixture.FirstLaunchFailure) as raised:
+            with fixture.first_launch_trace(self.root) as trace:
+                try:
+                    with trace.checkpoint("native-tool-client"):
+                        trace.observe(
+                            ["podman", secret], 19, "connection refused " + secret
+                        )
+                        raise box.BoxError(secret)
+                finally:
+                    with trace.checkpoint("container-stop"):
+                        trace.observe(["podman", secret], 23, "private " + secret)
+                        raise box.BoxError("private-cleanup " + secret)
+        result = fixture.private_json(self.root, "first-launch-failure.json")
+        self.assertEqual(result["scope"], "new-fixture-first-owning-launch")
+        self.assertEqual(result["error"]["stage"], "native-tool-client")
+        self.assertEqual(result["error"]["exit_code"], 19)
+        self.assertEqual(result["cleanup_errors"][0]["stage"], "container-stop")
+        self.assertEqual(raised.exception.diagnostic, result["error"])
+        self.assertTrue(raised.exception.report_written)
+        self.assertNotIn(secret, json.dumps(result))
+        self.assertEqual(fixture.private_json(self.root, "fixture-ids.json"), original)
+        before = (self.root / "first-launch-failure.json").read_bytes()
+        with self.assertRaisesRegex(fixture.FixtureError, "first-launch-report-exists"):
+            with fixture.first_launch_trace(self.root):
+                self.fail("Existing report allowed another launch")
+        self.assertEqual((self.root / "first-launch-failure.json").read_bytes(), before)
+
+    def test_first_launch_report_errors_do_not_replace_the_launch_failure(self):
+        self.complete_fixture_metadata()
+        with (
+            patch.object(
+                fixture, "write_json_new", side_effect=OSError("private-report-error")
+            ),
+            self.assertRaises(fixture.FirstLaunchFailure) as raised,
+        ):
+            with fixture.first_launch_trace(self.root) as trace:
+                with trace.checkpoint("selected-session"):
+                    raise KeyError("private-session-error")
+        self.assertEqual(raised.exception.diagnostic["stage"], "selected-session")
+        self.assertEqual(raised.exception.diagnostic["error_class"], "invalid-data")
+        self.assertEqual(raised.exception.report_error, "os-error")
+        self.assertFalse(raised.exception.report_written)
+        self.assertNotIn("private", str(raised.exception))
+
+    def test_successful_first_launch_trace_does_not_create_failure_evidence(self):
+        self.complete_fixture_metadata()
+        with fixture.first_launch_trace(self.root) as trace:
+            with trace.checkpoint("selected-session"):
+                pass
+        self.assertIsNone(trace.failure)
+        self.assertFalse((self.root / "first-launch-failure.json").exists())
+
+    def test_new_full_driver_uses_trace_for_the_actual_first_owner_callback(self):
+        self.complete_fixture_metadata()
+        (self.root / "config/opencode").mkdir(mode=0o700)
+        secret = "synthetic-first-owner-provider-error"
+        baseline = {
+            "info": {
+                "id": "ses_fixture",
+                "location": {"directory": str(self.root / "source-a")},
+                "permissions": fixture.ASK_RULES,
+            },
+            "messages": [
+                {
+                    "id": "msg_fixture",
+                    "type": "user",
+                    "text": fixture.SEED_TEXT,
+                    "time": {"created": 1},
+                }
+            ],
+        }
+        cleanup = []
+
+        def shutdown():
+            cleanup.append("shutdown")
+            raise OSError("private-provider-shutdown " + secret)
+
+        server = SimpleNamespace(
+            server_port=12345,
+            shutdown=shutdown,
+            server_close=lambda: cleanup.append("close"),
+        )
+        worker = SimpleNamespace(join=lambda **kwargs: cleanup.append("join"))
+
+        def launch(arguments):
+            self.assertIn("--import-session", arguments)
+            path, _ = self.record("source-a", "a" * 32)
+            box.atomic_json(
+                box.session_file(path),
+                {"sessions": ["ses_fixture"], "last": "ses_fixture"},
+            )
+            return box.run_tui(["opencode", "--session", "ses_fixture"])
+
+        def native(*args, trace):
+            trace("host-provider-health")
+            trace.observe(["podman", secret], 18, "connection refused " + secret)
+            raise box.BoxError(secret)
+
+        with (
+            patch.object(fixture, "host_guard"),
+            patch.object(
+                fixture,
+                "isolated_env",
+                return_value={"XDG_RUNTIME_DIR": "/run/user/9999"},
+            ),
+            patch.object(fixture, "validate_store"),
+            patch.object(box, "check_backend"),
+            patch.object(crypto, "tools"),
+            patch.object(vault, "crypto"),
+            patch.object(fixture, "prepare_native_cli"),
+            patch.object(fixture, "seed_native_history", return_value=baseline),
+            patch.object(fixture, "write_vault"),
+            patch.object(fixture, "make_provider", return_value=(server, worker)),
+            patch.object(fixture, "launcher", side_effect=launch),
+            patch.object(fixture, "verify_owned_resources"),
+            patch.object(
+                fixture.workspace_service,
+                "live_connection",
+                return_value={"url": "http://127.0.0.1:1"},
+            ),
+            patch.object(box, "export_container_session", return_value=baseline),
+            patch.object(fixture, "request_for", return_value=lambda *args: {}),
+            patch.object(fixture, "run_native", side_effect=native),
+            self.assertRaises(fixture.FirstLaunchFailure) as raised,
+        ):
+            fixture.run(
+                self.root,
+                Path(sys.executable).resolve(),
+                "tumbleweed",
+                report=lambda phase: None,
+            )
+        result = fixture.private_json(self.root, "first-launch-failure.json")
+        self.assertEqual(raised.exception.diagnostic["stage"], "host-provider-health")
+        self.assertEqual(result["error"]["exit_code"], 18)
+        self.assertNotIn(secret, json.dumps(result))
+        self.assertEqual(cleanup, ["shutdown", "close", "join"])
+        self.assertEqual(
+            raised.exception.shutdown_errors,
+            [{"stage": "provider-shutdown", "error_class": "os-error"}],
+        )
+
+    def test_new_full_driver_cli_prints_primary_failure_and_private_report_path(self):
+        secret = "synthetic-private-first-launch-cli-error"
+        program = """import importlib.util,sys
+from unittest.mock import patch
+spec=importlib.util.spec_from_file_location('fixture',sys.argv[1])
+fixture=importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+def fail(root,*args):
+    with fixture.first_launch_trace(root) as trace:
+        with trace.checkpoint('config-reload'):
+            raise KeyError(sys.argv[3])
+with patch.object(fixture,'host_guard'), patch.object(fixture.shutil,'which',return_value=sys.executable), patch.object(fixture,'run',side_effect=fail):
+    sys.exit(fixture.main(['--work-dir',sys.argv[2],'--opencode-v2',sys.executable]))
+"""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                program,
+                str(SCRIPT),
+                str(self.parent),
+                secret,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("stage=config-reload class=invalid-data", result.stdout)
+        self.assertIn("Report: ", result.stdout)
+        self.assertIn("first-launch-failure.json", result.stdout)
+        self.assertEqual(result.stderr, "")
+        self.assertNotIn(secret, result.stdout)
 
     def test_source_retry_requires_verified_selection_and_rejects_later_evidence(self):
         path, data, baseline = self.retained_source()

@@ -483,6 +483,10 @@ The private Podman selector records its canonical base Python interpreter and
 native engine path. Cleanup validates that recorded identity instead of the
 current virtual environment; those recorded binaries must remain available.
 It never rewrites an unrecognized selector to bypass validation.
+New first-owning-launch failures also retain `first-launch-failure.json`, with
+fixed substeps/classes/exit codes and the primary failure separated from
+launcher cleanup errors. This is failure evidence, not acceptance. A reporting
+failure cannot replace the primary diagnostic or overwrite an earlier report.
 
 For an unsuccessful owning launch, inspect retained checkpoints without
 starting/executing a container, unlocking the vault, syncing or replaying:
@@ -493,8 +497,12 @@ uv run --isolated --no-project --with cryptography python -I -B tools/test_globa
 ```
 
 Use the exact retained path printed by your run; do not combine this with
-cleanup, executable or work/temp placement options. The diagnostic validates
-the private store and labels, then returns only readiness/state/exit-code and
+cleanup, executable or work/temp placement options. A file-only checkpoint first
+compares the fixture's cached Podman boot marker with the current kernel boot
+ID, reporting booleans only. A stale, absent, empty, invalid or unreadable marker
+refuses engine/resource inspection; no Podman command is run. On a matching boot
+the diagnostic validates the private store and labels, then returns only
+readiness/state/exit-code and
 import/session checkpoints. Container error text is reduced to fixed categories,
 never printed alongside env/config values. It cannot recover an exception that
 the original run discarded, and inspection does not establish acceptance.
@@ -508,9 +516,22 @@ categories, validated numeric versions and store-verification booleans. Raw
 stdout/stderr stays in anonymous memory. No resources are inspected after the
 initial refusal, even if a comparison succeeds; no launch, unlock, reset,
 cleanup, selector/config rewrite or acceptance follows from these probes.
+Podman `info` is informational, but its runtime initialization can refresh state
+and write metadata; it is not a guarantee of database-byte immutability. The
+file-only boot guard avoids implicit refresh on an old/uninitialized runtime.
 
-If the retained source is stopped, baseline-ready and already has its verified
-seed recorded, a narrowly scoped owning retry can capture the failing substep:
+**Disk-backed fixture runtime state is limited to its original boot.** Podman
+6.1.4 rejects a cached/current boot-ID mismatch. This fixture now identifies it
+before engine calls rather than following Podman's directory-deletion advice.
+`--retry-source` and `--cleanup` also refuse it; never delete/rewrite the marker,
+move either store root, reset the engine or edit the stored paths to resume.
+Retain that fixture unchanged. A new run under `--work-dir` creates a separate
+fresh synthetic fixture with a new history/vault/store, not a replay or recovery
+of the old one; only its own complete report can establish a new host result.
+
+If the retained source is on the same verified boot, stopped, baseline-ready and
+already has its verified seed recorded, a narrowly scoped owning retry can
+capture the failing substep:
 
 ```sh
 uv run --isolated --no-project --with cryptography python -I -B tools/test_global_vault_podman.py \
