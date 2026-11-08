@@ -53,6 +53,8 @@ jobs:
           python-version: '3.13'
       - name: Install separate unmodified OpenCode versions in temporary storage
         run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends poppler-utils
           npm install --prefix "$RUNNER_TEMP/opencode-v1" --no-audit --no-fund opencode-ai@1.19.5
           npm install --prefix "$RUNNER_TEMP/opencode-v2" --no-audit --no-fund @opencode/cli@2.2.6
       - name: Offline V1 and V2 native integration
@@ -61,3 +63,4 @@ jobs:
           python3 -B tests/smoke_mainline.py
           python3 -B tests/smoke_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_host_plugins.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_native_host_port.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"

@@ -6,5 +6,6 @@ include completions/oc-box
 include plugin_bridge.js
 recursive-include tests *.py *.mjs
 include tools/host_sandbox.js
+recursive-include tools/native_plugins *.js
 recursive-include tools *.py
 global-exclude *.py[cod]

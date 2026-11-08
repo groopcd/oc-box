@@ -164,8 +164,9 @@ Packaged manuals are in the package's `docs/` and the tool environment's
 
 For plain host `opencode --standalone` outside oc-box, the original V1 plugins
 are not automatically adapted. The opt-in [host plugin migration utility](docs/host-plugins.md)
-creates a separate V2 profile while preserving the original configuration and
-host sandbox policy. It is a source-checkout tool, not an installed oc-box command;
+audits and ports known plugins to direct V2 implementations in your normal host
+configuration, retiring obsolete V1 workarounds. A separate compatibility profile
+is still optional. These are source-checkout tools, not installed oc-box commands;
 real host sandbox enforcement requires its documented acceptance checks.
 
 While a V2 workspace is running, open its same session from another host terminal:

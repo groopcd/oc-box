@@ -107,7 +107,7 @@ def main(binary, copied_sources=None):
             / "opencode/node_modules/@anthropic-ai/sandbox-runtime/dist/index.js"
         )
         runtime.write_text("""export const SandboxManager = {
-  async initialize() {}, async wrapWithSandbox(command) { return command },
+  async initialize(policy) { this.policy = policy }, getConfig() { return this.policy }, async wrapWithSandbox(command) { return command },
   cleanupAfterCommand() {}, async reset() {}
 }\n""")
         state = {

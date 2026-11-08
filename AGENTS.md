@@ -53,6 +53,10 @@ portable: use example project paths and synthetic session IDs, not local data.
 - `tools/migrate_host_plugins.py` / `tools/host_sandbox.js`: opt-in plain-host
   V2 profile preparation; never edit originals or reuse container sandbox opt-out
   as host protection. Mocked runtime tests are not real sandbox validation.
+- `tools/port_host_plugins.py` / `tools/native_plugins/`: V2-only normal-host
+  plugin audit and explicit native replacement. Keep unrelated config/data intact,
+  take one private safety snapshot, refuse unknown implementations/overrides, and
+  never treat an inactive plugin as proof of host sandbox enforcement.
 - `docs/cli.md`: canonical command reference; `tools/build_docs.py` generates
   the committed man/Texinfo/Info manuals from it.
 

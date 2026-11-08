@@ -5,6 +5,8 @@ import { SandboxManager } from "@anthropic-ai/sandbox-runtime"
 import fs from "node:fs/promises"
 import os from "node:os"
 import path from "node:path"
+const originalCommands = Symbol.for("opencode.host-sandbox.original-commands")
+const runtimeLease = Symbol.for("opencode.host-sandbox.runtime-lease")
 
 const denied = [".ssh", ".gnupg", ".aws/credentials", ".azure", ".config/gcloud", ".config/gh", ".kube", ".docker/config.json", ".npmrc", ".netrc", ".env"]
 const domains = ["registry.npmjs.org", "*.npmjs.org", "registry.yarnpkg.com", "pypi.org", "*.pypi.org", "crates.io", "*.crates.io", "github.com", "*.github.com", "gitlab.com", "*.gitlab.com", "bitbucket.org", "*.bitbucket.org", "api.openai.com", "api.anthropic.com", "generativelanguage.googleapis.com", "*.googleapis.com"]
@@ -47,13 +49,56 @@ export default {
     // blocking hook active rather than an inactive plugin allowing raw shell.
     let available = false
     let warned = false
+    const signature = JSON.stringify(policy)
+    let lease = globalThis[runtimeLease]
+    let ownsLease = false
     try {
-      await SandboxManager.initialize(policy)
-      available = true
+      if (lease && lease.signature !== signature) throw Error("different policy already owns runtime")
+      if (!lease) {
+        if (SandboxManager.getConfig() !== undefined) throw Error("sandbox runtime already owned by another plugin")
+        lease = { signature, references: 0, available: false, backgrounds: new Set() }
+        globalThis[runtimeLease] = lease
+        lease.ready = (async () => {
+          await SandboxManager.initialize(policy)
+          if (SandboxManager.getConfig() !== policy) throw Error("runtime policy mismatch")
+          lease.available = true
+        })()
+      }
+      lease.references++
+      ownsLease = true
+      await lease.ready
+      available = lease.available
     } catch {
       console.error("Host sandbox unavailable; " + (permissive ? "explicit permissive policy allows unsandboxed shell" : "shell commands will be blocked"))
     }
     const commands = new Map()
+    const backgrounds = new Set()
+    const exited = new Set()
+    const subscription = new AbortController()
+    const cleanup = () => {
+      if (!commands.size && !backgrounds.size && !globalThis[originalCommands]?.size && !lease?.backgrounds?.size) SandboxManager.cleanupAfterCommand()
+    }
+    globalThis[originalCommands] ??= new Map()
+    if (ctx.event?.subscribe) {
+      void (async () => {
+        try {
+          for await (const event of ctx.event.subscribe({ signal: subscription.signal })) {
+            if (!["shell.exited", "shell.deleted"].includes(event.type)) continue
+            const id = event.data.id
+            if (backgrounds.delete(id)) { lease.backgrounds.delete(id); cleanup() }
+            else {
+              if (exited.size >= 256) exited.delete(exited.values().next().value)
+              exited.add(id)
+            }
+          }
+        } catch {
+          if (!subscription.signal.aborted) {
+            available = false
+            console.error("Host sandbox lifecycle subscription failed; new shell commands blocked in enforce mode")
+          }
+        }
+      })()
+    }
     await ctx.tool.hook("execute.before", async event => {
       if (event.tool !== "shell") return
       if (typeof event.input?.command !== "string") throw new Error("Host sandbox: unsupported shell input; command blocked")
@@ -65,6 +110,7 @@ export default {
       try {
         const wrapped = await SandboxManager.wrapWithSandbox(command, undefined, undefined, undefined, { commandId: event.id, commandText: command })
         commands.set(event.id, { command, input: event.input })
+        globalThis[originalCommands].set(event.id, { command, cancel: () => { commands.delete(event.id); globalThis[originalCommands].delete(event.id); cleanup() } })
         event.input = { ...event.input, command: wrapped }
       } catch {
         if (!permissive) throw new Error("Host sandbox could not wrap command in enforce mode; command blocked")
@@ -79,11 +125,23 @@ export default {
       // hook-visible input and clean temporary mounts for success AND errors.
       if (event.input && typeof event.input === "object") event.input.command = original.command
       commands.delete(event.id)
-      SandboxManager.cleanupAfterCommand()
+      globalThis[originalCommands].delete(event.id)
+      if (event.status === "completed" && event.result.metadata?.status === "running" && event.result.metadata.shellID) {
+        const id = event.result.metadata.shellID
+        if (!exited.delete(id)) { backgrounds.add(id); lease.backgrounds.add(id) }
+      }
+      cleanup()
     })
     return async () => {
+      subscription.abort()
+      for (const id of commands.keys()) globalThis[originalCommands].delete(id)
       commands.clear()
-      await SandboxManager.reset()
+      for (const id of backgrounds) lease.backgrounds.delete(id)
+      backgrounds.clear()
+      if (ownsLease && --lease.references === 0) {
+        delete globalThis[runtimeLease]
+        await SandboxManager.reset()
+      }
     }
   },
 }

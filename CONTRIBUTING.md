@@ -74,6 +74,12 @@ mocked runtime; real host filesystem/network enforcement remains a manual
 acceptance check. See `docs/host-plugins.md`. Keep defaults fail-closed, avoid
 Build permission overrides, preserve source-relative supporting files, and
 reject unsupported migration paths instead of silently disabling protection.
+`tools/port_host_plugins.py` is the V2-only path: reviewed known-source replacements,
+an inactive private safety snapshot, direct V2 implementations under
+`tools/native_plugins/`, and no V1 SDK/bridge. Retirement decisions require source
+analysis and behavioral proof, not plugin status alone. Never remove unknown
+plugins, actual audit overrides, auth files, databases or the unused alternate
+profile automatically. Native smoke tests mock the sandbox engine, not host isolation.
 
 ## Bash completion
 

@@ -1,4 +1,126 @@
-# Plain host OpenCode 2.x: migrate legacy plugins safely
+# Plain host OpenCode 2.x: native plugin migration and audit
+
+## Recommended: native V2 in your normal host configuration
+
+If you use only OpenCode 2.x, `tools/port_host_plugins.py` audits the known personal
+plugins and replaces them with direct V2 implementations in your normal
+`~/.config/opencode`. No V1 SDK, generic compatibility bridge, alternate profile
+or special launcher is needed afterward. Existing V1 sources are removed from
+autoload/config entries and placed in one private safety snapshot before changes;
+this is recovery evidence, not maintained V1 support. Auth and session databases
+are not changed by the tool.
+
+### Plugin decisions
+
+| Plugin | Decision and reason |
+| --- | --- |
+| opencode-sandbox | Keep; native V2 shell hooks and maintained sandbox engine preserve host policy. Host enforcement still needs validation. |
+| python-isolation | Keep; pip/uv isolation remains useful, particularly with a readonly sandbox home. Private writable caches and native shell environment hook. |
+| output-clamp | Keep; native 8/12 KiB selective UTF-8 budgets are stricter than V2's built-in 50 KiB/2,000-line limit. Full spill text, files and structured data are preserved. |
+| lemonade-models | Keep; V2 does not automatically discover your configured compatible local server's live model inventory/capabilities/context. No models are loaded except explicit load/unload tool calls. |
+| no-nested-sandbox | Keep; prevents models from hand-wrapping commands and nesting the host sandbox. Native original-command tracking avoids hook-order false positives. |
+| pdf-to-text | Keep conditionally; native extraction is used only when the selected model does not advertise PDF support. Native PDF-capable routes receive the original media. |
+| sandbox-uncloak | Retire from normal V2 use; the native sandbox clones execution input and leaves durable command history unwrapped. Old migrated conversations may still contain old wrappers; their history is not rewritten or deleted by this migration. |
+| tool-definition-audit | Retire from normal use; its override map is empty, so it only performs repeated diagnostic serialization/file writes. Nonempty custom override maps require manual review rather than removal. |
+| copilot-gpt6-effort | Retire; 2.2.6's Copilot catalog derives effort variants, sets reasoningEffort/reasoningSummary, and the native Responses model sends them. Selected effort was verified without the global-fetch/header workaround. |
+
+The native sandbox port also waits for background shell completion events before
+cleaning resources and reference-counts identical-policy instances. A conflicting
+policy/runtime owner is blocked rather than silently reusing another project's
+restrictions; use separate standalone servers for different policies. The native
+PDF fallback covers primary, compaction, generate
+and title requests, without V1 part/message conversion or persistent PDF logs.
+Finish background shell jobs before unloading/reloading the sandbox plugin;
+unload releases its proxy/runtime resources rather than promising persistent jobs.
+No Build allow-all override is installed on the host. Unknown implementations,
+V1 plugins or existing native destination directories require review instead of
+being overwritten. The port targets the known implementations and 2.2.6; it is
+not a generic arbitrary-plugin transpiler.
+
+### Apply on the host
+
+From the source checkout, first run the audit:
+
+```sh
+python3 tools/port_host_plugins.py
+```
+
+Exit host OpenCode clients before applying to avoid reload during the file changes.
+If using the shared service, stop it intentionally first; the tool itself never
+starts/stops services. Then explicitly apply the reviewed native replacements:
+
+```sh
+python3 tools/port_host_plugins.py --apply
+npm install --prefix "${XDG_CONFIG_HOME:-$HOME/.config}/opencode" \
+  --no-audit --no-fund
+```
+
+The apply tool changes only recognized plugin sources, plugin entries and their
+dependency keys. Unrelated config values and dependencies remain; JSONC comments
+are preserved in the safety snapshot, while active files are reserialized. It
+prints the private snapshot path and writes `native-plugin-migration.json`.
+It refuses a second apply over the receipt; do not repeatedly overwrite a working
+migration. If a filesystem/concurrent-edit failure interrupts application, keep
+the printed safety snapshot and request recovery guidance rather than resetting
+files or retrying blind.
+
+Launch using the ordinary binary and your trusted env file:
+
+```bash
+( set -a; source /path/to/provider-credentials.env && set +a && opencode --standalone )
+```
+
+`opencode2` is an equivalent command alias in `@opencode/cli@2.2.6`. Select variants
+through `/models` or `provider/model#variant`; merely setting the base/default
+model does not select an effort level. Do not reintroduce the retired effort
+plugin if the selected variant is wrong—verify the available catalog variants.
+
+### The previous separate profile
+
+If you ran `migrate_host_plugins.py --apply --output ~/.config/opencode-host-v2`
+and installed its npm dependencies, **no original configuration needs reverting**.
+That created only the separate profile and dependencies. Leave it unused while
+testing the normal native config; its `run-opencode` launcher still selects the
+older compatibility profile and should no longer be your normal launch command.
+You may remove that one explicitly-created directory later after native host
+validation. This tool does not recursively remove it or touch its files.
+
+The npm `ini@7` engine warning is separate from plugin API migration. It requires
+Node `^22.22.2`, `^24.15.0` or newer supported major; Node 24.14.0 is below that
+24.x minimum. With fnm, select a current Node 24 release before dependency refresh.
+Global npm tools are per Node installation, so switching Node may require
+reinstalling the V2 CLI in the new installation:
+
+```sh
+fnm install 24
+fnm use 24
+npm install -g @opencode/cli@2.2.6
+opencode --version
+```
+
+Use your existing package channel if the CLI is not npm-managed. Optional native
+addon install-script warnings do not justify approving all dependency scripts;
+inspect any package-specific need separately.
+
+### Validation
+
+```sh
+python3 -B -m unittest discover -s tests -p test_native_host_port.py -v
+python3 -B tests/smoke_native_host_port.py --opencode /path/to/opencode-v2
+```
+
+Native fixture checks run with no V1 SDK/bridge and verify inference/MCP, live
+synthetic Lemonade inventory, unwrapped stored commands, selected reasoning
+settings at a Responses endpoint and real PDF fallback bytes. The sandbox engine
+is mocked inside this container; **real host filesystem/network enforcement must
+be validated using the Required host test section below before trusting it**.
+If the native sandbox is inactive or dependencies fail to load, do not assume
+its fail-closed runtime hooks are present. Stop and fix activation first.
+
+## Older option: separate compatibility profile
+
+The remainder documents the previous optional profile approach. It is not needed
+for a V2-only host and does not modify the normal host plugins.
 
 The adapters inside oc-box do not edit your host plugins. Running
 `opencode --standalone` outside oc-box therefore still loads your original V1
@@ -11,7 +133,7 @@ unlock credentials, or start a service/package manager. The default is a names-o
 dry run. The `--apply` operation creates a new private profile and an explicit
 launcher. Existing output directories are never replaced.
 
-## Prepare on your host
+### Prepare a separate profile
 
 Run from a source checkout containing the utility, in your regular host terminal:
 
