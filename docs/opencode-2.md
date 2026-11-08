@@ -499,6 +499,26 @@ import/session checkpoints. Container error text is reduced to fixed categories,
 never printed alongside env/config values. It cannot recover an exception that
 the original run discarded, and inspection does not establish acceptance.
 
+If the retained source is stopped, baseline-ready and already has its verified
+seed selected, a narrowly scoped owning retry can capture the failing substep:
+
+```sh
+uv run --isolated --no-project --with cryptography python -I -B tools/test_global_vault_podman.py \
+  --retry-source /var/tmp/oc-box-gv-host-EXAMPLE
+```
+
+This refuses fixtures with backup/restore/result evidence or an unexpected
+workspace/session. It resumes the existing synthetic source, never reimports,
+resets or purges it. Each attempt creates a new private companion vault/config
+and report, leaving the original encrypted vault, seed and configuration
+evidence unchanged. The lost random fixture passphrase is not recovered or
+written to disk. Only owning-source readiness, retained history and native
+tool/permission checks are retried; success does not repeat or establish the
+original first launch, new-project/opt-out/full-backup/restore stages.
+Failure reports fixed substeps/error classes/exit codes rather than raw private
+stderr, env values, argv or transcript contents. Keep the attempt report and
+original fixture; do not use the whole new-fixture command as a retry.
+
 **No live result for this fixture has been accepted yet.** Unit and native
 offline tests do not substitute for executing it on a host. Keep the important
 project untouched until the desired validation passes.

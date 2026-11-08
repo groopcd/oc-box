@@ -113,6 +113,69 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
         # selector test; it prints a bounded diagnostic and performs no lifecycle.
         fixture.prepare_podman_cli(self.root, Path(sys.executable).resolve())
 
+    def retained_source(self):
+        self.complete_fixture_metadata()
+        path, data = self.record("source-a", "a" * 32)
+        data["ready"] = True
+        box.atomic_json(path, data)
+        fixture.record_ids(self.root)
+        baseline = {
+            "info": {
+                "id": "ses_fixture",
+                "location": {"directory": data["project"]},
+                "permissions": fixture.ASK_RULES,
+            },
+            "messages": [
+                {
+                    "id": "msg_fixture",
+                    "type": "user",
+                    "text": fixture.SEED_TEXT,
+                    "time": {"created": 1},
+                }
+            ],
+        }
+        fixture.write_json_new(self.root / "seed-baseline.json", baseline)
+        evidence = path.parent / "imports-v2/ses_fixture.json"
+        evidence.parent.mkdir(mode=0o700)
+        fixture.write_json_new(evidence, baseline)
+        box.atomic_json(
+            box.session_file(path),
+            {
+                "sessions": ["ses_fixture"],
+                "last": "ses_fixture",
+                "imported_from_host": {"ses_fixture": {"backup": str(evidence)}},
+            },
+        )
+        fixture.write_json_new(
+            self.root / "executables.json", {"2": str(Path(sys.executable).resolve())}
+        )
+        for name in ("config", "data", "state", "cache"):
+            (self.root / ("host-" + name + "-2")).mkdir(mode=0o700)
+        wrapper = self.root / "bin/opencode"
+        wrapper.write_text(fixture.native_wrapper_source(sys.executable))
+        wrapper.chmod(0o700)
+        config = self.root / "config/opencode"
+        config.mkdir(mode=0o700)
+        fixture.write_json_new(
+            config / "opencode.json", fixture.fixture_config(12345, self.root)
+        )
+        fixture.write_plugin(self.root)
+        settings = self.root / "config/oc-box"
+        settings.mkdir(mode=0o700)
+        fixture.write_json_new(
+            settings / "config.json",
+            {
+                "default_distro": "tumbleweed",
+                "pass_env": [fixture.PASS_ENV],
+                "auto_update": False,
+            },
+        )
+        original = self.root / "data/oc-box/credentials/vault.json"
+        original.parent.mkdir(mode=0o700, parents=True)
+        original.write_text('{"opaque":"synthetic encrypted evidence placeholder"}')
+        original.chmod(0o600)
+        return path, data, baseline
+
     def test_help_is_harmless_and_host_run_refuses_container_before_placement(self):
         env = {
             "PATH": "/usr/bin:/bin",
@@ -467,6 +530,112 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
         self.assertIsNone(fixture.state_error_category(""))
         self.assertIsNone(fixture.state_error_category(None))
 
+    def test_source_retry_requires_verified_selection_and_rejects_later_evidence(self):
+        path, data, baseline = self.retained_source()
+        result = fixture.validate_source_retry(self.root)
+        self.assertEqual(result[:3], (self.root, path, data))
+        self.assertEqual(result[3], baseline)
+        original = fixture.source_evidence_digests(self.root, path)
+        for name in ("full.ocbox", "result.json", "restored-full"):
+            artifact = self.root / name
+            artifact.write_text("retained later-stage evidence")
+            with (
+                self.subTest(name=name),
+                self.assertRaisesRegex(fixture.FixtureError, "retry-later-evidence"),
+            ):
+                fixture.validate_source_retry(self.root)
+            artifact.unlink()
+        self.assertEqual(fixture.source_evidence_digests(self.root, path), original)
+        state = box.session_state(path)
+        state["last"] = "ses_unexpected"
+        box.atomic_json(box.session_file(path), state)
+        with self.assertRaisesRegex(fixture.FixtureError, "retry-verified-import"):
+            fixture.validate_source_retry(self.root)
+
+    def test_attempt_selector_keeps_original_history_without_rewriting_legacy_wrapper(
+        self,
+    ):
+        path, _, _ = self.retained_source()
+        before = fixture.source_evidence_digests(self.root, path)
+        attempt = self.root / "source-retries/attempt-unit"
+        attempt.mkdir(mode=0o700, parents=True)
+        wrapper = fixture.prepare_source_retry_selector(
+            self.root, attempt, Path(sys.executable).resolve()
+        )
+        program = "import json,os; print(json.dumps({key:os.environ.get(key) for key in ('HOME','XDG_CONFIG_HOME','XDG_DATA_HOME','XDG_STATE_HOME','OPENCODE_AUTH_CONTENT')}))"
+        result = subprocess.run(
+            [str(wrapper), "-I", "-c", program],
+            env={
+                **os.environ,
+                "XDG_DATA_HOME": "/unrelated/data",
+                "OPENCODE_AUTH_CONTENT": "unrelated private value",
+            },
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        response = json.loads(result.stdout)
+        self.assertEqual(response["XDG_DATA_HOME"], str(self.root / "host-data-2"))
+        self.assertEqual(response["XDG_STATE_HOME"], str(self.root / "host-state-2"))
+        self.assertEqual(response["HOME"], str(self.root / "host-home"))
+        self.assertIsNone(response["OPENCODE_AUTH_CONTENT"])
+        self.assertEqual(fixture.source_evidence_digests(self.root, path), before)
+
+    def test_retry_trace_keeps_first_failure_separate_and_never_echoes_private_text(
+        self,
+    ):
+        secret = "synthetic-sensitive-trace-value"
+        trace = fixture.SourceRetryTrace()
+        trace("host-provider-health")
+        trace.observe(["podman", secret], 17, b"connection refused " + secret.encode())
+        trace.fail(box.BoxError("private failure " + secret))
+        original = copy.deepcopy(trace.failure)
+        trace("container-stop")
+        trace.observe(["podman", secret], 23, secret.encode())
+        trace.fail(box.BoxError("private cleanup " + secret))
+        self.assertEqual(trace.failure, original)
+        self.assertEqual(trace.failure["exit_code"], 17)
+        self.assertEqual(len(trace.cleanup_errors), 1)
+        self.assertNotIn(
+            secret,
+            json.dumps(
+                {
+                    "error": trace.failure,
+                    "cleanup": trace.cleanup_errors,
+                    "steps": trace.steps,
+                }
+            ),
+        )
+        with os.fdopen(
+            os.memfd_create("trace-fixture", os.MFD_CLOEXEC), "w+b"
+        ) as stream:
+            stream.write(b"private native stderr " + secret.encode())
+            stream.seek(5)
+            position = stream.tell()
+            self.assertIn(secret.encode(), fixture.private_stderr(stream))
+            self.assertEqual(stream.tell(), position)
+
+    def test_nested_native_probe_diagnostic_accepts_fixed_schema_only(self):
+        valid = {
+            "stage": "native-tool-client",
+            "error_class": "subprocess-exit",
+            "native_exit_code": 2,
+            "stderr_category": "http",
+        }
+        self.assertEqual(fixture.probe_diagnostic(json.dumps(valid)), valid)
+        for field, value in (
+            ("stage", "private-stage-value"),
+            ("stderr_category", "private-category"),
+            ("error_class", "private-error"),
+        ):
+            poisoned = {**valid, field: value}
+            with self.subTest(field=field):
+                self.assertIsNone(fixture.probe_diagnostic(json.dumps(poisoned)))
+        self.assertIsNone(
+            fixture.probe_diagnostic(json.dumps({**valid, "private": "value"}))
+        )
+
     def test_cleanup_validates_all_labels_before_any_removal(self):
         self.complete_fixture_metadata()
         _, source = self.record("source-a", "a" * 32)
@@ -533,6 +702,49 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
             fixture.cleanup(self.root)
         self.assertEqual(len(operations), 4)
         self.assertTrue(all(operation[1] == "inspect" for operation in operations))
+
+    def test_failed_source_retry_writes_private_report_and_keeps_original_evidence(
+        self,
+    ):
+        path, data, baseline = self.retained_source()
+        before = fixture.source_evidence_digests(self.root, path)
+        secret = "synthetic-private-retry-failure-value"
+        with (
+            patch.object(fixture, "host_guard"),
+            patch.object(fixture, "validate_store"),
+            patch.object(fixture, "check_native_version", return_value="2.2.6"),
+            patch.object(
+                fixture,
+                "verify_stopped_source",
+                return_value={"State": {"Running": False, "Status": "exited"}},
+            ),
+            patch.object(box, "check_backend"),
+            patch.object(
+                fixture, "launcher", side_effect=box.BoxError("private " + secret)
+            ) as launch,
+            patch.object(
+                box,
+                "remove_resources",
+                side_effect=AssertionError("No retry reset/purge"),
+            ),
+            patch.object(
+                box,
+                "import_host_session",
+                side_effect=AssertionError("No retry reimport"),
+            ),
+        ):
+            report_path, result = fixture.retry_source(self.root)
+        self.assertEqual(launch.call_args.args[0], ["start", "--workspace", data["id"]])
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["scope"], "retained-source-only")
+        self.assertEqual(result["error"]["stage"], "owning-launch")
+        self.assertEqual(result["error"]["error_class"], "box-error")
+        self.assertTrue(result["evidence_unchanged"])
+        self.assertNotIn(secret, report_path.read_text())
+        self.assertEqual(report_path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(fixture.source_evidence_digests(self.root, path), before)
+        self.assertTrue((report_path.parent / "vault/vault.json").is_file())
+        self.assertFalse((self.root / "result.json").exists())
 
 
 if __name__ == "__main__":

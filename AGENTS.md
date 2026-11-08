@@ -143,6 +143,12 @@ from offline safety/native helper tests. Leave encrypted evidence on failure.
 Its initial host run failed during the first owning launch, not an accepted pass.
 Use --diagnose for validated read-only checkpoints; never print raw errors/env
 or treat inspection as replay/acceptance. Keep the retained fixture intact.
+--retry-source is limited to a stopped baseline-ready, already-imported source
+with verified private store/identity and no later backup/restore evidence. Use
+new companion synthetic vault/config/report files; never overwrite original
+ciphertext/seed/config, reimport, reset, purge, or claim the full fixture reran.
+Keep first-failure diagnostics separate from shutdown/journal failures and
+report fixed substep/category/exit data only, never private stderr/env/argv.
 A disk-backed fixture passed full/portable restore and reset; a targeted retry
 passed exact V1 history preservation, inactive-major database-byte preservation
 and V2 return with retained native messages plus synthetic tool execution. The

@@ -4,8 +4,10 @@
 Uses repository launcher code, unmodified OpenCode 2.2.6 and a private rootless
 Podman store. Provider, MCP, vault, host history, config and projects are entirely
 synthetic. Only TUI exit and masked prompt input are scripted. There is no paid
-inference, host installation/update, shared native service, V1 requirement or
-retry mode. Evidence is retained, including on failure. --cleanup removes only
+inference, host installation/update, shared native service or V1 requirement.
+--retry-source retries only a validated retained first source owner, using a
+new companion encrypted vault; it does not repeat first-ever import acceptance.
+Evidence is retained, including on failure. --cleanup removes only
 verified fixture-owned containers/volumes/networks, never files or images.
 
 Run on a regular host, not inside oc-box, with an existing disk-backed parent:
@@ -19,6 +21,7 @@ import contextlib
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
+import inspect
 import json
 import os
 from pathlib import Path
@@ -126,43 +129,169 @@ for line in sys.stdin:
         print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':result}),flush=True)
 """
 
+
+def stderr_category(message):
+    """Return only static categories, never private error content."""
+    if not isinstance(message, (str, bytes)) or not message:
+        return "empty"
+    text = message[:65536]
+    if isinstance(text, bytes):
+        text = text.decode("utf-8", errors="replace")
+    text = text.lower()
+    for terms, category in (
+        (("cgroup", "systemd"), "cgroup-runtime"),
+        (("quota", "no space left", "storage"), "storage"),
+        (("mount", "selinux"), "mount-or-label"),
+        (("permission denied", "operation not permitted"), "permission"),
+        (
+            (
+                "unauthorized",
+                "forbidden",
+                "authentication",
+                "invalid api key",
+                "http error 401",
+                "http error 403",
+            ),
+            "authentication",
+        ),
+        (("gateway", "http error 502", "http error 503", "http error 504"), "gateway"),
+        (
+            (
+                "connection refused",
+                "name resolution",
+                "getaddrinfo",
+                "network is unreachable",
+            ),
+            "network",
+        ),
+        (("timed out", "timeout"), "timeout"),
+        (("plugin", "npm err", "module not found", "cannot find package"), "plugin"),
+        (("provider", "api key", "chat/completions"), "provider"),
+        (
+            ("permission.asked", "permission assertion", "permission rejected"),
+            "permission",
+        ),
+        (("http error", "http status", "status code"), "http"),
+        (("no such file", "executable", "not found"), "missing-runtime-file"),
+    ):
+        if any(term in text for term in terms):
+            return category
+    return "unclassified"
+
+
+# Include the exact declared classifier in the separate container probe.
+STDERR_CLASSIFIER = inspect.getsource(stderr_category)
+STDERR_CATEGORIES = frozenset(
+    {
+        "empty",
+        "unclassified",
+        "cgroup-runtime",
+        "storage",
+        "mount-or-label",
+        "permission",
+        "authentication",
+        "gateway",
+        "network",
+        "timeout",
+        "plugin",
+        "provider",
+        "http",
+        "missing-runtime-file",
+        "event-stream",
+        "native-events",
+    }
+)
+PROBE_STAGES = frozenset(
+    {
+        "native-event-barrier",
+        "native-tool-client",
+        "native-event-stream",
+        "native-results",
+    }
+)
+ERROR_CLASSES = frozenset(
+    {
+        "fixture-error",
+        "box-error",
+        "assertion",
+        "timeout",
+        "missing-file",
+        "os-error",
+        "invalid-data",
+        "subprocess-exit",
+        "interrupted",
+        "exception",
+    }
+)
+
+
 # Observe the authenticated event stream INSIDE the fixture container. Host
 # /proc cannot safely interpret namespace PIDs. This runs the real native client
 # with stdin EOF, no --auto, and retains private output in anonymous memory only.
-NATIVE_PROBE = """import base64,json,os,subprocess,sys,threading
+NATIVE_PROBE = (
+    """import base64,json,os,subprocess,sys,threading
 from urllib.request import Request,build_opener,ProxyHandler
-url,ident=sys.argv[1:3]; command=sys.argv[3:]
-assert '--server' in command and '--auto' not in command
-assert command[command.index('--server')+1]==url
-ready=threading.Event(); done=threading.Event(); events=[]; failures=[]
-def observe():
-    auth=base64.b64encode(('opencode:'+os.environ['OPENCODE_PASSWORD']).encode()).decode()
-    request=Request(url+'/api/event',headers={'Authorization':'Basic '+auth,'Accept':'text/event-stream'})
-    try:
-        with build_opener(ProxyHandler({})).open(request,timeout=200) as response:
-            data=[]
-            for raw in response:
-                line=raw.decode().rstrip('\\r\\n')
-                if line.startswith('data:'): data.append(line[5:].lstrip())
-                elif not line and data:
-                    event=json.loads('\\n'.join(data)); data=[]
-                    if event['type']=='server.connected': ready.set()
-                    if event.get('data',{}).get('sessionID')==ident:
-                        events.append(event['type'])
-                        if event['type'] in ('session.execution.succeeded','session.execution.failed','session.execution.interrupted'): break
-    except Exception:
-        failures.append('event-stream')
-    finally:
-        done.set()
-worker=threading.Thread(target=observe,daemon=True); worker.start()
-assert ready.wait(10)
-with os.fdopen(os.memfd_create('fixture-native-output',os.MFD_CLOEXEC),'w+b') as output, os.fdopen(os.memfd_create('fixture-native-errors',os.MFD_CLOEXEC),'w+b') as errors:
-    result=subprocess.run(command,stdin=subprocess.DEVNULL,stdout=output,stderr=errors,timeout=180)
-    assert result.returncode==0
-assert done.wait(10); worker.join(timeout=2)
-assert not failures and 'session.execution.succeeded' in events and 'permission.asked' not in events
-print(json.dumps({'completed':True,'permission_asked':0}))
 """
+    + STDERR_CLASSIFIER
+    + """
+def main():
+    stage='native-event-barrier'; native_exit_code=None; category='native-events'
+    try:
+        url,ident=sys.argv[1:3]; command=sys.argv[3:]
+        assert '--server' in command and '--auto' not in command
+        assert command[command.index('--server')+1]==url
+        ready=threading.Event(); done=threading.Event(); events=[]; failures=[]
+        def observe():
+            try:
+                auth=base64.b64encode(('opencode:'+os.environ['OPENCODE_PASSWORD']).encode()).decode()
+                request=Request(url+'/api/event',headers={'Authorization':'Basic '+auth,'Accept':'text/event-stream'})
+                with build_opener(ProxyHandler({})).open(request,timeout=200) as response:
+                    data=[]
+                    for raw in response:
+                        line=raw.decode().rstrip('\\r\\n')
+                        if line.startswith('data:'): data.append(line[5:].lstrip())
+                        elif not line and data:
+                            event=json.loads('\\n'.join(data)); data=[]
+                            if event['type']=='server.connected': ready.set()
+                            if event.get('data',{}).get('sessionID')==ident:
+                                events.append(event['type'])
+                                if event['type'] in ('session.execution.succeeded','session.execution.failed','session.execution.interrupted'): break
+            except Exception as error:
+                failures.append(stderr_category(str(error)))
+            finally:
+                done.set()
+        worker=threading.Thread(target=observe,daemon=True); worker.start()
+        if not ready.wait(10):
+            category=failures[0] if failures else 'timeout'
+            raise AssertionError()
+        stage='native-tool-client'
+        with os.fdopen(os.memfd_create('fixture-native-output',os.MFD_CLOEXEC),'w+b') as output, os.fdopen(os.memfd_create('fixture-native-errors',os.MFD_CLOEXEC),'w+b') as errors:
+            result=subprocess.run(command,stdin=subprocess.DEVNULL,stdout=output,stderr=errors,timeout=180)
+            native_exit_code=result.returncode
+            if native_exit_code:
+                category=stderr_category(os.pread(errors.fileno(),65536,0))
+                raise subprocess.CalledProcessError(native_exit_code, [])
+        stage='native-event-stream'
+        category='timeout'
+        assert done.wait(10); worker.join(timeout=2)
+        category=failures[0] if failures else 'native-events'
+        assert not failures and 'session.execution.succeeded' in events and 'permission.asked' not in events
+        print(json.dumps({'completed':True,'permission_asked':0}))
+        return 0
+    except BaseException as error:
+        error_class='exception'
+        if isinstance(error, subprocess.TimeoutExpired): error_class='timeout'; category='timeout'
+        elif isinstance(error, subprocess.CalledProcessError): error_class='subprocess-exit'
+        elif isinstance(error, AssertionError): error_class='assertion'
+        elif isinstance(error, FileNotFoundError): error_class='missing-file'; category='missing-runtime-file'
+        elif isinstance(error, OSError): error_class='os-error'; category=stderr_category(str(error))
+        elif isinstance(error, (ValueError, KeyError, TypeError)): error_class='invalid-data'
+        elif isinstance(error, (KeyboardInterrupt, SystemExit)): error_class='interrupted'
+        print(json.dumps({'stage':stage,'error_class':error_class,'native_exit_code':native_exit_code,'stderr_category':category}),file=sys.stderr)
+        return 1
+sys.exit(main())
+"""
+)
 
 
 class FixtureError(Exception):
@@ -582,16 +711,20 @@ def prepare_root(root, distro):
         (root / name / "unfinished.txt").write_text("PROJECT_RETAINED\n")
 
 
-def prepare_native_cli(root, binary):
-    """A single-version selector, never a host installation or service client."""
-    check_native_version(root, binary, "2")
-    for name in ("config", "data", "state", "cache"):
-        (root / ("host-" + name + "-2")).mkdir(mode=0o700, exist_ok=True)
-    write_json_new(root / "executables.json", {"2": str(binary)})
-    code = """import json,os,pathlib,sys
-root=pathlib.Path(__file__).resolve().parents[1]
-binary=json.loads((root/'executables.json').read_text())['2']
-env={key:os.environ[key] for key in ('PATH','USER','LOGNAME','LANG','TERM','TMPDIR','XDG_RUNTIME_DIR') if key in os.environ}
+def native_wrapper_source(interpreter=None, *, root=None, binary=None):
+    """Legacy bytes, or an attempt-local selector bound to ORIGINAL host history."""
+    code = "import json,os,pathlib,sys\n"
+    code += (
+        "root=pathlib.Path(__file__).resolve().parents[1]\n"
+        if root is None
+        else "root=pathlib.Path(" + repr(str(root)) + ")\n"
+    )
+    code += (
+        "binary=json.loads((root/'executables.json').read_text())['2']\n"
+        if binary is None
+        else "binary=" + repr(str(binary)) + "\n"
+    )
+    code += """env={key:os.environ[key] for key in ('PATH','USER','LOGNAME','LANG','TERM','TMPDIR','XDG_RUNTIME_DIR') if key in os.environ}
 env['HOME']=str(root/'host-home')
 for name in ('CONFIG','DATA','CACHE','STATE'):
     env['XDG_'+name+'_HOME']=str(root/('host-'+name.lower()+'-2'))
@@ -599,9 +732,23 @@ env.update(OPENCODE_TEST_HOME=env['HOME'],OPENCODE_DISABLE_MODELS_FETCH='1',OPEN
 env['OPENCODE_CONFIG_CONTENT']=json.dumps({'snapshots':False,'formatter':False,'update':'disable','policies':[{'action':'plugin.use','resource':'*','effect':'deny'}]})
 os.execve(binary,[binary,*sys.argv[1:]],env)
 """
+    return (
+        "#!"
+        + (sys.executable if interpreter is None else str(interpreter))
+        + "\n"
+        + code
+    )
+
+
+def prepare_native_cli(root, binary):
+    """A single-version selector, never a host installation or service client."""
+    check_native_version(root, binary, "2")
+    for name in ("config", "data", "state", "cache"):
+        (root / ("host-" + name + "-2")).mkdir(mode=0o700, exist_ok=True)
+    write_json_new(root / "executables.json", {"2": str(binary)})
     wrapper = root / "bin/opencode"
     with wrapper.open("x") as output:
-        output.write("#!" + sys.executable + "\n" + code)
+        output.write(native_wrapper_source())
     wrapper.chmod(0o700)
     release = compat.version(
         box.run(
@@ -1035,9 +1182,14 @@ def selected_session(command, path, expected=None):
     return ident
 
 
-def assert_plugins(request, project):
+def assert_plugins(request, project, trace=None):
     query = "?directory=" + quote(str(project), safe="")
+    if trace is not None:
+        trace("api-model-default")
     request("GET", "/api/model/default" + query)
+    trace_complete(trace)
+    if trace is not None:
+        trace("api-plugin-list")
     plugins = request("GET", "/api/plugin" + query)["data"]
     indexed = {item["id"]: item for item in plugins}
     for ident in ("oc-box.build-permissions", "oc-box.fixture-global-vault-permission"):
@@ -1049,6 +1201,7 @@ def assert_plugins(request, project):
         not any(item.get("state", {}).get("status") == "failed" for item in plugins),
         "fixture-plugin-readiness",
     )
+    trace_complete(trace)
 
 
 def create_session(request, project, *, agent=None, parent=None, permissions=None):
@@ -1063,7 +1216,9 @@ def create_session(request, project, *, agent=None, parent=None, permissions=Non
     return request("POST", "/api/session", value)["data"]
 
 
-def evaluate(request, ident, expected, *, agent=None, resource="ask-target"):
+def evaluate(
+    request, ident, expected, *, agent=None, resource="ask-target", trace=None
+):
     target = "/api/session/" + ident + "/permission"
     require(request("GET", target)["data"] == [], "pending-permission")
     value = {"action": ACTION, "resources": [resource]}
@@ -1082,17 +1237,29 @@ def evaluate(request, ident, expected, *, agent=None, resource="ask-target"):
             )
         else:
             require(pending == [], "pending-permission")
+    except BaseException as error:
+        if trace is not None:
+            trace.fail(error)
+        raise
     finally:
         # Reject even unexpected asks. Never grant once/always or alter policy.
-        for item in pending:
-            request(
-                "POST", target + "/" + item["id"] + "/reply", {"decision": "reject"}
-            )
+        try:
+            for item in pending:
+                request(
+                    "POST", target + "/" + item["id"] + "/reply", {"decision": "reject"}
+                )
+        except BaseException as error:
+            if trace is not None:
+                trace("permission-cleanup")
+                trace.fail(error)
+            raise
     require(request("GET", target)["data"] == [], "pending-permission")
 
 
-def permission_matrix(request, project, primary):
-    assert_plugins(request, project)
+def permission_matrix(request, project, primary, trace=None):
+    assert_plugins(request, project, trace=trace)
+    if trace is not None:
+        trace("permission-matrix")
     original = request("GET", "/api/session/" + primary)["data"]
     require(original.get("permissions") == ASK_RULES, "session-asks")
     own = []
@@ -1120,10 +1287,24 @@ def permission_matrix(request, project, primary):
             (unknown["id"], None, "deny"),
             (unknown["id"], "fixture-unknown", "deny"),
         ):
-            evaluate(request, ident, effect, agent=agent)
+            evaluate(request, ident, effect, agent=agent, trace=trace)
         for agent in (None, "build", "plan", "fixture-child"):
-            evaluate(request, primary, "deny", agent=agent, resource="session-denied")
-            evaluate(request, primary, "deny", agent=agent, resource="policy-denied")
+            evaluate(
+                request,
+                primary,
+                "deny",
+                agent=agent,
+                resource="session-denied",
+                trace=trace,
+            )
+            evaluate(
+                request,
+                primary,
+                "deny",
+                agent=agent,
+                resource="policy-denied",
+                trace=trace,
+            )
         for session in [original, *own]:
             current = request("GET", "/api/session/" + session["id"])["data"]
             require(
@@ -1141,9 +1322,19 @@ def permission_matrix(request, project, primary):
             request("GET", "/api/permission/saved" + query)["data"] == [],
             "saved-permission",
         )
+    except BaseException as error:
+        if trace is not None:
+            trace.fail(error)
+        raise
     finally:
-        for session in reversed(own):
-            request("DELETE", "/api/session/" + session["id"])
+        try:
+            for session in reversed(own):
+                request("DELETE", "/api/session/" + session["id"])
+        except BaseException as error:
+            if trace is not None:
+                trace("permission-cleanup")
+                trace.fail(error)
+            raise
 
 
 def default_plan_fallback(root, data, request):
@@ -1192,8 +1383,24 @@ def default_plan_fallback(root, data, request):
     assert_plugins(request, project)
 
 
-def run_native(data, connection, ident, state, port, values):
-    assert_plugins(request_for(data, connection), box.container_project(data))
+def trace_complete(trace):
+    complete = getattr(trace, "completed", None)
+    if complete is not None:
+        complete()
+
+
+def run_native(data, connection, ident, state, port, values, trace=None):
+    if trace is not None:
+        trace("plugin-readiness")
+    assert_plugins(
+        request_for(data, connection), box.container_project(data), trace=trace
+    )
+    if trace is not None:
+        complete = getattr(trace, "completed", None)
+        if complete is not None:
+            complete("plugin-readiness")
+    if trace is not None:
+        trace("host-provider-health")
     health = "import json,sys; from urllib.request import build_opener,ProxyHandler; assert json.load(build_opener(ProxyHandler({})).open(sys.argv[1],timeout=5))=={'fixture':'oc-box-global-vault'}"
     box.run(
         box.exec_command(
@@ -1205,6 +1412,9 @@ def run_native(data, connection, ident, state, port, values):
         private=True,
         timeout=15,
     )
+    trace_complete(trace)
+    if trace is not None:
+        trace("native-tool-client")
     state.update(values=dict(values), markers=set(), before=state["requests"])
     args = [
         box.CONTAINER_OPENCODE,
@@ -1234,6 +1444,9 @@ def run_native(data, connection, ident, state, port, values):
         ],
     )
     result = box.run(command, input="", capture=True, private=True, timeout=215)
+    trace_complete(trace)
+    if trace is not None:
+        trace("native-results")
     require(
         json.loads(result.stdout) == {"completed": True, "permission_asked": 0},
         "native-events",
@@ -1248,6 +1461,9 @@ def run_native(data, connection, ident, state, port, values):
         request("GET", "/api/session/" + ident + "/permission")["data"] == [],
         "pending-permission",
     )
+    trace_complete(trace)
+    if trace is not None:
+        trace("transcript-validation")
     exported = box.export_container_session(data, ident)
     require(exported["info"].get("permissions") == ASK_RULES, "permission-preservation")
     tools = [
@@ -1272,6 +1488,7 @@ def run_native(data, connection, ident, state, port, values):
             "native-transcript",
         )
     require(DONE_MARKER in json.dumps(exported["messages"]), "native-transcript")
+    trace_complete(trace)
     return exported
 
 
@@ -1905,6 +2122,688 @@ def diagnose(root):
     return result
 
 
+SOURCE_LOADING_STAGES = {
+    "Checking rootless Podman": "private-store",
+    "Checking OpenCode version": "native-version",
+    "Preparing OpenCode and syncing configuration": "runtime-prepare",
+    "Installing OpenCode 2.x plugin dependencies": "plugin-dependencies",
+    "Preparing OpenCode 2.x private service and plugins": "runtime-plugin-readiness",
+    "Finding workspace session": "session-resolve",
+    "Syncing session history": "history-sync",
+    "Stopping container": "container-stop",
+    **{f"Starting {name} container": "container-start" for name in box.DISTROS},
+}
+SOURCE_STAGES = (
+    frozenset(SOURCE_LOADING_STAGES.values())
+    | PROBE_STAGES
+    | {
+        "source-validation",
+        "source-resources",
+        "source-stop-check",
+        "retry-preparation",
+        "owning-launch",
+        "private-owner",
+        "callback",
+        "selected-session",
+        "retained-transcript",
+        "plugin-readiness",
+        "host-provider-health",
+        "transcript-validation",
+        "api-model-default",
+        "api-plugin-list",
+        "provider-shutdown",
+        "private-owner-stop",
+        "permission-matrix",
+        "permission-cleanup",
+        "unlock-count",
+        "host-clean",
+        "evidence-preservation",
+        "complete",
+        "launcher-stage",
+    }
+)
+
+
+def program_label(command):
+    """Never include executable paths or any argument in a diagnostic."""
+    if not isinstance(command, (list, tuple)) or not command:
+        return "other"
+    name = Path(str(command[0])).name
+    if name in ("podman", "npm", "git", "age"):
+        return name
+    if re.fullmatch(r"python(?:[0-9]+(?:\.[0-9]+)*)?", name):
+        return "python"
+    if name == "opencode" or name.startswith("opencode-"):
+        return "opencode"
+    return "other"
+
+
+def safe_error_class(error):
+    for kind, label in (
+        (FixtureError, "fixture-error"),
+        (box.BoxError, "box-error"),
+        (subprocess.TimeoutExpired, "timeout"),
+        (subprocess.CalledProcessError, "subprocess-exit"),
+        (AssertionError, "assertion"),
+        (FileNotFoundError, "missing-file"),
+        (OSError, "os-error"),
+        ((ValueError, KeyError, TypeError), "invalid-data"),
+        ((KeyboardInterrupt, SystemExit), "interrupted"),
+    ):
+        if isinstance(error, kind):
+            return label
+    return "exception"
+
+
+def private_stderr(stream):
+    """Read anonymous stderr without seeking, replaying or altering its owner."""
+    if isinstance(stream, (str, bytes)):
+        return stream[:65536]
+    try:
+        descriptor = stream if isinstance(stream, int) else stream.fileno()
+        if descriptor < 0 or "memfd:" not in os.readlink(f"/proc/self/fd/{descriptor}"):
+            return b""
+        return os.pread(descriptor, 65536, 0)
+    except (AttributeError, OSError, ValueError):
+        return b""
+
+
+def probe_diagnostic(message):
+    """Accept only the probe's exact fixed JSON schema; discard everything else."""
+    if isinstance(message, bytes):
+        message = message.decode("utf-8", errors="replace")
+    if not isinstance(message, str):
+        return None
+    for line in message[:65536].splitlines():
+        try:
+            value = json.loads(line)
+        except ValueError:
+            continue
+        if (
+            isinstance(value, dict)
+            and set(value)
+            == {"stage", "error_class", "native_exit_code", "stderr_category"}
+            and isinstance(value["stage"], str)
+            and value["stage"] in PROBE_STAGES
+            and isinstance(value["error_class"], str)
+            and value["error_class"] in ERROR_CLASSES
+            and isinstance(value["stderr_category"], str)
+            and value["stderr_category"] in STDERR_CATEGORIES
+            and (
+                value["native_exit_code"] is None
+                or type(value["native_exit_code"]) is int
+            )
+        ):
+            return value
+    return None
+
+
+class SourceRetryTrace:
+    """One source-only diagnostic, frozen before the launcher's finally cleanup."""
+
+    def __init__(self):
+        self.stage = "source-validation"
+        self.failure = None
+        self.subprocess_failure = None
+
+        self.steps = []
+        self.cleanup_errors = []
+
+    def __call__(self, stage):
+        require(stage in SOURCE_STAGES, "retry-stage")
+        self.stage = stage
+        self.subprocess_failure = None
+        self.steps.append({"stage": stage, "state": "started"})
+
+    def completed(self, stage=None):
+        for step in reversed(self.steps):
+            if (
+                step["stage"] == (self.stage if stage is None else stage)
+                and step["state"] == "started"
+            ):
+                step["state"] = "completed"
+                break
+
+    def observe(self, command, exit_code, stderr, error_class="subprocess-exit"):
+        self.subprocess_failure = {
+            "stage": self.stage,
+            "program": program_label(command),
+            "exit_code": exit_code if type(exit_code) is int else None,
+            "stderr_category": stderr_category(stderr),
+            "error_class": error_class
+            if isinstance(error_class, str) and error_class in ERROR_CLASSES
+            else "exception",
+        }
+        native = probe_diagnostic(stderr)
+        if native is not None:
+            self.subprocess_failure.update(native)
+
+    def fail(self, error):
+        diagnostic = {
+            "stage": self.stage,
+            "error_class": safe_error_class(error),
+            "program": "other",
+            "exit_code": None,
+            "stderr_category": "empty",
+        }
+        if self.subprocess_failure is not None:
+            diagnostic.update(self.subprocess_failure)
+        for step in reversed(self.steps):
+            if step["stage"] == self.stage and step["state"] == "started":
+                step["state"] = "failed"
+                break
+        if self.failure is None:
+            self.failure = diagnostic
+        elif self.stage in {
+            "container-stop",
+            "history-sync",
+            "provider-shutdown",
+            "evidence-preservation",
+            "host-clean",
+            "private-owner-stop",
+            "permission-cleanup",
+            "source-stop-check",
+        }:
+            if diagnostic not in self.cleanup_errors and diagnostic != self.failure:
+                self.cleanup_errors.append(diagnostic)
+
+    @contextlib.contextmanager
+    def installed(self):
+        actual_run = subprocess.run
+        actual_loading = box.loading_stage
+        actual_owner = workspace_service.Owner.__enter__
+        actual_shutdown = workspace_service.Owner.shutdown
+
+        def observed_run(command, *args, **kwargs):
+            try:
+                result = actual_run(command, *args, **kwargs)
+            except BaseException as error:
+                self.observe(
+                    command,
+                    getattr(error, "returncode", None),
+                    private_stderr(
+                        getattr(error, "stderr", None) or kwargs.get("stderr")
+                    ),
+                    safe_error_class(error),
+                )
+                raise
+            if result.returncode:
+                self.observe(
+                    command,
+                    result.returncode,
+                    private_stderr(
+                        result.stderr
+                        if result.stderr is not None
+                        else kwargs.get("stderr")
+                    ),
+                )
+            else:
+                self.subprocess_failure = None
+            return result
+
+        @contextlib.contextmanager
+        def loading(label, **kwargs):
+            stage = SOURCE_LOADING_STAGES.get(label, "launcher-stage")
+            self(stage)
+            try:
+                with actual_loading(label, **kwargs):
+                    yield
+                self.completed(stage)
+            except BaseException as error:
+                self.fail(error)
+                raise
+
+        def owner_enter(owner):
+            self("private-owner")
+            try:
+                result = actual_owner(owner)
+                self.completed("private-owner")
+                return result
+            except BaseException as error:
+                self.fail(error)
+                raise
+
+        def owner_shutdown(owner):
+            if not owner.ready and hasattr(owner, "error_file"):
+                child = owner.child
+                self.observe(
+                    ["opencode"],
+                    None if child is None else child.poll(),
+                    private_stderr(owner.error_file),
+                )
+                original_error = sys.exc_info()[1]
+                if original_error is not None:
+                    self.fail(original_error)
+            try:
+                return actual_shutdown(owner)
+            except BaseException as error:
+                self("private-owner-stop")
+                self.fail(error)
+                raise
+
+        with (
+            patch.object(subprocess, "run", side_effect=observed_run),
+            patch.object(box, "loading_stage", loading),
+            patch.object(workspace_service.Owner, "__enter__", owner_enter),
+            patch.object(workspace_service.Owner, "shutdown", owner_shutdown),
+        ):
+            yield
+
+
+def validate_source_retry(root):
+    """Read-only checkpoint validation. Never consult/decrypt the old vault."""
+    root = validate_fixture(root)
+
+    def later_evidence(name):
+        return (
+            name
+            in {
+                "result.json",
+                "age-identity.txt",
+                "retired",
+                "recovered-registry",
+                "archive-origin",
+            }
+            or "backup" in name
+            or "restore" in name
+            or name.endswith((".ocbox", ".age"))
+        )
+
+    for entry in root.iterdir():
+        require(not later_evidence(entry.name), "retry-later-evidence")
+    # Never traverse/move the graphroot/runroot. These small synthetic project,
+    # registry and temporary journals suffice for this fixture's later stages.
+    scanned = 0
+    for name in ("temporary", "registry", "source-a", "source-b"):
+        folder = safe_path(root, name, directory=True, optional=name == "source-b")
+        if not folder.exists():
+            continue
+        for child in folder.rglob("*"):
+            scanned += 1
+            require(scanned <= 4096, "retry-evidence-bound")
+            no_symlinks(child)
+            require(not later_evidence(child.name), "retry-later-evidence")
+            require(name != "source-b" or child.name != box.MARKER, "retry-source-only")
+    records = workspace_records(root)
+    require(set(records) == {"source-a"}, "retry-source-only")
+    path, data = records["source-a"]
+    require(
+        data.get("ready") is True
+        and data.get("opencode_version") == NATIVE_VERSION
+        and not any("restore" in name or "backup" in name for name in data),
+        "retry-source-state",
+    )
+    baseline = private_json(root, "seed-baseline.json")
+    ident = baseline.get("info", {}).get("id")
+    require(box.valid_session_id(ident), "retry-seed")
+    box.validate_session_export(baseline, ident)
+    require(
+        compat.native(baseline)
+        and compat.directory(baseline) == data["project"]
+        and baseline["info"].get("permissions") == ASK_RULES
+        and len(baseline["messages"]) == 1
+        and baseline["messages"][0].get("type") == "user"
+        and baseline["messages"][0].get("text") == SEED_TEXT,
+        "retry-seed",
+    )
+    state = private_json(root, box.session_file(path).relative_to(root))
+    evidence = path.parent / "imports-v2" / (ident + ".json")
+    require(
+        state.get("last") == ident
+        and ident in state.get("sessions", [])
+        and state.get("imported_from_host") == {ident: {"backup": str(evidence)}},
+        "retry-verified-import",
+    )
+    safe_path(root, evidence.parent.relative_to(root), directory=True)
+    require(list(evidence.parent.iterdir()) == [evidence], "retry-verified-import")
+    exported = private_json(root, evidence.relative_to(root))
+    verify_v2_progress(exported, baseline)
+    require(
+        exported["messages"] == baseline["messages"]
+        and exported["info"].get("permissions") == ASK_RULES,
+        "retry-verified-import",
+    )
+    mapping = private_json(root, "executables.json")
+    require(
+        isinstance(mapping, dict)
+        and set(mapping) == {"2"}
+        and isinstance(mapping["2"], str),
+        "retry-native-executable",
+    )
+    binary = validate_native_podman(mapping["2"], root)
+    wrapper = safe_path(root, "bin/opencode")
+    previous = wrapper.read_text()
+    first = previous.splitlines()[0] if previous else ""
+    require(
+        first.startswith("#!/")
+        and os.access(wrapper, os.X_OK)
+        and previous == native_wrapper_source(first[2:]),
+        "retry-native-selector",
+    )
+    for name in ("config", "data", "state", "cache"):
+        safe_path(root, "host-" + name + "-2", directory=True)
+    config = private_json(root, "config/opencode/opencode.json")
+    url = (
+        config.get("providers", {})
+        .get("fixture", {})
+        .get("settings", {})
+        .get("baseURL")
+    )
+    match = re.fullmatch(
+        r"http://host\.containers\.internal:([0-9]{1,5})/v1", url or ""
+    )
+    require(
+        match is not None
+        and 0 < int(match[1]) < 65536
+        and config == fixture_config(int(match[1]), root),
+        "retry-source-config",
+    )
+    plugin = "config/opencode/plugins/fixture-global-vault-permission/"
+    require(
+        safe_path(root, plugin + "index.js").read_text() == TOOL_SOURCE
+        and safe_path(root, plugin + "package.json").read_text()
+        == '{"type":"module","main":"index.js"}\n',
+        "retry-source-plugin",
+    )
+    require(
+        private_json(root, "config/oc-box/config.json")
+        == {
+            "default_distro": data["distro"],
+            "pass_env": [PASS_ENV],
+            "auto_update": False,
+        },
+        "retry-source-config",
+    )
+    original = safe_path(root, "data/oc-box/credentials/vault.json")
+    info = original.stat()
+    require(
+        info.st_uid == os.getuid()
+        and not info.st_mode & 0o077
+        and info.st_nlink == 1
+        and info.st_size <= vault.MAX_FILE,
+        "retry-original-vault",
+    )
+    return root, path, data, baseline, binary
+
+
+def source_evidence_digests(root, path):
+    """Immutable ORIGINAL evidence only; live native DB/session state may grow."""
+    files = (
+        "fixture.json",
+        "fixture-ids.json",
+        "seed-baseline.json",
+        "executables.json",
+        "podman-executable.json",
+        "bin/opencode",
+        "bin/podman",
+        "data/oc-box/credentials/vault.json",
+    )
+    result = {name: crypto.digest(safe_path(root, name)) for name in files}
+    for directory in (root / "config", path.parent / "imports-v2", root / "vault"):
+        if directory.exists():
+            safe_path(root, directory.relative_to(root), directory=True)
+            for name, digest in tree_digest(directory).items():
+                result[str(directory.relative_to(root) / name)] = digest
+    return result
+
+
+def prepare_source_retry_selector(root, attempt, binary):
+    # A lost creation-time uv interpreter is not a reason to edit old evidence.
+    interpreter = Path(getattr(sys, "_base_executable", sys.executable)).resolve(
+        strict=True
+    )
+    validate_native_podman(interpreter, root)
+    wrapper = attempt / "bin/opencode"
+    wrapper.parent.mkdir(mode=0o700)
+    with wrapper.open("x") as output:
+        output.write(native_wrapper_source(interpreter, root=root, binary=binary))
+    wrapper.chmod(0o700)
+    return wrapper
+
+
+def verify_stopped_source(root, data):
+    info = verify_owned_resources(root, data, stopped=True)
+    state = info.get("State", {})
+    require(
+        state.get("Running") is False and state.get("Status") in {"stopped", "exited"},
+        "retry-source-state",
+    )
+    return info
+
+
+def retry_source(root, temp_parent=None):
+    """Retry one retained owner/native check, NOT the complete acceptance fixture."""
+    host_guard()
+    root, path, source, baseline, binary = validate_source_retry(root)
+    if temp_parent is not None:
+        temp_parent = existing_directory(temp_parent)
+    before = source_evidence_digests(root, path)
+    directory = safe_path(root, "source-retries", directory=True, optional=True)
+    directory.mkdir(mode=0o700, exist_ok=True)
+    info = directory.stat()
+    require(info.st_uid == os.getuid() and not info.st_mode & 0o077, "retry-directory")
+    attempt = Path(tempfile.mkdtemp(prefix="attempt-", dir=directory))
+    trace = SourceRetryTrace()
+    result = {
+        "status": "failed",
+        "scope": "retained-source-only",
+        "acceptance": "Only retained source owning launch/native checks; no first-ever launch/import, second project, rotation/reload/attach or backup/restore acceptance.",
+        "source_identity": None,
+        "native_version": NATIVE_VERSION,
+        "workspace_ids": {"source-a": source["id"]},
+        "selected_session": baseline["info"]["id"],
+        "checks": [],
+        "evidence_before": before,
+        "steps": trace.steps,
+        "cleanup_errors": trace.cleanup_errors,
+    }
+    server = worker = None
+    resources_verified = False
+    try:
+        result["source_identity"] = get_version_info(APP)
+        with (
+            patch.dict(os.environ, isolated_env(root), clear=True),
+            temporary_location(root, temp_parent),
+            trace.installed(),
+        ):
+            trace("private-store")
+            validate_store(root)
+            trace.completed()
+            result["checks"].append("private-store")
+            trace("native-version")
+            check_native_version(root, binary, "2")
+            trace.completed()
+            result["checks"].append("recorded-native-version")
+            trace("source-resources")
+            verify_stopped_source(root, source)
+            resources_verified = True
+            trace.completed()
+            result["checks"].append("retained-stopped-source")
+            trace("retry-preparation")
+            box.check_backend(feature="launch")
+            vault.crypto()
+            prepare_source_retry_selector(root, attempt, binary)
+            state = {
+                "values": {},
+                "requests": 0,
+                "before": 0,
+                "markers": set(),
+                "errors": 0,
+            }
+            server, worker = make_provider(state)
+            (attempt / "config/opencode").mkdir(parents=True, mode=0o700)
+            (attempt / "config/oc-box").mkdir(mode=0o700)
+            write_json_new(
+                attempt / "config/opencode/opencode.json",
+                fixture_config(server.server_port, attempt),
+            )
+            write_json_new(
+                attempt / "config/oc-box/config.json",
+                private_json(root, "config/oc-box/config.json"),
+            )
+            write_plugin(attempt)
+            password = secrets.token_urlsafe(32)
+            values = {
+                name: "fixture-" + secrets.token_urlsafe(24)
+                for name in (KEY, SIDE, ADDED)
+            }
+            cipher = attempt / "vault/vault.json"
+            require(not cipher.exists(), "retry-companion-vault")
+            actual_start = box.start_container
+
+            def start_retained(current_path, data):
+                # Called under the launcher's lifecycle lock. Refuse recreation
+                # if the retained source disappeared/changed since validation.
+                _, checked_path, checked, _, _ = validate_source_retry(root)
+                require(
+                    current_path == checked_path
+                    and data == checked
+                    and checked["id"] == source["id"],
+                    "retry-source-state",
+                )
+                require(
+                    source_evidence_digests(root, checked_path) == before,
+                    "retry-evidence-changed",
+                )
+                verify_stopped_source(root, checked)
+                return actual_start(current_path, data)
+
+            def owner(command):
+                trace("callback")
+                try:
+                    require("--auto" not in command, "client-autoaccept")
+                    current_path, data = workspace(root, "source-a")
+                    trace("source-resources")
+                    verify_owned_resources(root, data)
+                    trace.completed()
+                    trace("private-owner")
+                    connection = workspace_service.live_connection()
+                    require(connection is not None, "private-owner")
+                    trace.completed()
+                    trace("selected-session")
+                    ident = selected_session(
+                        command, current_path, baseline["info"]["id"]
+                    )
+                    trace.completed()
+                    result["checks"].append("actual-client-selected-session")
+                    trace("retained-transcript")
+                    verify_v2_progress(
+                        box.export_container_session(data, ident), baseline
+                    )
+                    result["checks"].append("retained-seed-before-native")
+                    trace.completed()
+                    run_native(
+                        data,
+                        connection,
+                        ident,
+                        state,
+                        server.server_port,
+                        values,
+                        trace=trace,
+                    )
+                    result["checks"].append("native-tools-events-transcript")
+                    permission_matrix(
+                        request_for(data, connection),
+                        box.container_project(data),
+                        ident,
+                        trace=trace,
+                    )
+                    result["checks"].append("permission-matrix")
+                    trace.completed()
+                    trace("retained-transcript")
+                    verify_v2_progress(
+                        box.export_container_session(data, ident), baseline
+                    )
+                    result["checks"].append("retained-seed-after-native")
+                    trace.completed()
+                    trace.completed("callback")
+                    return 0
+                except BaseException as error:
+                    trace.fail(error)
+                    raise
+
+            with patch.object(vault, "vault_path", return_value=cipher):
+                write_vault(values, password)
+                trace.completed("retry-preparation")
+                # Only the owner gets the new config. Podman still resolves the
+                # UNCHANGED original selector/config/store and original registry.
+                with (
+                    patch.dict(
+                        os.environ,
+                        {
+                            "XDG_CONFIG_HOME": str(attempt / "config"),
+                            "PATH": str(attempt / "bin") + ":" + os.environ["PATH"],
+                        },
+                    ),
+                    patch.object(vault, "hidden", return_value=password) as hidden,
+                    patch.object(box, "run_tui", side_effect=owner),
+                    patch.object(box, "start_container", side_effect=start_retained),
+                ):
+                    trace("owning-launch")
+                    launcher(["start", "--workspace", source["id"]])
+                    trace.completed("owning-launch")
+                    trace("unlock-count")
+                    require(hidden.call_count == 1, "unlock-count")
+                    trace.completed()
+            trace("host-clean")
+            assert_host_clean()
+            trace.completed()
+            trace("source-resources")
+            verify_stopped_source(root, workspace(root, "source-a")[1])
+            trace.completed()
+            result["checks"].append("source-stopped-host-clean")
+            result["status"] = "passed"
+    except BaseException as error:
+        trace.fail(error)
+    finally:
+        if resources_verified:
+            trace("source-stop-check")
+            try:
+                with (
+                    patch.dict(os.environ, isolated_env(root), clear=True),
+                    trace.installed(),
+                ):
+                    validate_fixture(root)
+                    verify_stopped_source(root, workspace(root, "source-a")[1])
+                result["source_container_stopped"] = True
+                trace.completed()
+            except BaseException as error:
+                result["source_container_stopped"] = False
+                trace.fail(error)
+        try:
+            trace("host-clean")
+            assert_host_clean()
+            trace.completed()
+        except BaseException as error:
+            trace.fail(error)
+        if server is not None:
+            trace("provider-shutdown")
+            try:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=3)
+                trace.completed()
+            except BaseException as error:
+                trace.fail(error)
+        try:
+            trace("evidence-preservation")
+            after = source_evidence_digests(root, path)
+            result["evidence_after"] = after
+            result["evidence_unchanged"] = after == before
+            require(after == before, "retry-evidence-changed")
+            trace.completed()
+            result["checks"].append("original-evidence-byte-preserved")
+        except BaseException as error:
+            trace.fail(error)
+            result["evidence_unchanged"] = False
+        if trace.failure is not None:
+            result["status"] = "failed"
+            result["error"] = trace.failure
+        report_path = attempt / "retry-result.json"
+        write_json_new(report_path, result)
+    return report_path, result
+
+
 class FixtureArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         self.exit(
@@ -1940,6 +2839,11 @@ def parser():
         type=Path,
         help="Read-only checkpoints for a retained fixture; no container start, vault unlock or replay",
     )
+    value.add_argument(
+        "--retry-source",
+        type=Path,
+        help="Retry only a retained stopped first source owner/native checks with a new companion encrypted vault; preserve original evidence, refuse later-stage evidence",
+    )
     return value
 
 
@@ -1962,6 +2866,47 @@ def main(argv=None):
 
     try:
         host_guard()
+        if args.retry_source is not None:
+            require(
+                args.cleanup is None
+                and args.diagnose is None
+                and args.work_dir is None
+                and args.opencode_v2 is None
+                and not any(
+                    value == "--distro" or value.startswith("--distro=")
+                    for value in arguments
+                ),
+                "retry-options",
+            )
+            phase = "retry-source-validation"
+            root = validate_fixture(args.retry_source)
+            with private_output():
+                report_path, result = retry_source(root, args.temp_dir)
+            print("Retained root: " + str(root), file=output)
+            print("Report: " + str(report_path), file=output)
+            if result["status"] == "passed":
+                print(
+                    "global-vault fixture: retained-source-only PASSED; not a full fixture/import acceptance",
+                    file=output,
+                )
+                return 0
+            diagnostic = result["error"]
+            print(
+                "global-vault fixture: FAILED scope=retained-source-only stage="
+                + diagnostic["stage"]
+                + " class="
+                + diagnostic["error_class"]
+                + " program="
+                + diagnostic["program"]
+                + " exit_code="
+                + str(diagnostic["exit_code"])
+                + " native_exit_code="
+                + str(diagnostic.get("native_exit_code"))
+                + " stderr_category="
+                + diagnostic["stderr_category"],
+                file=output,
+            )
+            return 1
         if args.diagnose is not None:
             require(
                 args.cleanup is None
@@ -2040,19 +2985,53 @@ def main(argv=None):
         print("Report: " + str(root / "result.json"), file=output)
         return 0
     except BaseException as error:
-        category = (
-            str(error)
-            if isinstance(error, FixtureError)
-            else (
-                "interrupted"
-                if isinstance(error, (KeyboardInterrupt, SystemExit))
+        if args.retry_source is not None:
+            # Refusals before attempt creation have no report. Do not echo even
+            # FixtureError text unless it is one of these fixed public labels.
+            refusals = {
+                "host-only",
+                "retry-options",
+                "retry-later-evidence",
+                "retry-source-only",
+                "retry-source-state",
+                "retry-seed",
+                "retry-verified-import",
+                "retry-evidence-bound",
+                "retry-native-executable",
+                "retry-native-selector",
+                "retry-source-config",
+                "retry-source-plugin",
+                "retry-original-vault",
+                "retry-directory",
+            }
+            category = (
+                str(error)
+                if isinstance(error, FixtureError) and str(error) in refusals
                 else "operation-failed"
             )
-        )
-        print(
-            "global-vault fixture: FAILED phase=" + phase + " category=" + category,
-            file=output,
-        )
+            print(
+                "global-vault fixture: FAILED scope=retained-source-only stage="
+                + phase
+                + " class="
+                + safe_error_class(error)
+                + " exit_code=None stderr_category=empty category="
+                + category,
+                file=output,
+            )
+        else:
+            category = (
+                str(error)
+                if isinstance(error, FixtureError)
+                else (
+                    "interrupted"
+                    if isinstance(error, (KeyboardInterrupt, SystemExit))
+                    else "operation-failed"
+                )
+            )
+            print(
+                "global-vault fixture: FAILED phase=" + phase + " category=" + category,
+                file=output,
+            )
         if root is not None:
             print("Retained root: " + str(root), file=output)
             try:
