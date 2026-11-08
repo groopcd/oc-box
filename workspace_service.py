@@ -685,4 +685,9 @@ def web_parser():
         action="store_true",
         help="print the pairing link without opening a browser",
     )
+    result.add_argument(
+        "--no-vault",
+        action="store_true",
+        help="owning V2 launch only: skip vault use once; refused when attaching",
+    )
     return result

@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import re
@@ -32,6 +33,114 @@ version = load("version_info_docs", APP / "version_info.py")
 
 
 class DocumentationTests(unittest.TestCase):
+    def test_v2_vault_examples_use_native_provider_and_mcp_env_references(self):
+        for name in ("docs/cli.md", "docs/opencode-2.md"):
+            with self.subTest(name=name):
+                text = (APP / name).read_text()
+                examples = [
+                    json.loads(source)
+                    for source in re.findall(r"```json\n(.*?)\n```", text, re.DOTALL)
+                ]
+                config = next(
+                    example
+                    for example in examples
+                    if "providers" in example and "mcp" in example
+                )
+                self.assertEqual(config["$schema"], "https://opencode.ai/config.json")
+                self.assertEqual(
+                    config["providers"]["anthropic"]["settings"]["apiKey"],
+                    "{env:ANTHROPIC_API_KEY}",
+                )
+                self.assertEqual(
+                    config["mcp"]["servers"]["example-tools"]["environment"],
+                    {"MCP_API_KEY": "{env:MCP_API_KEY}"},
+                )
+
+    def test_vault_reference_documents_dynamic_mode_and_invocation_opt_out(self):
+        text = (APP / "docs/cli.md").read_text()
+        self.assertIn("### --credential-mode env|selected|vault\n", text)
+        self.assertIn("--credential-mode vault --clear-credentials", text)
+        section = text.split("### --no-vault\n", 1)[1].split("\n### ", 1)[0]
+        for phrase in (
+            "V2-only",
+            "owning",
+            "without changing the saved workspace policy",
+            "retain their env constraints",
+            "Attached TUI/web clients reject",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, section)
+        guide = (APP / "docs/opencode-2.md").read_text()
+        setup = guide.split(
+            "### Global vault-first from the first project launch\n", 1
+        )[1]
+        setup = setup.split("\n### ", 1)[0]
+        self.assertLess(
+            setup.index("oc-box secrets set ANTHROPIC_API_KEY"),
+            setup.index("oc-box --project ~/devel/demo"),
+        )
+        self.assertNotIn("oc-box credentials", setup)
+        self.assertNotRegex(text + guide, r"(?m)^oc-box\s+--(?:auto|standalone)\b")
+
+    def test_native_autoapproval_is_not_the_container_build_only_default(self):
+        text = " ".join((APP / "docs/opencode-2.md").read_text().split())
+        for phrase in (
+            "inside container Build mode only",
+            "All non-Build/Plan/child rules",
+            "opencode --auto --standalone",
+            "does not override explicit denials",
+            "session.permissions",
+            "oc-box does not enable it or modify normal host `cli.json`",
+            "No new live permission-prompt/reload pass has been accepted yet",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, text.replace("**", ""))
+
+    def test_global_vault_keeps_native_oauth_copying_independent(self):
+        for name in ("docs/cli.md", "docs/opencode-2.md"):
+            text = " ".join((APP / name).read_text().split())
+            with self.subTest(name=name):
+                self.assertIn(
+                    "Native OpenCode saved/OAuth credential refresh and copying "
+                    "remain independent in every credential mode, including global vault mode",
+                    text,
+                )
+                self.assertIn("structured OAuth refresh-token records", text)
+                self.assertIn("`OPENCODE_AUTH_CONTENT`", text)
+                self.assertIn("no plaintext opencode json secrets", text.lower())
+        for name in (
+            "README.md",
+            "SECURITY.md",
+            "CONTRIBUTING.md",
+            "AGENTS.md",
+            "docs/cli.md",
+            "docs/opencode-2.md",
+        ):
+            with self.subTest(name=name):
+                text = " ".join((APP / name).read_text().split())
+                self.assertNotIn("env/auth fallback", text)
+                self.assertNotIn("env-file/OpenCode-auth", text)
+
+    def test_v2_build_helper_preserves_denials_and_child_rules(self):
+        for name in ("docs/cli.md", "docs/opencode-2.md"):
+            text = " ".join((APP / name).read_text().split()).replace("**", "")
+            with self.subTest(name=name):
+                self.assertRegex(text, r"final `ask`(?: decision)? to `allow`")
+                self.assertIn("explicit permission event agent wins", text)
+                self.assertRegex(text, r"never(?: assumes)? the parent's agent")
+                self.assertIn("denials remain denied", text)
+                self.assertIn("Explicit session and mandatory policy denials", text)
+                self.assertIn("never overwrites a deny passed to it", text)
+                self.assertIn("including their configured denies, as before", text)
+                self.assertIn("existing final Build", text)
+                self.assertIn("Session permission arrays are not overwritten", text)
+                self.assertIn("Plan/child requests", text)
+                self.assertIn("elicitation prompts", text)
+                self.assertIn("`OPENCODE_CONFIG_CONTENT` overlay", text)
+                self.assertIn("managed policy still wins", text)
+                self.assertIn("No `--auto`", text)
+                self.assertIn("native evaluator/import/reload", text)
+
     def test_every_parser_command_and_option_has_its_own_reference_entry(self):
         text = (APP / "docs/cli.md").read_text()
         headings = re.findall(r"^### (.+)$", text, re.MULTILINE)

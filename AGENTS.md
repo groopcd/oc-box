@@ -33,7 +33,11 @@ portable: use example project paths and synthetic session IDs, not local data.
 - `workspace_identity.py`: generic Linux VFS directory identity, capability-based
   persistent handles and strict fallback; shared by lifecycle/status checks.
 - `vault.py` / `credentials.py`: optional encrypted host vault and names-only
-  per-workspace credential policy. Legacy env-file forwarding remains default.
+  per-workspace credential policy. V1 retains legacy env-file defaults; V2 without
+  an explicit policy is global vault-first, with env-file fallback only when no
+  vault is present. Native OpenCode saved/OAuth credential refresh/copy remains
+  independent in every mode. Explicit env/selected policies remain intentional
+  overrides.
 - `secret_prompt.py`: controlling-TTY masked input, explicit value reveal, safe
   terminal restoration. Never reveal passphrases or accept non-TTY fallback.
 - `backups.py` / `backup_crypto.py` / `backup_archive.py`: host-only encrypted
@@ -127,6 +131,8 @@ and upstream V1 migration from a retained snapshot. V2 lacks upstream native LSP
 The 1.5 V2 release has accepted disposable host-terminal validation: TUI/web/
 persistent-shell coexistence, detach/reattach, stop/resume, updated plugins,
 selected-vault provider/shell/MCP delivery, rotation and attach without unlock.
+Those accepted host probes do not validate the new V2 global vault default or
+`--no-vault`; unit/native offline checks are not a new live Podman lifecycle pass.
 A disk-backed fixture passed full/portable restore and reset; a targeted retry
 passed exact V1 history preservation, inactive-major database-byte preservation
 and V2 return with retained native messages plus synthetic tool execution. The
@@ -166,9 +172,28 @@ Host-session import and mapped NPU access have been exercised on Tumbleweed.
 A native warm plugin-initialization probe completed in under one second.
 New mounts use `:z`, and cold plugin resolution is timed before opening the TUI.
 
-Container launches give Build mode allow-all OpenCode permissions through a
-generated private config/plugin. Keep Plan/subagent rules and plain host
-OpenCode permissions unchanged.
+The existing final Build-agent wildcard overrides copied ordinary global/Build
+tool permission rules, including their configured denies, as before; native
+smoke deliberately checks those inherited denies becoming allow. The new V2
+hook changes only final asks for the resolved actual Build agent (`ask` to
+`allow`), never a deny passed to it. Preserve explicit session/mandatory-policy
+denials, native unknown-agent ask/deny outcomes, managed rules after the private overlay
+and all non-Build/Plan/child rules. Explicit event agent wins;
+omitted agent resolves current session then native configured default, never
+parent. Never overwrite session permission arrays or leak Build allowances into
+Plan/child rules. Question/MCP elicitation prompts are not permission asks.
+The final private OPENCODE_CONFIG_CONTENT overlay reenables only the generated
+Build helper against lower-priority project plugin removals; managed policy
+still wins. Do not assume an external agent transform runs after all config.
+Keep V1 behavior, Plan/subagent rules and plain host permissions unchanged.
+Do not enable blanket native V2 client autoaccept or modify normal host
+`cli.json` to fix a Build-only prompt regression. Native `--auto` and TUI
+`session.permissions: autoaccept` approve asks, not explicit denials; plain-host
+`--auto` still respects configured denies. Optional
+plain-host `opencode --auto --standalone` is a user choice, not an oc-box command
+or vault consumer. No `--auto`/client autoaccept flag is added to oc-box clients.
+New native evaluator/import/reload fixtures do not establish live host acceptance;
+no new live permission-prompt/reload pass is accepted yet.
 
 Do not treat a lost marker or changed filesystem device/inode as permission to
 create a replacement workspace. Look up registered canonical paths, direct the
@@ -202,7 +227,31 @@ workspaces and source checkouts, and do not self-update from inside a container.
 Vault values/passphrases never belong in argv, logs, project files, registry
 metadata, plaintext temporary files, or host os.environ. Keep the optional crypto
 dependency lazy for default installs. Maintenance and informational commands
-never unlock. Wrong/missing selected credentials must abort before reset deletion.
+never unlock. V2 global mode selects all current encrypted entries on each new
+owner, including the first launch; never save an automatic name list. It replaces
+ambient suffix/pass_env forwarding when a vault is present. Preserve supported
+native OpenCode saved/OAuth credential refresh and copying in every mode: global
+mode governs env-variable entries, not structured OAuth records.
+Suppress legacy ambient token/env overrides, including OPENCODE_AUTH_CONTENT,
+in configured global mode; retain native auth integration in every mode. Never
+import plaintext opencode.json secrets or rewrite them into the vault.
+Existing copied/container config/auth secrets remain independent; mode changes
+do not revoke credentials.
+Empty initialized vaults unlock and deliver no vault entries; absent vaults give
+env-file compatibility fallback
+and setup guidance, never automatic installation/config or JSON-secret import.
+Wrong passphrases, corrupt configured vaults, missing crypto and wrong/missing
+selected credentials must abort before setup/reset deletion, never silently
+fall back. Saved vault mode on V1 uses legacy env forwarding without global
+unlock; explicit old env/selected vault selections retain their behavior.
+Vault mode refuses nonempty per-name lists; switching selections requires
+`--credential-mode vault --clear-credentials`. V2-only `--no-vault` is ephemeral
+for one owning start/reset/web invocation, skips vault entries while retaining
+explicit env constraints, and is refused on attach and unrelated commands.
+Attach never unlocks/refreshes. The vault/passphrase are never mounted; delivered
+values remain readable by the agent/tools in private container environments.
+Plain host `opencode --standalone` uses native host env/auth, not the oc-box vault;
+oc-box continues to own its private foreground V2 workspace service.
 Secret values may be deliberately revealed only in the interactive host prompt;
 start every field masked, keep passphrases masked, and document recording risk.
 Vault/backup new-password minimums default to 8 characters, configurable separately
@@ -219,3 +268,7 @@ changes, isolated from real workspace state. This fixture does not test restored
 real-project model inference.
 Restores retain original internal project paths via `container_project`; host
 destinations/physical identities and resource IDs are fresh, not DB path edits.
+Backups retain workspace credential modes/policies, but exclude the global host
+vault and outside env files. Restored default/global V2 uses the restoring host's
+vault, not old host privileges; persisted workspace config/auth may still contain
+secrets. Protect encrypted host vault data separately.

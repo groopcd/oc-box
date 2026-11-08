@@ -30,7 +30,7 @@ _oc_box()
     local command='' action='' word skip=0 positional=0 ended=0 i
     local commands='start stop sync reset repair terminal web upgrade secrets credentials backup backup-info restore purge list distros status doctor completion'
     local selectors='--project --workspace'
-    local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args'
+    local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault'
     local help='-h --help' options
     COMPREPLY=()
     (( COMP_CWORD > 0 )) && prev=${COMP_WORDS[COMP_CWORD-1]}
@@ -91,7 +91,7 @@ _oc_box()
             --feature)
                 _oc_box_words 'launch maintenance history backup backup-info restore vault github-upgrade bootstrap storage overlay manuals docs-build'; return 0 ;;
             --auto-update) _oc_box_words 'on off'; return 0 ;;
-            --credential-mode) _oc_box_words 'env selected'; return 0 ;;
+            --credential-mode) _oc_box_words 'env selected vault'; return 0 ;;
             --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port)
                 return 0 ;;
         esac
@@ -99,11 +99,11 @@ _oc_box()
 
     case $command in
         start) options="$help $selectors $launch" ;;
-        reset) options="$help $selectors --distro --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args" ;;
+        reset) options="$help $selectors --distro --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault" ;;
         sync) options="$help $selectors" ;;
         stop|repair) options="$help $selectors" ;;
         terminal) options="$help $selectors --maintenance" ;;
-        web) options="$help $selectors --port --no-open" ;;
+        web) options="$help $selectors --port --no-open --no-vault" ;;
         status) options="$help $selectors --json" ;;
         purge) options="$help $selectors --delete-sessions --all -y --yes" ;;
         credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;

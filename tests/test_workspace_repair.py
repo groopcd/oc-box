@@ -18,6 +18,9 @@ spec.loader.exec_module(box)
 
 class WorkspaceRepairTests(unittest.TestCase):
     def setUp(self):
+        release = patch.object(box, "detect_opencode_release", return_value="1.19.5")
+        release.start()
+        self.addCleanup(release.stop)
         self.tmp = tempfile.TemporaryDirectory(prefix="oc-box-repair-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)

@@ -28,7 +28,7 @@ Do not run host lifecycle tests from inside the project's running container.
 For OpenCode 2.x compatibility, keep a separate native binary and run
 `python3 -B tests/smoke_v2.py --opencode /path/to/opencode-v2`. The 1.5 release
 retains 1.x support and has accepted disposable host-terminal lifecycle,
-credentials, backup/restore, reset and downgrade validation.
+selected-vault credentials, backup/restore, reset and downgrade validation.
 See `docs/opencode-2.md` for upstream differences and the private-service env
 strategy. Never test against real host service/config/data from this container.
 `plugin_bridge.js` adapts only its enumerated V1 hooks. The offline Node fixture
@@ -49,7 +49,7 @@ directories, PDF/history transforms and model-variant request rewriting.
 Native V1/V2 integration runs continuously on master, feature branches and pull
 requests; package checks assert the compatibility guide, V2 runtime resources and
 offline JS fixtures ship through their intended distribution channels. Accepted
-host TUI/web/shell, plugin and vault/backup/reset/downgrade tests are recorded in
+host TUI/web/shell, plugin and selected-vault/backup/reset/downgrade tests are recorded in
 `docs/opencode-2.md`. Repeat relevant host checks before releasing lifecycle or
 credential changes. Use `tools/test_v2_podman.py` for host acceptance; setup and
 precise scope are in `docs/opencode-2.md`. It uses isolated synthetic resources,
@@ -63,6 +63,74 @@ transition after restore/reset. Native V1 may update project/access metadata on
 read; compare exact messages/parts after reopening while keeping the inactive
 major's database bytes unchanged. Earlier restore/reset evidence is not rerun
 or relabeled by that targeted retry.
+
+### V2 global-vault acceptance (pending)
+
+V1 keeps legacy env-file defaults. V2 without an explicit policy is global
+vault-first; saved env/selected policies remain intentional overrides. Unit and
+native offline checks for the new global default and `--no-vault` must be
+distinguished from the **earlier accepted selected-vault host probes**. No new
+live global-vault Podman lifecycle pass has been accepted yet. Before release,
+validate on a host with isolated synthetic resources, never real vault/workspaces:
+
+- Initialize/populate a vault before the first project launch using the
+  `oc-box[vault]` extra or curl `--with-vault`; no project registration/selection
+  should be required for all current entries to reach provider/MCP/shell.
+- Verify dynamic values/additions/removals on the next new owner, with no frozen
+  automatic name lists. Configured global mode replaces ambient suffix/pass_env
+  forwarding, including legacy `OPENCODE_AUTH_CONTENT` overrides. Native
+  OpenCode saved/OAuth credential refresh and copying must remain independent
+  in every mode, including global vault mode: env entries do not replace
+  structured OAuth refresh-token records. Verify a vault with only a synthetic
+  search key does not disable saved provider auth. Never import or rewrite
+  plaintext OpenCode JSON secrets. Use published V2
+  `providers.PROVIDER.settings` / `mcp.servers.NAME.environment` references,
+  never literal secret values in JSON.
+- Check absent-vault env-file fallback and guidance, empty-vault unlock
+  with no entries, and fail-closed wrong-passphrase/corrupt/missing-crypto errors
+  before setup/reset deletion. Never install crypto, edit config or import JSON
+  secrets automatically.
+- Check explicit env/selected overrides, vault-mode refusal of nonempty name
+  lists and `--credential-mode vault --clear-credentials` conversion. Runtime V1
+  with saved vault mode must use legacy env without global unlock; old explicit
+  selections must still work.
+- Check one-owning-start/reset/web `--no-vault` without policy persistence,
+  retaining explicit env constraints. Attach rejects it and never unlocks or
+  refreshes; info/maintenance/sync/backup and other unrelated commands reject it.
+- Verify values remain only in host memory/private container environments,
+  never argv, host os.environ, service config, registry, or mounted vault files.
+  Backups retain policy but exclude global host vault/outside env files;
+  restored default/global V2 uses the restoring host vault, not old privileges.
+  Persisted workspace auth/config and agent-written credentials remain sensitive.
+
+Plain host `opencode --standalone` uses native host env/auth, not the oc-box
+vault; do not add an oc-box standalone command or replace its private foreground
+V2 owner service. Source env files only for one-off compatibility, not the primary
+V2 workflow. Report unit/native offline and live host results separately.
+
+Keep the existing final Build-agent wildcard override of copied ordinary
+global/Build tool rules, including their configured denies, as before. Native
+smoke deliberately checks inherited ordinary Build/global denies becoming allow.
+The new V2 hook must change only final Build asks (`ask` to `allow`), never
+overwrite a deny passed to it, and preserve explicit session/mandatory-policy
+denials, native unknown-agent ask/deny outcomes, managed rules after the private overlay
+and all non-Build/Plan/child rules. Explicit event agent wins; omitted agent
+resolves current session then native configured default, never parent.
+Keep Plan/child rules and session
+permission arrays intact: overwriting those arrays leaks Build allowances into
+other requests. Question and MCP elicitation prompts are not permission asks.
+V1 behavior remains unchanged. The final private `OPENCODE_CONFIG_CONTENT`
+overlay reenables only the generated Build helper against lower-priority project
+plugin removals; managed policy still wins. Do not assume an external agent
+transform runs after all config sources. Cover native evaluator, import and
+reload boundaries in offline fixtures; they are not a new live host pass.
+
+Use no host `cli.json` changes, `--auto` on oc-box clients or blanket all-agent
+client autoaccept. Native V2 `--auto` and TUI
+`session.permissions: autoaccept` approve asks, not explicit denials (plain-host
+`--auto` still respects configured denies); an optional
+one-off host `opencode --auto --standalone` is a user choice, not the oc-box
+default. New live permission-prompt/reload validation has not been accepted.
 
 ## Plain host plugin migration
 
@@ -96,6 +164,9 @@ including context, equals syntax, paths with spaces, and installation. Lint with
 `bash -n completions/oc-box` and `shellcheck --shell=bash completions/oc-box`.
 Completion must never invoke lifecycle commands, a secret prompt, or provider
 queries; open-ended identifiers are left for the user to enter.
+Include `vault` as a credential-mode choice and `--no-vault` only in owning
+start/reset/web contexts (including implicit start). Static completion does not
+probe the OpenCode major or active service; runtime validation rejects V1/attach.
 
 ## Distro dependency checks
 
@@ -191,11 +262,14 @@ Original contributions are licensed GPL-3.0-or-later. Retain LICENSE and NOTICE.
 ## Python packages and PyPI releases
 
 The wheel contains a namespaced `oc_box` package, runtime helper scripts,
-prebuilt manuals, license/notice, and immutable source metadata. Its default
-env workflow has no third-party runtime Python dependencies. The optional
-`vault` extra adds maintained cryptography for Scrypt/AES-GCM; full CI/security
+prebuilt manuals, license/notice, and immutable source metadata. V1 legacy env
+and V2 absent-vault env-file compatibility need no third-party runtime Python
+dependencies. Native OpenCode saved/OAuth credential refresh/copy remains
+independent in every mode, whether a vault exists or not. The optional `vault`
+extra adds maintained cryptography for Scrypt/AES-GCM; full CI/security
 tests install that extra in an isolated environment, while plain installs still
-test that no crypto dependency is required to launch. GitHub source/curl installations stay
+test absent-vault compatibility without crypto. A configured vault must fail
+closed when crypto is missing. GitHub source/curl installations stay
 supported in parallel. Do not make a pip-managed launcher install through the
 GitHub self-updater or write a global wrapper as an installation side effect.
 

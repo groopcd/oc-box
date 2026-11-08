@@ -101,12 +101,11 @@ def validate_name(name):
 
 
 def validate_value(value):
-    if (
-        not isinstance(value, str)
-        or not value
-        or "\0" in value
-        or len(value.encode()) > MAX_SECRET
-    ):
+    try:
+        size = len(value.encode("utf-8")) if isinstance(value, str) else 0
+    except UnicodeError:
+        size = MAX_SECRET + 1
+    if not isinstance(value, str) or not value or "\0" in value or size > MAX_SECRET:
         raise VaultError(
             "Secret value must be nonempty UTF-8 text without NUL and at most 64 KiB."
         )
@@ -115,6 +114,46 @@ def validate_value(value):
 def vault_path():
     base = Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
     return base.expanduser().absolute() / "oc-box/credentials/vault.json"
+
+
+def is_present(*, path=None):
+    """Check metadata only, without creating files, reading ciphertext or crypto.
+
+    Unsafe existing paths fail closed rather than masquerading as an absent
+    vault. Selection rechecks the private directory/file under the vault lock.
+    """
+    target = vault_path() if path is None else Path(path)
+    target = target.absolute()
+    try:
+        for component in (*reversed(target.parents), target):
+            metadata = component.lstat()
+            if stat.S_ISLNK(metadata.st_mode):
+                raise VaultError("Vault path must not contain symbolic links.")
+            if component != target and not stat.S_ISDIR(metadata.st_mode):
+                raise VaultError("Vault path parents must be directories.")
+            if component == target.parent and (
+                metadata.st_uid != os.getuid() or metadata.st_mode & 0o077
+            ):
+                raise VaultError(
+                    "Vault directory must be owned by your user with permissions 0700. Fix the host directory before continuing."
+                )
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.getuid()
+            or metadata.st_mode & 0o077
+            or metadata.st_nlink != 1
+            or metadata.st_size > MAX_FILE
+        ):
+            raise VaultError(
+                "Vault must be a private regular file (0600), owned by your user, with no extra hard links."
+            )
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise VaultError(
+            "Unable to inspect vault safely; fix the host vault path before continuing."
+        ) from exc
+    return True
 
 
 def crypto():
@@ -378,6 +417,20 @@ def write_encrypted(path, values, passphrase):
             os.close(directory)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def select_all(*, path=None):
+    """Unlock every current entry, keeping names encrypted outside this context."""
+    target = vault_path() if path is None else Path(path)
+    try:
+        with locked(target):
+            envelope = read_envelope(target)
+            crypto()
+            return unlock(envelope, hidden("Vault passphrase: "))
+    except OSError as exc:
+        raise VaultError(
+            "Unable to read vault safely; fix the host vault path before continuing."
+        ) from exc
 
 
 def select(names, *, path=None):

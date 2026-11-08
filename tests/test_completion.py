@@ -99,6 +99,15 @@ fi
         self.assertEqual(
             set(self.complete("doctor", "--feature", "")), set(dependencies.FEATURES)
         )
+        credential_modes = next(
+            action.choices
+            for action in box.parser()._actions
+            if action.dest == "credential_mode"
+        )
+        self.assertEqual(
+            set(self.complete("credentials", "--credential-mode", "")),
+            set(credential_modes),
+        )
         actions = next(
             action.choices
             for action in box.secrets_parser()._actions
@@ -128,6 +137,50 @@ fi
         )
         self.assertEqual(self.complete("completion", "ba"), ["bash"])
         self.assertEqual(self.complete("completion", "bash", "ba"), [])
+
+    def test_no_vault_is_offered_only_for_owning_launch_commands(self):
+        self.assertEqual(self.complete("--no-v"), ["--no-vault"])
+        for command in ("start", "reset", "web"):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--no-v"), ["--no-vault"])
+        for command in (
+            "stop",
+            "sync",
+            "repair",
+            "terminal",
+            "upgrade",
+            "secrets",
+            "credentials",
+            "backup",
+            "backup-info",
+            "restore",
+            "purge",
+            "list",
+            "distros",
+            "status",
+            "doctor",
+            "completion",
+            "--status",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--no-v"), [])
+
+    def test_vault_mode_completes_with_separate_and_equals_values(self):
+        self.assertEqual(
+            self.complete("credentials", "--credential-mode", ""),
+            ["env", "selected", "vault"],
+        )
+        for words in (
+            ("credentials", "--credential-mode", "va"),
+            ("credentials", "--credential-mode", "=", "va"),
+            ("credentials", "--credential-mode=va"),
+        ):
+            with self.subTest(words=words):
+                self.assertEqual(self.complete(*words), ["vault"])
+        self.assertEqual(
+            self.complete("credentials", "--credential-mode=va", breaks=" "),
+            ["--credential-mode=vault"],
+        )
 
     def test_separate_and_equals_option_values_complete_with_default_word_breaks(self):
         for words in (

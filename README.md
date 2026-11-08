@@ -62,7 +62,10 @@ oc-box doctor --feature backup-info --json
 ```
 
 Missing optional dependencies identify the affected feature without disabling
-normal launches. Missing age on Tumbleweed suggests
+unrelated commands. A configured V2 vault requires crypto support and fails
+closed if it is missing; without a vault, env-file compatibility launches remain
+available. Native OpenCode saved/OAuth credential refresh and copying remain
+independent in every mode. Missing age on Tumbleweed suggests
 `sudo zypper refresh && sudo zypper install age`; Ubuntu/Debian use apt, Fedora
 dnf, Arch pacman, and Alpine apk. Commands are for the OS running doctor, not
 the workspace image. See the [host dependency table](docs/cli.md#host-dependency-installation)
@@ -89,6 +92,12 @@ pipx install oc-box
 pipx ensurepath
 oc-box --version
 ```
+
+For the recommended V2 global vault workflow from your **first project launch**,
+install `pipx install 'oc-box[vault]'` or `uv tool install 'oc-box[vault]'` instead.
+The GitHub installer accepts `sh -s -- --with-vault`. Then initialize/populate the
+vault before launching the project, as shown below; no per-project registration
+is required. Standard installs do not automatically install the extra.
 
 Alternatively, use uv's tool manager:
 
@@ -168,6 +177,9 @@ audits and ports known plugins to direct V2 implementations in your normal host
 configuration, retiring obsolete V1 workarounds. A separate compatibility profile
 is still optional. These are source-checkout tools, not installed oc-box commands;
 real host sandbox enforcement requires its documented acceptance checks.
+Plain host `opencode --standalone` uses the host's normal environment/auth and
+does not access the oc-box vault. It is not an oc-box flag; oc-box continues to
+own a private foreground V2 service per active workspace.
 
 While a V2 workspace is running, open its same session from another host terminal:
 
@@ -239,10 +251,28 @@ not signed release artifacts; see [SECURITY.md](SECURITY.md).
 
 ## Quick start
 
+For OpenCode 2.x, install vault support using the extra above (or curl
+`--with-vault`), then store credentials on the host **before the first launch**:
+
 ```sh
+oc-box secrets init
+oc-box secrets set ANTHROPIC_API_KEY
+oc-box secrets set MCP_API_KEY
 mkdir -p ~/devel/demo
 oc-box --project ~/devel/demo
 ```
+
+Values/passphrases are entered only in masked host-terminal prompts. V2 without
+an explicit workspace credential policy uses **all current global vault entries**
+on each new owning start/reset/import/web; no project registration or selection
+is needed. Use provider/MCP `{env:NAME}` references, never literal secret values
+in JSON; see the [published V2 configuration examples](docs/opencode-2.md#provider-and-mcp-references-not-json-secrets).
+Without a vault, the same project launch retains env-file fallback and offers
+concise setup guidance, without automatic installation
+or config/JSON-secret import. An initialized empty vault unlocks and delivers no
+entries. V1's legacy env-file default is unchanged. Native OpenCode saved/OAuth
+credential refresh/copy remains independent in every credential mode, including
+global vault mode. Explicit workspace env/selected policies remain overrides.
 
 On Tumbleweed the default image is
 `registry.opensuse.org/opensuse/tumbleweed:latest`. Initial setup installs
@@ -268,10 +298,12 @@ oc-box --status                     # CPU, RAM, storage, state, limits, sessions
 oc-box --status --project ~/devel/demo --json
 oc-box distros                      # Supported images and host default
 oc-box stop --project ~/devel/demo
-oc-box terminal --project ~/devel/demo # Maintenance shell, without OpenCode
+oc-box terminal --project ~/devel/demo # V2 session shell; V1 maintenance shell
+oc-box terminal --maintenance --project ~/devel/demo # Clean maintenance shell
 oc-box sync --project ~/devel/demo   # Retry host history sync after a crash
 oc-box repair --project ~/devel/demo # Accept a verified directory identity change
 oc-box reset --project ~/devel/demo --cpus 8 --memory 16g
+oc-box start --project ~/devel/demo --no-vault # One owning V2 compatibility launch
 oc-box purge --project ~/devel/demo  # Remove environment; retain source files
 oc-box --about
 oc-box upgrade --check
@@ -287,7 +319,8 @@ or stop containers and can run while OpenCode is active.
 | --- | --- | --- | --- |
 | Exit or `stop` | Kept | Kept | Kept, stopped |
 | `sync` | Kept | Kept; host archive refreshed | Kept, stopped |
-| `terminal` | Kept | Kept; no history sync | Kept, prior run state restored |
+| `terminal` (V1/maintenance) | Kept | Kept; no history sync | Kept, prior run state restored |
+| `terminal` (V2 attach) | Kept | Shared current session | Kept; owner controls stop |
 | `reset` | Kept | Kept | Rebuilt |
 | `purge` | Kept | Deleted | Deleted |
 | `purge --all` | **Deleted** | **Deleted** | Deleted |
@@ -307,9 +340,9 @@ the project directory. Shared image caches and unrelated resources remain.
 After exiting the workspace's OpenCode client, enter its existing container:
 
 ```sh
-oc-box terminal --project ~/devel/demo
+oc-box terminal --maintenance --project ~/devel/demo
 # Or, from another directory:
-oc-box terminal --workspace WORKSPACE_ID
+oc-box terminal --maintenance --workspace WORKSPACE_ID
 ```
 
 This opens a clean interactive shell at the project path, with the same mounts,
@@ -417,32 +450,65 @@ are copied into private storage at startup. MCPs, formatters, and language
 servers run natively inside the container. Host-only executables must be
 installed there too. Changes to host configuration apply on the next launch.
 
-Build mode allows all OpenCode tool permissions inside oc-box; Plan and
-subagent rules are unchanged. The existing Bubblewrap plugin is disabled for
+On V2, ordinary copied Build/global tool permission rules are overridden by the
+existing final Build-agent wildcard, including their configured denies, as
+before. Final permission asks for the actual container Build agent are
+auto-allowed without prompting, but explicit session/mandatory-policy denials
+and managed-rule denials applying after the private overlay remain denied.
+Unknown-agent requests retain native ask/deny outcomes and are never treated as
+Build. All non-Build/Plan/child rules and V1 behavior are unchanged.
+The existing Bubblewrap plugin is disabled for
 the container launch. HTTP service endpoints using localhost in global config
 are mapped to `host.containers.internal`, including the host Lemonade endpoint.
 Plain host OpenCode retains its normal configuration and permissions.
 
-API-key/token environment variables are forwarded, and additional names can be
-listed in `~/.config/oc-box/config.json` under `pass_env`. Credentials remain
-available to the container's processes and copied config/auth may contain
-secrets. Only forward credentials you intend the agent to use. Forwarded secret
-values are not embedded in Podman's command-line arguments.
+The V2 helper changes only a final `ask` to `allow`, never a deny passed to it:
+an explicit event agent wins,
+otherwise it resolves the current session's agent and then the native configured
+default, never the parent's agent. A Build parent does not grant allowances to
+Plan/child requests. Session permission arrays are not overwritten; question
+and MCP elicitation prompts remain separate and may still need input. The final
+private `OPENCODE_CONFIG_CONTENT` overlay reenables only the generated Build
+helper against lower-priority project plugin removals; managed policy still wins.
+oc-box clients receive no `--auto` or client-wide autoaccept setting. New native
+evaluator/import/reload fixtures are offline checks, not accepted live host
+permission validation.
+
+If you explicitly want native V2 ask autoapproval for a one-off **host** launch,
+`opencode --auto --standalone` is an optional choice, using normal host env/auth
+and not the oc-box vault. It approves asks, not explicit denials, including plain
+host configured denies. The already-
+running TUI equivalent is Ctrl+P → Open settings → Sessions → Permissions →
+autoaccept (`cli.json` `session.permissions`); that broader preference can
+persist and is not enabled by oc-box. Do not use a global all-agent client
+setting as a substitute for oc-box's container Build-only default. New live
+permission-prompt/reload validation remains pending.
+
+V2 without an explicit credential policy is global vault-first: when the host
+vault is present, all current entries replace ambient automatic token/API-key
+and `pass_env` forwarding, including legacy `OPENCODE_AUTH_CONTENT` overrides.
+Ordinary native OpenCode saved/OAuth credential refresh and copying continue in
+every mode: vault env entries do not replace structured OAuth refresh-token
+records. V1, an explicit env override, or a V2 launch without a
+vault retain legacy env forwarding; selected mode restricts credential names.
+Delivered credentials remain readable by the agent/tools, and copied config/auth
+may already contain secrets. Global use deliberately exposes every stored entry
+to each default V2 workspace; use selected mode when a project should receive
+less. Forwarded vault values never enter Podman argv, host os.environ, config or
+registry. The vault/passphrase are never mounted into the container.
 
 Read [SECURITY.md](SECURITY.md) for the trust boundary and reporting guidance.
 Rootless containers share the host kernel, have network access, and do not have
 a disk quota. Snapshots/archives are not backups against disk or volume loss.
 
-## Optional encrypted vault and workspace credential selection
+## Global V2 vault and explicit workspace credential overrides
 
-**Your existing env-file workflow remains the default.** Continue to source
-your file and launch normally; no vault, new password prompt, or crypto
-dependency is required:
-
-```sh
-source /path/to/private/file.env
-oc-box --project ~/devel/demo
-```
+**V2 defaults to global vault-first without an explicit workspace policy.** This
+includes existing V2 workspaces with no policy; saved env/selected policies remain
+intentional overrides. V1 retains its legacy env-file default. Global mode uses
+all current entries on each normal new owner, including the first launch, rather
+than saving a frozen automatic name list. Additions/removals and updated values
+apply on the next new owner, not to attached TUI/web/session-shell clients.
 
 For encrypted storage on the host, enable the optional vault support:
 
@@ -467,17 +533,33 @@ the host needs a controlling terminal and normal private Unix file permissions,
 including under WSL. Do not put the vault on an exposed project mount or a
 Windows-shared path that cannot enforce those permissions.
 
-Create the vault and store secrets through interactive masked prompts (names
-only in argv):
+Create the vault and store secrets **before your first V2 project launch** through
+interactive masked prompts (names only in argv). Global use needs no per-project
+registration, exit/configure/relaunch step, or selection command:
 
 ```sh
 oc-box secrets init
+oc-box secrets set ANTHROPIC_API_KEY
+oc-box secrets set MCP_API_KEY
 oc-box secrets set PERSONAL_GITHUB_TOKEN
 oc-box secrets set BRAVE_API_KEY
 oc-box secrets list            # Unlocks; prints names, never values
 oc-box secrets remove OLD_TOKEN
 oc-box secrets passwd          # Change the vault passphrase
 ```
+
+When no vault exists, default V2 launches keep the env-file fallback and concise
+setup guidance. They do not automatically
+install crypto, create a vault, modify config, or import JSON secrets. An empty
+initialized vault still unlocks and delivers no vault entries, with guidance to
+run `oc-box secrets set NAME`. A present corrupt vault, wrong passphrase, or
+missing crypto support aborts before container setup/reset deletion, without
+silently falling back. OpenCode's native saved/OAuth credential refresh and
+copying remain independent in every mode, including global vault mode. A vault
+containing only a search API key does not disable an existing Copilot OAuth
+account. Vault env entries do not replace structured OAuth refresh-token records,
+and no plaintext OpenCode JSON secrets are imported or rewritten. Existing
+copied/container auth/config values remain independent; no revocation is implied.
 
 Typing/pasting shows `*` characters and a live character count. At **secret
 value** and confirmation prompts, press **Ctrl+R** to switch between masked and
@@ -517,30 +599,38 @@ with `oc-box secrets init --min-passphrase-length 8`,
 `oc-box backup ... --min-passphrase-length 8`. These rules apply to new/changed
 passwords; existing vaults/backups still unlock with their original passwords.
 
-Select only the credentials an **existing** workspace needs, after exiting its
-active launcher. These commands do not start/reset a container or read values:
+As an intentional override, select only the credentials an **existing** workspace
+needs, after exiting its active launcher. These commands do not start/reset a
+container or read values:
 
 ```sh
 oc-box credentials --project ~/devel/demo
 oc-box credentials --project ~/devel/demo --credential-mode selected \
-  --env-secret GITHUB_TOKEN \
-  --vault-secret PERSONAL_GITHUB_TOKEN --vault-secret BRAVE_API_KEY
+  --clear-credentials --vault-secret PERSONAL_GITHUB_TOKEN --vault-secret BRAVE_API_KEY
 oc-box --project ~/devel/demo
 ```
 
 Selected mode replaces automatic `_TOKEN`/`_API_KEY` and custom `pass_env`
 forwarding with those explicit names. It permits mixing sourced environment
 credentials and selected vault entries, but not selecting the same name from
-both. Normal OpenCode launch/reset prompts once to unlock selected vault names;
-the passphrase and vault file never enter the container. A missing selected env
+both. Normal owning start/reset/import/web prompts once to unlock selected vault
+names; the passphrase and vault file never enter the container. A missing selected env
 variable, wrong passphrase, or missing vault entry aborts before container setup
-or reset deletion. `terminal`, list/status, repair, stop, upgrade, and standalone
+or reset deletion. `terminal`, list/status, repair, stop, upgrade, and explicit
 history sync never unlock the vault. Delivered credentials are still environment
 variables accessible to OpenCode, its tools, and other permitted processes.
 
 Selections persist in the host registry as **names only**, independent of the
 project and vault. Repeating options appends names; replace them with
-`--clear-credentials`. To return to the original behavior:
+`--clear-credentials`. The accepted modes are `env`, `selected`, and `vault`.
+Vault mode uses all current entries, refuses nonempty per-name selections, and
+does not save an automatic list. To switch an old selection back to global V2:
+
+```sh
+oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
+```
+
+For a deliberate persistent legacy env override:
 
 ```sh
 oc-box credentials --project ~/devel/demo --credential-mode env --clear-credentials
@@ -554,6 +644,25 @@ processes, source files, session history, swap, or backups. The vault protects
 storage before delivery; it does not hide a delivered key from the agent.
 See the [complete credential reference](docs/cli.md#credentials) and
 [security notes](SECURITY.md) before migrating sensitive credentials.
+
+V1 with saved `vault` mode returns to legacy env forwarding without unlocking
+all-global entries; explicit old env/selected vault selections still work as
+before. V2-only `--no-vault` skips vault entries for **one owning start/reset/web
+invocation**, without saving policy. Global mode uses legacy env forwarding for
+that invocation; explicit env/selected modes retain their env constraints.
+Attached clients reject it and never unlock/refresh. Information, maintenance,
+sync, backup/restore, credential management and other unrelated commands reject
+the flag too. For one-off env-file compatibility only:
+
+```sh
+. ~/.config/provider-credentials.env
+oc-box --project ~/devel/demo --no-vault
+# Or plain host OpenCode, which never consumes the oc-box vault:
+opencode --standalone
+```
+
+Sourcing a file is not the recommended primary V2 workflow. The next normal
+oc-box owner uses its saved/default policy again.
 
 ## Backup and restore
 
@@ -580,11 +689,14 @@ archive and image bytes stream directly into encryption; only ciphertext is
 temporarily staged. Native age public recipients can replace the passphrase for
 unattended backups using `--recipient age1...`; restore/info use the matching
 private `--identity FILE`. The host-wide credential vault is **not included**;
-back up its encrypted file separately and retain its own passphrase.
+back up its encrypted file separately and retain its own passphrase. Outside
+env files are excluded too; files inside the project are ordinary project data.
 
 Restore is non-overwriting and creates fresh workspace/container/volume IDs.
 It preserves conversation IDs, full live database/subagent history, source/Git
-edits, private home, and resource/credential-name selections. It keeps the old
+edits, private home, and resource/credential modes and names-only policies. A
+restored default/global V2 workspace uses the restoring host's current vault,
+not the original vault or old host privileges. It keeps the old
 **in-container** project/home paths and maps the new host project there, rather
 than rewriting database paths. Thus the host directory may move while the agent
 still sees the original internal path. It leaves the new container stopped;
@@ -639,6 +751,10 @@ warm resume, host-session import, MCP connection, and mapped NPU access have
 been exercised. The automated mainline test uses temporary databases and local
 model/MCP/LSP/formatter fixtures; it does not prove Podman isolation or certify
 every distro/runtime/device combination.
+The earlier selected-vault host provider/MCP/shell, rotation and attach probes
+are accepted; the new global-vault defaults and `--no-vault` still require live
+host/rootless-Podman acceptance. New unit/native offline checks must not be
+reported as a real global-vault lifecycle pass.
 
 ```sh
 uv run --no-project --with cryptography python -B -m unittest discover -s tests -v

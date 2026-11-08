@@ -287,6 +287,7 @@ class UpdateTests(unittest.TestCase):
                     side_effect=updater.UpdateError("network offline"),
                 ),
                 patch.object(box, "check_backend"),
+                patch.object(box, "detect_opencode_release", return_value="1.19.5"),
                 patch.object(box, "launch", return_value=0) as launch,
                 contextlib.redirect_stderr(io.StringIO()) as errors,
             ):

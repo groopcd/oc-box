@@ -980,10 +980,10 @@ def private_host_env(path, data):
     return env
 
 
-def container_build_config(release="1.0.0"):
+def container_build_config(release="1.0.0", *, home=None):
     """Override only Build permissions in the container's final config scope."""
     if opencode_compat.major(release) == 2:
-        return {
+        config = {
             "$schema": "https://opencode.ai/config.json",
             "agents": {
                 "build": {
@@ -991,6 +991,14 @@ def container_build_config(release="1.0.0"):
                 }
             },
         }
+        if home is not None:
+            # Project plugin removals are lower priority than this generated
+            # private content scope. Re-enable only our Build helper, never
+            # unrelated integrations or plugins blocked by managed policy.
+            config["plugins"] = [
+                {"package": home + "/.config/opencode/plugins/oc-box-build-permissions"}
+            ]
+        return config
     return {
         "$schema": "https://opencode.ai/config.json",
         "agent": {"build": {"permission": "allow"}},
@@ -998,9 +1006,9 @@ def container_build_config(release="1.0.0"):
 
 
 def container_build_plugin(release="1.0.0"):
-    # Config sources deep-merge permission objects, so a later wildcard alone
-    # can leave inherited tool-specific denials after it. Normalize Build only
-    # after mainline has finished loading project configs and agent files.
+    # Only Build is overridden. V2 applies its final configuration after external
+    # transforms; the private content scope supplies the final agent wildcard,
+    # while this hook handles inherited session asks without changing their rules.
     if opencode_compat.major(release) == 2:
         return """export default {
   id: "oc-box.build-permissions",
@@ -1010,8 +1018,18 @@ def container_build_plugin(release="1.0.0"):
         agent.permissions = [{ action: "*", resource: "*", effect: "allow" }]
       })
     })
-    await ctx.permission.hook("evaluate", event => {
-      if (event.agent === "build") event.effect = "allow"
+    await ctx.permission.hook("evaluate", async event => {
+      if (event.effect !== "ask") return
+      let agentID = event.agent
+      if (agentID === undefined) {
+        const session = await ctx.session.get({ sessionID: event.sessionID })
+        agentID = session.agent
+        if (agentID === undefined) {
+          const { data: agents } = await ctx.agent.list()
+          agentID = agents.find(agent => agent.mode !== "subagent" && !agent.hidden)?.id
+        }
+      }
+      if (agentID === "build") event.effect = "allow"
     })
   },
 }
@@ -1045,7 +1063,10 @@ def container_env(data):
     # Pass provider/MCP credentials and explicit settings, never host PATH,
     # loader settings, Unix agent/engine sockets, or sandbox proxy variables.
     forwarded = {}
+    global_vault = credentials.effective_policy(data)["mode"] == "vault"
     for key, value in os.environ.items():
+        if global_vault and key not in ("COLORTERM", "LANG", "LEMONADE_BASE_URL"):
+            continue
         if (
             key.endswith(("_API_KEY", "_TOKEN"))
             or key
@@ -1065,7 +1086,7 @@ def container_env(data):
         Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
         / "oc-box/config.json"
     )
-    if settings.is_file():
+    if not global_vault and settings.is_file():
         extra = read_json(settings).get("pass_env", [])
         for key in extra:
             if not isinstance(key, str) or not re.fullmatch(r"[A-Z_][A-Z_0-9]*", key):
@@ -1075,7 +1096,7 @@ def container_env(data):
     env.update(credentials.forwarded(data, forwarded))
     # Apply after project/agent files, without lifting Plan or subagent rules.
     env["OPENCODE_CONFIG_CONTENT"] = json.dumps(
-        container_build_config(data.get("opencode_version", "1.0.0"))
+        container_build_config(data.get("opencode_version", "1.0.0"), home=home)
     )
     if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
         env["OPENCODE_DB"] = "oc-box-v2.db"
@@ -1605,10 +1626,12 @@ def prepare_runtime(path, data, version):
         Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
         / "opencode/auth.json"
     )
-    auth_content = os.environ.get("OPENCODE_AUTH_CONTENT") or (
-        auth.read_text() if auth.is_file() else None
-    )
-    if auth_content and not v2:
+    auth_content = None
+    if not v2:
+        auth_content = os.environ.get("OPENCODE_AUTH_CONTENT") or (
+            auth.read_text() if auth.is_file() else None
+        )
+    if auth_content:
         json.loads(auth_content)
         target = "import os,pathlib,sys; p=pathlib.Path(os.environ['XDG_DATA_HOME'])/'opencode/auth.json'; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(sys.stdin.read()); p.chmod(0o600)"
         run(
@@ -1618,7 +1641,7 @@ def prepare_runtime(path, data, version):
             timeout=30,
         )
     mcp_auth = auth.with_name("mcp-auth.json")
-    if mcp_auth.is_file() and not v2:
+    if not v2 and mcp_auth.is_file():
         target = "import os,pathlib,sys; p=pathlib.Path(os.environ['XDG_DATA_HOME'])/'opencode/mcp-auth.json'; p.parent.mkdir(parents=True,exist_ok=True); p.write_text(sys.stdin.read()); p.chmod(0o600)"
         run(
             exec_command(data, ["python3", "-c", target]),
@@ -1640,7 +1663,11 @@ def prepare_runtime(path, data, version):
         entries = json.loads(exported.stdout)
         if not isinstance(entries, list):
             raise BoxError("Invalid OpenCode 2.x credential export.")
-        if os.environ.get("OPENCODE_AUTH_CONTENT"):
+        # Native saved/OAuth credentials remain independent of env forwarding.
+        # A vault-first launch must not reintroduce an ambient legacy env blob.
+        if credentials.effective_policy(data)["mode"] != "vault" and os.environ.get(
+            "OPENCODE_AUTH_CONTENT"
+        ):
             overrides = opencode_compat.legacy_credentials(
                 os.environ["OPENCODE_AUTH_CONTENT"]
             )
@@ -2169,21 +2196,54 @@ def parse_jsonc(text):
     return value
 
 
+@contextlib.contextmanager
+def launch_credentials(data, args):
+    """Resolve automatic credentials against this launch's native CLI major.
+
+    Keep the probed version in ephemeral launch arguments, not credential
+    metadata. An owning launch can nest this context without another unlock;
+    attach and informational paths never enter it.
+    """
+    active = credentials.is_active(data)
+    version = getattr(args, "_opencode_release", None)
+    if not active and (
+        "credentials" not in data
+        or credentials.policy(data)["mode"] == "vault"
+        or getattr(args, "no_vault", False)
+    ):
+        if version is None:
+            with loading_stage("Checking OpenCode version"):
+                version = detect_opencode_release()
+            args._opencode_release = version
+    try:
+        with credentials.unlocked(
+            data, version=version, no_vault=getattr(args, "no_vault", False)
+        ) as values:
+            yield values
+    finally:
+        if not active and hasattr(args, "_opencode_release"):
+            del args._opencode_release
+
+
 def launch(path, data, args):
     # Keep plaintext values out of persisted workspace metadata, os.environ,
     # and informational/maintenance/sync invocations. Launch unlock is local.
     try:
         if args.command == "sync":
+            if getattr(args, "no_vault", False):
+                raise BoxError("--no-vault is not a history-sync option.")
             return launch_environment(path, data, args)
-        with credentials.unlocked(data):
+        with launch_credentials(data, args):
             return launch_environment(path, data, args)
     except vault.VaultError as exc:
         raise BoxError(str(exc)) from exc
 
 
 def launch_environment(path, data, args):
-    with loading_stage("Checking OpenCode version"):
-        version = detect_opencode_release()
+    version = getattr(args, "_opencode_release", None)
+    if version is None:
+        with loading_stage("Checking OpenCode version"):
+            version = detect_opencode_release()
     if data.get("opencode_version") != version:
         data["opencode_version"] = version
         atomic_json(path, data)
@@ -2565,8 +2625,13 @@ def parser():
     result.add_argument("--model", help="OpenCode provider/model")
     result.add_argument(
         "--credential-mode",
-        choices=("env", "selected"),
-        help="with credentials, select legacy env forwarding or explicit per-workspace credentials",
+        choices=("env", "selected", "vault"),
+        help="with credentials, select env forwarding, explicit names, or the V2 global vault",
+    )
+    result.add_argument(
+        "--no-vault",
+        action="store_true",
+        help="V2 owning start/reset/web only: skip vault use for this launch without changing saved policy",
     )
     result.add_argument(
         "--env-secret",
@@ -2737,6 +2802,10 @@ def credentials_command(args):
         print(
             "Default env-file workflow: automatic token/key and configured pass_env forwarding remains enabled."
         )
+    elif selected["mode"] == "vault":
+        print(
+            "V2 global vault: all current entries are used at the next owning launch; their names and values remain encrypted here. V1 keeps legacy env forwarding."
+        )
     print(
         "No secret values were read. Changes apply to the next normal launch, not terminal; copied config/auth and existing container secrets are independent."
     )
@@ -2786,7 +2855,9 @@ def main(argv=None):
         )
         args = parser().parse_args(["start", *selectors])
         args.command, args.port, args.no_open = "web", web.port, web.no_open
-        if opencode_compat.major(detect_opencode_release()) != 2:
+        args.no_vault = web.no_vault
+        args._opencode_release = detect_opencode_release()
+        if opencode_compat.major(args._opencode_release) != 2:
             raise BoxError(
                 "'oc-box web' requires OpenCode 2.x; use the native TUI with 1.x."
             )
@@ -2799,6 +2870,16 @@ def main(argv=None):
         )
     if args.maintenance and args.command != "terminal":
         raise BoxError("--maintenance applies only to terminal.")
+    if args.no_vault and (
+        args.command not in ("start", "reset", "web")
+        or args.status
+        or args.about
+        or args.version
+        or args.json
+    ):
+        raise BoxError(
+            "--no-vault applies only to an owning OpenCode 2.x start/reset/web launch."
+        )
     if args.command == "completion":
         raise BoxError("Use 'oc-box completion bash' with no workspace options.")
     if args.command == "doctor":
@@ -3026,6 +3107,8 @@ def main(argv=None):
             raise BoxError("Invalid host session ID.")
     if args.distro:
         args.distro = distro_name(args.distro)
+    if args.pids_limit is not None and args.pids_limit < 32:
+        raise BoxError("--pids-limit must be at least 32.")
     if args.command == "distros":
         default = host_default()
         for name, (image, _) in DISTROS.items():
@@ -3117,6 +3200,13 @@ def main(argv=None):
         if args.resume:
             raise BoxError("No workspace/session exists here to resume.")
         project = validate_project(args.project)
+        if args.no_vault:
+            version = getattr(args, "_opencode_release", None)
+            if version is None:
+                version = detect_opencode_release()
+            if opencode_compat.major(version) != 2:
+                raise BoxError("--no-vault requires native OpenCode 2.x.")
+            args._opencode_release = version
         path, data = create_workspace(
             project, distro_name(args.distro or host_default())
         )
@@ -3183,6 +3273,7 @@ def main(argv=None):
                     args.podman_arg,
                     args.clear_devices,
                     args.clear_podman_args,
+                    args.no_vault,
                 )
             ):
                 raise BoxError(
@@ -3209,6 +3300,10 @@ def main(argv=None):
         if args.command == "web" and workspace_service.controller_running(
             sys.modules[__name__], data
         ):
+            if args.no_vault:
+                raise BoxError(
+                    "An attached web client cannot change vault use; exit the owning launcher before a --no-vault launch."
+                )
             with workspace_service.attach(
                 sys.modules[__name__], path, data
             ) as connection:
@@ -3220,11 +3315,11 @@ def main(argv=None):
             raise BoxError(
                 "This workspace restore did not finish. Do not start it; inspect backup recovery staging and use plain purge by ID before retrying into a new destination."
             )
-        if args.command == "reset":
-            # Validate/unlock before reset removes the old OS. Wrong/missing
-            # credentials must never destroy an otherwise working environment.
+        if args.command in ("start", "reset", "web"):
+            # Validate/unlock before setup or reset changes the environment.
+            # Wrong/missing credentials must never destroy the old OS.
             try:
-                launch_context.enter_context(credentials.unlocked(data))
+                launch_context.enter_context(launch_credentials(data, args))
             except vault.VaultError as exc:
                 raise BoxError(str(exc)) from exc
         if args.command in ("start", "reset", "sync", "terminal", "web"):
@@ -3252,7 +3347,15 @@ def main(argv=None):
                     )
                 # Identity and credential validation take precedence; validate
                 # CLI compatibility before deleting a working container.
-                detect_opencode_release()
+                if (
+                    getattr(args, "_opencode_release", None) is not None
+                    and detect_opencode_release() != args._opencode_release
+                ):
+                    raise BoxError(
+                        "The host OpenCode release changed during credential preparation; reset was not performed. Retry with the intended executable."
+                    )
+                if getattr(args, "_opencode_release", None) is None:
+                    args._opencode_release = detect_opencode_release()
                 check_resource_controllers(data)
                 remove_resources(data, keep_home=True)
                 data["ready"] = False

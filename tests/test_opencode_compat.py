@@ -112,6 +112,9 @@ class OpenCodeCompatibilityTests(unittest.TestCase):
         self.assertIn("os.execvpe", " ".join(command))
 
     def test_production_v2_environment_bridge_clears_old_container_credentials(self):
+        # This tests the explicit compatibility env workflow. Default V2 vault
+        # forwarding is exercised inside an owner context in the global suite.
+        self.data["credentials"] = {"mode": "env", "env": [], "vault": []}
         with patch.dict(
             os.environ, {"SYNTHETIC_TOKEN": "new-synthetic", "PATH": os.environ["PATH"]}
         ):

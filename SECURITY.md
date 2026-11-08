@@ -14,9 +14,13 @@ guarantee against kernel/runtime vulnerabilities.
 - Global OpenCode config, plugins, MCP definitions, and auth are copied at
   startup. All execute inside the container, where they may use supplied
   credentials and the network. Audit copied integrations as executable software.
-- Variables ending in `_API_KEY` or `_TOKEN` and configured `pass_env` values
-  are available inside the container. Do not forward unrelated credentials.
-  Credential values are passed through the Podman client's environment, not its
+- Default V2 workspaces without an explicit credential policy receive **all
+  current host vault entries** on each new owner when the vault is present.
+  This replaces ambient suffix/pass_env forwarding. Every default V2 project
+  can therefore read every stored entry; select a narrower workspace policy when
+  needed. V1, explicit env mode and no-vault compatibility retain legacy
+  `_API_KEY`/`_TOKEN` and configured `pass_env` forwarding; selected mode limits
+  credential names. Values pass through the Podman client's environment, not its
   command line; this is not protection from same-user process inspection.
 - Host services and LAN endpoints are reachable over the network. An API with
   powerful operations remains powerful even without a host filesystem mount.
@@ -29,7 +33,33 @@ socket, SSH agent, desktop sockets, host PID/network namespaces, and host device
 are not mounted/exposed. The default container has resource ceilings but no disk
 quota, so project, image, and volume growth can exhaust host disk space.
 
-## Optional host credential vault
+The existing final Build-agent wildcard overrides copied ordinary global/Build
+tool permission rules, including configured denies, as before. The new V2
+helper changes only final `ask` to `allow` for **actual container Build asks**;
+it never overwrites a deny passed to it. Explicit session/mandatory-policy
+denials and managed-rule denials applying after the private overlay remain denied.
+Unknown-agent requests retain native ask/deny outcomes and are never treated as
+Build. All non-Build/Plan/child rules remain intact.
+An explicit event agent wins; otherwise resolve the current session, then native
+configured default, never the parent's agent. Plan/child requests retain their
+own rules, and session permission arrays are not overwritten. Question and MCP
+elicitation prompts are not permission asks. V1 behavior and plain host
+permissions remain unchanged.
+
+The final private `OPENCODE_CONFIG_CONTENT` overlay reenables only the generated
+Build helper against lower-priority project plugin removals; managed policy
+still wins. This does not rely on external agent transforms running after all
+config. No `--auto` or client-wide autoaccept is added to oc-box clients. The new
+native evaluator/import/reload fixture is offline, not live host acceptance.
+Native V2 `--auto` / TUI `session.permissions: autoaccept` are broader optional
+user choices that approve asks, not explicit denials (including configured denies
+on the plain host). oc-box does not enable
+client-wide autoaccept or modify normal host `cli.json`. A one-off host
+`opencode --auto --standalone` still runs against normal host env/auth, never the
+oc-box vault; treat its host authority separately. No new live permission-prompt/
+reload pass has been accepted yet.
+
+## Global V2 host credential vault and policy overrides
 
 With OpenCode 2.x, workspace clients use native private
 workspace-owned stdio servers with per-launch environment snapshots; clients
@@ -54,9 +84,32 @@ terminating the shell; its environment/state belong to the running service.
 The connecting host's provider/vault values are not forwarded. Maintenance
 shells retain their separate allowlisted environment and exclusive lock.
 
-The original env-file workflow remains the default: no vault initialization,
-password prompt, or crypto dependency is introduced by an ordinary upgrade.
-The opt-in vault uses cryptography's Scrypt KDF and AES-256-GCM; it does not
+V1's original env-file default is unchanged. V2 without an explicit credential
+policy is global vault-first, including existing workspaces with no policy.
+Existing explicit env/selected policies remain intentional overrides. When the
+host vault is present, every normal owning start/reset/import/web unlocks once
+and supplies all current entries, including the first project launch. Selection
+is dynamic; names are not frozen into an automatic registry list. New values,
+additions and removals apply on the next new owner, never an attached client.
+
+Without a vault, V2 keeps env-file fallback and concise setup
+guidance; no crypto installation, vault creation, config edits or JSON-secret
+imports happen automatically. An initialized empty vault unlocks but supplies no
+entries and suggests `oc-box secrets set NAME`. A present corrupt vault, wrong
+passphrase, or missing crypto support aborts before setup/reset deletion, never
+silently falling back. Install the `oc-box[vault]` extra or curl `--with-vault`
+and use `secrets init/set` before the first V2 project launch for global delivery;
+no per-project registration is needed. Native OpenCode saved/OAuth credential
+refresh and copying remain independent in every credential mode, including
+global vault mode. Global vault delivery concerns env-variable entries, not
+structured OAuth refresh-token records. Configured global mode suppresses legacy
+ambient token/env overrides, including `OPENCODE_AUTH_CONTENT`, but retains
+ordinary supported native auth copying. No plaintext OpenCode JSON secrets are
+imported or rewritten; existing copied/container auth/config secrets remain
+independent and no revocation is implied. Configuration should contain
+published V2 provider/MCP `{env:NAME}` references, not secret values.
+
+The encrypted vault uses cryptography's Scrypt KDF and AES-256-GCM; it does not
 implement cryptographic primitives itself. Credentials are entered only on a
 controlling host terminal with kernel echo disabled; a custom masked editor
 provides a character count. There is no passphrase argument,
@@ -89,15 +142,31 @@ nonce, authenticated format metadata, and fsynced atomic ciphertext replacement.
 No plaintext file is created; names are encrypted along with values. Scrypt's
 fixed n=131072/r=8/p=1 parameters require approximately 128 MiB memory per KDF.
 
-Each workspace stores only its selected env/vault names and `env`/`selected`
-mode in the private host registry. Selected mode replaces auto suffix/pass_env
+Explicit workspace policy stores mode (`env`, `selected`, or `vault`) and selected
+env/vault names only in the private host registry. Global vault mode saves no
+automatic entry-name list and refuses nonempty per-name selections; switch an
+existing selection with `--credential-mode vault --clear-credentials`.
+Selected mode replaces auto suffix/pass_env
 forwarding with explicit names. Runtime/loader/shell control names cannot be
-selected as credentials. The vault is unlocked only for a normal workspace
-launch/reset/import, once per launch; missing names or failed unlock prevent
-setup or reset destruction. No vault prompt is made for terminal, information,
-standalone sync, or upgrade operations. The passphrase/vault file never enter
-the container. Decrypted values are passed as process environment values,
-not Podman command arguments or saved registry/config data.
+credentials, including global vault entries. Missing selected names or failed
+unlock prevent setup or reset destruction. No vault prompt is made for attached
+clients, terminal, information, explicit sync, backup/info/restore or upgrade
+operations. The passphrase/vault file never enter or mount into the container.
+Decrypted values stay in launcher memory and private container process
+environments, never host os.environ, Podman argv or saved registry/config data.
+
+V2-only `--no-vault` is an ephemeral opt-out for one owning start/reset/web
+invocation; it does not save policy. Global mode uses legacy env forwarding for
+that invocation, while explicit env/selected modes skip vault entries but retain
+their env constraints. It is refused on attached clients, V1 and all unrelated
+info/maintenance/sync/backup/credential commands. Attach never unlocks/refreshes.
+Runtime V1 with saved vault mode uses legacy env forwarding without all-global
+unlock; explicit old env/selected vault selections work as before.
+
+Plain host `opencode --standalone` uses normal host environment/auth and does not
+read the oc-box vault. It is not an oc-box flag or a replacement for oc-box's
+private foreground V2 owner service. Env-file sourcing is a one-off compatibility
+option, not the primary V2 vault workflow.
 
 This is **at-rest protection and reduced forwarding, not credential hiding
 from an unrestricted agent**. Delivered secrets remain readable inside the
@@ -118,10 +187,14 @@ project or assume Windows-shared mounts have the same permission behavior.
 GitHub installs can opt into private crypto wheels using `--with-vault`, staged
 before launcher activation without modifying system/user site-packages. Python
 tool installs use the `vault` extra; default installs remain dependency-free.
+The earlier selected-vault host probes are accepted; global defaults and
+`--no-vault` have no accepted new live Podman lifecycle pass. Unit/native offline
+checks do not establish that host acceptance.
 
 ## Host-side operations
 
-`oc-box terminal` opens a maintenance shell without copying auth/config or
+V1 `oc-box terminal` and V2 `oc-box terminal --maintenance` open a maintenance
+shell without copying auth/config or
 forwarding host tokens, API keys, custom `pass_env`, proxies, or agent sockets.
 Only allowlisted Podman runtime/storage environment names reach the host client.
 The shell uses `env -i`, skips startup profiles, and disables history persistence;
@@ -190,7 +263,13 @@ storage. No provider credentials are forwarded, vault unlocked, container code
 executed, or OpenCode config/auth refreshed for backup/info/restore. The complete
 project, private home, OS, and registry may contain credentials, so backups and their
 decryption keys must be handled as sensitive data. The separate host vault is
-not included; its encrypted file needs an independent backup.
+not included; its encrypted file needs an independent backup. Outside host env
+files are excluded, while env files inside the project are project data.
+Workspace credential modes/policies are preserved, with selections as names
+only. Restored default/global V2 uses the restoring host's current vault, not the
+old host vault or privileges. A full workspace backup may contain config/auth
+values already persisted inside it; forwarded credentials are readable by the
+agent/tools and may have been saved independently of the vault transport.
 
 New backup passwords use the masked controlling-host-terminal editor, followed
 by standard age encryption. The validated password is supplied through a private

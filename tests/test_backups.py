@@ -15,6 +15,7 @@ from unittest.mock import patch
 import backups
 import backup_crypto as crypto
 import oc_box as box
+import vault
 
 
 @unittest.skipUnless(
@@ -267,6 +268,70 @@ class WorkspaceBackupTests(unittest.TestCase):
             b"synthetic-v2-db-bytes",
         )
         self.assertTrue((home / ".local/share/opencode/opencode.db").exists())
+
+    def test_credential_modes_roundtrip_without_vault_probe_or_unlock(self):
+        policies = (
+            ("2.2.6", {"mode": "env", "env": [], "vault": []}),
+            ("2.2.6", {"mode": "selected", "env": [], "vault": ["EXAMPLE_TOKEN"]}),
+            ("2.2.6", {"mode": "vault", "env": [], "vault": []}),
+            ("2.2.6", None),
+            ("1.19.5", {"mode": "vault", "env": [], "vault": []}),
+        )
+        with (
+            patch.object(
+                vault,
+                "is_present",
+                side_effect=AssertionError("Backups must not probe the host vault"),
+            ),
+            patch.object(backups.os, "geteuid", return_value=1000),
+            patch.object(
+                vault,
+                "select_all",
+                side_effect=AssertionError("Backups must not unlock the host vault"),
+            ),
+            patch.object(
+                vault,
+                "select",
+                side_effect=AssertionError(
+                    "Backups must not select host vault entries"
+                ),
+            ),
+            patch.object(
+                box,
+                "detect_opencode_release",
+                side_effect=AssertionError("Backup mode selection is read-only"),
+            ),
+        ):
+            for index, (release, policy) in enumerate(policies):
+                for portable in (False, True):
+                    with self.subTest(
+                        release=release, policy=policy, portable=portable
+                    ):
+                        self.data["opencode_version"] = release
+                        if policy is None:
+                            self.data.pop("credentials", None)
+                            expected = {"mode": "vault", "env": [], "vault": []}
+                        else:
+                            self.data["credentials"] = policy
+                            expected = policy
+                        box.atomic_json(self.path, self.data)
+                        self.archive = self.root / f"policy-{index}-{portable}.ocbox"
+                        self.backup(portable=portable)
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            backups.cli(
+                                box,
+                                [
+                                    "backup-info",
+                                    str(self.archive),
+                                    "--identity",
+                                    str(self.identity),
+                                ],
+                            )
+                        _, restored = self.restore(
+                            self.root / f"policy-restored-{index}-{portable}"
+                        )
+                        self.assertEqual(restored["credentials"], expected)
+                        self.assertEqual(restored["opencode_version"], release)
 
     def test_full_real_encrypted_roundtrip_preserves_project_home_and_session_ids(self):
         before = {

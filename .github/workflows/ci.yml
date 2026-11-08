@@ -64,3 +64,7 @@ jobs:
           python3 -B tests/smoke_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_host_plugins.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_native_host_port.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -m venv "$RUNNER_TEMP/global-vault-tests"
+          "$RUNNER_TEMP/global-vault-tests/bin/python" -m pip install 'cryptography>=44'
+          "$RUNNER_TEMP/global-vault-tests/bin/python" -B tests/smoke_global_vault.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          "$RUNNER_TEMP/global-vault-tests/bin/python" -B tests/smoke_build_permissions_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
