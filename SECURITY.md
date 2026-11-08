@@ -56,8 +56,9 @@ user choices that approve asks, not explicit denials (including configured denie
 on the plain host). oc-box does not enable
 client-wide autoaccept or modify normal host `cli.json`. A one-off host
 `opencode --auto --standalone` still runs against normal host env/auth, never the
-oc-box vault; treat its host authority separately. No new live permission-prompt/
-reload pass has been accepted yet.
+oc-box vault; treat its host authority separately. The separate scripted
+global-vault host fixture has passed native tool/permission/reload checks, not
+interactive TUI permission-prompt/reload acceptance or security certification.
 
 ## Global V2 host credential vault and policy overrides
 

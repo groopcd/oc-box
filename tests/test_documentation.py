@@ -33,7 +33,7 @@ version = load("version_info_docs", APP / "version_info.py")
 
 
 class DocumentationTests(unittest.TestCase):
-    def test_global_vault_host_procedure_is_isolated_and_not_a_live_pass(self):
+    def test_global_vault_host_procedure_is_isolated_with_scoped_acceptance(self):
         for name in ("docs/cli.md", "docs/opencode-2.md", "CONTRIBUTING.md"):
             text = (APP / name).read_text()
             normalized = " ".join(text.split())
@@ -45,7 +45,18 @@ class DocumentationTests(unittest.TestCase):
                 self.assertIn("scripted", normalized)
                 self.assertIn("host", normalized)
         guide = " ".join((APP / "docs/opencode-2.md").read_text().split())
-        self.assertIn("No live result for this fixture has been accepted yet", guide)
+        for phrase in (
+            "Accepted full scripted host result",
+            "1.5.38+g0611104",
+            "061110489f946682a40106175ae49a1c668da94b",
+            "not interactive TUI acceptance",
+            "not entry-removal or every vault error/override edge case",
+            "Earlier failed fixtures and source-only retries remain failure/diagnostic evidence",
+        ):
+            with self.subTest(phrase=phrase):
+                self.assertIn(phrase, guide.replace("**", ""))
+        self.assertNotIn("No live result for this fixture has been accepted yet", guide)
+        self.assertNotIn("`--no-vault` still need live", guide)
         self.assertIn("does not install/upgrade your launcher", guide)
         self.assertIn("normal provider accounts", guide)
         self.assertIn("never runs global prune", guide)
@@ -108,7 +119,7 @@ class DocumentationTests(unittest.TestCase):
             "does not override explicit denials",
             "session.permissions",
             "oc-box does not enable it or modify normal host `cli.json`",
-            "No new live permission-prompt/reload pass has been accepted yet",
+            "no new interactive TUI permission-prompt/reload pass has been accepted",
         ):
             with self.subTest(phrase=phrase):
                 self.assertIn(phrase, text.replace("**", ""))

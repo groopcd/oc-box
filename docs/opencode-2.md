@@ -2,9 +2,10 @@
 
 Available in oc-box 1.5.x, with retained OpenCode 1.x support. Validation uses
 unmodified OpenCode 1.19.5 and 2.2.6, plus accepted disposable Linux host/rootless
-Podman lifecycle tests for the earlier selected-vault workflow. The new global
-vault default and `--no-vault` still need live host/rootless-Podman acceptance;
-unit/native offline checks are not proof of that lifecycle. Upgrade through your
+Podman lifecycle tests for selected-vault and default global-vault workflows.
+The separate scripted global-vault fixture passed first launch/import, new-owner
+rotation/additions, `--no-vault` and full backup/restore; see its exact scope below.
+Unit/native offline checks are not proof of that lifecycle. Upgrade through your
 normal GitHub/curl, uv, pipx or virtual-environment package channel to get the
 1.5 release.
 
@@ -273,8 +274,9 @@ Open settings → Sessions → Permissions → autoaccept** is the equivalent us
 choice (`cli.json` `session.permissions`). That preference is a broader client
 setting, not a Build-only policy; enabling it can persist in that TUI's global
 CLI settings. oc-box does not enable it or modify normal host `cli.json`; it is
-not the recommended fix for a container Build-default regression. No new live
-permission-prompt/reload pass has been accepted yet. See the published
+not the recommended fix for a container Build-default regression. The scripted
+host fixture covers native tool/permission and reload checks, but no new
+interactive TUI permission-prompt/reload pass has been accepted. See the published
 [native commands](https://opencode.ai/docs/cli/commands) and
 [CLI settings](https://opencode.ai/docs/cli/config) references.
 
@@ -413,9 +415,11 @@ Accepted host testing for the 1.5 release covers:
   retained V1 database bytes unchanged.
 
 These accepted selected-vault host probes do **not** cover the new global vault
-default, first-launch delivery, dynamic addition/removal or `--no-vault`.
-Global-vault unit/native offline coverage must be reported separately; no live
-new global-vault Podman lifecycle pass has been accepted yet.
+default, first-launch delivery, dynamic addition/removal or `--no-vault` by
+themselves. A separate full global-vault host run is now accepted, as recorded
+below; it covers first launch, rotation/addition on new owners and `--no-vault`,
+not entry-removal or every vault error/override edge case. Unit/native offline
+coverage remains distinct from both host results.
 
 The initial full-image load hit a quota in system temporary storage. A fresh
 disk-backed run completed restore/reset, then a targeted retry completed the
@@ -565,9 +569,30 @@ verified imported seed explicitly for its native checks. Both IDs are reported
 and the other session's messages are checked unchanged. It never hand-edits
 the selection file; normal launcher history refresh may update its last-used ID.
 
-**No live result for this fixture has been accepted yet.** Unit and native
-offline tests do not substitute for executing it on a host. Keep the important
-project untouched until the desired validation passes.
+**Accepted full scripted host result:** the reviewed `result.json` for clean
+`1.5.38+g0611104` (commit `061110489f946682a40106175ae49a1c668da94b`, count 67)
+reports `passed` with unmodified OpenCode 2.2.6 and reported Podman
+6.1.4/Tumbleweed. It covers:
+
+- First global-vault owning launch/import with all synthetic entries and native
+  Build tools, preserving the seed transcript and scoped permission denials.
+- Running-owner rotation/reload/attach without refreshing its credential snapshot,
+  plus a new owner receiving rotated and newly added entries.
+- Plan/child/unknown-agent behavior, mandatory denials, and default-Plan fallback.
+- One-owning-launch `--no-vault` with env compatibility controls, no stale vault
+  entries, no vault probes and no saved-policy changes.
+- Full encrypted backup/restore, stopped byte-exact restored state before reopen,
+  and a restored launch with the latest host vault, retained history and OS state.
+
+This is real rootless lifecycle/storage with scripted TUI exit and masked prompt
+input, not interactive TUI acceptance, real-provider inference, security
+certification or a real-project backup. Entry-removal, empty/absent/corrupt-vault
+and other expanded host edge cases remain outside this accepted run. Earlier
+failed fixtures and source-only retries remain failure/diagnostic evidence;
+do not overwrite or relabel them. Unit/native offline checks do not replace this
+host run. Preserve an important project's original history and use a separate
+full backup after its own import/verification; the synthetic fixture is not that
+project's recovery archive.
 
 ### Repeatable host validation
 
@@ -751,14 +776,15 @@ Use only disposable projects, credential selections and backups:
   value and verify it inside that workspace; change the value and relaunch to
   verify refresh. Attached web/TUI/shell clients must retain the owning launch's
   snapshot and must not unlock again.
-- **New global vault acceptance (pending):** initialize/populate an isolated
-  synthetic vault before the first launch, verify all entries reach provider,
-  MCP and shell, add/remove entries and start a new owner to check dynamic
-  selection. Verify empty/absent/corrupt vault handling, wrong-password reset
+- **Additional global-vault host edge cases (not covered by the accepted fixture):**
+  remove entries and start a new owner to check dynamic selection. Verify
+  empty/absent/corrupt vault handling, wrong-password reset
   preservation, intentional env/selected overrides, V1 return, and one-owning-
   invocation `--no-vault` without saved-policy changes. Attached clients must
-  retain their snapshot and reject `--no-vault`. These require new host evidence;
-  offline checks and the earlier selected-vault pass do not close this gate.
+  retain their snapshot and reject `--no-vault`. First launch/import, rotation,
+  additions and owning-launch opt-out have separate accepted scripted evidence;
+  these expanded edge cases still require new host evidence, not an inference
+  from offline checks or the earlier selected-vault pass.
 - **V2 backup/restore:** create both full and portable backups after the owner
   and attached clients exit, restore to fresh destinations, then launch and
   verify sessions, internal paths, private-home data and expected OS differences.

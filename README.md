@@ -482,7 +482,10 @@ running TUI equivalent is Ctrl+P → Open settings → Sessions → Permissions 
 autoaccept (`cli.json` `session.permissions`); that broader preference can
 persist and is not enabled by oc-box. Do not use a global all-agent client
 setting as a substitute for oc-box's container Build-only default. New live
-permission-prompt/reload validation remains pending.
+interactive TUI permission-prompt/reload validation remains pending. The separate
+scripted rootless-Podman global-vault fixture has passed native Build tools,
+scoped permission checks and reload; see its accepted scope in
+[the V2 guide](docs/opencode-2.md#isolated-global-vault-and-build-approval-host-validation).
 
 V2 without an explicit credential policy is global vault-first: when the host
 vault is present, all current entries replace ambient automatic token/API-key

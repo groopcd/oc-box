@@ -133,6 +133,17 @@ persistent-shell coexistence, detach/reattach, stop/resume, updated plugins,
 selected-vault provider/shell/MCP delivery, rotation and attach without unlock.
 Those accepted host probes do not validate the new V2 global vault default or
 `--no-vault`; unit/native offline checks are not a new live Podman lifecycle pass.
+The separate global-vault fixture has now passed on clean 1.5.38+g0611104
+(061110489f946682a40106175ae49a1c668da94b), with OpenCode 2.2.6 and reported
+Podman 6.1.4/Tumbleweed. Its reviewed report covers first global-vault import,
+new-owner rotated/added entries, native Build tools with scoped denials/Plan,
+running-owner rotation/reload/attach, --no-vault and full encrypted backup/restore
+with stopped byte-exact state and restored latest-host-vault/history/OS checks.
+This is scripted synthetic host acceptance, not an interactive TUI pass, real
+provider inference, security certification or a backup of any real project.
+Entry-removal and empty/absent/corrupt-vault host edge cases remain separately
+unverified. Keep all earlier failure evidence; their retries did not establish
+this new full pass and must not be relabeled as accepted runs.
 `tools/test_global_vault_podman.py` is the focused V2-only host fixture for first
 global-vault import/new project delivery, scoped Build approvals/reload, opt-out
 and full backup/restore. Require private synthetic state, verified isolated
@@ -232,7 +243,9 @@ Do not enable blanket native V2 client autoaccept or modify normal host
 plain-host `opencode --auto --standalone` is a user choice, not an oc-box command
 or vault consumer. No `--auto`/client autoaccept flag is added to oc-box clients.
 New native evaluator/import/reload fixtures do not establish live host acceptance;
-no new live permission-prompt/reload pass is accepted yet.
+the separate scripted global-vault host fixture covers native tool/permission
+and reload checks, but no new interactive TUI permission-prompt/reload pass is
+accepted yet.
 
 Do not treat a lost marker or changed filesystem device/inode as permission to
 create a replacement workspace. Look up registered canonical paths, direct the

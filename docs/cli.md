@@ -1695,7 +1695,10 @@ native TUI, Ctrl+P → Open settings → Sessions → Permissions → autoaccept
 corresponding user setting (`cli.json` `session.permissions`). That broader
 preference can persist in the client's global CLI settings; oc-box does not
 enable it or edit normal host `cli.json`. It is not a blanket replacement for
-the Build-only default. A new live permission-prompt/reload pass is still pending.
+the Build-only default. The separate scripted global-vault host fixture has
+passed native tool/permission and reload checks. A new interactive TUI
+permission-prompt/reload pass is still pending; the scripted result is not
+interactive UI acceptance or security certification.
 
 HTTP endpoint keys in global config using localhost, 127.0.0.1, or ::1 are
 rewritten to `host.containers.internal`. OAuth redirect URIs and shell commands

@@ -1916,7 +1916,10 @@ Permissions → autoaccept is the corresponding user setting (‘cli.json’
 ‘session.permissions’).  That broader preference can persist in the
 client's global CLI settings; oc-box does not enable it or edit normal
 host ‘cli.json’.  It is not a blanket replacement for the Build-only
-default.  A new live permission-prompt/reload pass is still pending.
+default.  The separate scripted global-vault host fixture has passed
+native tool/permission and reload checks.  A new interactive TUI
+permission-prompt/reload pass is still pending; the scripted result is
+not interactive UI acceptance or security certification.
 
 HTTP endpoint keys in global config using localhost, 127.0.0.1, or ::1
 are rewritten to ‘host.containers.internal’.  OAuth redirect URIs and
@@ -2636,13 +2639,13 @@ Node: Sessions and recovery82302
 Node: Devices and host permissions87590
 Node: Resource reports89936
 Node: Configuration and environment92047
-Node: Files103117
-Node: Exit status107727
-Node: Examples108538
-Node: Troubleshooting110624
-Node: Installation and manuals119952
-Node: Authors and license127899
-Node: See also128506
+Node: Files103310
+Node: Exit status107920
+Node: Examples108731
+Node: Troubleshooting110817
+Node: Installation and manuals120145
+Node: Authors and license128092
+Node: See also128699
 
 End Tag Table
 

@@ -64,7 +64,7 @@ read; compare exact messages/parts after reopening while keeping the inactive
 major's database bytes unchanged. Earlier restore/reset evidence is not rerun
 or relabeled by that targeted retry.
 
-### V2 global-vault acceptance (pending)
+### V2 global-vault acceptance and additional host checks
 
 Use the focused V2-only host fixture before important project imports:
 
@@ -90,8 +90,15 @@ V1 keeps legacy env-file defaults. V2 without an explicit policy is global
 vault-first; saved env/selected policies remain intentional overrides. Unit and
 native offline checks for the new global default and `--no-vault` must be
 distinguished from the **earlier accepted selected-vault host probes**. No new
-live global-vault Podman lifecycle pass has been accepted yet. Before release,
-validate on a host with isolated synthetic resources, never real vault/workspaces:
+result should be inferred from those older probes. A separate full scripted
+global-vault host run passed on clean `1.5.38+g0611104`, using OpenCode 2.2.6 and
+reported Podman 6.1.4/Tumbleweed. Its reviewed report covers first launch/import,
+new-owner rotation/additions, native Build tools and scoped denials, reload/attach,
+`--no-vault`, and full encrypted backup/restore. It is not interactive TUI
+acceptance or a real-project backup; see `docs/opencode-2.md` for exact limits.
+For relevant changes, repeat isolated host validation. Additional host edge
+cases below are not all covered by that accepted fixture; never use real
+vault/workspaces:
 
 - Initialize/populate a vault before the first project launch using the
   `oc-box[vault]` extra or curl `--with-vault`; no project registration/selection
@@ -150,7 +157,8 @@ client autoaccept. Native V2 `--auto` and TUI
 `session.permissions: autoaccept` approve asks, not explicit denials (plain-host
 `--auto` still respects configured denies); an optional
 one-off host `opencode --auto --standalone` is a user choice, not the oc-box
-default. New live permission-prompt/reload validation has not been accepted.
+default. The scripted host fixture covers native permission/tool/reload checks;
+new interactive TUI permission-prompt/reload validation has not been accepted.
 
 ## Plain host plugin migration
 
