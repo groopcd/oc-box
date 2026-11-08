@@ -4,8 +4,9 @@ import fs from "node:fs/promises"
 import vm from "node:vm"
 
 const source = await fs.readFile(process.argv[2], "utf8")
-async function load(user = {}, env = {}, broken = false) {
+async function load(user = {}, env = {}, broken = false, control = {}) {
   const hooks = new Map(), calls = []
+  let retainedConfig = control.existingConfig
   const pending = [], waiting = []
   async function* subscribe({ signal }) {
     while (!signal.aborted) {
@@ -17,11 +18,11 @@ async function load(user = {}, env = {}, broken = false) {
     }
   }
   const runtime = {
-    async initialize(policy) { calls.push(["policy", policy]); if (broken) throw Error("private failure") },
-    getConfig() { return calls.find(item => item[0] === "policy")?.[1] },
+    async initialize(policy) { retainedConfig = policy; calls.push(["policy", policy]); if (broken) throw Error("private failure") },
+    getConfig() { return retainedConfig },
     async wrapWithSandbox(command) { return "WRAPPED " + command },
     cleanupAfterCommand() { calls.push(["cleanup"]) },
-    async reset() { calls.push(["reset"]) },
+    async reset() { calls.push(["reset"]); if (control.resetTask) await control.resetTask() },
   }
   const context = vm.createContext({ process: { env }, console: { error() {} }, AbortController })
   const module = new vm.SourceTextModule(source, { context })
@@ -35,7 +36,7 @@ async function load(user = {}, env = {}, broken = false) {
     for (const [key, value] of Object.entries(exports[name])) this.setExport(key, value)
   }, { context }))
   await module.evaluate()
-  const ctx = { location: { directory: "/project", project: { worktree: "/project" } }, tool: { async hook(name, hook) { hooks.set(name, hook) } }, event: { subscribe } }
+  const ctx = { location: { directory: "/project", project: { worktree: "/project" } }, tool: { async hook(name, hook) { if (control.failHook) { control.failHook = false; throw Error("registration failure") } hooks.set(name, hook) } }, event: { subscribe } }
   const cleanup = await module.namespace.default.setup(ctx)
   return { hooks, calls, cleanup, again: directory => module.namespace.default.setup({ ...ctx, location: { directory: directory || "/project", project: { worktree: directory || "/project" } } }), emit(event) { const resolve = waiting.shift(); if (resolve) resolve(event); else pending.push(event) } }
 }
@@ -88,6 +89,52 @@ async function load(user = {}, env = {}, broken = false) {
   await different()
   assert.equal(calls.filter(item => item[0] === "reset").length, 0)
   await cleanup()
+}
+{
+  const { hooks, calls, cleanup, again } = await load()
+  await cleanup()
+  for (let index = 0; index < 3; index++) {
+    const next = await again()
+    const event = { tool: "shell", id: "after-reload-" + index, input: { command: "harmless project command" } }
+    await hooks.get("execute.before")(event)
+    await hooks.get("execute.after")({ ...event, status: "error" })
+    await next()
+    await next() // cleanup is idempotent; never decrement another generation.
+  }
+  assert.equal(calls.filter(item => item[0] === "policy").length, 4)
+}
+{
+  let unblock
+  const gate = new Promise(resolve => { unblock = resolve })
+  const { hooks, calls, cleanup, again } = await load({}, {}, false, { resetTask: () => gate })
+  const closing = cleanup()
+  await new Promise(resolve => setImmediate(resolve))
+  const reopening = again()
+  await new Promise(resolve => setImmediate(resolve))
+  assert.equal(calls.filter(item => item[0] === "policy").length, 1, "must not initialize while the old reset is pending")
+  unblock()
+  await closing
+  const next = await reopening
+  await hooks.get("execute.before")({ tool: "shell", id: "reset-race", input: { command: "plain" } })
+  assert.equal(calls.filter(item => item[0] === "policy").length, 2)
+  await next()
+}
+{
+  const control = {}
+  const { hooks, calls, cleanup, again } = await load({}, {}, false, control)
+  await cleanup()
+  control.failHook = true
+  await assert.rejects(again(), /registration failure/)
+  const next = await again()
+  await hooks.get("execute.before")({ tool: "shell", id: "failed-setup-recovery", input: { command: "plain" } })
+  await next()
+  assert.equal(calls.filter(item => item[0] === "reset").length, 3)
+}
+{
+  const { hooks, calls, cleanup } = await load({}, {}, false, { existingConfig: { private: "foreign policy" } })
+  await assert.rejects(hooks.get("execute.before")({ tool: "shell", input: { command: "plain" } }), /unowned-runtime/)
+  await cleanup()
+  assert.equal(calls.filter(item => item[0] === "policy" || item[0] === "reset").length, 0)
 }
 {
   const { hooks } = await load({ mode: "unknown" })

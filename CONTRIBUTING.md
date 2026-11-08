@@ -73,7 +73,10 @@ sandbox runtime, not the container opt-out bridge. Native profile tests use a
 mocked runtime; real host filesystem/network enforcement remains a manual
 acceptance check. Foreground native host project/outside-project write and
 allowed/disallowed network probes are accepted; reload/background behavior remain
-separate host checks. See `docs/host-plugins.md`. Keep defaults fail-closed, avoid
+separate host checks. The first host reload failed closed because SDK reset retains
+its config object; native same-process reload fixtures now cover idle lease
+ownership and reset/init serialization, pending a host retest. See
+`docs/host-plugins.md`. Keep defaults fail-closed, avoid
 Build permission overrides, preserve source-relative supporting files, and
 reject unsupported migration paths instead of silently disabling protection.
 `tools/port_host_plugins.py` is the V2-only path: reviewed known-source replacements,

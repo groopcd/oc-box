@@ -336,6 +336,58 @@ def main(binary):
                     model["id"] == "native-lemonade"
                     and model["limit"]["context"] == 16000
                 )
+            # The real /reload operation rebuilds Location services without
+            # replacing the server process or clearing cached npm modules.
+            # The mock engine deliberately retains its config after reset,
+            # matching the real runtime contract that exposed the host bug.
+            old_cwd = Path.cwd()
+            try:
+                os.chdir(project)
+                with (
+                    patch.dict(os.environ, env, clear=True),
+                    bridge.server(binary) as request,
+                ):
+                    request("GET", "/api/model/default")
+                    pid = request("GET", "/api/info")["pid"]
+                    for index in range(3):
+                        request("POST", "/api/location/reload")
+                        request("GET", "/api/model/default")
+                        state["markers"].clear()
+                        resumed = subprocess.run(
+                            [
+                                binary,
+                                "run",
+                                "--server",
+                                request.endpoint["url"],
+                                "--session",
+                                ident,
+                                "--model",
+                                "fixture/gpt-smoke",
+                                "Exercise harmless shell/MCP tools after reload "
+                                + str(index),
+                            ],
+                            env={
+                                **env,
+                                "OPENCODE_PASSWORD": request.endpoint["password"],
+                            },
+                            cwd=project,
+                            input="",
+                            capture_output=True,
+                            text=True,
+                            timeout=90,
+                        )
+                        assert (
+                            resumed.returncode == 0
+                            and "HOST_V2_ACCEPTANCE_OK" in resumed.stdout
+                            and not state["errors"]
+                            and state["markers"] == {"VAULT_SHELL_OK", "VAULT_MCP_OK"}
+                        ), resumed.stderr[-2000:] + resumed.stdout[-2000:]
+                        assert request("GET", "/api/info")["pid"] == pid
+                print(
+                    "PASS: three native /reload cycles keep the same service process and reinitialize shell/MCP execution with cached runtime config."
+                )
+            finally:
+                os.chdir(old_cwd)
             assert receipt["no_v1_sdk_or_bridge"]
             print(
                 "PASS: V2-only native plugin loading, inference/MCP, live Lemonade context and unwrapped durable history with no V1 SDK/bridge."

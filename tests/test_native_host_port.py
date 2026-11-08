@@ -1,6 +1,7 @@
 import contextlib
 import importlib.util
 import io
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -134,6 +135,62 @@ class NativeHostPortTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "destination already exists"):
             port.apply(self.source)
         self.assertFalse(list(self.source.glob(".native-plugin-backup-*")))
+
+    def old_sandbox_install(self):
+        receipt = port.apply(self.source)
+        target = self.source / "plugins/opencode-sandbox/index.js"
+        old = b"// synthetic previously-generated sandbox fixture"
+        target.write_bytes(old)
+        return receipt, target, old
+
+    def test_sandbox_only_update_preserves_other_plugins_config_dependencies_and_previous_source(
+        self,
+    ):
+        receipt, target, old = self.old_sandbox_install()
+        before = {
+            path: path.read_bytes()
+            for path in self.source.rglob("*")
+            if path.is_file()
+            and path not in (target, self.source / "native-plugin-migration.json")
+        }
+        with patch.object(
+            port, "PREVIOUS_SANDBOX_HASHES", {hashlib.sha256(old).hexdigest()}
+        ):
+            result = port.update_sandbox(self.source)
+            self.assertEqual(result["status"], "planned")
+            self.assertEqual(target.read_bytes(), old)
+            updated = port.update_sandbox(self.source, apply_change=True)
+        self.assertEqual(updated["status"], "updated")
+        self.assertEqual(Path(updated["backup"]).read_bytes(), old)
+        self.assertEqual(
+            target.read_bytes(), (APP / "tools/host_sandbox.js").read_bytes()
+        )
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content)
+        self.assertTrue(Path(receipt["safety_backup"]).exists())
+        self.assertEqual(
+            port.update_sandbox(self.source, apply_change=True)["status"], "current"
+        )
+
+    def test_sandbox_only_update_refuses_custom_code_and_changed_runtime_dependency(
+        self,
+    ):
+        _, target, old = self.old_sandbox_install()
+        with self.assertRaisesRegex(ValueError, "customized or unrecognized"):
+            port.update_sandbox(self.source, apply_change=True)
+        self.assertEqual(target.read_bytes(), old)
+        manifest = self.source / "package.json"
+        value = json.loads(manifest.read_text())
+        value["dependencies"]["@anthropic-ai/sandbox-runtime"] = "different"
+        manifest.write_text(json.dumps(value))
+        with (
+            patch.object(
+                port, "PREVIOUS_SANDBOX_HASHES", {hashlib.sha256(old).hexdigest()}
+            ),
+            self.assertRaisesRegex(ValueError, "runtime dependency changed"),
+        ):
+            port.update_sandbox(self.source, apply_change=True)
+        self.assertFalse(list(self.source.glob(".native-sandbox-update-*")))
 
     def test_unrecognized_implementation_or_container_cannot_be_replaced(self):
         (self.source / "plugins/output-clamp.ts").write_text("custom unrelated code")

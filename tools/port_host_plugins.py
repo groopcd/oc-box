@@ -39,6 +39,11 @@ RETIRE = {
     "copilot-gpt6-effort": "Retire: V2 Copilot builds reasoning variants and sends selected reasoningEffort natively.",
 }
 MAX_FILE = 8 * 1024 * 1024
+# Exact previously-generated native sandbox sources, not arbitrary user code.
+PREVIOUS_SANDBOX_HASHES = {
+    "4659614bbc1048d385647937d617fa24bfaa1f7f0341a9a2041ef67eaa90bf7a",
+    "60fc6c0d1f24abdf80ca03b0eecd01f7f6af3ade28e4a641a965828a6038ff62",
+}
 MARKERS = {
     "opencode-sandbox": ("SandboxPlugin", "wrapWithSandbox", "resolveConfig"),
     "python-isolation": ("shell.env", "PIP_REQUIRE_VIRTUALENV"),
@@ -197,6 +202,62 @@ def atomic(path, content):
         staged.unlink(missing_ok=True)
 
 
+def update_sandbox(source, *, apply_change=False):
+    """Update only our recognized native sandbox; refuse customized installs."""
+    safe_directory(source)
+    safe_directory(source / "plugins")
+    safe_directory(source / "plugins/opencode-sandbox")
+    receipt_file = source / "native-plugin-migration.json"
+    receipt_bytes = read(receipt_file)
+    receipt = json.loads(receipt_bytes)
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("no_v1_sdk_or_bridge") is not True
+        or "opencode-sandbox" not in receipt.get("native_plugins", [])
+    ):
+        raise ValueError("A recognized completed native host migration is required")
+    installed = source / "plugins/opencode-sandbox/index.js"
+    previous = read(installed)
+    current = (APP / "tools/host_sandbox.js").read_bytes()
+    before, after = (
+        hashlib.sha256(previous).hexdigest(),
+        hashlib.sha256(current).hexdigest(),
+    )
+    if (
+        before != after
+        and before not in PREVIOUS_SANDBOX_HASHES
+        and before != receipt.get("sandbox_source_sha256")
+    ):
+        raise ValueError(
+            "Installed sandbox source is customized or unrecognized; no files were replaced"
+        )
+    manifest = json.loads(read(source / "package.json"))
+    if (
+        manifest.get("dependencies", {}).get("@anthropic-ai/sandbox-runtime")
+        != "0.0.76"
+    ):
+        raise ValueError(
+            "Sandbox runtime dependency changed; review before applying this 0.0.76 lifecycle fix"
+        )
+    if before == after:
+        return {"status": "current", "path": str(installed)}
+    if not apply_change:
+        return {"status": "planned", "path": str(installed)}
+    if read(installed) != previous or read(receipt_file) != receipt_bytes:
+        raise ValueError(
+            "Sandbox source/receipt changed during inspection; no replacement applied"
+        )
+    backup = source / (".native-sandbox-update-" + secrets.token_hex(8) + ".js")
+    descriptor = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "wb") as output:
+        output.write(previous)
+    backup.chmod(0o600)
+    atomic(installed, current)
+    receipt.update(sandbox_source_sha256=after, sandbox_update_backup=str(backup))
+    atomic(receipt_file, (json.dumps(receipt, indent=2) + "\n").encode())
+    return {"status": "updated", "path": str(installed), "backup": str(backup)}
+
+
 def apply(source):
     if (source / "native-plugin-migration.json").exists():
         raise ValueError(
@@ -341,6 +402,10 @@ def apply(source):
             "version": "2.2.6",
             "no_v1_sdk_or_bridge": True,
         }
+        if "opencode-sandbox" in kept:
+            receipt["sandbox_source_sha256"] = hashlib.sha256(
+                (source / "plugins/opencode-sandbox/index.js").read_bytes()
+            ).hexdigest()
         atomic(
             source / "native-plugin-migration.json",
             (json.dumps(receipt, indent=2) + "\n").encode(),
@@ -368,12 +433,30 @@ def main(argv=None):
         action="store_true",
         help="replace recognized host sources/config plugin entries with native V2 implementations",
     )
+    parser.add_argument(
+        "--update-sandbox",
+        action="store_true",
+        help="inspect/update only the recognized installed native sandbox lifecycle code; requires --apply to write",
+    )
     args = parser.parse_args(argv)
     if os.environ.get("OC_BOX_CONTAINER") == "1":
         parser.error(
             "Run this tool on the regular host, not the copied container profile"
         )
     source = args.config.expanduser().resolve(strict=True)
+    if args.update_sandbox:
+        result = update_sandbox(source, apply_change=args.apply)
+        print("Native sandbox update " + result["status"] + ": " + result["path"])
+        if result["status"] == "planned":
+            print(
+                "No files changed. Use --update-sandbox --apply to install the lifecycle fix."
+            )
+        elif result["status"] == "updated":
+            print("Previous source preserved: " + result["backup"])
+            print(
+                "Other plugins/config/dependencies are unchanged. Exit the old broken host service once and start a fresh V2 process, then retest /reload."
+            )
+        return 0
     _, _, names, unknown = audit(source)
     print("Normal host profile: " + str(source))
     for name in KEEP:

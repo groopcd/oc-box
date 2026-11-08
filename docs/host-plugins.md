@@ -114,8 +114,11 @@ synthetic Lemonade inventory, unwrapped stored commands, selected reasoning
 settings at a Responses endpoint and real PDF fallback bytes. The sandbox engine
 is mocked inside this container; that is not host isolation proof. Reported host
 foreground tests confirmed allowed project writes, denied outside-project writes,
-an allowed PyPI request and an explicit example.com allowlist denial. Reload and
-background-job cleanup have not yet been reported as tested on the host.
+an allowed PyPI request and an explicit example.com allowlist denial. A subsequent
+host `/reload` failed closed before executing the probes. The lifecycle fix below
+passes native reload tests; host reload acceptance remains pending the retest.
+Background-job cleanup is separately covered by mocked-runtime tests, not yet
+reported validated on the host.
 If the native sandbox is inactive or dependencies fail to load, do not assume
 its fail-closed runtime hooks are present. Stop and fix activation first.
 
@@ -140,6 +143,48 @@ source or evidence to commit. Before recording reload or background cleanup as
 accepted, finish background jobs, run `/reload` and repeat the same checks; test
 background completion separately if relevant. Native file tools, MCPs, plugins
 and interactive PTYs remain outside this shell-tool sandbox's claimed boundary.
+
+## Sandbox lifecycle update after the first migration
+
+The first host reload exposed a runtime ownership bug: sandbox-runtime 0.0.76
+closes its proxy/helpers during `reset()` but retains `getConfig()`. The old
+plugin deleted its lease record and then treated that idle cached config as an
+unowned active runtime. The shell was correctly blocked in enforce mode, but
+initialization could no longer recover on reload.
+
+The fix keeps an idle ownership record tied to the exact runtime instance/policy
+and waits for the old reset before initializing a new generation. It permits
+policy changes only after the previous references are released, cleans up failed
+registration, and makes cleanup idempotent. It never adopts/resets an unmarked
+foreign runtime or makes enforce mode permissive. Failure messages give fixed
+codes (`unowned-runtime`, `lease-generation`, `in-use-policy`, `runtime-init`,
+`runtime-reset`, `runtime-owner-mismatch`, `event-stream`), not private exception
+text or policy values.
+
+From a **normal host terminal**, not the currently blocked OpenCode shell tool:
+
+```sh
+git pull --ff-only
+python3 tools/port_host_plugins.py --update-sandbox
+python3 tools/port_host_plugins.py --update-sandbox --apply
+```
+
+This hash-checks the installed generated sandbox, preserves its previous source
+in a private file, updates only `plugins/opencode-sandbox/index.js` and the
+migration receipt, and refuses customized code/dependency changes. Other plugins,
+OpenCode config, auth/data and dependencies are untouched. No npm reinstall is
+needed. Do not rerun the full `--apply` migration over an existing receipt.
+
+Exit the old broken standalone service once and start a fresh host V2 process in
+the same disposable project using your ordinary sourced env file. The old code
+already discarded its ownership marker; the new code will not guess ownership
+of that unmarked cached state. If using an unhealthy shared service instead,
+restart it intentionally after closing its clients. This is one-time recovery
+of the previously broken service, not a requirement to restart for future config
+edits. Then run `/reload` and repeat the same allow/deny tests without another
+restart. Three same-process native `/api/location/reload` cycles plus overlapping
+reset/startup and registration-failure tests pass in offline fixtures; the sandbox
+engine is mocked there, so the host retest is still required.
 
 ## Older option: separate compatibility profile
 

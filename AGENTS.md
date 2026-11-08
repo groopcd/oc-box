@@ -60,6 +60,9 @@ portable: use example project paths and synthetic session IDs, not local data.
   Native host foreground allow/deny write and network probes are accepted;
   reload/background cleanup remain separate host checks. Do not generalize this
   shell-tool sandbox to native file tools, MCPs, plugin processes or session PTYs.
+  Runtime reset retains getConfig; keep idle ownership and serialize reset/init
+  across reload, never infer an unmarked runtime owner. Host reload failed closed;
+  the lifecycle fix is covered by native reload fixtures pending host retest.
 - `docs/cli.md`: canonical command reference; `tools/build_docs.py` generates
   the committed man/Texinfo/Info manuals from it.
 
