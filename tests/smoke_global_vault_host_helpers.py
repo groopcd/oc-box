@@ -212,6 +212,67 @@ def run_tools(fixture, binary, request, ident, env, state, prior):
     return actual
 
 
+def check_cli_empty_responses(fixture, binary, request, data, primary):
+    """Exercise production CLI parsing, not just the bridge's HTTP JSON reader."""
+    original_client = fixture.workspace_service.client_command
+    local = {**data, "container": "native-helper-no-container"}
+
+    def local_client(box, workspace, connection, arguments, **kwargs):
+        command = original_client(box, workspace, connection, arguments, **kwargs)
+        begin = command.index(workspace["container"]) + 1
+        return box.ContainerCommand(command[begin:], command.environment)
+
+    with (
+        patch.object(fixture.box, "CONTAINER_OPENCODE", str(binary)),
+        patch.object(
+            fixture.workspace_service, "client_command", side_effect=local_client
+        ),
+    ):
+
+        def cli(method, target, value=None):
+            try:
+                return fixture.workspace_service.api(
+                    fixture.box, local, request.endpoint, method, target, value
+                )
+            except json.JSONDecodeError as error:
+                if not error.doc.strip():
+                    raise fixture.FixtureError("cli-empty-success-unhandled") from None
+                raise
+
+        session = fixture.create_session(
+            cli, data["project"], agent="plan", parent=primary
+        )
+        target = "/api/session/" + session["id"] + "/permission"
+        result = cli(
+            "POST", target, {"action": fixture.ACTION, "resources": ["ask-target"]}
+        )["data"]
+        fixture.require(result["effect"] == "ask", "cli-plan-ask")
+        fixture.require(
+            cli("POST", target + "/" + result["id"] + "/reply", {"decision": "reject"})
+            is None,
+            "cli-empty-permission-reply",
+        )
+        fixture.require(cli("GET", target)["data"] == [], "cli-permission-cleaned")
+        fixture.require(
+            cli("DELETE", "/api/session/" + session["id"]) is None,
+            "cli-empty-session-delete",
+        )
+        fixture.require(cli("POST", "/api/location/reload") is None, "cli-empty-reload")
+        fixture.assert_plugins(cli, data["project"])
+        retained = cli("GET", "/api/session/" + primary)["data"]
+        fixture.require(
+            retained["id"] == primary and retained["permissions"] == fixture.ASK_RULES,
+            "cli-primary-retained",
+        )
+        fixture.evaluate(cli, primary, "deny", agent="build", resource="session-denied")
+        try:
+            cli("GET", "/api/session/ses_cli_missing_fixture")
+        except fixture.box.BoxError:
+            pass
+        else:
+            raise fixture.FixtureError("cli-failed-command-suppressed")
+
+
 def main(argv=None):
     parser = Arguments(description=__doc__)
     parser.add_argument("--repo", type=Path, default=APP)
@@ -362,6 +423,10 @@ def main(argv=None):
                     fixture.assert_plugins(request, data["project"])
                     mark("NATIVE_HELPER_IMPORT_AND_COPIED_PLUGINS_OK")
 
+                    phase = "CLI_EMPTY_RESPONSES"
+                    check_cli_empty_responses(fixture, binary, request, data, ident)
+                    mark("NATIVE_HELPER_CLI_REPLY_DELETE_RELOAD_EMPTY_OK")
+
                     phase = "FRESH_MATRIX"
                     fixture.permission_matrix(request, data["project"], ident)
                     mark("NATIVE_HELPER_BUILD_PLAN_DENIALS_UNKNOWN_FRESH_OK")
@@ -422,9 +487,23 @@ def main(argv=None):
             )
         mark("NATIVE_HELPER_CHECK_PASSED")
         return 0
-    except BaseException:
+    except BaseException as error:
+        category = "operation-failed"
+        error_class = "exception"
+        if "fixture" in locals():
+            error_class = fixture.safe_error_class(error)
+            if (
+                isinstance(error, fixture.FixtureError)
+                and str(error) == "cli-empty-success-unhandled"
+            ):
+                category = "cli-empty-success-unhandled"
         print(
-            "NATIVE_HELPER_CHECK_FAILED phase=" + phase + " category=operation-failed",
+            "NATIVE_HELPER_CHECK_FAILED phase="
+            + phase
+            + " class="
+            + error_class
+            + " category="
+            + category,
             file=output,
             flush=True,
         )

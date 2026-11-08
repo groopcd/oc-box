@@ -155,6 +155,10 @@ synthetic fixture is separate acceptance, never a replay of retained evidence.
 Podman info can initialize/refresh runtime metadata, not guarantee byte-level
 immutability. New first-launch failures retain fixed primary substeps separately
 from cleanup/reporting errors; never overwrite an earlier failure report.
+Native API CLI success with no body (HTTP 204 reply/delete/reload) returns None,
+matching the HTTP bridge; preserve failed-command and malformed nonempty JSON
+errors. Native fixtures exercise that CLI transport, not only HTTP. Repropagated
+exception identity must not create a false failure after completed shutdown.
 --retry-source is limited to a stopped baseline-ready, already-imported source
 with verified private store/identity and no later backup/restore evidence. Use
 new companion synthetic vault/config/report files; never overwrite original

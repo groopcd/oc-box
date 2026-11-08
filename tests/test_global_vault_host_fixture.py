@@ -1110,6 +1110,24 @@ with patch.object(fixture,'host_guard'), patch.object(fixture.shutil,'which',ret
             fixture.probe_diagnostic(json.dumps({**valid, "private": "value"}))
         )
 
+    def test_repropagated_error_does_not_invent_a_completed_shutdown_failure(self):
+        trace = fixture.SourceRetryTrace()
+        error = json.JSONDecodeError("synthetic-private-error", "", 0)
+        trace("permission-cleanup")
+        trace.fail(error)
+        trace("container-stop")
+        trace.completed()
+        trace.fail(error)
+        self.assertEqual(trace.failure["stage"], "permission-cleanup")
+        self.assertEqual(
+            trace.steps[-1], {"stage": "container-stop", "state": "completed"}
+        )
+        self.assertEqual(trace.cleanup_errors, [])
+        trace("container-stop")
+        trace.fail(box.BoxError("synthetic-actual-shutdown-error"))
+        self.assertEqual(trace.cleanup_errors[0]["stage"], "container-stop")
+        self.assertEqual(trace.steps[-1]["state"], "failed")
+
     def test_cleanup_validates_all_labels_before_any_removal(self):
         self.complete_fixture_metadata()
         _, source = self.record("source-a", "a" * 32)

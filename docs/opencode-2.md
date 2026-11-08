@@ -487,6 +487,12 @@ New first-owning-launch failures also retain `first-launch-failure.json`, with
 fixed substeps/classes/exit codes and the primary failure separated from
 launcher cleanup errors. This is failure evidence, not acceptance. A reporting
 failure cannot replace the primary diagnostic or overwrite an earlier report.
+Native CLI API replies with HTTP 204 carry no JSON body: permission replies,
+session deletion and location reload now return `None` through the workspace
+transport, matching the private HTTP bridge. Failed commands and malformed
+nonempty JSON still fail. The native helper regression checks this CLI path,
+not only HTTP; it is not a new live Podman acceptance result. A propagated
+callback error after a completed stop is not recorded as a new shutdown failure.
 
 For an unsuccessful owning launch, inspect retained checkpoints without
 starting/executing a container, unlocking the vault, syncing or replaying:

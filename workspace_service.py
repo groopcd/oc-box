@@ -206,7 +206,11 @@ def api(box, data, connection, method, target, value=None):
         private=True,
         timeout=60,
     )
-    return json.loads(result.stdout)
+    # Native api prints nothing for successful HTTP 204 replies (permission
+    # rejection, session deletion, reload, etc.). Match the private HTTP bridge's
+    # None convention. run still checks command failure; nonempty malformed JSON
+    # must remain an error rather than being mistaken for a no-content success.
+    return json.loads(result.stdout) if result.stdout.strip() else None
 
 
 class Owner:

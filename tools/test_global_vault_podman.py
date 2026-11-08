@@ -2538,6 +2538,9 @@ class SourceRetryTrace:
 
         self.steps = []
         self.cleanup_errors = []
+        # Exception identity is private memory only. Re-propagating a callback
+        # error after successful shutdown is not a new container-stop failure.
+        self._seen_failures = []
 
     def __call__(self, stage):
         require(stage in SOURCE_STAGES, "retry-stage")
@@ -2579,6 +2582,9 @@ class SourceRetryTrace:
             self.subprocess_failure.update(native)
 
     def fail(self, error):
+        if any(previous is error for previous in self._seen_failures):
+            return
+        self._seen_failures.append(error)
         diagnostic = {
             "stage": self.stage,
             "error_class": safe_error_class(error),
