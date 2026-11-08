@@ -227,6 +227,168 @@ class V2HostFixtureTests(unittest.TestCase):
                 "graphroot = " + json.dumps(str(root / "data/containers/storage")), text
             )
 
+    def test_temp_location_overrides_cached_python_and_podman_environment_then_restores(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as directory:
+            root = Path(directory)
+            previous_env = os.environ.get("TMPDIR")
+            previous_cached = tempfile.tempdir
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                fixture.temporary_location(root) as location,
+            ):
+                self.assertEqual(location, root / "temporary")
+                self.assertEqual(tempfile.gettempdir(), str(location))
+                self.assertEqual(fixture.isolated_env(root)["TMPDIR"], str(location))
+                self.assertEqual(fixture.crypto.environment()["TMPDIR"], str(location))
+                self.assertEqual(location.stat().st_mode & 0o777, 0o700)
+                with tempfile.TemporaryDirectory() as staging:
+                    self.assertEqual(Path(staging).parent, location)
+            self.assertEqual(os.environ.get("TMPDIR"), previous_env)
+            self.assertEqual(tempfile.tempdir, previous_cached)
+
+    def test_explicit_temp_parent_is_separate_from_retained_fixture_and_is_private(
+        self,
+    ):
+        with (
+            tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as fixture_dir,
+            tempfile.TemporaryDirectory(prefix="oc-box-temp-parent-") as parent_dir,
+        ):
+            root, parent = Path(fixture_dir), Path(parent_dir)
+            fixture.storage_config(root)
+            storage = root / "config/containers/storage.conf"
+            before = storage.read_bytes()
+            with (
+                contextlib.redirect_stdout(io.StringIO()),
+                fixture.temporary_location(root, parent) as location,
+            ):
+                self.assertEqual(location.parent, parent)
+                self.assertEqual(location.stat().st_mode & 0o777, 0o700)
+                self.assertEqual(fixture.crypto.environment()["TMPDIR"], str(location))
+                self.assertEqual(storage.read_bytes(), before)
+                (location / "fixture-staging").write_bytes(b"ciphertext fixture")
+            self.assertFalse(location.exists())
+            self.assertEqual(storage.read_bytes(), before)
+
+    def test_temp_location_refuses_missing_parent_symlink_or_shared_fixture_directory(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as directory:
+            root = Path(directory)
+            with self.assertRaises(FileNotFoundError):
+                fixture.existing_directory(root / "missing")
+            (root / "file").write_text("unrelated")
+            with self.assertRaisesRegex(ValueError, "existing directory"):
+                fixture.existing_directory(root / "file")
+            (root / "temporary").symlink_to(root, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symlinked"):
+                with fixture.temporary_location(root):
+                    pass
+            (root / "temporary").unlink()
+            (root / "temporary").mkdir(mode=0o755)
+            with self.assertRaisesRegex(ValueError, "private"):
+                with fixture.temporary_location(root):
+                    pass
+
+    def test_new_fixture_work_parent_selection_does_not_move_existing_storage(self):
+        with tempfile.TemporaryDirectory(prefix="oc-box-work-parent-") as temporary:
+            parent = Path(temporary)
+            with (
+                patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
+                patch.object(os, "geteuid", return_value=1000),
+                patch.object(fixture, "run") as run,
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    fixture.main(
+                        [
+                            "--opencode-v1",
+                            sys.executable,
+                            "--opencode-v2",
+                            sys.executable,
+                            "--work-dir",
+                            str(parent),
+                        ]
+                    ),
+                    0,
+                )
+            root = run.call_args.args[0]
+            self.assertEqual(root.parent, parent)
+            self.assertTrue(root.name.startswith(fixture.PREFIX))
+            self.assertEqual(root.stat().st_mode & 0o777, 0o700)
+
+    def test_full_restore_retry_temp_override_preserves_backup_and_cleans_only_new_temp_directory(
+        self,
+    ):
+        with (
+            tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as fixture_dir,
+            tempfile.TemporaryDirectory(
+                prefix="oc-box-retry-temp-parent-"
+            ) as parent_dir,
+        ):
+            root, parent = Path(fixture_dir), Path(parent_dir)
+            archive = root / "full.ocbox"
+            archive.write_bytes(b"original encrypted fixture evidence")
+            observed = []
+
+            def retry(selected):
+                self.assertEqual(selected, root)
+                directory = Path(os.environ["TMPDIR"])
+                observed.append(directory)
+                self.assertEqual(directory.parent, parent)
+                self.assertEqual(fixture.crypto.environment()["TMPDIR"], str(directory))
+                self.assertEqual(
+                    archive.read_bytes(), b"original encrypted fixture evidence"
+                )
+
+            with (
+                patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
+                patch.object(os, "geteuid", return_value=1000),
+                patch.object(
+                    fixture,
+                    "resume_fixture",
+                    return_value=(
+                        root,
+                        Path(sys.executable),
+                        Path(sys.executable),
+                        "tumbleweed",
+                    ),
+                ),
+                patch.object(fixture, "retry_full_restore", side_effect=retry),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(
+                    fixture.main(
+                        ["--retry-full-restore", str(root), "--temp-dir", str(parent)]
+                    ),
+                    0,
+                )
+            self.assertEqual(len(observed), 1)
+            self.assertFalse(observed[0].exists())
+            self.assertTrue(root.exists())
+            self.assertEqual(
+                archive.read_bytes(), b"original encrypted fixture evidence"
+            )
+
+    def test_work_parent_cannot_be_used_to_relocate_a_retained_fixture(self):
+        with (
+            patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
+            patch.object(os, "geteuid", return_value=1000),
+            patch.object(fixture, "resume_fixture") as resume,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            for option in ("--resume", "--retry-full-restore"):
+                with (
+                    self.subTest(option=option),
+                    self.assertRaises(SystemExit) as error,
+                ):
+                    fixture.main(
+                        [option, "/example/fixture", "--work-dir", "/example/parent"]
+                    )
+                self.assertEqual(error.exception.code, 2)
+            resume.assert_not_called()
+
     def test_synthetic_provider_requires_current_vault_value_and_exercises_native_tools(
         self,
     ):

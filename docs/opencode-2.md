@@ -256,6 +256,22 @@ uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
   --opencode-v2 "$fixture_tools/v2/node_modules/.bin/opencode"
 ```
 
+By default the fixture places its image store and temporary files under one
+private system-temp directory. For a large full image on a disk-backed test
+filesystem, pass an existing parent using `--work-dir /var/tmp`. This creates a
+new random private fixture there; it does not move or reuse the old image store.
+Set `--temp-dir /var/tmp` to place Podman's temporary image files and Python's
+encrypted-component staging in a separate private directory under that parent.
+Both options accept any existing parent suitable for the host filesystem/quota.
+For example, use the same native executables above:
+
+```sh
+uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
+  --opencode-v1 "$fixture_tools/v1/node_modules/.bin/opencode" \
+  --opencode-v2 "$fixture_tools/v2/node_modules/.bin/opencode" \
+  --work-dir /var/tmp --temp-dir /var/tmp
+```
+
 Requires host rootless Podman prerequisites, age/age-keygen, Git, npm and uv for
 these setup commands; see `oc-box doctor`. The default test distro is Tumbleweed
 (`--distro NAME` selects another catalog distro). Expect image/package downloads,
@@ -329,15 +345,35 @@ uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
   --retry-full-restore /tmp/oc-box-live-v2-EXAMPLE
 ```
 
-This reports available bytes/inodes for fixture storage, `/var/tmp` (Podman's
-default image temporary location) and encrypted staging. It authenticates the
-entire image component into a discard stream, then retries the unchanged backup
+This reports available bytes/inodes for fixture storage, Podman's temporary
+image directory (`TMPDIR`, normally `/var/tmp` outside this fixture) and encrypted
+staging. It authenticates the entire image component into a discard stream,
+then retries the unchanged backup
 at the still-nonexistent `restored-full` destination. It refuses existing restore
 or completed-test evidence. Full restore success writes `full-restore-result.json`
 and records the fresh ID for cleanup; this limited retry is not proof of native
 restored inference, portable restore, reset or downgrade. Pipeline failures show
 producer/consumer exit codes and fixed diagnostic categories, never raw tool
 stderr or decrypted image bytes.
+
+To retry only the old backup with temporary files on another filesystem:
+
+```sh
+uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
+  --retry-full-restore /tmp/oc-box-live-v2-EXAMPLE --temp-dir /var/tmp
+```
+
+The fixture forwards the private temporary directory as `TMPDIR` to Podman and
+Python staging, and restores the calling process's original tempfile default
+afterward. Temporary override directories are cleaned on exit; retained source
+resources, encrypted backup and isolated image store are unchanged. An override
+changes temporary placement only, not the existing store's graphroot/runroot.
+If image storage itself is quota-limited, run a new full fixture with `--work-dir`
+on a filesystem with adequate user/project quota rather than copying live Podman
+storage or overwriting the old backup. Keep the original backup until accepted.
+`Disk quota exceeded` is separate from filesystem-wide free bytes; zero inode
+counts can mean the filesystem does not report inode capacity. Check the actual
+user/project limits before interpreting the available-space lines as sufficient.
 
 #### Manual alternative
 

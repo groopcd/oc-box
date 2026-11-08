@@ -781,7 +781,18 @@ Streaming failures identify the producer/consumer exit code and a fixed category
 (for example exhausted storage, permission denial or archive rejection); private
 tool stderr is never printed. Full image load also needs Podman's host temporary
 image space (normally `/var/tmp`), in addition to destination image/private-home
-storage. Keep the encrypted source archive after failure and use a new absent
+storage. Backup/restore subprocesses honor an explicit `TMPDIR` so host temporary
+image files and encrypted-component staging can use a suitable filesystem:
+
+```sh
+TMPDIR=/var/tmp oc-box restore /backup/demo.ocbox --project ~/devel/demo-restored \
+  --identity ~/.config/backup-age-key.txt
+```
+
+The directory must exist and be usable by your regular user. This changes
+temporary placement, not Podman's image-store location or its storage quotas.
+Filesystem-wide free bytes do not establish user/project quota headroom.
+Keep the encrypted source archive after failure and use a new absent
 destination after incomplete-restore cleanup; no failed staging is activated.
 
 Restore into a **new, nonexistent** host project destination. Never overwrites

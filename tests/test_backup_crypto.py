@@ -268,6 +268,68 @@ class AgeEnvelopeTests(unittest.TestCase):
         self.assertIn("space exhausted", str(error.exception))
         self.assertNotIn("private-file", str(error.exception))
 
+    def test_stream_tools_honor_explicit_temp_location_without_forwarding_secrets(self):
+        with tempfile.TemporaryDirectory(prefix="oc-box-pipeline-temp-") as temporary:
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "TMPDIR": temporary,
+                        "OPENAI_API_KEY": "synthetic-private",
+                        "AGE_PASSPHRASE": "synthetic-private",
+                    },
+                ),
+                crypto.memory_file() as captured,
+            ):
+                crypto.stream_pipeline(
+                    [
+                        sys.executable,
+                        "-B",
+                        "-c",
+                        "import json,os,sys; sys.stdout.write(json.dumps({'tmp':os.environ.get('TMPDIR'),'provider':os.environ.get('OPENAI_API_KEY'),'password':os.environ.get('AGE_PASSPHRASE')}))",
+                    ],
+                    [
+                        sys.executable,
+                        "-B",
+                        "-c",
+                        "import json,os,sys; item=json.load(sys.stdin); item['consumer_tmp']=os.environ.get('TMPDIR'); print(json.dumps(item))",
+                    ],
+                    destination=captured,
+                )
+                captured.seek(0)
+                result = json.load(captured)
+            self.assertEqual(
+                result,
+                {
+                    "tmp": temporary,
+                    "consumer_tmp": temporary,
+                    "provider": None,
+                    "password": None,
+                },
+            )
+
+    def test_quota_error_does_not_echo_paths_or_credentials_and_explains_free_space_limit(
+        self,
+    ):
+        with self.assertRaises(crypto.BackupError) as error:
+            crypto.stream_pipeline(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout.buffer.write(b'fixture-image')",
+                ],
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdin.buffer.read(); sys.stderr.write('write /private/synthetic-secret: disk quota exceeded'); sys.exit(125)",
+                ],
+            )
+        self.assertIn("consumer exit 125", str(error.exception))
+        self.assertIn("quota exceeded", str(error.exception))
+        self.assertIn("free space does not establish quota", str(error.exception))
+        self.assertNotIn("/private", str(error.exception))
+        self.assertNotIn("synthetic-secret", str(error.exception))
+
     def test_age_passphrase_envelope_uses_real_tty_never_env_or_argv(self):
         # Exercise only synthetic data through the real age prompt and key
         # envelope, preserving the surrounding terminal on all paths.

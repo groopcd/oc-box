@@ -10,6 +10,7 @@ Fixture resources are retained for diagnosis and removed only by --cleanup.
 """
 
 import argparse
+import contextlib
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -85,7 +86,50 @@ def isolated_env(root):
         OPENCODE_AUTH_CONTENT="{}",
         PYTHONDONTWRITEBYTECODE="1",
     )
+    if "TMPDIR" in os.environ:
+        env["TMPDIR"] = os.environ["TMPDIR"]
     return env
+
+
+def existing_directory(path):
+    parent = Path(path).expanduser().resolve(strict=True)
+    if not parent.is_dir():
+        raise ValueError("Fixture work/temp parent must be an existing directory")
+    return parent
+
+
+@contextlib.contextmanager
+def temporary_location(root, parent=None):
+    """Place Python encrypted staging and Podman temp files explicitly."""
+    with contextlib.ExitStack() as stack:
+        if parent is not None:
+            directory = Path(
+                stack.enter_context(
+                    tempfile.TemporaryDirectory(
+                        prefix="oc-box-v2-temp-", dir=existing_directory(parent)
+                    )
+                )
+            )
+        else:
+            directory = root / "temporary"
+            if directory.is_symlink():
+                raise ValueError("Fixture temporary directory must not be symlinked")
+            directory.mkdir(mode=0o700, exist_ok=True)
+            info = directory.stat()
+            if info.st_uid != os.getuid() or info.st_mode & 0o077:
+                raise ValueError(
+                    "Fixture temporary directory must be private and owned by this user"
+                )
+        print(
+            "oc-box fixture: Temporary image and encrypted staging directory: "
+            + str(directory),
+            flush=True,
+        )
+        # tempfile caches its default directory; the host process may have
+        # used it before the fixture env was set, so override both layers.
+        stack.enter_context(patch.dict(os.environ, {"TMPDIR": str(directory)}))
+        stack.enter_context(patch.object(tempfile, "tempdir", str(directory)))
+        yield directory
 
 
 def native_env(root, major):
@@ -684,15 +728,16 @@ def retry_full_restore(root):
         with box.workspace_lock(path):
             stopped_container(data)
             # Read filesystem capacity only; no predictable temporary file.
-            image_tmp = Path("/var/tmp")  # nosec B108
+            default_image_tmp = "/var/tmp"  # nosec B108
+            image_tmp = Path(os.environ.get("TMPDIR", default_image_tmp))
             for label, location in (
                 ("fixture image storage", root / "data/containers/storage"),
-                ("Podman default temporary storage", image_tmp),
+                ("Podman temporary image storage", image_tmp),
                 ("encrypted-component staging", Path(tempfile.gettempdir())),
             ):
                 info = os.statvfs(location)
                 print(
-                    f"oc-box fixture: {label}: available {info.f_bavail * info.f_frsize // (1024 * 1024)} MiB, free inodes {info.f_favail}",
+                    f"oc-box fixture: {label}: available {info.f_bavail * info.f_frsize // (1024 * 1024)} MiB, free inodes {info.f_favail if info.f_files > 0 else 'not reported'} (does not measure quota headroom)",
                     flush=True,
                 )
             with crypto.opened(archive, [identity]) as (manifest, encrypted, private):
@@ -1152,6 +1197,16 @@ def main(argv=None):
         "--opencode-v2", type=Path, help="separate unmodified OpenCode 2.2.6 executable"
     )
     parser.add_argument("--distro", choices=tuple(box.DISTROS), default="tumbleweed")
+    parser.add_argument(
+        "--work-dir",
+        type=Path,
+        help="existing parent for a NEW private fixture, including its isolated Podman image store; use a disk-backed filesystem with adequate quota",
+    )
+    parser.add_argument(
+        "--temp-dir",
+        type=Path,
+        help="existing parent for private Podman temporary images and Python encrypted staging, usable with new runs or retries; defaults inside fixture",
+    )
     parser.add_argument("--cleanup", type=Path)
     parser.add_argument(
         "--retry-full-restore",
@@ -1170,17 +1225,20 @@ def main(argv=None):
             "Run this fixture from a regular HOST terminal, not sudo or inside oc-box.\n",
         )
     if args.cleanup:
-        if args.resume or args.retry_full_restore:
-            parser.error("--cleanup cannot be combined with a retry")
+        if args.resume or args.retry_full_restore or args.work_dir or args.temp_dir:
+            parser.error("--cleanup cannot be combined with retry or placement options")
         cleanup(args.cleanup)
         return 0
     if args.retry_full_restore:
-        if args.resume or args.opencode_v1 or args.opencode_v2:
+        if args.resume or args.opencode_v1 or args.opencode_v2 or args.work_dir:
             parser.error(
                 "--retry-full-restore reuses fixture/archive metadata and cannot be combined with other retry/executable options"
             )
         try:
-            retry_full_restore(args.retry_full_restore)
+            # Validate the old fixture/evidence before making a temporary dir.
+            root, _, _, _ = resume_fixture(args.retry_full_restore, full_restore=True)
+            with temporary_location(root, args.temp_dir):
+                retry_full_restore(root)
         except BaseException:
             print(
                 "Fixture and encrypted backup retained for diagnosis: "
@@ -1190,14 +1248,15 @@ def main(argv=None):
             raise
         return 0
     if args.resume:
-        if args.opencode_v1 or args.opencode_v2:
+        if args.opencode_v1 or args.opencode_v2 or args.work_dir:
             parser.error(
-                "--resume reuses the recorded native executables; do not supply replacement paths"
+                "--resume reuses the recorded native executables and image store; do not supply executable paths or --work-dir"
             )
         root, v1, v2, distro = resume_fixture(args.resume)
         print("Retrying retained V2 source fixture: " + str(root), flush=True)
         try:
-            run(root, v1, v2, distro, resume=True)
+            with temporary_location(root, args.temp_dir):
+                run(root, v1, v2, distro, resume=True)
         except BaseException:
             print("Fixture retained for diagnosis: " + str(root), file=sys.stderr)
             raise
@@ -1210,11 +1269,15 @@ def main(argv=None):
     )
     if not all(os.access(binary, os.X_OK) for binary in (v1, v2)):
         parser.error("Both native executables must be executable")
-    root = Path(tempfile.mkdtemp(prefix=PREFIX))
+    work_dir = existing_directory(args.work_dir) if args.work_dir is not None else None
+    if args.temp_dir is not None:
+        existing_directory(args.temp_dir)
+    root = Path(tempfile.mkdtemp(prefix=PREFIX, dir=work_dir))
     root.chmod(0o700)
     print("Isolated V2 acceptance fixture: " + str(root), flush=True)
     try:
-        run(root, v1, v2, args.distro)
+        with temporary_location(root, args.temp_dir):
+            run(root, v1, v2, args.distro)
     except BaseException:
         print("Fixture retained for diagnosis: " + str(root), file=sys.stderr)
         raise

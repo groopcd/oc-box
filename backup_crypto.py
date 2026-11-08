@@ -67,6 +67,7 @@ def environment():
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
             "XDG_STATE_HOME",
+            "TMPDIR",
             "DBUS_SESSION_BUS_ADDRESS",
         )
         if key in os.environ
@@ -398,7 +399,10 @@ def pipeline_error(processes, errors):
                         (b"no space left on device", b"enospc"),
                         "storage or temporary-image space exhausted; check free bytes and inodes",
                     ),
-                    ((b"disk quota exceeded", b"edquot"), "storage quota exceeded"),
+                    (
+                        (b"disk quota exceeded", b"edquot"),
+                        "storage or temporary-image quota exceeded; filesystem free space does not establish quota headroom; check user/project quotas and temporary storage placement",
+                    ),
                     (
                         (b"read-only file system", b"erofs"),
                         "destination filesystem is read-only",

@@ -55,6 +55,9 @@ Use `tools/test_v2_podman.py` for those remaining acceptance checks; setup and
 precise scope are in `docs/opencode-2.md`. It uses isolated synthetic resources,
 scripted prompt/TUI actions and real rootless lifecycle/native inference fixtures.
 Never run it under sudo, inside oc-box, or against real workspaces.
+Use `--work-dir` for a new fixture's isolated image store and `--temp-dir` for
+private temporary-image/encrypted staging placement when system temp is limited.
+Neither option moves retained Podman storage; retry preserves encrypted evidence.
 
 ## Bash completion
 

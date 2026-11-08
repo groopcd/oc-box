@@ -129,6 +129,9 @@ must validate its private registry/graphroot/runroot and refuse backup evidence.
 Full-restore diagnostic retry preserves encrypted evidence, authenticates the
 image component to a discard stream and refuses an existing destination. Pipeline
 errors report fixed categories/exit codes only, never raw private stderr.
+Host acceptance `--work-dir` creates fresh disk-backed fixture storage, while
+`--temp-dir` redirects only private temporary files through honored `TMPDIR`.
+Never move a retained graphroot/runroot or overwrite encrypted evidence to retry.
 
 Package/dependency mappings must pass `.github/workflows/distros.yml` on all
 seven catalog images using `tools/test_dependency_distro.py`. That disposable
