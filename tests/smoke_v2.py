@@ -1089,18 +1089,26 @@ export const Fixture = async () => ({
                     )["data"]
             assert "Legacy text" in json.dumps(migrated)
             assert old_database.read_bytes() == before
-            assert (
-                json.loads(
-                    bounded(
-                        ["opencode", "--pure", "export", "ses_legacy_fixture"],
-                        legacy_env,
-                        project,
-                    )
-                )["messages"][0]["parts"][0]["text"]
-                == "Legacy text"
+            v2_database = old_database.with_name("oc-box-v2.db")
+            before_v2 = v2_database.read_bytes()
+            for arguments in (
+                ["--pure", "debug", "agent", "build"],
+                ["--pure", "session", "list", "--format", "json"],
+            ):
+                bounded(["opencode", *arguments], legacy_env, project)
+            restored_v1 = json.loads(
+                bounded(
+                    ["opencode", "--pure", "export", "ses_legacy_fixture"],
+                    legacy_env,
+                    project,
+                )
             )
+            assert restored_v1["messages"] == legacy["messages"], (
+                "V1 reopened transcript changed"
+            )
+            assert v2_database.read_bytes() == before_v2, "V1 wrote the V2 database"
             print(
-                "PASS: real V1-to-V2 snapshot migration with unchanged V1 database and downgrade export.",
+                "PASS: V2 snapshot migration leaves V1 bytes intact; reopening native V1 retains the exact transcript and leaves V2 bytes intact.",
                 flush=True,
             )
             # Real foreground owner, same-user concurrent attach and browser

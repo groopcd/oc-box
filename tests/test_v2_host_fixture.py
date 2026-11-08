@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import oc_box as box
 import vault
@@ -758,3 +758,271 @@ class V2HostFixtureTests(unittest.TestCase):
             ):
                 fixture.cleanup(root)
             remove.assert_not_called()
+
+    def test_v1_history_check_allows_access_metadata_but_rejects_changed_parts_or_identity(
+        self,
+    ):
+        expected = fixture.legacy_session(Path("/synthetic/project"))
+        current = json.loads(json.dumps(expected))
+        current["info"]["time"]["updated"] = 100
+        current["info"]["title"] = "Metadata updated by native V1"
+        fixture.verify_v1_history(current, expected)
+        for change in ("text", "message-id", "session-id", "path"):
+            current = json.loads(json.dumps(expected))
+            if change == "text":
+                current["messages"][0]["parts"][0]["text"] = "lost history"
+            elif change == "message-id":
+                current["messages"][0]["info"]["id"] = "msg_changed"
+            elif change == "session-id":
+                current["info"]["id"] = "ses_changed"
+            else:
+                current["info"]["directory"] = "/another/project"
+            with (
+                self.subTest(change=change),
+                self.assertRaises((AssertionError, box.BoxError)),
+            ):
+                fixture.verify_v1_history(current, expected)
+
+    def test_v2_progress_check_requires_exact_retained_messages_and_allows_new_progress(
+        self,
+    ):
+        expected = {
+            "info": {
+                "id": fixture.LEGACY_ID,
+                "location": {"directory": "/synthetic/project"},
+            },
+            "messages": [{"id": "msg_original", "type": "user", "text": "original"}],
+        }
+        current = json.loads(json.dumps(expected))
+        current["messages"].append(
+            {"id": "msg_new", "type": "user", "text": "new progress"}
+        )
+        fixture.verify_v2_progress(current, expected)
+        current["messages"][0]["text"] = "changed"
+        with self.assertRaisesRegex(AssertionError, "retained native history"):
+            fixture.verify_v2_progress(current, expected)
+        current["messages"] = []
+        with self.assertRaisesRegex(AssertionError, "retained native history"):
+            fixture.verify_v2_progress(current, expected)
+
+    def exercise_downgrade_retry(self, root, *, changed_v1=False):
+        path, source, _ = self.retained_downgrade(root)
+        native = {
+            "info": {
+                "id": fixture.LEGACY_ID,
+                "location": {"directory": source["project"]},
+            },
+            "messages": [
+                {"id": "msg_seed", "type": "user", "text": "V1_HISTORY_RETAINED"},
+                {
+                    "id": "msg_progress",
+                    "type": "assistant",
+                    "text": "HOST_V2_ACCEPTANCE_OK",
+                },
+            ],
+        }
+        calls = []
+        server = Mock(server_port=12345)
+        worker = Mock()
+
+        def launch(arguments):
+            major = (root / "host-major").read_text()
+            source["opencode_version"] = fixture.NATIVE_VERSIONS[major]
+            calls.append("launch-" + major)
+            box.run_tui([])
+
+        def export(data, ident):
+            if data["opencode_version"].startswith("1."):
+                transcript = fixture.legacy_session(root / "source")
+                transcript["info"]["time"]["updated"] = 100
+                if changed_v1:
+                    transcript["messages"][0]["parts"][0]["text"] = "lost original"
+                return transcript
+            return json.loads(json.dumps(native))
+
+        def model_request(data, ident, state, port):
+            calls.append("native-v2-request")
+            state["markers"].update(("VAULT_SHELL_OK", "VAULT_MCP_OK"))
+            native["messages"].append(
+                {"id": "msg_followup", "type": "user", "text": "new progress"}
+            )
+            return subprocess.CompletedProcess([], 0, "HOST_V2_ACCEPTANCE_OK", "")
+
+        def opened(archive, identities):
+            calls.append("authenticate-" + archive.stem)
+            manifest = {
+                "kind": archive.stem,
+                "source_workspace_id": source["id"],
+                "project": source["project"],
+                "sessions": {"last": fixture.LEGACY_ID},
+            }
+            return contextlib.nullcontext(
+                (manifest, root / "encrypted", b"synthetic-private")
+            )
+
+        with (
+            patch.object(
+                fixture,
+                "resume_fixture",
+                return_value=(
+                    root,
+                    Path(sys.executable),
+                    Path(sys.executable),
+                    "tumbleweed",
+                ),
+            ),
+            patch.object(
+                fixture, "prepare_native_cli", return_value=root / "bin/opencode"
+            ),
+            patch.object(fixture, "workspace", return_value=(path, source)),
+            patch.object(fixture, "stopped_container"),
+            patch.object(fixture, "make_provider", return_value=(server, worker)),
+            patch.object(fixture.crypto, "opened", side_effect=opened),
+            patch.object(fixture.backups, "validate_manifest"),
+            patch.object(box, "check_backend"),
+            patch.object(fixture.vault, "write_encrypted"),
+            patch.object(box, "main", side_effect=launch),
+            patch.object(box, "export_container_session", side_effect=export),
+            patch.object(
+                fixture, "digest_home", return_value="unchanged-v2-bytes"
+            ) as digest,
+            patch.object(fixture, "run_fixture_session", side_effect=model_request),
+            patch.object(
+                box, "exec_command", side_effect=lambda data, command: command
+            ),
+            patch.object(
+                box, "run", return_value=subprocess.CompletedProcess([], 0, "", "")
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            if changed_v1:
+                with self.assertRaisesRegex(AssertionError, "message/part history"):
+                    fixture.retry_downgrade(root)
+            else:
+                fixture.retry_downgrade(root)
+        self.assertTrue(
+            all(
+                call.args[1]
+                in (
+                    ".local/share/opencode/oc-box-v2.db",
+                    ".local/share/opencode/opencode.db",
+                )
+                for call in digest.call_args_list
+            )
+        )
+        self.assertEqual(len(digest.call_args_list), 1 if changed_v1 else 4)
+        server.shutdown.assert_called_once()
+        server.server_close.assert_called_once()
+        worker.join.assert_called_once()
+        for name in ("full.ocbox", "portable.ocbox"):
+            self.assertEqual((root / name).read_bytes(), b"retained fixture evidence")
+        return calls
+
+    def test_downgrade_retry_checks_native_v1_and_v2_history_and_never_recreates_backups(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            calls = self.exercise_downgrade_retry(root)
+            self.assertEqual(
+                calls,
+                [
+                    "authenticate-full",
+                    "authenticate-portable",
+                    "launch-2",
+                    "launch-1",
+                    "launch-2",
+                    "native-v2-request",
+                ],
+            )
+            result = json.loads((root / "downgrade-result.json").read_text())
+            self.assertEqual(result["status"], "passed")
+            self.assertIn("Targeted", result["scope"])
+
+    def test_downgrade_retry_stops_on_changed_original_history_without_false_pass(self):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            calls = self.exercise_downgrade_retry(root, changed_v1=True)
+            self.assertEqual(calls[-1], "launch-1")
+            self.assertNotIn("native-v2-request", calls)
+            self.assertFalse((root / "downgrade-result.json").exists())
+
+    def retained_downgrade(self, root):
+        path, source = self.retained_source(root)
+        box.atomic_json(
+            path.parent / "imports" / (fixture.LEGACY_ID + ".json"),
+            fixture.legacy_session(root / "source"),
+        )
+        ids = [source["id"]]
+        with (
+            patch.dict(os.environ, fixture.isolated_env(root), clear=True),
+            patch.object(Path, "home", return_value=root / "host-home"),
+        ):
+            for kind in ("full", "portable"):
+                project = root / ("restored-" + kind)
+                project.mkdir()
+                restored_path, data = box.create_workspace(project, "tumbleweed")
+                data.update(
+                    container_project=source["project"],
+                    restored_from={"workspace_id": source["id"], "kind": kind},
+                )
+                box.atomic_json(restored_path, data)
+                ids.append(data["id"])
+        (root / "fixture-ids.json").write_text(json.dumps(ids))
+        for name in ("full.ocbox", "portable.ocbox", "age-identity.txt"):
+            (root / name).write_bytes(b"retained fixture evidence")
+            (root / name).chmod(0o600)
+        return path, source, ids
+
+    def test_downgrade_retry_requires_exact_restored_registry_and_preserves_both_archives(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            _, _, ids = self.retained_downgrade(root)
+            with patch.object(
+                fixture, "stopped_container", return_value={"State": {"Running": False}}
+            ):
+                self.assertEqual(fixture.resume_fixture(root, downgrade=True)[0], root)
+            with self.assertRaisesRegex(ValueError, "source fixture"):
+                fixture.resume_fixture(root)
+            path = root / "registry/workspaces" / ids[-1] / "workspace.json"
+            data = box.read_json(path)
+            data["restored_from"]["workspace_id"] = "e" * 32
+            box.atomic_json(path, data)
+            with (
+                patch.object(fixture, "stopped_container"),
+                self.assertRaisesRegex(
+                    ValueError, "retained downgrade fixture evidence"
+                ),
+            ):
+                fixture.resume_fixture(root, downgrade=True)
+            for name in ("full.ocbox", "portable.ocbox"):
+                self.assertEqual(
+                    (root / name).read_bytes(), b"retained fixture evidence"
+                )
+
+    def test_downgrade_retry_refuses_changed_seed_history_or_completed_report(self):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            path, _, _ = self.retained_downgrade(root)
+            evidence = path.parent / "imports" / (fixture.LEGACY_ID + ".json")
+            original = box.read_json(evidence)
+            changed = json.loads(json.dumps(original))
+            changed["messages"][0]["parts"][0]["text"] = "different history"
+            box.atomic_json(evidence, changed)
+            with (
+                patch.object(fixture, "stopped_container"),
+                self.assertRaisesRegex(AssertionError, "message/part history"),
+            ):
+                fixture.resume_fixture(root, downgrade=True)
+            box.atomic_json(evidence, original)
+            (root / "downgrade-result.json").write_text("retained completion evidence")
+            with self.assertRaisesRegex(
+                ValueError, "overwrite backup/restore evidence"
+            ):
+                fixture.resume_fixture(root, downgrade=True)
+            self.assertEqual(
+                (root / "downgrade-result.json").read_text(),
+                "retained completion evidence",
+            )

@@ -224,11 +224,12 @@ Accepted host testing confirms 1.x env/MCP operation and 2.2.6 MCP access,
 cold/warm startup, native TUI, web and persistent session-shell coexistence,
 detach/reattach, stop/resume, updated plugin behavior and host history sync.
 The host fixture verified selected-vault provider/shell/MCP delivery, rotation
-and attach without unlock, and created a full backup. It stopped during full
-restore image loading before activation. V2 full/portable backup and restore,
-reset and V1 downgrade host validation are still pending. Automated fixtures
-verify those data/credential contracts but do not replace host rootless-Podman
-validation.
+and attach without unlock. A disk-backed rerun advanced through full/portable
+restore and reset to the V1 downgrade check. That run rejected normal V1 database
+metadata writes because it compared database bytes after native V1 reopened it.
+The corrected check verifies exact V1 message/part history and that V1 never
+writes the V2 database. V2 return remains pending the targeted host retry/final
+acceptance evidence. Automated fixtures do not replace host rootless-Podman tests.
 
 ### Remaining release checks
 
@@ -374,6 +375,35 @@ storage or overwriting the old backup. Keep the original backup until accepted.
 `Disk quota exceeded` is separate from filesystem-wide free bytes; zero inode
 counts can mean the filesystem does not report inode capacity. Check the actual
 user/project limits before interpreting the available-space lines as sufficient.
+
+For a fixture that has completed full/portable restores and reset but stopped
+at downgrade, complete only the version transitions while preserving its backups:
+
+```sh
+git pull --ff-only
+uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
+  --retry-downgrade /var/tmp/oc-box-live-v2-EXAMPLE --temp-dir /var/tmp
+```
+
+This requires exactly the recorded source, full restore and portable restore,
+all stopped, plus both encrypted backups and the original private V1 import
+transcript. It validates ownership, isolated graphroot/runroot and restore origins,
+authenticates both archive manifests, and snapshots current V2 transcript progress
+before reopening V1. It compares the complete V1 message/part transcript against
+the original import and verifies V1 has not written any V2 database bytes. After
+returning to V2 it verifies all retained message contents/order and executes the
+synthetic provider/shell/MCP check. It does not recreate restores or rewrite the
+encrypted backups, and refuses existing completion evidence. The result is
+`downgrade-result.json`; earlier restore/reset results remain separate host test
+evidence, not checks claimed to have run again by this targeted command.
+
+Native OpenCode 1.19.5 updates its `project` access metadata during ordinary
+`debug agent`, `session list` and `export`. Database-byte equality is therefore
+required only while the *other* major is running; after V1 itself reopens its
+database, exact retained transcript comparison is the history-preservation check.
+Private-home backup/restore transport remains byte-exact before either runtime
+reopens restored files. This distinction is exercised against unmodified V1/V2
+in CI and does not permit changed/lost messages or overwritten session identity.
 
 #### Manual alternative
 

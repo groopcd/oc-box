@@ -58,6 +58,11 @@ Never run it under sudo, inside oc-box, or against real workspaces.
 Use `--work-dir` for a new fixture's isolated image store and `--temp-dir` for
 private temporary-image/encrypted staging placement when system temp is limited.
 Neither option moves retained Podman storage; retry preserves encrypted evidence.
+`--retry-downgrade` completes a retained three-workspace fixture's V1/V2
+transition after restore/reset. Native V1 may update project/access metadata on
+read; compare exact messages/parts after reopening while keeping the inactive
+major's database bytes unchanged. Earlier restore/reset evidence is not rerun
+or relabeled by that targeted retry.
 
 ## Bash completion
 

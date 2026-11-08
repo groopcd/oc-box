@@ -303,6 +303,36 @@ def legacy_session(project):
     }
 
 
+def verify_v1_history(actual, expected):
+    """V1 may update project/access metadata when reopened; history is exact."""
+    box.validate_session_export(actual, expected["info"]["id"])
+    if (
+        actual["info"]["id"] != expected["info"]["id"]
+        or compat.directory(actual) != compat.directory(expected)
+        or actual["messages"] != expected["messages"]
+    ):
+        raise AssertionError(
+            "V1 downgrade changed retained session identity, project or complete message/part history"
+        )
+
+
+def verify_v2_progress(actual, expected):
+    box.validate_session_export(actual, expected["info"]["id"])
+    current = {message["id"]: message for message in actual["messages"]}
+    retained = {message["id"] for message in expected["messages"]}
+    if (
+        compat.directory(actual) != compat.directory(expected)
+        or any(
+            current.get(message["id"]) != message for message in expected["messages"]
+        )
+        or [
+            message["id"] for message in actual["messages"] if message["id"] in retained
+        ]
+        != [message["id"] for message in expected["messages"]]
+    ):
+        raise AssertionError("Returning to V2 lost or changed retained native history")
+
+
 def fixture_config(port):
     return {
         "$schema": "https://opencode.ai/config.json",
@@ -582,8 +612,10 @@ def cleanup(root):
     )
 
 
-def resume_fixture(root, *, full_restore=False):
-    """Only retry a stopped source fixture that has not started backups yet."""
+def resume_fixture(root, *, full_restore=False, downgrade=False):
+    """Validate isolated resources and evidence for the requested bounded retry."""
+    if full_restore and downgrade:
+        raise ValueError("Cannot combine full-restore and downgrade retry validation")
     if root.is_symlink() or not root.name.startswith(PREFIX):
         raise ValueError("Not a V2 acceptance fixture directory")
     root = root.resolve(strict=True)
@@ -630,9 +662,12 @@ def resume_fixture(root, *, full_restore=False):
     ids = json.loads((root / "fixture-ids.json").read_text())
     if (
         not isinstance(ids, list)
-        or len(ids) != 1
-        or not isinstance(ids[0], str)
-        or not re.fullmatch(r"[0-9a-f]{32}", ids[0])
+        or len(ids) != (3 if downgrade else 1)
+        or any(
+            not isinstance(ident, str) or not re.fullmatch(r"[0-9a-f]{32}", ident)
+            for ident in ids
+        )
+        or len(set(ids)) != len(ids)
     ):
         raise ValueError(
             "Resume supports only a source fixture before backup/restore; use cleanup and a new fixture after later failures"
@@ -640,19 +675,26 @@ def resume_fixture(root, *, full_restore=False):
     if any(
         (root / name).exists() or (root / name).is_symlink()
         for name in (
-            *(("full.ocbox",) if not full_restore else ()),
-            "portable.ocbox",
-            "restored-full",
-            "restored-portable",
+            *(("full.ocbox",) if not (full_restore or downgrade) else ()),
+            *(
+                ("portable.ocbox", "restored-full", "restored-portable")
+                if not downgrade
+                else ()
+            ),
             "result.json",
             "full-restore-result.json",
+            "downgrade-result.json",
         )
     ):
         raise ValueError(
             "Resume would overwrite backup/restore evidence; use cleanup and a new fixture"
         )
-    if full_restore:
-        for name in ("full.ocbox", "age-identity.txt"):
+    if full_restore or downgrade:
+        for name in (
+            "full.ocbox",
+            "age-identity.txt",
+            *(("portable.ocbox",) if downgrade else ()),
+        ):
             file = root / name
             info = file.lstat()
             if (
@@ -685,11 +727,13 @@ def resume_fixture(root, *, full_restore=False):
         )
     with patch.dict(os.environ, isolated_env(root), clear=True):
         paths = list(box.workspace_paths())
-        if len(paths) != 1 or paths[0].is_symlink() or paths[0].parent.is_symlink():
+        if len(paths) != len(ids) or any(
+            path.is_symlink() or path.parent.is_symlink() for path in paths
+        ):
             raise ValueError("Unexpected workspaces in retained fixture registry")
         path, data = workspace(ids[0])
         if (
-            paths[0] != path
+            path not in paths
             or data["project"] != str(root / "source")
             or data["home"] != str(root / "host-home")
             or data["distro"] not in box.DISTROS
@@ -710,7 +754,239 @@ def resume_fixture(root, *, full_restore=False):
         with box.workspace_lock(path):
             box.refresh_workspace_identity(path, data)
             stopped_container(data)
+        if downgrade:
+            baseline = path.parent / "imports" / (LEGACY_ID + ".json")
+            if baseline.parent.is_symlink():
+                raise ValueError("Retained V1 import evidence must not be symlinked")
+            info = baseline.lstat()
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_mode & 0o077
+                or info.st_size > crypto.MAX_SMALL
+            ):
+                raise ValueError("Missing or unsafe retained V1 import evidence")
+            verify_v1_history(box.read_json(baseline), legacy_session(root / "source"))
+            for index, kind in enumerate(("full", "portable"), 1):
+                restored_path, restored = workspace(ids[index])
+                if (
+                    restored_path not in paths
+                    or restored["project"] != str(root / ("restored-" + kind))
+                    or restored.get("container_project") != data["project"]
+                    or restored["home"] != data["home"]
+                    or restored["container"] != "oc-box-" + ids[index]
+                    or restored["home_volume"] != "oc-box-home-" + ids[index]
+                    or restored.get("devices")
+                    or restored.get("podman_args")
+                    or restored.get("restore_incomplete")
+                    or restored.get("restored_from", {}).get("workspace_id")
+                    != data["id"]
+                    or restored["restored_from"].get("kind") != kind
+                ):
+                    raise ValueError(
+                        "Recorded restored workspace does not match retained downgrade fixture evidence"
+                    )
+                with box.workspace_lock(restored_path):
+                    box.refresh_workspace_identity(restored_path, restored)
+                    stopped_container(restored)
     return root, *binaries, data["distro"]
+
+
+def retry_downgrade(root):
+    """Complete only the V1/V2 transition after the restored fixture stage."""
+    root, v1, v2, _ = resume_fixture(root, downgrade=True)
+    wrapper = prepare_native_cli(root, v1, v2, resume=True)
+    archives = {
+        name: crypto.digest(root / name) for name in ("full.ocbox", "portable.ocbox")
+    }
+    state = {
+        "key": "fixture-" + secrets.token_urlsafe(24),
+        "markers": set(),
+        "requests": 0,
+        "errors": [],
+    }
+    password = secrets.token_urlsafe(24)
+    server, worker = make_provider(state)
+    history = {}
+    try:
+        with (
+            patch.dict(os.environ, isolated_env(root), clear=True),
+            patch.object(vault, "vault_path", return_value=root / "vault/vault.json"),
+            patch.object(Path, "home", return_value=root / "host-home"),
+            patch.object(
+                box,
+                "detect_opencode_release",
+                side_effect=lambda: compat.version(
+                    box.run(
+                        [str(wrapper), "--version"],
+                        stdin=subprocess.DEVNULL,
+                        capture=True,
+                        private=True,
+                        timeout=15,
+                    ).stdout
+                ),
+            ),
+            patch.object(
+                box,
+                "host_command",
+                side_effect=lambda data, *arguments: compat.command(
+                    data.get("opencode_version", "1.0.0"), str(wrapper), arguments
+                ),
+            ),
+        ):
+            box.check_backend(feature="launch")
+            path, source = workspace(
+                json.loads((root / "fixture-ids.json").read_text())[0]
+            )
+            original = box.read_json(path.parent / "imports" / (LEGACY_ID + ".json"))
+            with box.workspace_lock(path):
+                for kind in ("full", "portable"):
+                    with crypto.opened(
+                        root / (kind + ".ocbox"), [root / "age-identity.txt"]
+                    ) as (manifest, _, _):
+                        backups.validate_manifest(box, manifest)
+                        if (
+                            manifest["kind"] != kind
+                            or manifest["source_workspace_id"] != source["id"]
+                            or manifest["project"] != source["project"]
+                            or manifest["sessions"].get("last") != LEGACY_ID
+                        ):
+                            raise ValueError(
+                                "Retained backup does not match the recorded downgrade fixture"
+                            )
+                (root / "config/opencode/opencode.json").write_text(
+                    json.dumps(fixture_config(server.server_port))
+                )
+                with vault.locked(vault.vault_path(), create=True):
+                    vault.write_encrypted(
+                        vault.vault_path(), {KEY: state["key"]}, password
+                    )
+                credentials.configure(source, mode="selected", secrets=[KEY])
+                box.atomic_json(path, source)
+            phase = {"value": "baseline"}
+
+            def check_session(_command):
+                _, current = workspace(source["id"])
+                actual = box.export_container_session(current, LEGACY_ID)
+                if current["opencode_version"].startswith("1."):
+                    verify_v1_history(actual, original)
+                    return 0
+                if "V1_HISTORY_RETAINED" not in json.dumps(
+                    actual
+                ) or "HOST_V2_ACCEPTANCE_OK" not in json.dumps(actual):
+                    raise AssertionError(
+                        "Expected existing migrated/native V2 history is missing"
+                    )
+                if phase["value"] == "baseline":
+                    history["v2"] = actual
+                else:
+                    verify_v2_progress(actual, history["v2"])
+                    state["markers"].clear()
+                    result = run_fixture_session(
+                        current, LEGACY_ID, state, server.server_port
+                    )
+                    if (
+                        state["errors"]
+                        or state["markers"] != {"VAULT_SHELL_OK", "VAULT_MCP_OK"}
+                        or "HOST_V2_ACCEPTANCE_OK" not in result.stdout
+                    ):
+                        raise AssertionError(
+                            "Returning V2 native provider/shell/MCP check failed"
+                        )
+                    verify_v2_progress(
+                        box.export_container_session(current, LEGACY_ID), history["v2"]
+                    )
+                verify = "import pathlib,os,sys; assert pathlib.Path(sys.argv[1],'unfinished.txt').read_text()=='PROJECT_RETAINED\\n'; assert pathlib.Path(os.environ['HOME'],'acceptance-home.txt').read_text()=='HOME_RETAINED\\n'; assert not pathlib.Path('/etc/oc-box-v2-fixture').exists()"
+                box.run(
+                    box.exec_command(
+                        current,
+                        ["python3", "-c", verify, box.container_project(current)],
+                    ),
+                    input="",
+                    capture=True,
+                    private=True,
+                    timeout=30,
+                )
+                return 0
+
+            with (
+                patch.object(vault, "hidden", return_value=password),
+                patch.object(box, "run_tui", side_effect=check_session),
+            ):
+                (root / "host-major").write_text("2")
+                box.main(["start", "--workspace", source["id"]])
+                current = workspace(source["id"])[1]
+                stopped_container(current)
+                v2_before = digest_home(current, ".local/share/opencode/oc-box-v2.db")
+                phase["value"] = "downgrade"
+                (root / "host-major").write_text("1")
+                box.main(["start", "--workspace", source["id"]])
+                current = workspace(source["id"])[1]
+                stopped_container(current)
+                if (
+                    digest_home(current, ".local/share/opencode/oc-box-v2.db")
+                    != v2_before
+                ):
+                    raise AssertionError(
+                        "V1 downgrade wrote to the retained V2 database"
+                    )
+                print(
+                    "PASS: Native V1 downgrade preserves exact seed message/part history; V2 database bytes unchanged.",
+                    flush=True,
+                )
+                phase["value"] = "return"
+                v1_before_return = digest_home(
+                    current, ".local/share/opencode/opencode.db"
+                )
+                (root / "host-major").write_text("2")
+                box.main(["start", "--workspace", source["id"]])
+                current = workspace(source["id"])[1]
+                stopped_container(current)
+                if (
+                    digest_home(current, ".local/share/opencode/opencode.db")
+                    != v1_before_return
+                ):
+                    raise AssertionError(
+                        "Returning V2 wrote to the retained V1 database"
+                    )
+                print(
+                    "PASS: Return to V2 preserves all pre-downgrade native messages and executes synthetic provider/shell/MCP tools.",
+                    flush=True,
+                )
+            if any(
+                crypto.digest(root / name) != digest
+                for name, digest in archives.items()
+            ):
+                raise AssertionError("Retained encrypted backup evidence changed")
+            result = {
+                "status": "passed",
+                "scope": "Targeted native V1 downgrade and V2 return on the retained reset/restored fixture; earlier full/portable restore/reset results are separate host evidence, not repeated by this command.",
+                "checks": [
+                    "V1 identity and full seed transcript exactly retained",
+                    "V1 does not write V2 database bytes",
+                    "V2 return does not write V1 database bytes",
+                    "All existing V2 messages exactly preserved after return",
+                    "Native synthetic provider/shell/MCP execution after return",
+                    "Retained project/home/reset OS state",
+                    "Encrypted full/portable backups unchanged",
+                ],
+                "fixture_ids": json.loads((root / "fixture-ids.json").read_text()),
+                "source_version": get_version_info(APP)["version"],
+                "native_versions": dict(NATIVE_VERSIONS),
+                "encrypted_backups": archives,
+            }
+            report = root / "downgrade-result.json"
+            with report.open("x") as output:
+                json.dump(result, output, indent=2)
+                output.write("\n")
+            report.chmod(0o600)
+            print(
+                "Downgrade acceptance retry passed. Report: " + str(report), flush=True
+            )
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=3)
 
 
 def retry_full_restore(root):
@@ -875,24 +1151,18 @@ def run(root, v1, v2, distro, *, resume=False):
                             current_path, current, legacy_session(source)
                         )
                     transcript = box.export_container_session(current, LEGACY_ID)
-                    if "V1_HISTORY_RETAINED" not in json.dumps(transcript):
-                        raise AssertionError("Retained V1 session missing")
-                    if "HOST_V2_ACCEPTANCE_OK" in json.dumps(transcript):
-                        raise AssertionError(
-                            "V2 transcript replaced retained V1 history"
-                        )
+                    verify_v1_history(
+                        transcript, active.get("v1_history", legacy_session(source))
+                    )
+                    if active["stage"] == "seed-v1":
+                        active["v1_history"] = transcript
                     return 0
                 session = workspace_service.live_connection()
                 if not session:
                     raise AssertionError("V2 did not create a private foreground owner")
                 if active.get("required_v2"):
                     prior = box.export_container_session(current, LEGACY_ID)
-                    if not active["required_v2"].issubset(
-                        {message["id"] for message in prior["messages"]}
-                    ):
-                        raise AssertionError(
-                            "Existing V2 progress was lost or reseeded before launch"
-                        )
+                    verify_v2_progress(prior, active["required_v2"])
                 session_id = LEGACY_ID
                 state["markers"].clear()
                 native_run = run_fixture_session(
@@ -977,9 +1247,7 @@ def run(root, v1, v2, distro, *, resume=False):
                         timeout=30,
                     )
                 if active["stage"] not in ("restored-full", "restored-portable"):
-                    active["source_v2"] = {
-                        message["id"] for message in transcript["messages"]
-                    }
+                    active["source_v2"] = transcript
                 return 0
 
             active = {"id": data["id"], "stage": "seed-v1"}
@@ -1131,6 +1399,9 @@ def run(root, v1, v2, distro, *, resume=False):
                 "Wrong vault password preserves resources; native V2 reset retains project/home/history and rebuilds OS"
             )
             (root / "host-major").write_text("1")
+            v2_before_downgrade = digest_home(
+                workspace(data["id"])[1], ".local/share/opencode/oc-box-v2.db"
+            )
             active["stage"] = "downgrade-v1"
             with (
                 patch.object(vault, "hidden", return_value=password),
@@ -1141,10 +1412,11 @@ def run(root, v1, v2, distro, *, resume=False):
             _, current = box.find_workspace(workspace_id=data["id"])
             assert current is not None
             if (
-                digest_home(current, ".local/share/opencode/opencode.db")
-                != original_v1_digest
+                digest_home(current, ".local/share/opencode/oc-box-v2.db")
+                != v2_before_downgrade
             ):
-                raise AssertionError("Downgrade modified retained V1 data")
+                raise AssertionError("V1 downgrade wrote to the retained V2 database")
+            v1_before_return = digest_home(current, ".local/share/opencode/opencode.db")
             (root / "host-major").write_text("2")
             active["stage"] = "return-v2"
             active["required_v2"] = active["source_v2"]
@@ -1154,6 +1426,13 @@ def run(root, v1, v2, distro, *, resume=False):
             ):
                 box.main(["start", "--workspace", data["id"]])
             stopped_container(workspace(data["id"])[1])
+            if (
+                digest_home(
+                    workspace(data["id"])[1], ".local/share/opencode/opencode.db"
+                )
+                != v1_before_return
+            ):
+                raise AssertionError("Returning V2 wrote to the retained V1 database")
             reports.append(
                 "Native V1 downgrade and V2 return preserve both histories without reseeding"
             )
@@ -1209,6 +1488,11 @@ def main(argv=None):
     )
     parser.add_argument("--cleanup", type=Path)
     parser.add_argument(
+        "--retry-downgrade",
+        type=Path,
+        help="verify exact retained V1 transcript and V2 return on a stopped three-workspace fixture after successful restore/reset stages; preserve existing archives",
+    )
+    parser.add_argument(
         "--retry-full-restore",
         type=Path,
         help="authenticate and retry a retained full backup into its still-absent restored-full destination without regenerating the backup",
@@ -1225,9 +1509,38 @@ def main(argv=None):
             "Run this fixture from a regular HOST terminal, not sudo or inside oc-box.\n",
         )
     if args.cleanup:
-        if args.resume or args.retry_full_restore or args.work_dir or args.temp_dir:
+        if (
+            args.resume
+            or args.retry_full_restore
+            or args.retry_downgrade
+            or args.work_dir
+            or args.temp_dir
+        ):
             parser.error("--cleanup cannot be combined with retry or placement options")
         cleanup(args.cleanup)
+        return 0
+    if args.retry_downgrade:
+        if (
+            args.resume
+            or args.retry_full_restore
+            or args.opencode_v1
+            or args.opencode_v2
+            or args.work_dir
+        ):
+            parser.error(
+                "--retry-downgrade reuses recorded fixture resources and cannot be combined with another retry/executable/work option"
+            )
+        try:
+            root, _, _, _ = resume_fixture(args.retry_downgrade, downgrade=True)
+            with temporary_location(root, args.temp_dir):
+                retry_downgrade(root)
+        except BaseException:
+            print(
+                "Fixture and encrypted backups retained for diagnosis: "
+                + str(args.retry_downgrade),
+                file=sys.stderr,
+            )
+            raise
         return 0
     if args.retry_full_restore:
         if args.resume or args.opencode_v1 or args.opencode_v2 or args.work_dir:

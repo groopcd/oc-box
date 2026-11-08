@@ -116,9 +116,10 @@ host-terminal V2 lifecycle/credential/backup validation; no real workspaces in t
 Host TUI/web/persistent-shell coexistence, detach/reattach, stop/resume and updated
 plugin behavior are accepted. The host fixture verified selected-vault provider,
 shell/MCP delivery, rotation and attach without unlock before full image restore
-failed. V2 full/portable backup/restore, reset and V1 downgrade still require host
-acceptance. Keep native V1/V2 integration enabled on master and pull requests
-after the feature merges.
+failed in the first fixture. A disk-backed rerun reached the V1 downgrade after
+full/portable restore and reset, then hit an overly strict V1 database-byte check.
+Final downgrade/V2-return host evidence and acceptance remain pending. Keep native
+V1/V2 integration enabled on master and pull requests after the feature merges.
 `tools/test_v2_podman.py` is the opt-in host acceptance fixture for these remaining
 checks: isolated synthetic vault/provider/MCP, native version executables, real
 rootless backup/reset/downgrade. Prompt/TUI actions are scripted; do not claim a
@@ -132,6 +133,11 @@ errors report fixed categories/exit codes only, never raw private stderr.
 Host acceptance `--work-dir` creates fresh disk-backed fixture storage, while
 `--temp-dir` redirects only private temporary files through honored `TMPDIR`.
 Never move a retained graphroot/runroot or overwrite encrypted evidence to retry.
+Native V1 reads update project/access metadata. After V1 itself reopens its DB,
+verify exact retained messages/parts, not physical DB-byte equality; require the
+inactive major's DB bytes unchanged. Late-stage downgrade retry validates all
+three stopped fixture workspaces, encrypted archives and original import evidence,
+and must not claim earlier restore/reset checks were rerun.
 
 Package/dependency mappings must pass `.github/workflows/distros.yml` on all
 seven catalog images using `tools/test_dependency_distro.py`. That disposable
