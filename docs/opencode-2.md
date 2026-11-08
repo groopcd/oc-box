@@ -493,6 +493,10 @@ transport, matching the private HTTP bridge. Failed commands and malformed
 nonempty JSON still fail. The native helper regression checks this CLI path,
 not only HTTP; it is not a new live Podman acceptance result. A propagated
 callback error after a completed stop is not recorded as a new shutdown failure.
+The first-owner host-clean check runs after the fixture's synthetic ambient
+control injection is removed. Vault/cache retention is also checked before that
+environment restoration, so restoration cannot conceal an accidentally inserted
+vault entry; deliberate ambient controls are never mistaken for vault delivery.
 
 For an unsuccessful owning launch, inspect retained checkpoints without
 starting/executing a container, unlocking the vault, syncing or replaying:

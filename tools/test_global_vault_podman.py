@@ -1615,8 +1615,15 @@ def write_vault(values, password):
         vault.write_encrypted(vault.vault_path(), values, password)
 
 
-def assert_host_clean():
+def assert_host_vault_clean():
     require(not credentials.has_unlocked_values(), "host-value-retention")
+    require(
+        all(name not in os.environ for name in (KEY, SIDE, ADDED)), "host-value-leak"
+    )
+
+
+def assert_host_clean():
+    assert_host_vault_clean()
     require(all(name not in os.environ for name in KNOWN), "host-value-leak")
 
 
@@ -1930,27 +1937,33 @@ def run(root, binary, distro, report=None):
                     verify_v2_progress(progress["source-a"], baseline)
             return 0
 
-        with (
-            first_launch_trace(root) as trace,
-            patch.dict(os.environ, ambient),
-            patch.object(vault, "hidden", return_value=password) as hidden,
-            patch.object(box, "run_tui", side_effect=first_owner),
-        ):
-            report("first-global-owning-launch")
-            trace("owning-launch")
-            launcher(
-                [
-                    "start",
-                    "--project",
-                    str(root / "source-a"),
-                    "--distro",
-                    distro,
-                    "--import-session",
-                    baseline["info"]["id"],
-                ]
-            )
-            with trace.checkpoint("unlock-count"):
-                require(hidden.call_count == 1, "unlock-count")
+        with first_launch_trace(root) as trace:
+            with (
+                patch.dict(os.environ, ambient),
+                patch.object(vault, "hidden", return_value=password) as hidden,
+                patch.object(box, "run_tui", side_effect=first_owner),
+            ):
+                report("first-global-owning-launch")
+                trace("owning-launch")
+                launcher(
+                    [
+                        "start",
+                        "--project",
+                        str(root / "source-a"),
+                        "--distro",
+                        distro,
+                        "--import-session",
+                        baseline["info"]["id"],
+                    ]
+                )
+                with trace.checkpoint("unlock-count"):
+                    require(hidden.call_count == 1, "unlock-count")
+                # Check real vault/cache retention before patch.dict restores
+                # the environment and could hide an accidentally inserted key.
+                with trace.checkpoint("host-vault-clean"):
+                    assert_host_vault_clean()
+            # Remove fixture-owned ambient controls before checking the host.
+            # The trace still covers the real cache/environment leak assertions.
             with trace.checkpoint("host-clean"):
                 assert_host_clean()
             with trace.checkpoint("source-resources"):
@@ -2447,6 +2460,7 @@ SOURCE_STAGES = (
         "permission-cleanup",
         "unlock-count",
         "host-clean",
+        "host-vault-clean",
         "evidence-preservation",
         "complete",
         "launcher-stage",

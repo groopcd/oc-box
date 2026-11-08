@@ -1004,6 +1004,88 @@ with patch.object(fixture,'host_guard'), patch.object(fixture.shutil,'which',ret
         self.assertEqual(result.stderr, "")
         self.assertNotIn(secret, result.stdout)
 
+    def test_first_launch_host_clean_runs_after_synthetic_controls_are_removed(self):
+        self.complete_fixture_metadata()
+        (self.root / "config/opencode").mkdir(mode=0o700)
+        baseline = {"info": {"id": "ses_fixture"}, "messages": []}
+        server = SimpleNamespace(
+            server_port=12345, shutdown=lambda: None, server_close=lambda: None
+        )
+        worker = SimpleNamespace(join=lambda **kwargs: None)
+        checked = []
+        original_check = fixture.assert_host_clean
+        original_vault_check = fixture.assert_host_vault_clean
+
+        class FirstPhaseComplete(Exception):
+            pass
+
+        def report(phase):
+            if phase == "first-import-all-entries-build-asks":
+                raise FirstPhaseComplete()
+
+        def launch(arguments):
+            self.assertIn("--import-session", arguments)
+            self.assertIn(fixture.AMBIENT, os.environ)
+            self.assertIn(fixture.PASS_ENV, os.environ)
+            self.record("source-a", "a" * 32)
+            vault.hidden()  # Exactly one scripted unlock for this owning launch.
+            return 0
+
+        def host_check():
+            checked.append({name: name in os.environ for name in fixture.KNOWN})
+            original_check()
+
+        with (
+            patch.object(fixture, "host_guard"),
+            patch.object(
+                fixture,
+                "isolated_env",
+                return_value={"XDG_RUNTIME_DIR": "/run/user/9999"},
+            ),
+            patch.object(fixture, "validate_store"),
+            patch.object(box, "check_backend"),
+            patch.object(crypto, "tools"),
+            patch.object(vault, "crypto"),
+            patch.object(fixture, "prepare_native_cli"),
+            patch.object(fixture, "seed_native_history", return_value=baseline),
+            patch.object(fixture, "write_vault"),
+            patch.object(fixture, "make_provider", return_value=(server, worker)),
+            patch.object(fixture, "launcher", side_effect=launch),
+            patch.object(fixture, "verify_owned_resources"),
+            patch.object(fixture, "assert_host_clean", side_effect=host_check),
+            patch.object(
+                fixture, "assert_host_vault_clean", wraps=original_vault_check
+            ) as vault_check,
+            self.assertRaises(FirstPhaseComplete),
+        ):
+            fixture.run(
+                self.root, Path(sys.executable).resolve(), "tumbleweed", report=report
+            )
+        self.assertEqual(checked, [{name: False for name in fixture.KNOWN}])
+        self.assertEqual(vault_check.call_count, 2)
+        self.assertFalse((self.root / "first-launch-failure.json").exists())
+
+    def test_host_clean_retains_cache_and_environment_leak_checks(self):
+        with patch.object(
+            fixture.credentials, "has_unlocked_values", return_value=True
+        ):
+            with self.assertRaisesRegex(fixture.FixtureError, "host-value-retention"):
+                fixture.assert_host_clean()
+        for name in fixture.KNOWN:
+            with (
+                self.subTest(name=name),
+                patch.dict(os.environ, {name: "synthetic-leak-control"}),
+            ):
+                with self.assertRaisesRegex(fixture.FixtureError, "host-value-leak"):
+                    fixture.assert_host_clean()
+                if name in (fixture.KEY, fixture.SIDE, fixture.ADDED):
+                    with self.assertRaisesRegex(
+                        fixture.FixtureError, "host-value-leak"
+                    ):
+                        fixture.assert_host_vault_clean()
+                else:
+                    fixture.assert_host_vault_clean()
+
     def test_source_retry_requires_verified_selection_and_rejects_later_evidence(self):
         path, data, baseline = self.retained_source()
         result = fixture.validate_source_retry(self.root)

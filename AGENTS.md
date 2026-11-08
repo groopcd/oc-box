@@ -159,6 +159,9 @@ Native API CLI success with no body (HTTP 204 reply/delete/reload) returns None,
 matching the HTTP bridge; preserve failed-command and malformed nonempty JSON
 errors. Native fixtures exercise that CLI transport, not only HTTP. Repropagated
 exception identity must not create a false failure after completed shutdown.
+First-owner host-clean checks run after synthetic ambient controls are removed;
+also check vault/cache retention before restoring that environment so fixture
+restoration cannot hide an inserted vault entry. Never weaken the leak guards.
 --retry-source is limited to a stopped baseline-ready, already-imported source
 with verified private store/identity and no later backup/restore evidence. Use
 new companion synthetic vault/config/report files; never overwrite original
