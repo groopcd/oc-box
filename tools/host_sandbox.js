@@ -22,7 +22,7 @@ export default {
   async setup(ctx) {
     // The existing explicit opt-out is kept for copied oc-box launches only.
     // The host migration never sets this variable or disables sandbox policy.
-    if (process.env.OC_BOX_CONTAINER === "1" || ["1", "true"].includes(process.env.OPENCODE_DISABLE_SANDBOX)) return
+    if (["1", "true"].includes(process.env.OPENCODE_DISABLE_SANDBOX)) return
     const base = path.join(process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config"), "opencode-sandbox")
     let user
     try {

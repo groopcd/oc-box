@@ -94,10 +94,15 @@ async function load(user = {}, env = {}, broken = false) {
   assert.throws(() => hooks.get("execute.before")({ tool: "shell" }), /policy invalid; command blocked/)
 }
 {
-  for (const env of [{ OC_BOX_CONTAINER: "1" }, { OPENCODE_DISABLE_SANDBOX: "1" }]) {
+  for (const env of [{ OC_BOX_CONTAINER: "1", OPENCODE_DISABLE_SANDBOX: "1" }, { OPENCODE_DISABLE_SANDBOX: "1" }]) {
     const { hooks, calls } = await load({}, env)
     assert.equal(hooks.size, 0)
     assert.equal(calls.length, 0)
   }
+}
+{
+  const { hooks, cleanup } = await load({}, { OC_BOX_CONTAINER: "1" })
+  assert.ok(hooks.has("execute.before"))
+  await cleanup()
 }
 console.log("PASS: native host sandbox hook policy, fail-closed setup, success/error cleanup and unchanged original input; mocked runtime, not isolation validation")
