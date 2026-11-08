@@ -149,6 +149,10 @@ new companion synthetic vault/config/report files; never overwrite original
 ciphertext/seed/config, reimport, reset, purge, or claim the full fixture reran.
 Keep first-failure diagnostics separate from shutdown/journal failures and
 report fixed substep/category/exit data only, never private stderr/env/argv.
+Recorded secondary fixture roots may be selected by normal resume: validate
+their actual root/project metadata and retain their messages, while checking
+the verified seed explicitly. Never accept unrecorded/foreign/child selection,
+rewrite the last-used pointer, reimport, or infer acceptance from this retry.
 A disk-backed fixture passed full/portable restore and reset; a targeted retry
 passed exact V1 history preservation, inactive-major database-byte preservation
 and V2 return with retained native messages plus synthetic tool execution. The

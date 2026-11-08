@@ -1182,6 +1182,18 @@ def selected_session(command, path, expected=None):
     return ident
 
 
+def validate_selected_source_session(info, ident, data):
+    """A recorded selector must resolve to a root in this same private project."""
+    require(
+        isinstance(info, dict)
+        and info.get("id") == ident
+        and not info.get("parentID")
+        and isinstance(info.get("location"), dict)
+        and info["location"].get("directory") == box.container_project(data),
+        "selected-session",
+    )
+
+
 def assert_plugins(request, project, trace=None):
     query = "?directory=" + quote(str(project), safe="")
     if trace is not None:
@@ -2448,9 +2460,15 @@ def validate_source_retry(root):
     )
     state = private_json(root, box.session_file(path).relative_to(root))
     evidence = path.parent / "imports-v2" / (ident + ".json")
+    recorded = state.get("sessions")
     require(
-        state.get("last") == ident
-        and ident in state.get("sessions", [])
+        isinstance(recorded, list)
+        and len(recorded) <= 16
+        and all(box.valid_session_id(item) for item in recorded)
+        and len(recorded) == len(set(recorded))
+        and box.valid_session_id(state.get("last"))
+        and state["last"] in recorded
+        and ident in recorded
         and state.get("imported_from_host") == {ident: {"backup": str(evidence)}},
         "retry-verified-import",
     )
@@ -2578,6 +2596,9 @@ def retry_source(root, temp_parent=None):
     if temp_parent is not None:
         temp_parent = existing_directory(temp_parent)
     before = source_evidence_digests(root, path)
+    selected_before = private_json(root, box.session_file(path).relative_to(root))[
+        "last"
+    ]
     directory = safe_path(root, "source-retries", directory=True, optional=True)
     directory.mkdir(mode=0o700, exist_ok=True)
     info = directory.stat()
@@ -2591,7 +2612,8 @@ def retry_source(root, temp_parent=None):
         "source_identity": None,
         "native_version": NATIVE_VERSION,
         "workspace_ids": {"source-a": source["id"]},
-        "selected_session": baseline["info"]["id"],
+        "selected_session_before": selected_before,
+        "diagnostic_session": baseline["info"]["id"],
         "checks": [],
         "evidence_before": before,
         "steps": trace.steps,
@@ -2681,12 +2703,22 @@ def retry_source(root, temp_parent=None):
                     require(connection is not None, "private-owner")
                     trace.completed()
                     trace("selected-session")
-                    ident = selected_session(
-                        command, current_path, baseline["info"]["id"]
-                    )
+                    selected = selected_session(command, current_path, selected_before)
+                    request = request_for(data, connection)
+                    selected_info = request("GET", "/api/session/" + selected)["data"]
+                    validate_selected_source_session(selected_info, selected, data)
+                    result["actual_client_selected_session"] = selected
+                    ident = baseline["info"]["id"]
                     trace.completed()
                     result["checks"].append("actual-client-selected-session")
                     trace("retained-transcript")
+                    other = (
+                        box.export_container_session(data, selected)
+                        if selected != ident
+                        else None
+                    )
+                    if other is not None:
+                        box.validate_session_export(other, selected)
                     verify_v2_progress(
                         box.export_container_session(data, ident), baseline
                     )
@@ -2714,6 +2746,16 @@ def retry_source(root, temp_parent=None):
                     verify_v2_progress(
                         box.export_container_session(data, ident), baseline
                     )
+                    if other is not None:
+                        unchanged = box.export_container_session(data, selected)
+                        require(
+                            unchanged["info"]["id"] == selected
+                            and unchanged["messages"] == other["messages"],
+                            "other-session-changed",
+                        )
+                        result["checks"].append(
+                            "other-recorded-session-retained-unchanged"
+                        )
                     result["checks"].append("retained-seed-after-native")
                     trace.completed()
                     trace.completed("callback")

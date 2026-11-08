@@ -500,15 +500,15 @@ never printed alongside env/config values. It cannot recover an exception that
 the original run discarded, and inspection does not establish acceptance.
 
 If the retained source is stopped, baseline-ready and already has its verified
-seed selected, a narrowly scoped owning retry can capture the failing substep:
+seed recorded, a narrowly scoped owning retry can capture the failing substep:
 
 ```sh
 uv run --isolated --no-project --with cryptography python -I -B tools/test_global_vault_podman.py \
   --retry-source /var/tmp/oc-box-gv-host-EXAMPLE
 ```
 
-This refuses fixtures with backup/restore/result evidence or an unexpected
-workspace/session. It resumes the existing synthetic source, never reimports,
+This refuses fixtures with backup/restore/result evidence or an unrecorded
+selection, wrong project or non-root session. It resumes the existing synthetic source, never reimports,
 resets or purges it. Each attempt creates a new private companion vault/config
 and report, leaving the original encrypted vault, seed and configuration
 evidence unchanged. The lost random fixture passphrase is not recovered or
@@ -518,6 +518,11 @@ original first launch, new-project/opt-out/full-backup/restore stages.
 Failure reports fixed substeps/error classes/exit codes rather than raw private
 stderr, env values, argv or transcript contents. Keep the attempt report and
 original fixture; do not use the whole new-fixture command as a retry.
+If another recorded synthetic root became the normal current selection, the
+retry validates that client's session/project metadata, then targets the
+verified imported seed explicitly for its native checks. Both IDs are reported
+and the other session's messages are checked unchanged. It never hand-edits
+the selection file; normal launcher history refresh may update its last-used ID.
 
 **No live result for this fixture has been accepted yet.** Unit and native
 offline tests do not substitute for executing it on a host. Keep the important

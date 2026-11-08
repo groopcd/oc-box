@@ -707,6 +707,10 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
         self,
     ):
         path, data, baseline = self.retained_source()
+        state = box.session_state(path)
+        state["sessions"].append("ses_other_recorded")
+        state["last"] = "ses_other_recorded"
+        box.atomic_json(box.session_file(path), state)
         before = fixture.source_evidence_digests(self.root, path)
         secret = "synthetic-private-retry-failure-value"
         with (
@@ -737,6 +741,8 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
         self.assertEqual(launch.call_args.args[0], ["start", "--workspace", data["id"]])
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["scope"], "retained-source-only")
+        self.assertEqual(result["diagnostic_session"], baseline["info"]["id"])
+        self.assertEqual(result["selected_session_before"], "ses_other_recorded")
         self.assertEqual(result["error"]["stage"], "owning-launch")
         self.assertEqual(result["error"]["error_class"], "box-error")
         self.assertTrue(result["evidence_unchanged"])
@@ -745,6 +751,38 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
         self.assertEqual(fixture.source_evidence_digests(self.root, path), before)
         self.assertTrue((report_path.parent / "vault/vault.json").is_file())
         self.assertFalse((self.root / "result.json").exists())
+
+    def test_verified_seed_can_be_checked_without_rewriting_another_recorded_selection(
+        self,
+    ):
+        path, _, baseline = self.retained_source()
+        state = box.session_state(path)
+        state["sessions"].append("ses_other_recorded")
+        state["last"] = "ses_other_recorded"
+        box.atomic_json(box.session_file(path), state)
+        before = box.session_file(path).read_bytes()
+        _, _, _, checked, _ = fixture.validate_source_retry(self.root)
+        self.assertEqual(checked, baseline)
+        self.assertEqual(box.session_file(path).read_bytes(), before)
+        state["last"] = "ses_not_recorded"
+        box.atomic_json(box.session_file(path), state)
+        with self.assertRaisesRegex(fixture.FixtureError, "retry-verified-import"):
+            fixture.validate_source_retry(self.root)
+
+    def test_retry_selected_metadata_must_be_a_root_in_the_same_private_project(self):
+        _, data, _ = self.retained_source()
+        info = {"id": "ses_other_recorded", "location": {"directory": data["project"]}}
+        fixture.validate_selected_source_session(info, "ses_other_recorded", data)
+        for changed in (
+            {**info, "id": "ses_wrong"},
+            {**info, "parentID": "ses_parent"},
+            {**info, "location": {"directory": str(self.parent)}},
+            {**info, "location": None},
+        ):
+            with self.subTest(info=changed), self.assertRaises(fixture.FixtureError):
+                fixture.validate_selected_source_session(
+                    changed, "ses_other_recorded", data
+                )
 
 
 if __name__ == "__main__":
