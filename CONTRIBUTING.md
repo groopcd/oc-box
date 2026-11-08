@@ -72,10 +72,10 @@ profile; it never edits the source profile, host databases, or installed CLI.
 sandbox runtime, not the container opt-out bridge. Native profile tests use a
 mocked runtime; real host filesystem/network enforcement remains a manual
 acceptance check. Foreground native host project/outside-project write and
-allowed/disallowed network probes are accepted; reload/background behavior remain
-separate host checks. The first host reload failed closed because SDK reset retains
-its config object; native same-process reload fixtures now cover idle lease
-ownership and reset/init serialization, pending a host retest. See
+allowed/disallowed network probes are accepted before and after reload; background
+behavior remains a separate host check. The first host reload failed closed
+because SDK reset retains its config object; native same-process reload fixtures cover idle lease
+ownership and reset/init serialization, and the corrected host reload passed. See
 `docs/host-plugins.md`. Keep defaults fail-closed, avoid
 Build permission overrides, preserve source-relative supporting files, and
 reject unsupported migration paths instead of silently disabling protection.

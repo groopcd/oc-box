@@ -14,7 +14,7 @@ are not changed by the tool.
 
 | Plugin | Decision and reason |
 | --- | --- |
-| opencode-sandbox | Keep; native V2 shell hooks and maintained sandbox engine preserve host policy. Reported host foreground allow/deny checks passed; reload/background cleanup remain separate checks. |
+| opencode-sandbox | Keep; native V2 shell hooks and maintained sandbox engine preserve host policy. Reported host allow/deny checks passed before and after reload; background cleanup remains a separate check. |
 | python-isolation | Keep; pip/uv isolation remains useful, particularly with a readonly sandbox home. Private writable caches and native shell environment hook. |
 | output-clamp | Keep; native 8/12 KiB selective UTF-8 budgets are stricter than V2's built-in 50 KiB/2,000-line limit. Full spill text, files and structured data are preserved. |
 | lemonade-models | Keep; V2 does not automatically discover your configured compatible local server's live model inventory/capabilities/context. No models are loaded except explicit load/unload tool calls. |
@@ -115,14 +115,15 @@ settings at a Responses endpoint and real PDF fallback bytes. The sandbox engine
 is mocked inside this container; that is not host isolation proof. Reported host
 foreground tests confirmed allowed project writes, denied outside-project writes,
 an allowed PyPI request and an explicit example.com allowlist denial. A subsequent
-host `/reload` failed closed before executing the probes. The lifecycle fix below
-passes native reload tests; host reload acceptance remains pending the retest.
+host `/reload` initially failed closed before executing the probes. After the
+lifecycle fix below, the operator repeated the probes before and after reload:
+all child commands executed and the same filesystem/network enforcement passed.
 Background-job cleanup is separately covered by mocked-runtime tests, not yet
 reported validated on the host.
 If the native sandbox is inactive or dependencies fail to load, do not assume
 its fail-closed runtime hooks are present. Stop and fix activation first.
 
-## Accepted native-host foreground smoke results
+## Accepted native-host foreground and reload smoke results
 
 All six native plugins were reported loaded in the normal host V2 setup. The
 operator ran shell-tool tests with actual execution, not pre-execution OpenCode
@@ -135,14 +136,21 @@ permission refusals:
 | HTTPS request to allowed PyPI | HTTP 200, exit 0 |
 | HTTPS request to disallowed example.com | curl exit 22; tunnel response HTTP 403 with `X-Proxy-Error: blocked-by-allowlist` |
 
+After the sandbox-only lifecycle update and one fresh host launch, the same A–D
+results were reported before and after `/reload`, without an initialization failure
+or pre-execution permission refusal. The repeated denied request showed proxy
+CONNECT 403/curl exit 22, not a DNS error, TLS failure or timeout. Reload is accepted
+for this tested normal-host policy and disposable project, not just inferred from
+mocked cleanup or plugin activation.
+
 These are accepted foreground shell-tool smoke results for the tested policy,
 paths and endpoints, not exhaustive sandbox certification. There were no config
 changes, installations, real credential reads, or hand-written sandbox wrappers
 in these probes. The successful project test file is disposable test data, not
-source or evidence to commit. Before recording reload or background cleanup as
-accepted, finish background jobs, run `/reload` and repeat the same checks; test
-background completion separately if relevant. Native file tools, MCPs, plugins
-and interactive PTYs remain outside this shell-tool sandbox's claimed boundary.
+source or evidence to commit. Repeat reload checks after lifecycle/policy changes;
+finish background jobs first. Background completion/cleanup still needs its own
+host test if relevant. Native file tools, MCPs, plugins and interactive PTYs
+remain outside this shell-tool sandbox's claimed boundary.
 
 ## Sandbox lifecycle update after the first migration
 
@@ -183,8 +191,10 @@ restart it intentionally after closing its clients. This is one-time recovery
 of the previously broken service, not a requirement to restart for future config
 edits. Then run `/reload` and repeat the same allow/deny tests without another
 restart. Three same-process native `/api/location/reload` cycles plus overlapping
-reset/startup and registration-failure tests pass in offline fixtures; the sandbox
-engine is mocked there, so the host retest is still required.
+reset/startup and registration-failure tests pass in offline fixtures; their
+sandbox engine is mocked. The operator's subsequent host allow/deny retest before
+and after reload passed as recorded above. Background behavior is not claimed
+as validated by those foreground probes.
 
 ## Older option: separate compatibility profile
 
