@@ -28,6 +28,24 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
+### V2 session-history synchronization
+
+The changes introduced in `d638907be97f9f33d00e59da526eb046e39a3627` add paginated
+root/child discovery, independent host archives with relationship provenance,
+missing-source reconciliation, verified native imports, and refusal of incomplete
+or unsettled exports. Unit tests and `tests/smoke_session_sync_v2.py` exercise
+these contracts using synthetic private databases and substituted transport. The
+fixture also runs as part of the ordinary native V2 smoke suite.
+
+These checks are not live rootless-Podman acceptance. The accepted interactive,
+vault-edge, and shared home-component reports below ran different source revisions
+without this change; their scopes and identities remain unchanged. In particular,
+`1.6.44+ga043049` and `1.6.44+gd638907` share a patch count, not the same source.
+Repeat relevant host lifecycle checks and add focused history/readiness acceptance
+on the clean integrated release candidate before stable GitHub/PyPI publication.
+Mainline source updates and build-only distribution artifacts do not establish
+that acceptance or trigger a stable release by themselves.
+
 ### Reviewed host reports — 2026-11-09
 
 These are user-supplied reports reviewed here, **not executions from this
@@ -264,6 +282,7 @@ a CLI abort-before-deletion test protect different boundaries.
 | `test_process_io` | Keep large regular-file capture and cwd/PWD coherence; private capture/redaction has separate credential contracts. |
 | `test_secret_prompt` | Keep editor/paste/byte-limit and real TTY/echo/cancellation/resize regressions, not just masked rendering. |
 | `test_session_import` | Keep exact transcript/ID, namespace/origin, duplicate/no-overwrite, known normalization and failed-import recovery regressions. |
+| `test_session_sync` | V2 paginated root/child discovery, missing-source reconciliation, independent relationship provenance, export completeness and verified host archive replacement. |
 | `test_session_terminal`, `test_terminal`, `test_workspace_service` | Keep persistent versus maintenance-shell authority, frame validation, client leases, auth/env isolation and lifecycle locks; consolidate API response outcomes. |
 | `test_stale_workspaces` | Keep nondestructive purge/provenance and abort-on-failed-sync/copy recovery boundaries. |
 | `test_startup` | Keep warm cache adoption, SDK/lock/config safety and TUI relay; consolidate cache invalidation causes with fresh fixtures per row. |

@@ -51,6 +51,11 @@ their checkout ownership distinct from unrelated source and flat installations.
   native transcripts, private V2 service leases and credential refresh. Preserve
   V1 database/history; never save forwarded vault env in service config or
   connect workspace activity to the host shared service.
+  V2 history discovery includes paginated child sessions; only a complete valid
+  inventory may retire missing source IDs, retaining their archives. Keep host
+  archives independently replaceable, with namespaced relationships as metadata,
+  not native parent links or revived permissions. Reject unsettled/omitted history
+  and verify native imports; CLI conflict success is not proof of synchronization.
 - `workspace_service.py`: foreground V2 owner, same-user runtime-socket client
   leases and host-loopback HTTP/WebSocket relay. Control credentials remain
   ephemeral memory only; no published container/LAN ports or shared host service.
@@ -107,7 +112,7 @@ OpenCode itself and its integrations run natively inside the container. Preserve
 MCPs, formatters, language servers, and plugins. Do not return to replacing
 built-in tools or disabling integrations for containment. Keep mainline OpenCode
 unmodified. Live sessions persist in a private named volume, and host-side
-history is synchronized with supported CLI export/import commands on exit.
+history is synchronized with supported native API/CLI export/import on exit.
 
 ## Git workflow
 
@@ -219,6 +224,12 @@ This establishes measured rootless 0/1 UID/GID/mode/content transport, source
 preservation and root privacy through the common archive/age/extract path only.
 It is not a new per-kind full/portable container-origin/first-mount or custom-
 mapping pass. Preserve the earlier lifecycle/UI/vault versions and all evidence.
+The session-sync/readiness changes from d638907 have unit/native offline coverage
+only. None of the accepted a043049/acddbd8/7df5074 host reports contains that
+change; matching 1.6.44 patch numbers do not identify matching source hashes.
+Repeat relevant host lifecycle and focused history/readiness acceptance on the
+clean integrated candidate before stable publication. Build-only artifacts and
+mainline integration are not a new accepted host run.
 The global-vault fixture's initial host run failed during the first owning
 launch, not an accepted pass.
 Use --diagnose for validated read-only checkpoints; never print raw errors/env

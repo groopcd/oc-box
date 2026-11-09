@@ -1733,7 +1733,58 @@ def prepare_runtime(path, data, version):
     # Config-directory auth is already part of the config snapshot.
 
 
-def refresh_sessions(path, data):
+def run_v2_history(data, action, **settings):
+    """Use the owning service when present; never elect a host shared service."""
+    live = workspace_service.live_connection()
+    endpoint = (
+        {key: live[key] for key in ("url", "password")}
+        if live and live["workspace"] == data["id"]
+        else None
+    )
+    return run(
+        exec_command(
+            data,
+            [
+                "python3",
+                "-c",
+                (PACKAGE / "opencode_v2_io.py").read_text(),
+                action,
+                CONTAINER_OPENCODE,
+            ],
+        ),
+        input=json.dumps(
+            {"directory": container_project(data), "endpoint": endpoint, **settings}
+        ),
+        capture=True,
+        private=True,
+        timeout=180,
+    )
+
+
+def list_container_sessions(data):
+    """V2's CLI lists roots only; use its paginated API for the full inventory."""
+    if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
+        result = run_v2_history(data, "sessions")
+        values = json.loads(result.stdout)
+        if not isinstance(values, list):
+            raise BoxError("Invalid OpenCode 2.x session inventory.")
+        for item in values:
+            if (
+                not isinstance(item, dict)
+                or not valid_session_id(item.get("id"))
+                or not isinstance(item.get("location"), dict)
+                or opencode_compat.directory({"info": item}) != container_project(data)
+                or not isinstance(item.get("time"), dict)
+                or not isinstance(item["time"].get("updated"), (int, float))
+                or (
+                    item.get("parentID") is not None
+                    and not valid_session_id(item["parentID"])
+                )
+            ):
+                raise BoxError("Invalid OpenCode 2.x session inventory entry.")
+        if len({item["id"] for item in values}) != len(values):
+            raise BoxError("Duplicate OpenCode 2.x session inventory entry.")
+        return values
     result = run(
         exec_command(
             data, [CONTAINER_OPENCODE, "--pure", "session", "list", "--format", "json"]
@@ -1741,18 +1792,49 @@ def refresh_sessions(path, data):
         capture=True,
         timeout=60,
     )
-    values = json.loads(result.stdout or "[]")
+    return json.loads(result.stdout or "[]")
+
+
+def refresh_sessions(path, data):
+    values = list_container_sessions(data)
+    v2 = opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2
     roots = [
         item
         for item in values
-        if item.get("directory") == container_project(data)
+        if opencode_compat.directory({"info": item}) == container_project(data)
         and valid_session_id(item.get("id"))
+        and (not v2 or not item.get("parentID"))
     ]
-    roots.sort(key=lambda item: item.get("updated", 0), reverse=True)
-    state = session_state(path)
-    state["sessions"] = list(
-        dict.fromkeys(state.get("sessions", []) + [item["id"] for item in roots])
+    roots.sort(
+        key=lambda item: (
+            item.get("time", {}).get("updated", 0) if v2 else item.get("updated", 0)
+        ),
+        reverse=True,
     )
+    state = session_state(path)
+    if v2:
+        # A complete, successful inventory is authoritative. Retain the last
+        # good archives/host associations for deleted or moved-away sources.
+        current = [item["id"] for item in values]
+        present = set(current)
+        previous = state.get("sessions", [])
+        state["missing"] = list(
+            dict.fromkeys(
+                [
+                    ident
+                    for ident in state.get("missing", []) + previous
+                    if ident not in present
+                ]
+            )
+        )
+        state["sessions"] = list(
+            dict.fromkeys([ident for ident in previous if ident in present] + current)
+        )
+        state["last"] = roots[0]["id"] if roots else None
+    else:
+        state["sessions"] = list(
+            dict.fromkeys(state.get("sessions", []) + [item["id"] for item in roots])
+        )
     if roots:
         state["last"] = roots[0]["id"]
     atomic_json(session_file(path), state)
@@ -1889,6 +1971,14 @@ def validate_session_export(exported, ident):
 
 
 def export_container_session(data, ident):
+    if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
+        exported = json.loads(run_v2_history(data, "export", session=ident).stdout)
+        validate_session_export(exported, ident)
+        if opencode_compat.directory(exported) != container_project(data):
+            raise BoxError(
+                "OpenCode 2.x session moved outside this workspace directory."
+            )
+        return exported
     # Podman gives the child a pipe even when host output is a regular file.
     # Spool in-container too to avoid mainline's large-stdout truncation.
     spool = """import shutil,subprocess,sys,tempfile
@@ -1983,16 +2073,7 @@ def import_host_session(path, data, exported):
         / ("imports-v2" if opencode_compat.native(exported) else "imports")
         / (ident + ".json")
     )
-    listed = run(
-        exec_command(
-            data, [CONTAINER_OPENCODE, "--pure", "session", "list", "--format", "json"]
-        ),
-        capture=True,
-        timeout=60,
-    )
-    existing = any(
-        item.get("id") == ident for item in json.loads(listed.stdout or "[]")
-    )
+    existing = any(item.get("id") == ident for item in list_container_sessions(data))
     if existing:
         if not backup.is_file() or ident in state.get("imported_from_host", {}):
             raise BoxError(
@@ -2144,6 +2225,84 @@ def archive_session(export, data):
     return result
 
 
+def guard_host_archive_children(path, data, ident):
+    """Native delete is recursive, even across children not owned by oc-box."""
+    result = run(
+        host_command(data, "api", "get", "/api/session?parentID=" + ident + "&limit=1"),
+        env=private_host_env(path, data),
+        cwd=path.parent / "controller",
+        capture=True,
+        private=True,
+        timeout=60,
+    )
+    response = json.loads(result.stdout)
+    if (
+        not isinstance(response, dict)
+        or not isinstance(response.get("data"), list)
+        or not isinstance(response.get("cursor"), dict)
+        or (not response["data"] and response["cursor"].get("next") is not None)
+    ):
+        raise BoxError("Invalid host archive child inventory; no archive was replaced.")
+    if response["data"]:
+        raise BoxError(
+            "Host archive has linked child sessions; refusing recursive replacement. "
+            "Container history and host conversations are retained."
+        )
+
+
+def verify_host_archive(path, data, archived):
+    """A successful native CLI import may be a conflict/no-op, not an update."""
+    ident = archived["info"]["id"]
+    result = run(
+        host_command(data, "--pure", "export", ident),
+        env=private_host_env(path, data),
+        cwd=path.parent / "controller",
+        capture=True,
+        private=True,
+        timeout=60,
+    )
+    imported = json.loads(result.stdout)
+    validate_session_export(imported, ident)
+    source_time = archived["info"].get("time", {})
+    idle = source_time.get("idle")
+    # Native import preserves creation/archive/idle times, clips busy/viewed to
+    # the idle boundary, and assigns a new updated time. Verify those semantics
+    # rather than accepting stale metadata or demanding timestamp byte equality.
+    expected_time = {
+        "created": source_time.get("created"),
+        "archived": source_time.get("archived"),
+        "idle": idle,
+        **{
+            key: min(idle, source_time[key])
+            if idle is not None and source_time.get(key) is not None
+            else None
+            for key in ("busy", "viewed")
+        },
+    }
+    if (
+        imported["messages"] != archived["messages"]
+        or imported["info"].get("metadata", {}) != archived["info"].get("metadata", {})
+        or any(
+            imported["info"].get(key) != archived["info"].get(key)
+            for key in ("title", "agent", "model", "cost", "tokens")
+        )
+        or opencode_compat.directory(imported) != str(path.parent / "controller")
+        or any(
+            key in imported["info"]
+            for key in ("parentID", "permissions", "fork", "revert")
+        )
+        or any(
+            imported["info"].get("time", {}).get(key) != value
+            for key, value in expected_time.items()
+        )
+        or imported["info"].get("outcome")
+        != (archived["info"].get("outcome") if idle is not None else None)
+    ):
+        raise BoxError(
+            "Host archive verification failed; history sync remains pending."
+        )
+
+
 def sync_sessions(path, data):
     state = refresh_sessions(path, data)
     archives = path.parent / "history"
@@ -2159,6 +2318,8 @@ def sync_sessions(path, data):
         if state["synced"].get(ident) == digest:
             continue
         if ident in state.get("host_sessions", {}):
+            if opencode_compat.native(archived):
+                guard_host_archive_children(path, data, archived["info"]["id"])
             # Mainline import appends new messages but does not update existing
             # parts or metadata. Replace only this namespaced archive copy.
             run(
@@ -2178,6 +2339,8 @@ def sync_sessions(path, data):
             capture=True,
             timeout=60,
         )
+        if opencode_compat.native(archived):
+            verify_host_archive(path, data, archived)
         state["synced"][ident] = digest
         state.setdefault("host_sessions", {})[ident] = archived["info"]["id"]
         atomic_json(session_file(path), state)
@@ -2357,6 +2520,10 @@ def launch_client(path, data, args, version, exported, owner=None):
             owner.wait_clients()
     try:
         with loading_stage("Syncing session history"):
+            if owner:
+                workspace_service.wait_history(
+                    sys.modules[__name__], data, owner.connection
+                )
             sync_sessions(path, data)
     except (BoxError, ValueError, KeyError) as exc:
         print(

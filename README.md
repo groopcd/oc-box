@@ -196,6 +196,26 @@ preserving it for reattachment; `exit` closes that shell. `terminal --maintenanc
 retains the restricted shell, and 1.x retains its previous terminal behavior. See the
 [V2 client guide](docs/opencode-2.md#concurrent-web-terminal-and-full-tui-clients).
 
+### V2 conversation archives
+
+History synchronization includes paginated root, fork, archived, and child/subagent
+conversations at the workspace's exact internal project directory. Each remains
+a separate host archive; parent/fork provenance is informational metadata, not
+restored permissions or native parent links. Missing sources retain their last
+archives without blocking later conversations. Automatic resume stays root-only.
+
+Incomplete inventories, unsettled exports, and unverifiable imports leave sync
+pending rather than claiming success. Final owner shutdown checks native activity
+for up to 30 seconds after client leases drain; normal cleanup still stops the
+container on failure. Archives are mirrors, not bidirectional working copies or
+full backups of pending input and live execution. See the [sync reference](docs/cli.md#sync).
+
+These synchronization/readiness changes have unit and native offline regression
+coverage, but still need focused host-Podman acceptance before stable publication.
+Earlier interactive, vault-edge, and home-component reports tested different
+source revisions and do not validate this change. See [test evidence and release
+boundaries](docs/testing.md#v2-session-history-synchronization).
+
 ### Bash completion
 
 Enable command and option completion in your current Bash shell:

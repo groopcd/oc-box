@@ -18,7 +18,8 @@ import venv
 import zipfile
 
 
-def check(directory, *, with_vault=False):
+def check_archives(directory):
+    """Validate distribution contents without installing or running the wheel."""
     wheels = list(directory.glob("*.whl"))
     sources = list(directory.glob("*.tar.gz"))
     if len(wheels) != 1 or len(sources) != 1:
@@ -102,6 +103,9 @@ def check(directory, *, with_vault=False):
             "src/_oc_box_build.py",
             "tests/test_updater.py",
             "tests/test_session_terminal.py",
+            "tests/test_session_sync.py",
+            "tests/smoke_session_sync_v2.py",
+            "tests/smoke_v2.py",
             "tests/plugin_bridge_fixture.mjs",
             "tests/copied_plugin_bytes.mjs",
             "tools/check_package.py",
@@ -127,6 +131,12 @@ def check(directory, *, with_vault=False):
             "NOTICE",
         ):
             assert root + "/" + name in source.getnames(), name
+    return wheels[0], build
+
+
+def check(directory, *, with_vault=False):
+    wheel, build = check_archives(directory)
+    version = build["distribution_version"]
     with tempfile.TemporaryDirectory(prefix="oc-box-wheel-check-") as temporary:
         work = Path(temporary)
         environment = work / "venv"
@@ -167,7 +177,7 @@ def check(directory, *, with_vault=False):
             "install",
             "--no-index",
             "--no-deps",
-            wheels[0].resolve(),
+            wheel.resolve(),
         )
         cli = environment / "bin/oc-box"
         assert run(cli, "--version").strip() == "oc-box " + build["version"]
@@ -327,7 +337,7 @@ def check(directory, *, with_vault=False):
                 "--index-url",
                 "https://pypi.org/simple",
                 "--only-binary=:all:",
-                str(wheels[0].resolve()) + "[vault]",
+                str(wheel.resolve()) + "[vault]",
             )
             # Prompt mocking is only at the input boundary; exercise real
             # installed CLI routing, cipher/KDF, persistence, and name selection.
