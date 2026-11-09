@@ -27,6 +27,7 @@ if __package__:
         credentials,
         dependencies,
         opencode_compat,
+        opencode_v2_io,
         paths,
         plugin_compat,
         vault,
@@ -37,6 +38,7 @@ else:
     import credentials
     import dependencies
     import opencode_compat
+    import opencode_v2_io
     import paths
     import plugin_compat
     import vault
@@ -88,6 +90,10 @@ ALIASES = {
 
 class BoxError(Exception):
     pass
+
+
+class HistoryPending(BoxError):
+    """A session's history is not settled right now; others may still sync."""
 
 
 @contextlib.contextmanager
@@ -1741,7 +1747,7 @@ def run_v2_history(data, action, **settings):
         if live and live["workspace"] == data["id"]
         else None
     )
-    return run(
+    result = run(
         exec_command(
             data,
             [
@@ -1756,9 +1762,18 @@ def run_v2_history(data, action, **settings):
             {"directory": container_project(data), "endpoint": endpoint, **settings}
         ),
         capture=True,
+        check=False,
         private=True,
         timeout=180,
     )
+    if result.returncode:
+        # Only a whitelisted constant explanation is ever shown; native errors
+        # and private output stay hidden behind the generic exit status.
+        message = opencode_v2_io.fixed_message(result.stderr)
+        if message in opencode_v2_io.PENDING_MESSAGES:
+            raise HistoryPending(message)
+        raise BoxError(message or f"podman failed (exit {result.returncode})")
+    return result
 
 
 def list_container_sessions(data):
@@ -2307,10 +2322,18 @@ def sync_sessions(path, data):
     state = refresh_sessions(path, data)
     archives = path.parent / "history"
     archives.mkdir(exist_ok=True, mode=0o700)
+    pending, interrupted = [], 0
     for ident in state.get("sessions", []):
         if not valid_session_id(ident):
             raise BoxError("Invalid stored session ID")
-        archived = archive_session(export_container_session(data, ident), data)
+        try:
+            exported = export_container_session(data, ident)
+        except HistoryPending as exc:
+            # Keep this session's last good archives and continue with the rest.
+            pending.append(str(exc))
+            continue
+        interrupted += bool(exported.get(opencode_v2_io.INTERRUPTED))
+        archived = archive_session(exported, data)
         target = archives / (archived["info"]["id"] + ".json")
         atomic_json(target, archived)
         digest = hashlib.sha256(target.read_bytes()).hexdigest()
@@ -2344,6 +2367,19 @@ def sync_sessions(path, data):
         state["synced"][ident] = digest
         state.setdefault("host_sessions", {})[ident] = archived["info"]["id"]
         atomic_json(session_file(path), state)
+    if interrupted:
+        print(
+            f"oc-box: {interrupted} session(s) contain interrupted unfinished assistant "
+            "messages that native OpenCode omits from its export; their archives mirror "
+            "that export and record the omitted count.",
+            flush=True,
+        )
+    if pending:
+        raise BoxError(
+            f"{len(pending)} session(s) not settled yet: "
+            + "; ".join(dict.fromkeys(pending))
+            + " Their last archives are retained and other sessions were synchronized."
+        )
     if state.get("sessions"):
         print(
             "Session history synced to your normal host OpenCode database.", flush=True

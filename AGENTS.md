@@ -240,6 +240,13 @@ network-containment or security certification. The focused runner's first attemp
 Build-only artifacts and mainline integration are not a new accepted host run;
 repeat relevant host lifecycle and focused history/readiness acceptance on the clean
 integrated candidate for later runtime changes before stable publication.
+Published 1.6.51 refused a real migrated-V1 workspace: a never-completed V1
+assistant survives migration, is omitted by native export, and was treated as
+still changing. The fix branch archives such superseded assistants as native's
+export with a count-only annotation, keeps tail/running/active refusals, shows
+only whitelisted fixed reasons and lets other sessions sync. It has unit and
+native V1-to-V2 offline coverage only; it needs fresh host acceptance on a clean
+candidate before any stable release, and 1.6.51 stays as published.
 The global-vault fixture's initial host run failed during the first owning
 launch, not an accepted pass.
 Use --diagnose for validated read-only checkpoints; never print raw errors/env

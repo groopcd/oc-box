@@ -1502,6 +1502,23 @@ New work in a host archive is not merged back automatically. Container/home
 storage normally survives a client crash or reboot; the last uncommitted turn
 can still be lost. Retry missed archival with `oc-box sync`.
 
+OpenCode 2.x history is exported only when it has settled. A running direct
+shell or compaction, an unfinished assistant message at the end of a session,
+and a session that is executing right now are refused with a fixed reason
+(`OpenCode 2.x history is unsettled; retry sync after completion.`); that session
+keeps its last good archives, every other session is still synchronized, and
+`sync` returns nonzero with the number of pending sessions. Retry after the work
+finishes. An unfinished assistant message that the session has already moved past
+(settled messages follow it in an idle session) never settles on its own, and
+native OpenCode omits it from its export. This is typical of history migrated
+from OpenCode 1.x after an interrupted or killed turn; 2.x itself settles an
+older unfinished assistant when the next turn starts. Such a session
+is archived as that native export; the archive annotation records the omitted
+count and `sync` prints a notice with the number of affected sessions, never
+their titles, IDs or content. Other failures show a fixed explanation when
+the private history bridge can name one, otherwise only `podman failed (exit N)`;
+native error text and private data are never printed.
+
 For `--import-session`, quit the source client first. Its project must match
 the selected directory. A private source export is saved in
 `imports/SESSION_ID.json` under the workspace registry. oc-box imports into the

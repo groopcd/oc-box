@@ -227,6 +227,84 @@ def bounded(command, env, cwd, timeout=60):
     return output
 
 
+def interrupted_legacy_session(ident, project, tail):
+    """A V1 transcript whose first assistant never completed, as after a V1 crash."""
+
+    def user(number, text):
+        message = f"msg_{ident}_{number}"
+        return {
+            "info": {
+                "id": message,
+                "sessionID": ident,
+                "role": "user",
+                "agent": "build",
+                "model": {"providerID": "fixture", "modelID": "gpt-smoke"},
+                "time": {"created": number},
+            },
+            "parts": [
+                {
+                    "id": "prt_" + message,
+                    "sessionID": ident,
+                    "messageID": message,
+                    "type": "text",
+                    "text": text,
+                }
+            ],
+        }
+
+    def assistant(number, text, completed):
+        message = f"msg_{ident}_{number}"
+        info = {
+            "id": message,
+            "sessionID": ident,
+            "role": "assistant",
+            "parentID": f"msg_{ident}_{number - 1}",
+            "agent": "build",
+            "mode": "build",
+            "modelID": "gpt-smoke",
+            "providerID": "fixture",
+            "path": {"cwd": str(project), "root": str(project)},
+            "cost": 0,
+            "tokens": {
+                "input": 0,
+                "output": 0,
+                "reasoning": 0,
+                "cache": {"read": 0, "write": 0},
+            },
+            "time": {"created": number, **({"completed": number} if completed else {})},
+        }
+        if completed:
+            info["finish"] = "stop"
+        return {
+            "info": info,
+            "parts": [
+                {
+                    "id": "prt_" + message,
+                    "sessionID": ident,
+                    "messageID": message,
+                    "type": "text",
+                    "text": text,
+                }
+            ],
+        }
+
+    messages = [user(1, "interrupted turn"), assistant(2, "unfinished", False)]
+    if not tail:
+        messages += [user(3, "later turn"), assistant(4, "finished", True)]
+    return {
+        "info": {
+            "id": ident,
+            "directory": str(project),
+            "projectID": "global",
+            "version": "1.19.5",
+            "slug": ident,
+            "time": {"created": 1, "updated": 9},
+            "title": "Interrupted legacy fixture",
+        },
+        "messages": messages,
+    }
+
+
 def main(binary, legacy_plugin_dir=None):
     binary = str(Path(binary).resolve())
     with tempfile.TemporaryDirectory(prefix="oc-box-native-v2-") as temporary:
@@ -1072,6 +1150,19 @@ export const Fixture = async () => ({
             bounded(
                 ["opencode", "--pure", "import", str(legacy_file)], legacy_env, project
             )
+            for name, tail in (
+                ("ses_legacy_superseded", False),
+                ("ses_legacy_tail", True),
+            ):
+                interrupted_file = root / (name + ".json")
+                interrupted_file.write_text(
+                    json.dumps(interrupted_legacy_session(name, project, tail))
+                )
+                bounded(
+                    ["opencode", "--pure", "import", str(interrupted_file)],
+                    legacy_env,
+                    project,
+                )
             old_database = Path(legacy_env["XDG_DATA_HOME"]) / "opencode/opencode.db"
             before = old_database.read_bytes()
             migration = {
@@ -1085,6 +1176,35 @@ export const Fixture = async () => ({
                     migrated = request(
                         "GET", "/api/experimental/session/ses_legacy_fixture/export"
                     )["data"]
+                    # Migration keeps V1's never-completed assistant, which V2 does
+                    # not settle and native export omits; only a later settled
+                    # message makes it safely superseded.
+                    page = request(
+                        "GET",
+                        "/api/session/ses_legacy_superseded/message?limit=100&order=asc",
+                    )["data"]
+                    assert [
+                        item["type"] == "assistant"
+                        and item.get("time", {}).get("completed") is None
+                        for item in page
+                    ] == [False, True, False, False], (
+                        "Migrated V1 history changed shape"
+                    )
+                    superseded = bridge.checked_export(request, "ses_legacy_superseded")
+                    assert superseded[bridge.INTERRUPTED] == {"assistant": 1}
+                    assert superseded["messages"] == [
+                        item for item in page if item is not page[1]
+                    ], "Native export did not mirror the projection minus the assistant"
+                    archive = box.archive_session(superseded, data)
+                    assert archive["info"]["metadata"]["oc-box.archive"][
+                        "interrupted"
+                    ] == {"assistant": 1}
+                    try:
+                        bridge.checked_export(request, "ses_legacy_tail")
+                    except bridge.FixedError as error:
+                        assert str(error) == bridge.UNSETTLED
+                    else:
+                        raise AssertionError("Unfinished tail assistant was accepted")
             assert "Legacy text" in json.dumps(migrated)
             assert old_database.read_bytes() == before
             v2_database = old_database.with_name("oc-box-v2.db")
@@ -1107,6 +1227,10 @@ export const Fixture = async () => ({
             assert v2_database.read_bytes() == before_v2, "V1 wrote the V2 database"
             print(
                 "PASS: V2 snapshot migration leaves V1 bytes intact; reopening native V1 retains the exact transcript and leaves V2 bytes intact.",
+                flush=True,
+            )
+            print(
+                "PASS: migrated V1 never-completed assistants are archived as native's export when superseded and refused at the unfinished tail.",
                 flush=True,
             )
             # Real foreground owner, same-user concurrent attach and browser

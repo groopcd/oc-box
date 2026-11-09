@@ -19,6 +19,65 @@ import time
 from urllib.parse import quote, urlparse
 from urllib.request import Request, build_opener, ProxyHandler
 
+# Constant, secret-free explanations that may be shown on the host. Only these
+# exact strings are ever surfaced; every other failure stays generic because
+# native errors can contain credential-bearing request/response data.
+ENDPOINT = "Invalid private OpenCode 2.x endpoint."
+NOT_READY = "Private OpenCode 2.x server did not become ready."
+READINESS = "Invalid private OpenCode 2.x readiness response."
+INVENTORY = "Invalid OpenCode 2.x session inventory."
+INVENTORY_ENTRY = "Invalid OpenCode 2.x session inventory entry."
+INVENTORY_INCONSISTENT = "Inconsistent OpenCode 2.x session inventory."
+INVENTORY_CURSOR = "Invalid OpenCode 2.x session inventory cursor."
+HISTORY = "Invalid OpenCode 2.x projected history."
+HISTORY_MESSAGE = "Invalid OpenCode 2.x projected message."
+HISTORY_INCONSISTENT = "Inconsistent OpenCode 2.x projected history."
+HISTORY_CURSOR = "Invalid OpenCode 2.x projected history cursor."
+EXPORT = "Invalid OpenCode 2.x history export."
+ACTIVITY = "Invalid OpenCode 2.x activity response."
+UNSETTLED = "OpenCode 2.x history is unsettled; retry sync after completion."
+CHANGED = "OpenCode 2.x history changed or omitted messages; retry sync."
+FIXED_MESSAGES = frozenset(
+    (
+        ENDPOINT,
+        NOT_READY,
+        READINESS,
+        INVENTORY,
+        INVENTORY_ENTRY,
+        INVENTORY_INCONSISTENT,
+        INVENTORY_CURSOR,
+        HISTORY,
+        HISTORY_MESSAGE,
+        HISTORY_INCONSISTENT,
+        HISTORY_CURSOR,
+        EXPORT,
+        ACTIVITY,
+        UNSETTLED,
+        CHANGED,
+    )
+)
+# Refusals that only mean "not settled right now". The sync loop continues with
+# other sessions after these; every other fixed message still aborts the sync.
+PENDING_MESSAGES = frozenset((UNSETTLED, CHANGED))
+INTERRUPTED = "ocBoxInterrupted"
+MARKER = "oc-box-fixed: "
+
+
+class FixedError(ValueError):
+    """Carries only one of FIXED_MESSAGES; safe to show on the host."""
+
+    def __init__(self, message):
+        assert message in FIXED_MESSAGES
+        super().__init__(message)
+
+
+def fixed_message(stderr):
+    """Return the whitelisted explanation from a failed bridge, else None."""
+    for line in reversed((stderr or "").splitlines()):
+        if line.startswith(MARKER) and line[len(MARKER) :] in FIXED_MESSAGES:
+            return line[len(MARKER) :]
+    return None
+
 
 def endpoint_request(endpoint):
     """Use a private loopback endpoint without persisting its credentials."""
@@ -36,7 +95,7 @@ def endpoint_request(endpoint):
         or not isinstance(password, str)
         or not password
     ):
-        raise ValueError("Invalid private OpenCode 2.x endpoint.")
+        raise FixedError(ENDPOINT)
     auth = "Basic " + base64.b64encode(("opencode:" + password).encode()).decode()
     opener = build_opener(ProxyHandler({}))
 
@@ -71,10 +130,10 @@ def session_inventory(request, directory):
             or not isinstance(page.get("data"), list)
             or not isinstance(page.get("cursor"), dict)
         ):
-            raise ValueError("Invalid OpenCode 2.x session inventory.")
+            raise FixedError(INVENTORY)
         for item in page["data"]:
             if not isinstance(item, dict):
-                raise ValueError("Invalid OpenCode 2.x session inventory entry.")
+                raise FixedError(INVENTORY_ENTRY)
             ident = item.get("id")
             if (
                 not isinstance(ident, str)
@@ -82,21 +141,28 @@ def session_inventory(request, directory):
                 or not isinstance(item.get("location"), dict)
                 or item.get("location", {}).get("directory") != directory
             ):
-                raise ValueError("Inconsistent OpenCode 2.x session inventory.")
+                raise FixedError(INVENTORY_INCONSISTENT)
             identities.add(ident)
             values.append(item)
         cursor = page["cursor"].get("next")
         if cursor is None:
             return values
         if not isinstance(cursor, str) or not cursor or cursor in cursors:
-            raise ValueError("Invalid OpenCode 2.x session inventory cursor.")
+            raise FixedError(INVENTORY_CURSOR)
         cursors.add(cursor)
 
 
 def checked_export(request, ident):
-    """Native export filters unsettled messages; never accept that as full history."""
+    """Native export filters unsettled messages; never accept that as full history.
+
+    A running shell/compaction, or an unfinished assistant with nothing settled
+    after it, is unsettled history and is refused. An unfinished assistant that
+    the session has already moved past (a settled message follows it and the
+    session is idle) will never settle: native keeps it out of its export, so the
+    archive mirrors that export and the omitted count is reported separately.
+    """
     route = "/api/session/" + quote(ident, safe="") + "/message?limit=100"
-    projected, identities, cursors = [], set(), set()
+    projected, states, identities, cursors = [], [], set(), set()
     cursor = None
     while True:
         page = request(
@@ -108,42 +174,54 @@ def checked_export(request, ident):
             or not isinstance(page.get("data"), list)
             or not isinstance(page.get("cursor"), dict)
         ):
-            raise ValueError("Invalid OpenCode 2.x projected history.")
+            raise FixedError(HISTORY)
         for message in page["data"]:
             if not isinstance(message, dict) or not isinstance(message.get("id"), str):
-                raise ValueError("Invalid OpenCode 2.x projected message.")
+                raise FixedError(HISTORY_MESSAGE)
             if message["id"] in identities:
-                raise ValueError("Inconsistent OpenCode 2.x projected history.")
-            if (
+                raise FixedError(HISTORY_INCONSISTENT)
+            if message.get("type") in ("shell", "compaction") and (
+                message.get("status") == "running"
+            ):
+                raise FixedError(UNSETTLED)
+            incomplete = (
                 message.get("type") == "assistant"
                 and message.get("time", {}).get("completed") is None
-            ) or (
-                message.get("type") in ("shell", "compaction")
-                and message.get("status") == "running"
-            ):
-                raise ValueError(
-                    "OpenCode 2.x history is unsettled; retry sync after completion."
-                )
+            )
             identities.add(message["id"])
             projected.append(message)
+            states.append(incomplete)
         cursor = page["cursor"].get("next")
         if cursor is not None and (not isinstance(cursor, str) or not cursor):
-            raise ValueError("Invalid OpenCode 2.x projected history cursor.")
+            raise FixedError(HISTORY_CURSOR)
         if not page["data"] or cursor is None:
             break
         if cursor in cursors:
-            raise ValueError("Invalid OpenCode 2.x projected history cursor.")
+            raise FixedError(HISTORY_CURSOR)
         cursors.add(cursor)
+    settled = [index for index, incomplete in enumerate(states) if not incomplete]
+    omitted = {index for index, incomplete in enumerate(states) if incomplete}
+    if omitted and (not settled or max(omitted) > settled[-1]):
+        raise FixedError(UNSETTLED)
     response = request(
         "GET", "/api/experimental/session/" + quote(ident, safe="") + "/export"
     )
     if not isinstance(response, dict) or not isinstance(response.get("data"), dict):
-        raise ValueError("Invalid OpenCode 2.x history export.")
+        raise FixedError(EXPORT)
     exported = response["data"]
-    if exported.get("messages") != projected:
-        raise ValueError(
-            "OpenCode 2.x history changed or omitted messages; retry sync."
-        )
+    expected = [
+        message for index, message in enumerate(projected) if index not in omitted
+    ]
+    if exported.get("messages") != expected:
+        raise FixedError(CHANGED)
+    if omitted:
+        # Read activity last: a turn that started during the export is live.
+        activity = request("GET", "/api/session/active")
+        if not isinstance(activity, dict) or not isinstance(activity.get("data"), dict):
+            raise FixedError(ACTIVITY)
+        if ident in activity["data"]:
+            raise FixedError(UNSETTLED)
+        exported = {**exported, INTERRUPTED: {"assistant": len(omitted)}}
     return exported
 
 
@@ -167,13 +245,11 @@ def server(binary):
             output = bytearray()
             while b"\n" not in output:
                 if child.poll() is not None or time.monotonic() > deadline:
-                    raise ValueError(
-                        "Private OpenCode 2.x server did not become ready."
-                    )
+                    raise FixedError(NOT_READY)
                 if select.select([child.stdout], [], [], 0.1)[0]:
                     output.extend(os.read(child.stdout.fileno(), 4096))
                 if len(output) > 65536:
-                    raise ValueError("Invalid private OpenCode 2.x readiness response.")
+                    raise FixedError(READINESS)
             address = json.loads(output.split(b"\n", 1)[0])["url"]
             request = endpoint_request({"url": address, "password": password})
             request.alive = lambda: child.poll() is None
@@ -349,6 +425,10 @@ def main(argv):
 if __name__ == "__main__":
     try:
         main(sys.argv[1:])
+    except FixedError as error:
+        # One of FIXED_MESSAGES only; the host re-checks it against the whitelist.
+        print(MARKER + str(error), file=sys.stderr)
+        sys.exit(2)
     except Exception:
         # Native errors can contain credential-bearing request/response data.
         print(

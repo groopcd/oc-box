@@ -381,9 +381,18 @@ verify messages and metadata, since CLI success can represent an import conflict
 
 After client leases close, normal owner shutdown bounds its native activity wait
 to 30 seconds. Projected-history checks also reject messages omitted by native
-export while an assistant, direct user shell, or compaction is unfinished. Failure
-leaves sync pending/nonzero and retains private data; normal cleanup still stops
-the container. This is not an atomic history freeze or a backup of pending input
+export while a direct user shell or compaction is running, an assistant is
+unfinished at the end of a session, or the session is active. Failure leaves that
+session's sync pending (other sessions still synchronize, the command returns
+nonzero) and retains private data; normal cleanup still stops the container.
+An unfinished assistant followed by settled messages in an idle session is
+superseded: native never settles it (observed for history migrated from 1.x after
+an interrupted turn; 2.x settles older ones at the next turn) and omits it from
+export, so the archive
+mirrors that export, records the omitted count only in the `oc-box.archive`
+annotation and the host prints a count-only notice. The bridge reports a refusal
+reason only from a fixed whitelist of constant messages; it never forwards native
+error text. This is not an atomic history freeze or a backup of pending input
 and live execution. Persistent terminal sessions do not themselves block the wait.
 
 **Release evidence boundary:** native multi-session checks are offline integration,

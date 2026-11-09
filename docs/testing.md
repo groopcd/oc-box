@@ -37,6 +37,17 @@ or unsettled exports. Unit tests and `tests/smoke_session_sync_v2.py` exercise
 these contracts using synthetic private databases and substituted transport. The
 fixture also runs as part of the ordinary native V2 smoke suite.
 
+Unfinished assistants that a session has already moved past are archived as
+native's export, with a count-only annotation, while tail-unfinished assistants,
+running shells/compactions and active sessions stay refused. Pending sessions do
+not block the others, and refusals show a fixed whitelisted reason. Unit tests
+cover the classification, whitelist and isolation. `tests/smoke_v2.py` reproduces
+the native state with real OpenCode 1.19.5 and 2.2.6: a V1 transcript containing a
+never-completed assistant is imported by V1, migrated by V2, and production
+`checked_export` and `archive_session` handle it. Natively, 2.x settles an older
+unfinished assistant at the next turn; a killed 2.x server leaves a running
+compaction until then, so those cases stay refused.
+
 These checks are not live rootless-Podman acceptance. The accepted interactive,
 vault-edge, and shared home-component reports below ran different source revisions
 without this change; their scopes and identities remain unchanged. In particular,

@@ -167,6 +167,9 @@ def validate_native(export, ident):
 
 def native_archive(export, data, remap_id):
     result = json.loads(json.dumps(export))
+    # The bridge reports unfinished assistants native omits from its export out
+    # of band; it is never part of the importable transcript.
+    interrupted = result.pop("ocBoxInterrupted", None)
     ident = result["info"].get("id")
     validate_native(result, ident)
     mapping = {ident: remap_id(ident, "ses")}
@@ -214,6 +217,11 @@ def native_archive(export, data, remap_id):
                 "messageID": remap_id(fork["boundary"]["messageID"], "msg"),
             },
         }
+    if interrupted is not None:
+        count = interrupted.get("assistant") if isinstance(interrupted, dict) else None
+        if type(count) is not int or count < 1:
+            raise ValueError("Invalid OpenCode 2.x interrupted-message count.")
+        relationships["interrupted"] = {"assistant": count}
     if relationships:
         metadata = result["info"].setdefault("metadata", {})
         if not isinstance(metadata, dict):

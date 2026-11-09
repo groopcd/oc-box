@@ -499,6 +499,291 @@ class SessionSyncTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     v2.checked_export(lambda *_: next(responses), "ses_root")
 
+    def export_requests(self, messages, exported=None, active=None):
+        """A request double for the message pages, the export and idle activity."""
+        info = self.session("ses_root")
+        calls = []
+
+        def request(method, target):
+            calls.append(target)
+            if target.endswith("/export"):
+                return {"data": {"info": info, "messages": exported or []}}
+            if target == "/api/session/active":
+                return {"data": active or {}}
+            return {"data": messages, "cursor": {}}
+
+        return request, calls
+
+    def stale(self, ident, completed=None):
+        time = {"created": 1}
+        if completed is not None:
+            time["completed"] = completed
+        return {"id": ident, "type": "assistant", "time": time}
+
+    def user(self, ident):
+        return {"id": ident, "type": "user", "text": "kept", "time": {"created": 1}}
+
+    def test_superseded_unfinished_assistants_are_omitted_and_counted(self):
+        messages = [
+            self.user("msg_a"),
+            self.stale("msg_stale_one"),
+            self.stale("msg_stale_two"),
+            self.user("msg_b"),
+            self.stale("msg_done", completed=5),
+        ]
+        expected = [messages[0], messages[3], messages[4]]
+        request, calls = self.export_requests(messages, expected)
+        exported = v2.checked_export(request, "ses_root")
+        self.assertEqual(exported["messages"], expected)
+        self.assertEqual(exported[v2.INTERRUPTED], {"assistant": 2})
+        self.assertEqual(calls[-1], "/api/session/active")
+        # Sessions without such messages are returned exactly as before.
+        request, calls = self.export_requests([messages[0]], [messages[0]])
+        self.assertNotIn(v2.INTERRUPTED, v2.checked_export(request, "ses_root"))
+        self.assertNotIn("/api/session/active", calls)
+
+    def test_unfinished_history_that_may_still_change_is_still_refused(self):
+        stale = self.stale("msg_stale")
+        done = self.user("msg_later")
+        running = {"id": "msg_shell", "type": "shell", "status": "running"}
+        cases = {
+            "tail": [self.user("msg_a"), stale],
+            "only unfinished": [stale],
+            "unfinished then unfinished tail": [
+                self.user("msg_a"),
+                stale,
+                self.stale("msg_tail"),
+            ],
+            "running shell with later settled": [running, done],
+            "settled before, unfinished after the last settled": [
+                stale,
+                done,
+                self.stale("msg_tail"),
+            ],
+        }
+        for name, messages in cases.items():
+            with self.subTest(name=name):
+                request, _ = self.export_requests(messages, [])
+                with self.assertRaises(v2.FixedError) as raised:
+                    v2.checked_export(request, "ses_root")
+                self.assertEqual(str(raised.exception), v2.UNSETTLED)
+        # A session executing right now is live even when later messages exist.
+        messages = [stale, done]
+        request, _ = self.export_requests(
+            messages, [done], {"ses_root": {"type": "running"}}
+        )
+        with self.assertRaises(v2.FixedError) as raised:
+            v2.checked_export(request, "ses_root")
+        self.assertEqual(str(raised.exception), v2.UNSETTLED)
+        # A native export that disagrees with the projection stays a refusal.
+        request, _ = self.export_requests(messages, [stale, done])
+        with self.assertRaises(v2.FixedError) as raised:
+            v2.checked_export(request, "ses_root")
+        self.assertEqual(str(raised.exception), v2.CHANGED)
+        request, _ = self.export_requests(messages, [done], {"ses_root": 1})
+        with self.assertRaises(v2.FixedError) as raised:
+            v2.checked_export(request, "ses_root")
+        self.assertEqual(str(raised.exception), v2.UNSETTLED)
+        request, _ = self.export_requests(messages, [done], active=None)
+        bad = lambda method, target: (
+            {"data": []} if target == "/api/session/active" else request(method, target)
+        )
+        with self.assertRaises(v2.FixedError) as raised:
+            v2.checked_export(bad, "ses_root")
+        self.assertEqual(str(raised.exception), v2.ACTIVITY)
+
+    def test_only_whitelisted_constant_messages_can_be_fixed_errors(self):
+        import ast
+
+        tree = ast.parse(Path(v2.__file__).read_text())
+        names = {
+            node.targets[0].id: node.value.value
+            for node in tree.body
+            if isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+            and isinstance(node.targets[0], ast.Name)
+        }
+        raised = [
+            node.args[0].id
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            and getattr(node.func, "id", None) == "FixedError"
+            and node.args
+            and isinstance(node.args[0], ast.Name)
+        ]
+        self.assertTrue(raised)
+        for name in raised:
+            self.assertIn(names[name], v2.FIXED_MESSAGES, name)
+        self.assertTrue(v2.PENDING_MESSAGES < v2.FIXED_MESSAGES)
+        with self.assertRaises(AssertionError):
+            v2.FixedError("native said: secret-token")
+        self.assertEqual(
+            v2.fixed_message("noise\n" + v2.MARKER + v2.UNSETTLED + "\n"), v2.UNSETTLED
+        )
+        for stderr in (
+            "",
+            None,
+            v2.MARKER + "native said: secret-token",
+            "xx" + v2.MARKER + v2.UNSETTLED,
+        ):
+            self.assertIsNone(v2.fixed_message(stderr))
+
+    def test_bridge_process_exposes_only_fixed_messages(self):
+        source = Path(v2.__file__).read_text()
+        endpoint = {"url": "http://example.invalid:1", "password": "p"}
+        for payload, code, marker in (
+            ({"directory": "/x", "endpoint": endpoint}, 2, v2.ENDPOINT),
+            ({}, 1, None),
+        ):
+            result = subprocess.run(
+                ["python3", "-c", source, "sessions", "/nonexistent/opencode"],
+                input=json.dumps(payload),
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=60,
+            )
+            self.assertEqual(result.returncode, code)
+            self.assertEqual(v2.fixed_message(result.stderr), marker)
+            self.assertNotIn("Traceback", result.stderr)
+
+    def test_history_failures_show_fixed_reasons_never_private_output(self):
+        def failed(stderr, code=1):
+            return subprocess.CompletedProcess([], code, "", stderr)
+
+        with patch.object(box, "run", return_value=failed(v2.MARKER + v2.UNSETTLED, 2)):
+            with self.assertRaises(box.HistoryPending) as raised:
+                box.run_v2_history(self.data, "export", session="ses_root")
+        self.assertEqual(str(raised.exception), v2.UNSETTLED)
+        with patch.object(box, "run", return_value=failed(v2.MARKER + v2.INVENTORY, 2)):
+            with self.assertRaises(box.BoxError) as raised:
+                box.run_v2_history(self.data, "sessions")
+        self.assertNotIsInstance(raised.exception, box.HistoryPending)
+        self.assertEqual(str(raised.exception), v2.INVENTORY)
+        with patch.object(
+            box,
+            "run",
+            return_value=failed(
+                "provider token=secret-token\n" + v2.MARKER + "token=secret-token"
+            ),
+        ):
+            with self.assertRaises(box.BoxError) as raised:
+                box.run_v2_history(self.data, "sessions")
+        self.assertEqual(str(raised.exception), "podman failed (exit 1)")
+        self.assertNotIn("secret-token", str(raised.exception))
+        ok = subprocess.CompletedProcess([], 0, "[]", "")
+        with patch.object(box, "run", return_value=ok):
+            self.assertIs(box.run_v2_history(self.data, "sessions"), ok)
+
+    def test_pending_session_does_not_block_other_sessions_and_is_reported(self):
+        infos = [
+            self.session("ses_first"),
+            self.session("ses_stuck", 2),
+            self.session("ses_last", 3),
+        ]
+        exports = {item["id"]: {"info": item, "messages": []} for item in infos}
+        exports["ses_last"][v2.INTERRUPTED] = {"assistant": 2}
+        host, imports = {}, []
+
+        def export(_data, ident):
+            if ident == "ses_stuck":
+                raise box.HistoryPending(v2.UNSETTLED)
+            return copy.deepcopy(exports[ident])
+
+        def host_run(command, **_kwargs):
+            if "import" in command:
+                archived = box.read_json(Path(command[-2]))
+                imports.append(archived["info"]["id"])
+                archived["info"]["location"] = {
+                    "directory": str(self.path.parent / "controller")
+                }
+                host[archived["info"]["id"]] = archived
+            elif "export" in command:
+                return self.result(host[command[-2]])
+            elif "api" in command:
+                return self.result({"data": [], "cursor": {}})
+            return self.result(None)
+
+        output = io.StringIO()
+        with (
+            patch.object(box, "list_container_sessions", return_value=infos),
+            patch.object(box, "export_container_session", side_effect=export),
+            patch.object(box, "run", side_effect=host_run),
+            patch("sys.stdout", output),
+        ):
+            with self.assertRaises(box.BoxError) as raised:
+                box.sync_sessions(self.path, self.data)
+        archive = lambda ident: (
+            self.path.parent
+            / "history"
+            / (box.archive_id(self.data["id"] + "-v2", ident, "ses") + ".json")
+        )
+        self.assertTrue(archive("ses_first").exists() and archive("ses_last").exists())
+        self.assertFalse(archive("ses_stuck").exists())
+        self.assertEqual(len(imports), 2)
+        state = box.session_state(self.path)
+        self.assertEqual(set(state["synced"]), {"ses_first", "ses_last"})
+        message = str(raised.exception)
+        self.assertIn("1 session(s) not settled yet", message)
+        self.assertIn(v2.UNSETTLED, message)
+        self.assertIn("other sessions were synchronized", message)
+        self.assertNotIn("ses_stuck", message)
+        self.assertIn("1 session(s) contain interrupted", output.getvalue())
+        self.assertNotIn("Session history synced", output.getvalue())
+        annotation = box.read_json(archive("ses_last"))["info"]["metadata"][
+            "oc-box.archive"
+        ]
+        self.assertEqual(annotation["interrupted"], {"assistant": 2})
+        self.assertNotIn(v2.INTERRUPTED, box.read_json(archive("ses_last")))
+        self.assertNotIn(
+            "oc-box.archive",
+            box.read_json(archive("ses_first"))["info"].get("metadata", {}),
+        )
+        # A later settled retry completes normally and keeps the other archives.
+        exports["ses_stuck"] = {"info": infos[1], "messages": []}
+        before = archive("ses_first").read_bytes()
+
+        def settled(_data, ident):
+            return copy.deepcopy(exports[ident])
+
+        output = io.StringIO()
+        with (
+            patch.object(box, "list_container_sessions", return_value=infos),
+            patch.object(box, "export_container_session", side_effect=settled),
+            patch.object(box, "run", side_effect=host_run),
+            patch("sys.stdout", output),
+        ):
+            box.sync_sessions(self.path, self.data)
+        self.assertEqual(len(imports), 3)
+        self.assertEqual(archive("ses_first").read_bytes(), before)
+        self.assertIn("Session history synced", output.getvalue())
+
+    def test_other_history_refusals_still_abort_and_interrupted_count_is_validated(
+        self,
+    ):
+        infos = [self.session("ses_first"), self.session("ses_second", 2)]
+        with (
+            patch.object(box, "list_container_sessions", return_value=infos),
+            patch.object(
+                box, "export_container_session", side_effect=box.BoxError(v2.EXPORT)
+            ) as export,
+        ):
+            with self.assertRaises(box.BoxError) as raised:
+                box.sync_sessions(self.path, self.data)
+        self.assertEqual(str(raised.exception), v2.EXPORT)
+        self.assertEqual(export.call_count, 1)
+        source = {"info": self.session("ses_root"), "messages": []}
+        remap = lambda ident, prefix: "arch_" + ident
+        for value in (0, -1, True, "2", {}):
+            export_value = {**source, v2.INTERRUPTED: {"assistant": value}}
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                box.opencode_compat.native_archive(export_value, self.data, remap)
+        with self.assertRaises(ValueError):
+            box.opencode_compat.native_archive(
+                {**source, v2.INTERRUPTED: 3}, self.data, remap
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
