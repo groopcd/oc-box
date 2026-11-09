@@ -43,10 +43,9 @@ without this change; their scopes and identities remain unchanged. In particular
 `1.6.44+ga043049` and `1.6.44+gd638907` share a patch count, not the same source.
 Repeat relevant host lifecycle checks and add focused history/readiness acceptance
 on the clean integrated release candidate before stable GitHub/PyPI publication.
-Status: the focused history/readiness runner has since passed on clean
-`1.6.51+gb5d1ea8` (see the reviewed reports below); the global-vault and V1/V2
-lifecycle fixtures still need their own reviewed source-qualified reports for
-that candidate.
+Status: the focused history/readiness runner, the global-vault fixture and the
+V1/V2 lifecycle fixture have all since passed on clean `1.6.51+gb5d1ea8` (see the
+reviewed reports below), and that exact commit was published as stable v1.6.51.
 Mainline source updates and build-only distribution artifacts do not establish
 that acceptance or trigger a stable release by themselves.
 
@@ -170,10 +169,29 @@ container**, and do not replace earlier 1.5 evidence:
   archives, parent replacement, missing-source retention, genuine host-child
   refusal/recovery, readiness drains, a real background-job wakeup and pending
   shell recovery with only scripted native API/CLI and TUI-exit callbacks.
-  A first attempt with runner `1b5ce6b2…f3d314` failed earlier as described in the runner section above;
-  it remains failed evidence and was not rerun or relabeled.
+  A first attempt with runner `1b5ce6b2…f3d314` failed earlier as described in the
+  runner section above; it remains failed evidence and was not rerun or relabeled.
 
-The first two runs use scripted TUI/prompt input. The third combines reports
+- The V2 global-vault fixture (`tools/test_global_vault_podman.py`) passed on clean
+  **1.6.51+gb5d1ea8** (commit `b5d1ea87729e3f681f530c38945c119133c55b2a`, count 80,
+  `dirty: false`) with native OpenCode **2.2.6**. The reviewed report's status is
+  `passed` and lists all 13 stages from private-store/native-version through
+  restored-latest-host-vault-history-os: first global-vault import and Build asks,
+  running-owner rotation/reload/attach, mandatory denials and Plan, new-owner
+  rotated/added entries, `--no-vault`, and full encrypted backup/restore with
+  stopped byte-exact state.
+- The V1/V2 lifecycle fixture (`tools/test_v2_podman.py`) passed all six stages on
+  reported **1.6.51+gb5d1ea8** with native OpenCode **1.19.5 / 2.2.6** and **18
+  synthetic provider requests**: V1 seeded lifecycle, selected-vault
+  delivery/rotation/attach, full and portable V2 restores with fresh IDs and
+  byte-exact stopped state, wrong-password reset preserving resources, and V1
+  downgrade with V2 return preserving both histories. Its report records the
+  version string and native versions, not a dirty flag or full commit; it ran
+  from the clean candidate checkout.
+
+The first two runs and the three 1.6.51 fixtures use scripted TUI/prompt input;
+the 1.6.51 focused, global-vault and lifecycle runs ran the same published source,
+and a later runtime change needs them repeated. The interactive run combines reports
 with the operator's explicit stepwise confirmations: its unchanged
 `NOT_AUTOMATICALLY_PASSED` field correctly avoids self-certifying observations.
 It uses `--no-vault` and production attach-only client helpers, not ordinary

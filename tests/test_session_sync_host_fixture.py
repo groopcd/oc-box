@@ -28,9 +28,7 @@ spec.loader.exec_module(runner)
 
 class SessionHistoryHostFixtureTests(unittest.TestCase):
     def setUp(self):
-        temporary = tempfile.TemporaryDirectory(
-            prefix="history-runner-unit-", dir="/tmp/opencode"
-        )
+        temporary = tempfile.TemporaryDirectory(prefix="history-runner-unit-")
         self.addCleanup(temporary.cleanup)
         self.parent = Path(temporary.name)
         self.source = self.parent / "source"

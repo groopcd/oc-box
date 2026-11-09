@@ -224,12 +224,22 @@ This establishes measured rootless 0/1 UID/GID/mode/content transport, source
 preservation and root privacy through the common archive/age/extract path only.
 It is not a new per-kind full/portable container-origin/first-mount or custom-
 mapping pass. Preserve the earlier lifecycle/UI/vault versions and all evidence.
-The session-sync/readiness changes from d638907 have unit/native offline coverage
-only. None of the accepted a043049/acddbd8/7df5074 host reports contains that
-change; matching 1.6.44 patch numbers do not identify matching source hashes.
-Repeat relevant host lifecycle and focused history/readiness acceptance on the
-clean integrated candidate before stable publication. Build-only artifacts and
-mainline integration are not a new accepted host run.
+The session-sync/readiness changes from d638907 first had unit/native offline
+coverage only. None of the accepted a043049/acddbd8/7df5074 host reports contains
+that change; matching 1.6.44 patch numbers do not identify matching source hashes.
+Clean 1.6.51+gb5d1ea8 (b5d1ea87729e3f681f530c38945c119133c55b2a, count 80) then
+passed three reviewed host runs with native 2.2.6: the focused history/readiness
+runner (27 named checks, runner ab26dffb...0528, `tools/test_session_sync_podman.py`,
+run from a separate harness checkout via --source/--expect-commit), the global-vault
+fixture (13 stages) and the V1/V2 lifecycle fixture (six stages, native 1.19.5/
+2.2.6, 18 synthetic provider requests; its report records the version string, not a
+dirty flag). It was published unchanged as stable v1.6.51 (GitHub + PyPI). Scopes
+are scripted synthetic host acceptance, not interactive TUI/web, real-provider,
+network-containment or security certification. The focused runner's first attempt
+(runner 1b5ce6b2...) failed on a runner oracle defect and stays failed evidence.
+Build-only artifacts and mainline integration are not a new accepted host run;
+repeat relevant host lifecycle and focused history/readiness acceptance on the clean
+integrated candidate for later runtime changes before stable publication.
 The global-vault fixture's initial host run failed during the first owning
 launch, not an accepted pass.
 Use --diagnose for validated read-only checkpoints; never print raw errors/env
