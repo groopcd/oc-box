@@ -43,6 +43,10 @@ without this change; their scopes and identities remain unchanged. In particular
 `1.6.44+ga043049` and `1.6.44+gd638907` share a patch count, not the same source.
 Repeat relevant host lifecycle checks and add focused history/readiness acceptance
 on the clean integrated release candidate before stable GitHub/PyPI publication.
+Status: the focused history/readiness runner has since passed on clean
+`1.6.51+gb5d1ea8` (see the reviewed reports below); the global-vault and V1/V2
+lifecycle fixtures still need their own reviewed source-qualified reports for
+that candidate.
 Mainline source updates and build-only distribution artifacts do not establish
 that acceptance or trigger a stable release by themselves.
 
@@ -152,6 +156,22 @@ container**, and do not replace earlier 1.5 evidence:
   (owner, two terminal attachments and web) returned exit 0 without secondary
   errors; the synthetic provider recorded **9 requests, 0 errors** and all three
   tool markers. The helper requires native OpenCode 2.2.6.
+
+- The separate focused history/readiness runner (`tools/test_session_sync_podman.py`)
+  passed on clean **1.6.51+gb5d1ea8** (full commit
+  `b5d1ea87729e3f681f530c38945c119133c55b2a`, count 80) with native OpenCode
+  **2.2.6** (binary SHA-256 `50503d24…895`) and runner SHA-256 `ab26dffb…0528`.
+  The reviewed report has status `PASS`, stage `complete`, all **27** named checks
+  true, no primary/secondary categories, an empty `failure_trace`, `dirty: false`
+  and launcher exit codes `[0, 0, 0, 1, 0]`; the single `1` is the deliberate
+  pending-shell owner exit, followed by a successful recovery `sync`. The
+  candidate checkout was also reported at the same HEAD with empty status
+  afterwards. It covers paginated root/child/archived/fork scope, independent
+  archives, parent replacement, missing-source retention, genuine host-child
+  refusal/recovery, readiness drains, a real background-job wakeup and pending
+  shell recovery with only scripted native API/CLI and TUI-exit callbacks.
+  A first attempt with runner `1b5ce6b2…f3d314` failed earlier as described in the runner section above;
+  it remains failed evidence and was not rerun or relabeled.
 
 The first two runs use scripted TUI/prompt input. The third combines reports
 with the operator's explicit stepwise confirmations: its unchanged
