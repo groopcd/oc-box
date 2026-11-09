@@ -46,6 +46,77 @@ on the clean integrated release candidate before stable GitHub/PyPI publication.
 Mainline source updates and build-only distribution artifacts do not establish
 that acceptance or trigger a stable release by themselves.
 
+### Focused history/readiness host runner
+
+`tools/test_session_sync_podman.py` is a separate host harness, not an installed
+oc-box command. Run it outside its explicit clean `--source` checkout so the
+candidate can remain unchanged while the harness is developed or updated:
+
+```bash
+python3 -I -B /path/to/harness/tools/test_session_sync_podman.py \
+  --source /path/to/clean/candidate \
+  --expect-commit FULL_REVIEWED_CANDIDATE_COMMIT \
+  --work-dir /path/to/fresh-fixtures \
+  --opencode-v2 /path/to/opencode-2.2.6
+```
+
+Supply the reviewed full 40-character candidate hash, not a version number or an
+automatically selected moving branch. Host/root/container guards precede source,
+placement and native engine probing. The selected source must have full history,
+be clean and match that identity; imported runtime/helper paths and byte hashes
+must remain bound to it, and every loaded module under that checkout must be a
+hashed tracked file. On-disk bytecode caches are never read; ignored files other
+than those caches and editable-build metadata refuse. The work/temp parents and
+native executable may not sit inside the source. Runner and native executable
+hashes are recorded separately. Never edit the candidate or change native
+executables during a run.
+
+Use a regular unprivileged host terminal, outside containers and shell sandboxes.
+Only fresh synthetic projects, config/history and a verified private rootless
+Podman store may be used. The existing global-vault fixture's selectors, boot,
+store, ownership and mount checks remain authoritative; a history-purpose marker
+and source-workspace allowlist add restrictions rather than bypassing them. Do
+not reuse a completed global-vault/lifecycle root for these cases.
+
+Required history cases cover actual paginated root/child/grandchild/fork/archived
+discovery and directory scope, independent archive provenance, parent-only
+replacement, missing-source retention and genuine refusal of untracked native
+host children. A held direct user shell must demonstrate native filtered export,
+checked-export refusal, pending/nonzero owner exit with normal stopped cleanup,
+then recovery after actual completion. Inventory updates and earlier successful
+session exports are not an all-state transaction and need not roll back.
+
+Required readiness cases distinguish pre-publication refusal, attached-client
+lease drain, foreground activity and idle persistent PTYs. A foreground-active
+child must keep one production waiter pending across several observed active
+pairs before its provider response is released; a short deadline is not accepted
+as proof. Refusals are pinned to their actual cause: host-child replacement to
+the linked-child guard and the pending shell exit to that session's export. A
+real synthetic provider-issued background shell must remain pending while
+foreground is idle; its actual completion notification must then reawaken
+foreground execution after the job disappears. One production history waiter
+spans that handoff, observes both held phases without changing native
+responses, and completes only after the final provider response is released.
+The transient completed-but-unconsumed job row is not assumed to be observable
+or claimed merely from an empty query.
+
+Only scripted TUI-exit/observation callbacks and transparent forwarding spies are
+permitted. Production launcher, Podman/native-CLI transport, authentication,
+history exports/imports, permissions and errors stay real; gates release work,
+never fabricate activity, success or refusal. Control credentials and private
+native output stay out of reports. Retain reports/resources on failure and stop;
+never move stores, rewrite markers, replay completed evidence or prune globally.
+The only automatic removal is the private temporary staging directory created
+under an explicit `--temp-dir`; fixture roots, reports and Podman resources are
+retained. Image pulls use Podman's default registry-authentication lookup because
+the real runtime directory remains available to rootless Podman; no registry
+credential is read by the runner or recorded in its report.
+
+Offline guard/oracle and native synthetic-provider checks are preparation only.
+Record a host PASS only after reviewing the actual source-bound report and every
+required check. This fixture does not establish interactive TUI, real-provider,
+vault, backup/restore or network-containment acceptance.
+
 ### Reviewed host reports — 2026-11-09
 
 These are user-supplied reports reviewed here, **not executions from this
