@@ -594,6 +594,16 @@ host run. Preserve an important project's original history and use a separate
 full backup after its own import/verification; the synthetic fixture is not that
 project's recovery archive.
 
+**New-layout confirmation (2026-11-09):** a separately reviewed user-supplied
+terminal result and `result.json` report `passed` for clean
+`1.6.42+ge66fb39` (commit `e66fb393fecf54841a522865f49ea3528d8691e8`, count 71),
+with native OpenCode 2.2.6. All 13 checkpoints cover the same global-vault,
+Build/Plan/denial, rotation/reload/attach, opt-out and full encrypted-restore
+scope above. This establishes live rootless-Podman acceptance for that src-layout
+workflow, independently of the earlier 1.5 report. The report's audited Podman
+schema omission list is not a measurement of the actual engine version.
+Expanded vault edge cases and interactive UI acceptance remain separate.
+
 ### Repeatable host validation
 
 Versions now use **1.6.N**, preserving the original commit-count patch baseline and
@@ -667,6 +677,19 @@ The fixture has offline unit tests for host refusal, environment isolation,
 host-executable routing, credential checks and cleanup boundaries. Native V2 CI
 also exercises its exact provider/MCP config and rotated environment without
 Podman. Only a successful run on the host closes the live acceptance gate.
+
+**Reviewed new-layout host result (2026-11-09):** a user-supplied complete report
+for `1.6.43+ge06896f` passed all six stages with native OpenCode 1.19.5/2.2.6
+and 18 synthetic provider requests. It covers selected-vault delivery/rotation/
+attach, full and portable restores with fresh IDs and stopped byte-exact state,
+wrong-password reset protection, reset retaining project/home/history while
+rebuilding the OS, and V1 downgrade/V2 return without reseeding either history.
+Commit `e06896f660a5c2ee63a61660f033394edcb05adb` changes only `AGENTS.md`
+delegation instructions from release 1.6.42; runtime, tools and tests are identical.
+The report records `source_version`, not the fuller global fixture's
+`source_identity` fields. Keep this execution attributed to 1.6.43 rather than
+relabeling it as a 1.6.42 run. TUI/prompt input is scripted; interactive UI,
+real-provider inference and real-project restore are not established by it.
 
 The fixture supplies explicit stdin EOF to noninteractive native V2 `run`
 commands. OpenCode 2.2.6 reads Podman exec's open FIFO until EOF even when a

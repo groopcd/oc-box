@@ -28,6 +28,79 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
+### Reviewed host reports — 2026-11-09
+
+These are user-supplied reports reviewed here, **not executions from this
+container**, and do not replace earlier 1.5 evidence:
+
+- Global-vault delivery, Build tools/permissions and full encrypted restore were
+  accepted on clean **1.6.42+ge66fb39**, with native OpenCode **2.2.6**.
+- Separate selected-vault V1/V2 full/portable restore, reset, downgrade and V2
+  return were accepted on reported **1.6.43+ge06896f**, with native OpenCode
+  **1.19.5 / 2.2.6** and **18 synthetic provider requests**. That source revision
+  differs from 1.6.42 only in `AGENTS.md`; keep the execution versions distinct.
+
+Neither report establishes fresh real interactive TUI/web/persistent-shell
+acceptance, real provider inference or security certification.
+
+### Fresh manual UI observation (host only)
+
+`tools/test_interactive_podman.py` is a bounded **interactive-only** fixture, not
+another full vault/lifecycle acceptance run. Use an unprivileged host terminal,
+a clean full-history source checkout, explicit unmodified OpenCode 2.2.6 and an
+existing disk-backed work parent. Never run it inside oc-box or reuse completed
+fixture roots. No real project, operator credentials or vault unlock is needed:
+the owning start explicitly uses `--no-vault` and a synthetic `_API_KEY`.
+
+```bash
+python3 -B tools/test_interactive_podman.py start \
+  --work-dir /path/to/fixtures --opencode-v2 /path/to/opencode-2.2.6
+```
+
+Optional `--temp-dir /path/to/staging-parent` changes only private temporary
+placement. Both work and staging parents must be outside retained global-vault,
+V1/V2 and backup fixture roots and their descendants, including renamed roots
+with fixture evidence markers. No fixture files/store are moved or removed.
+The foreground owner prints its fresh exact root and secondary commands;
+wait until its TUI is ready, then use those commands in other host
+terminals. Only the single synthetic `source-a` workspace is allowed:
+
+```bash
+python3 -B tools/test_interactive_podman.py tui --fixture /path/to/printed-root
+python3 -B tools/test_interactive_podman.py terminal --fixture /path/to/printed-root
+python3 -B tools/test_interactive_podman.py web --fixture /path/to/printed-root
+python3 -B tools/test_interactive_podman.py stop --fixture /path/to/printed-root
+```
+
+Secondary commands require the unchanged source, original boot, verified private
+store/resources and a live authenticated owning service; none starts a new
+owner, refreshes credentials or accepts `--no-vault`. They dispatch directly to
+the production authenticated client helpers, never the owner-capable launcher;
+a lost/stopped service fails the client without ownership fallback. Do not
+pull, edit or switch the source checkout while the fixture is active: successful
+owner/client returns recheck the initial source identity after lease drain and
+refuse a changed/dirty checkout without relabeling the recorded execution.
+TTYs are required for UI paths. Web always uses `--no-open`: manually open its
+private one-use pairing URL
+without sharing or recording it. The provider stays alive in the owning
+foreground process while its launcher and attached leases remain active.
+
+Use **Build**, with one or two short synthetic prompts only (12 provider requests
+per owner window). The unchanged deterministic provider exercises shell, MCP and
+the permission tool; it does not support Plan/deny conversations. Manually record
+TUI rendering/input, concurrent web/TUI/shell use, Ctrl-] shell detach/reattach and
+history/shell-state continuity. Close clients before exiting the owner; `stop`
+is an explicit verified-source stop, not cleanup, reset or resume. A later owning
+observation requires another fresh fixture. Keep retained files/store in place.
+
+Private `interactive-*-report.json` files record source identity, actual
+launcher/client outcomes and owner provider counters/markers, never synthetic values or control
+credentials. They explicitly leave manual observations **NOT automatically
+passed** and never write the global fixture's `result.json`. Vault rotation,
+interactive permission prompts, formatter/LSP/device checks and other lifecycle
+acceptance remain separate. Offline `test_interactive_host_fixture` checks these
+guards and native relay dispatch, not real Podman/UI acceptance.
+
 ## Audit result
 
 The audit reduced 558 unit-test methods to 539 across the same 32 files. The

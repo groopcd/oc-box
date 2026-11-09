@@ -755,8 +755,13 @@ been exercised. The automated mainline test uses temporary databases and local
 model/MCP/LSP/formatter fixtures; it does not prove Podman isolation or certify
 every distro/runtime/device combination.
 The earlier selected-vault probes and separate full scripted global-vault run
-on `1.5.38+g0611104` are accepted at their documented scopes. The src-layout
-refactor's new offline checks do not establish a new live Podman lifecycle pass.
+on `1.5.38+g0611104` remain accepted at their documented scopes. Reviewed new-layout
+host reports now also pass global-vault/Build/full restore on clean
+`1.6.42+ge66fb39`, and selected-vault V1/V2 full/portable restore, reset and
+downgrade/return on `1.6.43+ge06896f`. The latter changes only delegation
+instructions from 1.6.42; keep their execution versions distinct. These are
+synthetic scripted host tests, not new interactive UI acceptance, real-provider
+inference or real-project backups. See [the test strategy](docs/testing.md).
 
 Runtime code lives in `src/oc_box/`, with tests/tools/docs in their conventional
 top-level directories. Root installer/build entrypoints remain for compatibility.
