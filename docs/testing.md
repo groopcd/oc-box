@@ -112,10 +112,25 @@ retained. Image pulls use Podman's default registry-authentication lookup becaus
 the real runtime directory remains available to rootless Podman; no registry
 credential is read by the runner or recorded in its report.
 
+Failed runs report their stage, fixed category and, as a bounded `failure_trace`,
+only exception class names with `file:function:line` code locations (also printed
+on the console); never messages, arguments, paths or native output.
+
 Offline guard/oracle and native synthetic-provider checks are preparation only.
 Record a host PASS only after reviewing the actual source-bound report and every
 required check. This fixture does not establish interactive TUI, real-provider,
 vault, backup/restore or network-containment acceptance.
+
+**First host attempt (not acceptance):** runner SHA-256 `1b5ce6b2…f3d314` on
+clean `1.6.51+gb5d1ea8` with native 2.2.6 stopped in the `graph` stage with
+`operation-failed` after `paginated_inventory` (launcher exit codes empty). All
+eight scoped sessions had already synced to eight host archives. The runner's own
+archive oracle indexed `info["title"]`, which native 2.2.6 omits for the untitled
+launcher-created session; production correctly archives it as `Session`. This was
+a runner defect, not a runtime failure, and retains its evidence as a failed
+attempt. An offline rehearsal against real native 2.2.6 with substituted local
+Podman/transport layers reproduced it and passed all 27 checks after the fix; that
+rehearsal is not host acceptance.
 
 ### Reviewed host reports — 2026-11-09
 

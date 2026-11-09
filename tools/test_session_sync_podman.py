@@ -26,6 +26,7 @@ import sys
 import tempfile
 import threading
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
@@ -372,6 +373,37 @@ def category(error):
     )
 
 
+FRAME = re.compile(
+    r"[A-Za-z0-9_.-]{1,80}\.py:(?:<[a-z]{1,12}>|[A-Za-z_][A-Za-z0-9_]{0,63}):[0-9]{1,6}"
+)
+TYPE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
+
+
+def trace(error):
+    """Code locations only: exception class names and file:function:line frames.
+
+    Never messages, arguments, locals or paths, so private native output cannot
+    appear. Follows the explicit cause/context chain (bounded) so a failure that
+    crossed a worker or a wrapper still identifies its original location.
+    """
+    entries, seen = [], set()
+    while error is not None and id(error) not in seen and len(entries) < 4:
+        seen.add(id(error))
+        frames = [
+            f"{Path(frame.filename).name}:{frame.name}:{frame.lineno}"
+            for frame in traceback.extract_tb(error.__traceback__)
+        ][-6:]
+        name = type(error).__name__
+        entries.append(
+            {
+                "type": name if TYPE.fullmatch(name) else "other",
+                "frames": [item for item in frames if FRAME.fullmatch(item)],
+            }
+        )
+        error = error.__cause__ or error.__context__
+    return entries
+
+
 def result(
     checks,
     identity,
@@ -382,8 +414,27 @@ def result(
     exits=(),
     *,
     stage="preparation",
+    failure_trace=(),
 ):
     require(stage in STAGES, "report-schema")
+    require(
+        isinstance(failure_trace, (list, tuple))
+        and len(failure_trace) <= 4
+        and all(
+            isinstance(entry, dict)
+            and set(entry) == {"type", "frames"}
+            and isinstance(entry["type"], str)
+            and TYPE.fullmatch(entry["type"])
+            and isinstance(entry["frames"], list)
+            and len(entry["frames"]) <= 6
+            and all(
+                isinstance(item, str) and FRAME.fullmatch(item)
+                for item in entry["frames"]
+            )
+            for entry in failure_trace
+        ),
+        "report-schema",
+    )
     require(
         isinstance(identity, dict)
         and set(identity) == {"commit", "commit_count", "version", "dirty", "sha256"},
@@ -453,6 +504,7 @@ def result(
         "launcher_exit_codes": list(exits),
         "primary_category": primary,
         "secondary_categories": list(secondary),
+        "failure_trace": list(failure_trace),
         "scope": SCOPE,
         "not_covered": [
             "transient completed-job row (not required or claimed)",
@@ -489,7 +541,8 @@ class Worker:
     def join(self, timeout=20):
         self.thread.join(timeout)
         require(not self.thread.is_alive(), "worker-timeout")
-        require(self.error is None, "worker-failed")
+        if self.error is not None:
+            raise Refusal("worker-failed") from self.error
         return self.value
 
 
@@ -1033,8 +1086,11 @@ class Harness:
                     for key, item in source["info"].get("metadata", {}).items()
                 )
             )
+            # The launcher-created session has no title; production labels it
+            # "Session" (see archive_session), so mirror that default.
             require(
-                value["info"]["title"] == "[oc-box source-a] " + source["info"]["title"]
+                value["info"]["title"]
+                == "[oc-box source-a] " + source["info"].get("title", "Session")
             )
             require(
                 value["info"]["time"].get("archived")
@@ -1680,7 +1736,7 @@ def parser():
 def main(argv=None):
     args = parser().parse_args(argv)
     root = loaded = harness = provider = None
-    primary, secondary = None, []
+    primary, secondary, failure = None, [], []
     old_umask = os.umask(0o077)
     output = os.fdopen(os.dup(1), "w", buffering=1)
     try:
@@ -1735,6 +1791,7 @@ def main(argv=None):
                 harness.run()
     except BaseException as error:  # noqa: BLE001 -- Only fixed public categories escape.
         primary = category(error)
+        failure = trace(error)
     finally:
         if provider is not None:
             try:
@@ -1753,6 +1810,7 @@ def main(argv=None):
                     secondary,
                     harness.exits,
                     stage=harness.stage,
+                    failure_trace=failure,
                 )
                 loaded.fixture.write_json_new(root / REPORT, report)
                 primary = report["primary_category"]
@@ -1765,6 +1823,14 @@ def main(argv=None):
         + ("PASS" if passed else "FAIL category=" + (primary or secondary[0])),
         file=output,
     )
+    for entry in failure:
+        print(
+            "session-history fixture: trace "
+            + entry["type"]
+            + " "
+            + " ".join(entry["frames"]),
+            file=output,
+        )
     if root is not None:
         print("Report: " + str(root / REPORT), file=output)
     output.close()

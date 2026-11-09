@@ -1208,6 +1208,109 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         self.assertEqual(order[0], "isolate")
         self.assertEqual(len(order), 3)
 
+    def test_failure_trace_reports_only_code_locations_never_messages(self):
+        def inner():
+            raise KeyError("private-sentinel-key")
+
+        def worker():
+            try:
+                inner()
+            except KeyError as error:
+                raise runner.Refusal("worker-failed") from error
+
+        try:
+            worker()
+        except runner.Refusal as error:
+            entries = runner.trace(error)
+        self.assertEqual([entry["type"] for entry in entries], ["Refusal", "KeyError"])
+        self.assertIn("inner", " ".join(entries[1]["frames"]))
+        self.assertTrue(
+            all(
+                runner.FRAME.fullmatch(frame)
+                for entry in entries
+                for frame in entry["frames"]
+            )
+        )
+        self.assertNotIn("private-sentinel", json.dumps(entries))
+        identity = {
+            "commit": self.commit,
+            "commit_count": 80,
+            "version": "1.6.51+g" + self.commit[:7],
+            "dirty": False,
+            "sha256": {"src/oc_box/oc_box.py": "c" * 64},
+        }
+        native = {"version": "2.2.6", "sha256": "e" * 64}
+        report = runner.result(
+            {}, identity, "d" * 64, native, "operation-failed", failure_trace=entries
+        )
+        self.assertEqual(report["failure_trace"], entries)
+        for bad in (
+            [{"type": "KeyError", "frames": ["/etc/passwd:read:1"]}],
+            [{"type": "private sentinel", "frames": []}],
+            [{"type": "KeyError", "frames": [], "message": "private-sentinel"}],
+            [{"type": "KeyError", "frames": []}] * 5,
+        ):
+            with (
+                self.subTest(bad=bad),
+                self.assertRaisesRegex(runner.Refusal, "report-schema"),
+            ):
+                runner.result({}, identity, "d" * 64, native, None, failure_trace=bad)
+
+    def test_worker_failure_keeps_original_location_reachable(self):
+        worker = runner.Worker(
+            lambda: (_ for _ in ()).throw(ValueError("private-sentinel"))
+        )
+        with self.assertRaises(runner.Refusal) as raised:
+            worker.join()
+        self.assertIsInstance(raised.exception.__cause__, ValueError)
+        self.assertEqual(str(raised.exception), "worker-failed")
+
+    def test_archive_verification_accepts_untitled_launcher_session(self):
+        # The launcher creates the selected session without a title, and native
+        # 2.2.6 omits the field; production archives it as "Session".
+        harness = self.harness()
+        harness.data, harness.path = {}, self.parent / "workspace.json"
+        harness.archive_id = lambda ident, prefix="ses": prefix + "_archive_" + ident
+        harness.archive_path = lambda ident: self.parent / (ident + ".json")
+        harness.box.verify_host_archive = Mock()
+        for title, expected in ((None, "Session"), ("Named source", "Named source")):
+            info = {"id": "ses_source", "time": {"created": 1}}
+            if title is not None:
+                info["title"] = title
+            source = {
+                "info": info,
+                "messages": [{"id": "msg_source", "type": "user", "text": "x"}],
+            }
+
+            def archive(label):
+                return {
+                    "info": {
+                        "id": "ses_archive_ses_source",
+                        "title": label,
+                        "time": {"created": 1},
+                    },
+                    "messages": [
+                        {"id": "msg_archive_msg_source", "type": "user", "text": "x"}
+                    ],
+                }
+
+            for label, accepted in (
+                ("[oc-box source-a] " + expected, True),
+                ("[oc-box source-a] Wrong", False),
+            ):
+                harness.export = Mock(
+                    side_effect=lambda ident, host=False, label=label, source=source: (
+                        archive(label) if host else source
+                    )
+                )
+                harness.box.read_json = Mock(return_value=archive(label))
+                with self.subTest(title=title, label=label):
+                    if accepted:
+                        harness.verify_archive("ses_source")
+                    else:
+                        with self.assertRaises(runner.Refusal):
+                            harness.verify_archive("ses_source")
+
 
 if __name__ == "__main__":
     unittest.main()
