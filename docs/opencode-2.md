@@ -435,6 +435,22 @@ Interactive host testing covers the native client UI separately. These checks
 do not claim restored real-project model inference or universal filesystem/OS
 certification. Automated offline fixtures do not replace host Podman validation.
 
+**Reviewed new-layout interactive result (2026-11-09):** the operator completed
+the bounded `tools/test_interactive_podman.py` workflow on clean
+`1.6.44+ga043049` (commit `a043049a2c3e3db3bb41338e8547b4da50a9733b`, count 73).
+The actual native Build TUI completed shell/MCP/permission tools without
+permission or credential prompts and resized correctly. Browser/TUI/persistent
+shell worked together; shell state survived detach/reattach; closing web retained
+the other clients; and owner exit waited for the attached shell before final
+detach allowed normal sync/shutdown. All four supplied reports returned exit 0
+with no secondary errors. The synthetic provider recorded 9 requests, 0 errors
+and all three tool markers; native 2.2.6 is enforced by the helper.
+Manual observations are supported by explicit operator confirmations, not an
+automatic pass field. This `--no-vault` run does not establish interactive vault
+input, Plan/deny/reload prompts, ordinary owner-capable secondary CLI routing,
+an additional full TUI attachment, formatter/LSP/device integration, real-provider
+inference or real-project restore. See [the repeatable workflow](testing.md).
+
 ### Isolated global-vault and Build approval host validation
 
 Before using a new credential-default build with important work, run the

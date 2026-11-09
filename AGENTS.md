@@ -191,7 +191,19 @@ graphroot/runroot and label-checked cleanup; no real credentials/projects or
 normal host service. Its scripted TUI/prompt is not an interactive TUI pass.
 Do not run it in this container, move retained storage, or infer live acceptance
 from offline safety/native helper tests. Leave encrypted evidence on failure.
-Its initial host run failed during the first owning launch, not an accepted pass.
+Separate reviewed new-layout reports passed global-vault/Build/full restore on
+clean 1.6.42+ge66fb39 and selected V1/V2 full/portable restore/reset/downgrade on
+reported 1.6.43+ge06896f (only AGENTS.md changed from 1.6.42). Operator-observed
+interactive TUI/resize/web/persistent-shell/detach/reattach/web-close/owner-wait
+checks passed clean 1.6.44+ga043049: four reports returned 0, provider 9 requests,
+0 errors and all three tool markers, with explicit manual confirmations.
+This --no-vault helper uses production attach-only clients, not normal secondary
+owner-capable routing; it does not establish interactive vault/Plan/reload,
+formatter/LSP/device, real-provider or real-project restore acceptance. Preserve
+each execution's source identity and all older evidence; manual observations
+remain NOT_AUTOMATICALLY_PASSED in reports rather than self-certified.
+The global-vault fixture's initial host run failed during the first owning
+launch, not an accepted pass.
 Use --diagnose for validated read-only checkpoints; never print raw errors/env
 or treat inspection as replay/acceptance. Keep the retained fixture intact.
 Store refusals retain fixed-category selector/native version/info diagnostics,

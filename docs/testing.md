@@ -40,8 +40,22 @@ container**, and do not replace earlier 1.5 evidence:
   **1.19.5 / 2.2.6** and **18 synthetic provider requests**. That source revision
   differs from 1.6.42 only in `AGENTS.md`; keep the execution versions distinct.
 
-Neither report establishes fresh real interactive TUI/web/persistent-shell
-acceptance, real provider inference or security certification.
+- A separate **operator-observed interactive** run on clean
+  **1.6.44+ga043049** passed native Build tool execution without permission or
+  credential prompts, TUI resize, simultaneous browser/TUI/persistent-shell use,
+  shell-state retention across detach/reattach, independent web closure and owner
+  waiting for the final shell lease before normal sync/shutdown. Four reports
+  (owner, two terminal attachments and web) returned exit 0 without secondary
+  errors; the synthetic provider recorded **9 requests, 0 errors** and all three
+  tool markers. The helper requires native OpenCode 2.2.6.
+
+The first two runs use scripted TUI/prompt input. The third combines reports
+with the operator's explicit stepwise confirmations: its unchanged
+`NOT_AUTOMATICALLY_PASSED` field correctly avoids self-certifying observations.
+It uses `--no-vault` and production attach-only client helpers, not ordinary
+owner-capable secondary CLI routing. It does not cover interactive vault input,
+Plan/deny conversations, reload permission prompts, a second full TUI attachment,
+formatter/LSP/devices, real-provider inference or security certification.
 
 ### Fresh manual UI observation (host only)
 

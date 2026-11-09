@@ -763,6 +763,13 @@ instructions from 1.6.42; keep their execution versions distinct. These are
 synthetic scripted host tests, not new interactive UI acceptance, real-provider
 inference or real-project backups. See [the test strategy](docs/testing.md).
 
+A separate operator-observed run on clean `1.6.44+ga043049` now accepts the
+bounded native Build TUI/resize, browser/persistent-shell coexistence,
+detach/reattach, independent web closure and owner lease-drain workflow. It uses
+synthetic credentials and `--no-vault`, not interactive vault/Plan/reload testing,
+real-provider inference or a real-project backup. Keep this interactive evidence
+separate from the scripted lifecycle reports above.
+
 Runtime code lives in `src/oc_box/`, with tests/tools/docs in their conventional
 top-level directories. Root installer/build entrypoints remain for compatibility.
 Run the source CLI without installing into project/system/user Python:
