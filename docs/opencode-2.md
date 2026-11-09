@@ -849,6 +849,13 @@ Use only disposable projects, credential selections and backups:
   The older `tools/test_backup_podman.py` fixture verifies backup transport and
   rootless ownership with synthetic database bytes; it does not by itself verify
   restored native V2 inference or service lifecycle.
+  A separate reviewed image-free shared home-component report passed on clean
+  `1.6.48+g7df5074` (commit `7df5074f4f8b8e9844c149cbad99cf6f1e93dcb3`, count 77).
+  All six checks passed, all 30 audited hashes match that source, and the source/
+  destination fingerprints agree with no reported failures. It establishes
+  measured rootless 0/1 UID/GID/mode/content transport, source preservation and
+  root privacy through the common production home stream, not another per-kind
+  container-origin/first-mount/custom-mapping test. See [the component workflow](testing.md).
 - **Reset/downgrade:** reset a disposable V2 workspace and verify retained
   project/private-home/session data. Select a separate host 1.19.5 executable and
   launch to verify retained V1 history, then select 2.2.6 again and verify V2

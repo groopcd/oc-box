@@ -198,7 +198,15 @@ home-component UID/GID/mode/content transport evidence**, not another whole full
 portable lifecycle, first-mount or keep-id/auto/custom-mapping acceptance. The
 reviewed 1.6.42/43/44/46 scopes above and all completed roots remain unchanged.
 Offline `test_home_ownership_host_fixture` (including real age through a fake
-unshare dispatcher) is not host or mapping acceptance; no new host pass is claimed.
+unshare dispatcher) is not host or mapping acceptance. A separate reviewed
+user-supplied host report now passed on clean **1.6.48+g7df5074**, commit
+`7df5074f4f8b8e9844c149cbad99cf6f1e93dcb3`, count 77. All 30 audited helper/runtime
+hashes match that commit; all six proof checks are true, source/destination
+manifest hashes match and no primary/secondary failures are reported. This
+accepts only measured rootless 0/1 UID/GID, mode/content transport, source
+preservation and root privacy through the shared production stream. It does not
+relabel the earlier per-kind lifecycle evidence or establish container-origin,
+first-mount, custom mappings or a security certification.
 
 Cleanup holds the fixture lock, verifies purpose, original-boot marker, three
 environment store selection and **both** exact volume metadata/paths before any

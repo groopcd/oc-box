@@ -212,6 +212,13 @@ wrong/corrupt/missing-crypto start/reset preservation. Only the exact native
 data and container-home ownership/mode/link checks remain strict. This adds no
 inference, UI, backup, actual OAuth refresh, device or network-containment claim;
 policy transitions and structured-auth increments remain separately unverified.
+Separate image-free shared home-component ownership acceptance passed clean
+1.6.48+g7df5074, count 77: all six checks true, all 30 audited helper/runtime
+hashes match Git, source/destination manifest hashes equal and no failures.
+This establishes measured rootless 0/1 UID/GID/mode/content transport, source
+preservation and root privacy through the common archive/age/extract path only.
+It is not a new per-kind full/portable container-origin/first-mount or custom-
+mapping pass. Preserve the earlier lifecycle/UI/vault versions and all evidence.
 The global-vault fixture's initial host run failed during the first owning
 launch, not an accepted pass.
 Use --diagnose for validated read-only checkpoints; never print raw errors/env

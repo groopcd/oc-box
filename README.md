@@ -776,6 +776,12 @@ corrupt-vault and genuinely missing-crypto refusals for start/reset with protect
 state retained. All ten case reports passed. This provider-free run adds no
 inference, backup, OAuth-refresh or interactive-UI claim.
 
+A separate image-free shared home-component probe passed on clean
+`1.6.48+g7df5074`: measured rootless UID/GID 0/1, modes/content, source
+preservation and matching destination fingerprints through the production
+encrypted stream. All six checks and 30 audited hashes agree. This is component
+evidence, not a new per-kind container lifecycle or first-mount pass.
+
 Runtime code lives in `src/oc_box/`, with tests/tools/docs in their conventional
 top-level directories. Root installer/build entrypoints remain for compatibility.
 Run the source CLI without installing into project/system/user Python:
