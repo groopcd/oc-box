@@ -163,6 +163,91 @@ attempt. An offline rehearsal against real native 2.2.6 with substituted local
 Podman/transport layers reproduced it and passed all 27 checks after the fix; that
 rehearsal is not host acceptance.
 
+### Next migrated-history release candidate
+
+Published `v1.6.51` remains unchanged. Its accepted host reports predate the
+superseded-assistant correction; the correction's native/offline pass is not new
+host acceptance. Freeze a clean candidate containing the runtime fix, regression
+fixtures and documentation, then run all three host fixtures on that exact
+revision before the next stable GitHub/PyPI publication.
+
+The focused V2 runner retains its original 27 checks and adds six pending-shell
+checks: all **33** must pass, including same-pass progress on both sides of a
+pending session, exact fixed reasons and unchanged pending archives/checkpoint.
+The V1/V2 lifecycle fixture additionally records nine `superseded_history.checks`
+for a synthetic interrupted V1 transcript through native import and migration,
+the native omission/count annotation and destination round-trip, and preserved
+V1 history. Require `superseded_history.included: true` and all nine checks on a
+fresh full run; resume/retry does not establish them. This imported fixture is not
+a host SIGKILL reproduction. Actual crash-origin and unfinished-tail regression
+coverage remains direct native/offline; no new host tail test is claimed.
+Do not infer a live active-superseded exception test from ordinary foreground
+readiness checks: native V2 can settle older assistants when another turn starts.
+
+A native preparation rehearsal caught an oracle defect before host handoff: the
+new lifecycle check assumed a terminal first projection page. Native 2.2.6 can
+return the four messages with a continuation cursor, then an empty terminal
+page. The check now consumes validated pagination, rejecting duplicate messages,
+invalid/repeated cursors and an unbounded page chain. The failed rehearsal remains
+failed evidence; neither its diagnosis nor a corrected offline run is host acceptance.
+
+Use the native executable setup in the
+[V1/V2 host guide](opencode-2.md#automated-disposable-host-fixture).
+From a normal unprivileged **host** terminal, substitute real paths and the full
+reviewed candidate hash below. Both checkouts need full Git history. The harness,
+both native executables and the fixture/temp parents must be outside the
+candidate. Existing fixture/temp parents need enough disk-backed space for fresh
+isolated image stores, encrypted full/portable backups and restores. Do not
+select a retained fixture or any of its descendants as a parent.
+
+```bash
+(
+  set -eu
+  candidate=/path/to/clean/candidate
+  harness=/path/to/separate/harness
+  commit=FULL_REVIEWED_CANDIDATE_COMMIT
+  v1=/path/to/opencode-1.19.5
+  v2=/path/to/opencode-2.2.6
+  fixtures=/path/to/fresh-fixtures
+  temporary=/path/to/private-temp
+  cd "$candidate"
+  test "$(git rev-parse HEAD)" = "$commit"
+  test -z "$(git status --porcelain --untracked-files=all)"
+
+  uv run --isolated --no-project --with cryptography python -I -B \
+    "$harness/tools/test_session_sync_podman.py" \
+    --source "$candidate" --expect-commit "$commit" \
+    --work-dir "$fixtures" --temp-dir "$temporary" --opencode-v2 "$v2"
+  test "$(git rev-parse HEAD)" = "$commit"
+  test -z "$(git status --porcelain --untracked-files=all)"
+
+  uv run --isolated --no-project --with cryptography python -I -B \
+    tools/test_global_vault_podman.py --opencode-v2 "$v2" \
+    --distro tumbleweed --work-dir "$fixtures" --temp-dir "$temporary"
+  test "$(git rev-parse HEAD)" = "$commit"
+  test -z "$(git status --porcelain --untracked-files=all)"
+
+  uv run --isolated --no-project --with cryptography python -I -B \
+    tools/test_v2_podman.py --opencode-v1 "$v1" --opencode-v2 "$v2" \
+    --distro tumbleweed --work-dir "$fixtures" --temp-dir "$temporary"
+  test "$(git rev-parse HEAD)" = "$commit"
+  test -z "$(git status --porcelain --untracked-files=all)"
+)
+```
+
+Stop on the first failure and retain its original reports/resources. A retry or
+new fixture is separate evidence; do not overwrite encrypted archives, move
+stores or rewrite boot/identity markers. Review each printed report, exact
+source/native/harness identities, every required check, deliberate refusal
+exits, recovery and secondary failures. Share only the fixed-schema reports and
+clean checkout identity, not raw native logs, environment or transcripts.
+
+After acceptance, follow the
+[publication checklist](../CONTRIBUTING.md#release-gate-and-publication-checklist):
+fast-forward the accepted commit without changing its identity, publish the
+matching GitHub Release/PyPI version, and compare the public artifacts' hashes.
+No new host pass or release is recorded by preparing this handoff.
+
 ### Reviewed host reports — 2026-11-09
 
 These are user-supplied reports reviewed here, **not executions from this

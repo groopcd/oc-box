@@ -377,3 +377,55 @@ builds, validates, and publishes to PyPI. Alternatively manually dispatch
 rules may require owner approval. Do not publish from untrusted pull requests.
 The repository's CI builds/verifies packages on Python 3.10 and 3.13; the full
 mainline smoke fixture remains part of local verification with OpenCode.
+
+### Release gate and publication checklist
+
+GitHub/curl and PyPI are separate distribution channels. `install.sh` and the
+GitHub self-updater fetch `master`, not the latest release tag. Do not advance
+that branch to an unaccepted runtime candidate merely to start release CI.
+
+1. Integrate changes on a `feature/**` candidate branch, preserving full history.
+   Finish documentation and regenerate the manuals before freezing the commit.
+   Check for untracked files as well as `build-info.json`'s dirty flag. Keep the
+   candidate unchanged throughout validation; record its full commit identity.
+2. Require the source/package/native integration workflow to pass, and the
+   seven-image distro workflow for package-map changes. Run `publish.yml` with
+   `publish=false` on the candidate as a build-only gate. Neither this workflow
+   nor the release-triggered publisher automatically checks other workflows or
+   host reports; the release owner must review those gates explicitly.
+3. For history/lifecycle changes, obtain new external-host reports for the
+   focused history/readiness runner, global-vault fixture and V1/V2 lifecycle
+   fixture on the same clean candidate. Include regression-specific host cases,
+   not just the previously accepted baseline. Use only private synthetic state;
+   never bypass host-only guards from an oc-box container. Follow the
+   [history/readiness handoff](docs/testing.md#focused-historyreadiness-host-runner)
+   and preserve failed attempts separately.
+4. Review the real reports, every required check, native and source identities,
+   expected refusals, recovery and secondary failures. Offline rehearsals, old
+   reports and a successful build cannot substitute for host acceptance. If any
+   source changes after testing, freeze and validate the new candidate instead.
+5. After acceptance and publication approval, fast-forward the exact tested
+   commit into `master`, push it and tag that same commit as `v1.6.N`. Do not
+   squash, rebase or add a merge/evidence commit between acceptance and tagging:
+   every commit changes both source identity and the derived version. Put the
+   accepted report summary in the GitHub release notes; later source-documentation
+   updates have their own version and do not retroactively change the release.
+6. Publish the stable GitHub Release. Its release event invokes Trusted
+   Publishing to PyPI; do not start a second upload. Wait for successful build
+   and publish jobs, including any environment approval. Download that run's
+   `python-distributions` artifact and attach its exact wheel and sdist, plus a
+   `SHA256SUMS` file, to the GitHub Release.
+7. Download the public PyPI files and compare their hashes with the GitHub assets
+   and checksum file. Re-run `tools/check_package.py DISTDIR --with-vault`, verify
+   an isolated installed CLI reports the accepted full `+gHASH` identity, and
+   check tag, release and `master` identities. Keep the full commit/count in
+   wheel and sdist resources even though the public version has no local suffix.
+
+A later evidence-only commit on `master` also advances the curl/self-update
+version, while PyPI stays at its selected release. Do not describe those channels
+as byte-identical after such an update; retain the released tag and artifacts.
+
+Use only the repository owner's explicit publication credential, isolated
+subprocess-local GitHub authentication and a verified owner identity for GitHub
+management and pushes. Never use provider/inherited Copilot credentials for
+publication, or reuse publication credentials for public source downloads.

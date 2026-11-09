@@ -25,6 +25,7 @@ import sys
 import tempfile
 import threading
 from unittest.mock import patch
+from urllib.parse import quote
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
@@ -35,6 +36,7 @@ from oc_box import (
     credentials,
     oc_box as box,
     opencode_compat as compat,
+    opencode_v2_io as history_io,
     vault,
     workspace_service,
 )
@@ -44,6 +46,7 @@ PREFIX = "oc-box-live-v2-"
 KEY = "ACCEPTANCE_API_KEY"
 UNSELECTED = "ACCEPTANCE_UNSELECTED_TOKEN"
 LEGACY_ID = "ses_v1_acceptance_fixture"
+SUPERSEDED_ID = "ses_v1_acceptance_superseded"
 NATIVE_VERSIONS = {"1": "1.19.5", "2": "2.2.6"}
 MCP = """import json,os,sys
 for line in sys.stdin:
@@ -317,6 +320,183 @@ def verify_v1_history(actual, expected):
         raise AssertionError(
             "V1 downgrade changed retained session identity, project or complete message/part history"
         )
+
+
+def superseded_legacy_session(project):
+    """Deterministic imported V1 interruption, not a new crash-origin test."""
+    messages = []
+    for number, (role, text) in enumerate(
+        (
+            ("user", "V1_INTERRUPTED_TURN"),
+            ("assistant", "V1_UNFINISHED_ASSISTANT"),
+            ("user", "V1_LATER_TURN"),
+            ("assistant", "V1_COMPLETED_ASSISTANT"),
+        ),
+        1,
+    ):
+        ident = f"msg_v1_superseded_{number}"
+        info = {
+            "id": ident,
+            "sessionID": SUPERSEDED_ID,
+            "role": role,
+            "agent": "build",
+            "time": {"created": number},
+        }
+        if role == "user":
+            info["model"] = {"providerID": "fixture", "modelID": "gpt-smoke"}
+        else:
+            info.update(
+                parentID=f"msg_v1_superseded_{number - 1}",
+                mode="build",
+                modelID="gpt-smoke",
+                providerID="fixture",
+                path={"cwd": str(project), "root": str(project)},
+                cost=0,
+                tokens={
+                    "input": 0,
+                    "output": 0,
+                    "reasoning": 0,
+                    "cache": {"read": 0, "write": 0},
+                },
+            )
+            if number == 4:
+                info["time"]["completed"] = number
+                info["finish"] = "stop"
+        messages.append(
+            {
+                "info": info,
+                "parts": [
+                    {
+                        "id": "prt_" + ident,
+                        "sessionID": SUPERSEDED_ID,
+                        "messageID": ident,
+                        "type": "text",
+                        "text": text,
+                    }
+                ],
+            }
+        )
+    return {
+        "info": {
+            "id": SUPERSEDED_ID,
+            "slug": "acceptance-superseded",
+            "title": "Synthetic V1 superseded interruption",
+            "directory": str(project),
+            "projectID": "global",
+            "version": "1.19.5",
+            # Keep the existing seed's selection priority; it is imported last.
+            "time": {"created": 1, "updated": 1},
+        },
+        "messages": messages,
+    }
+
+
+def verify_superseded_migration(data, connection):
+    """Compare native projection/raw export with the real production bridge."""
+    route = "/api/session/" + SUPERSEDED_ID + "/message?limit=100"
+    projected, identities, cursors = [], set(), set()
+    cursor = None
+    # Native can return a continuation after the final message, followed by an
+    # empty terminal page. Consume it; bound this known four-message fixture.
+    for _ in range(8):
+        page = workspace_service.api(
+            box,
+            data,
+            connection,
+            "GET",
+            route + ("&cursor=" + quote(cursor, safe="") if cursor else "&order=asc"),
+        )
+        if (
+            not isinstance(page, dict)
+            or not isinstance(page.get("data"), list)
+            or not isinstance(page.get("cursor"), dict)
+        ):
+            raise AssertionError("Synthetic superseded projection is incomplete")
+        for message in page["data"]:
+            if (
+                not isinstance(message, dict)
+                or not isinstance(message.get("id"), str)
+                or message["id"] in identities
+                or len(projected) >= 4
+            ):
+                raise AssertionError("Synthetic superseded projection is inconsistent")
+            identities.add(message["id"])
+            projected.append(message)
+        cursor = page["cursor"].get("next")
+        if cursor is None:
+            break
+        if not isinstance(cursor, str) or not cursor or cursor in cursors:
+            raise AssertionError("Synthetic superseded projection cursor is invalid")
+        cursors.add(cursor)
+    else:
+        raise AssertionError("Synthetic superseded projection is incomplete")
+    # These four IDs/states are known from the original V1 fixture, not derived
+    # from the checked export whose omission annotation is under test.
+    if (
+        [message.get("id") for message in projected]
+        != [f"msg_v1_superseded_{number}" for number in range(1, 5)]
+        or [message.get("type") for message in projected]
+        != ["user", "assistant", "user", "assistant"]
+        or [
+            message.get("type") == "assistant"
+            and message.get("time", {}).get("completed") is None
+            for message in projected
+        ]
+        != [False, True, False, False]
+    ):
+        raise AssertionError("Synthetic superseded migration changed native shape")
+    raw = workspace_service.api(
+        box,
+        data,
+        connection,
+        "GET",
+        "/api/experimental/session/" + SUPERSEDED_ID + "/export",
+    )["data"]
+    box.validate_session_export(raw, SUPERSEDED_ID)
+    if (
+        compat.directory(raw) != box.container_project(data)
+        or history_io.INTERRUPTED in raw
+        or raw["messages"] != [projected[index] for index in (0, 2, 3)]
+    ):
+        raise AssertionError(
+            "Native export did not omit exactly the superseded assistant"
+        )
+    checked = box.export_container_session(data, SUPERSEDED_ID)
+    count = checked.get(history_io.INTERRUPTED)
+    if (
+        count != {"assistant": 1}
+        or type(count.get("assistant")) is not int
+        or checked["messages"] != raw["messages"]
+    ):
+        raise AssertionError("Production superseded export count or transcript differs")
+    return checked
+
+
+def verify_superseded_sync(path, data, checked):
+    """Require the real sync checkpoint and native host archive round-trip."""
+    expected = box.archive_session(checked, data)
+    ident = expected["info"]["id"]
+    target = path.parent / "history" / (ident + ".json")
+    archived = box.read_json(target)
+    box.validate_session_export(archived, ident)
+    state = box.session_state(path)
+    count = (
+        archived["info"]
+        .get("metadata", {})
+        .get("oc-box.archive", {})
+        .get("interrupted")
+    )
+    if (
+        history_io.INTERRUPTED in archived
+        or archived["messages"] != expected["messages"]
+        or count != {"assistant": 1}
+        or type(count.get("assistant")) is not int
+        or state.get("host_sessions", {}).get(SUPERSEDED_ID) != ident
+        or state.get("synced", {}).get(SUPERSEDED_ID)
+        != hashlib.sha256(target.read_bytes()).hexdigest()
+    ):
+        raise AssertionError("Synced superseded archive or checkpoint differs")
+    box.verify_host_archive(path, data, archived)
 
 
 def verify_v2_progress(actual, expected):
@@ -1094,6 +1274,26 @@ def run(root, v1, v2, distro, *, resume=False):
     password = secrets.token_urlsafe(24)
     ids = []
     reports = []
+    # A retained fixture may predate this case. Resume/retry must never seed or
+    # overwrite it, nor claim a migration case that those commands did not run.
+    superseded_checks = (
+        {
+            name: False
+            for name in (
+                "native_v1_import_exact",
+                "native_v2_projection_unfinished_superseded",
+                "native_export_omits_exact_assistant",
+                "production_checked_export_count",
+                "production_sync_archive_native_roundtrip",
+                "v1_database_preserved_until_reopen",
+                "native_v1_reopen_messages_exact",
+                "v2_database_preserved_on_v1_reopen",
+                "v1_database_preserved_on_v2_return",
+            )
+        }
+        if not resume
+        else {}
+    )
     source = root / "source"
     source.mkdir(exist_ok=resume)
     (root / "host-home").mkdir(exist_ok=True)
@@ -1150,6 +1350,14 @@ def run(root, v1, v2, distro, *, resume=False):
                 current_path, current = workspace(active["id"])
                 if current["opencode_version"].startswith("1."):
                     if active["stage"] == "seed-v1":
+                        if not resume:
+                            box.import_host_session(
+                                current_path,
+                                current,
+                                superseded_legacy_session(source),
+                            )
+                        # Keep the existing seed selected for the normal native
+                        # model/tool, restore, reset and downgrade scenarios.
                         box.import_host_session(
                             current_path, current, legacy_session(source)
                         )
@@ -1159,10 +1367,30 @@ def run(root, v1, v2, distro, *, resume=False):
                     )
                     if active["stage"] == "seed-v1":
                         active["v1_history"] = transcript
+                    if not resume:
+                        verify_v1_history(
+                            box.export_container_session(current, SUPERSEDED_ID),
+                            superseded_legacy_session(source),
+                        )
+                        superseded_checks[
+                            "native_v1_import_exact"
+                            if active["stage"] == "seed-v1"
+                            else "native_v1_reopen_messages_exact"
+                        ] = True
                     return 0
                 session = workspace_service.live_connection()
                 if not session:
                     raise AssertionError("V2 did not create a private foreground owner")
+                if not resume:
+                    active["superseded_v2"] = verify_superseded_migration(
+                        current, session
+                    )
+                    for name in (
+                        "native_v2_projection_unfinished_superseded",
+                        "native_export_omits_exact_assistant",
+                        "production_checked_export_count",
+                    ):
+                        superseded_checks[name] = True
                 if active.get("required_v2"):
                     prior = box.export_container_session(current, LEGACY_ID)
                     verify_v2_progress(prior, active["required_v2"])
@@ -1259,6 +1487,10 @@ def run(root, v1, v2, distro, *, resume=False):
                     box.main(["start", "--workspace", data["id"]])
             path, data = workspace(data["id"])
             stopped_container(data)
+            if not resume and box.session_state(path)["last"] != LEGACY_ID:
+                raise AssertionError(
+                    "Synthetic import changed the existing seed selection"
+                )
             original_v1_digest = digest_home(data, ".local/share/opencode/opencode.db")
             reports.append("Native V1 seeded session and stopped lifecycle")
             # Create only the isolated encrypted vault; synthetic values stay
@@ -1282,7 +1514,15 @@ def run(root, v1, v2, distro, *, resume=False):
                                 vault.vault_path(), {KEY: state["key"]}, password
                             )
                     box.main(["start", "--workspace", active["id"]])
-                    stopped_container(workspace(active["id"])[1])
+                    current_path, current = workspace(active["id"])
+                    stopped_container(current)
+                    if not resume:
+                        verify_superseded_sync(
+                            current_path, current, active["superseded_v2"]
+                        )
+                        superseded_checks[
+                            "production_sync_archive_native_roundtrip"
+                        ] = True
                     if KEY in os.environ or credentials.has_unlocked_values():
                         raise AssertionError(
                             "Vault launch values leaked into host environment or remained unlocked"
@@ -1371,6 +1611,10 @@ def run(root, v1, v2, distro, *, resume=False):
                     patch.object(box, "run_tui", side_effect=snapshot_current),
                 ):
                     box.main(["start", "--workspace", active["id"]])
+                if not resume:
+                    verify_superseded_sync(
+                        restored_path, restored, active["superseded_v2"]
+                    )
                 reports.append(
                     "Native V2 "
                     + kind
@@ -1398,6 +1642,17 @@ def run(root, v1, v2, distro, *, resume=False):
             ):
                 box.main(["reset", "--workspace", data["id"]])
             stopped_container(workspace(data["id"])[1])
+            if not resume:
+                current_path, current = workspace(data["id"])
+                verify_superseded_sync(current_path, current, active["superseded_v2"])
+                if (
+                    digest_home(current, ".local/share/opencode/opencode.db")
+                    != original_v1_digest
+                ):
+                    raise AssertionError(
+                        "Lifecycle changed original V1 bytes before reopen"
+                    )
+                superseded_checks["v1_database_preserved_until_reopen"] = True
             reports.append(
                 "Wrong vault password preserves resources; native V2 reset retains project/home/history and rebuilds OS"
             )
@@ -1419,6 +1674,8 @@ def run(root, v1, v2, distro, *, resume=False):
                 != v2_before_downgrade
             ):
                 raise AssertionError("V1 downgrade wrote to the retained V2 database")
+            if not resume:
+                superseded_checks["v2_database_preserved_on_v1_reopen"] = True
             v1_before_return = digest_home(current, ".local/share/opencode/opencode.db")
             (root / "host-major").write_text("2")
             active["stage"] = "return-v2"
@@ -1436,6 +1693,14 @@ def run(root, v1, v2, distro, *, resume=False):
                 != v1_before_return
             ):
                 raise AssertionError("Returning V2 wrote to the retained V1 database")
+            if not resume:
+                current_path, current = workspace(data["id"])
+                verify_superseded_sync(current_path, current, active["superseded_v2"])
+                superseded_checks["v1_database_preserved_on_v2_return"] = True
+                if not all(superseded_checks.values()):
+                    raise AssertionError(
+                        "Synthetic superseded migration checks incomplete"
+                    )
             reports.append(
                 "Native V1 downgrade and V2 return preserve both histories without reseeding"
             )
@@ -1450,6 +1715,11 @@ def run(root, v1, v2, distro, *, resume=False):
                 "source_version": get_version_info(APP)["version"],
                 "native_versions": dict(NATIVE_VERSIONS),
                 "synthetic_provider_requests": state["requests"],
+                "superseded_history": {
+                    "included": not resume,
+                    "checks": superseded_checks,
+                    "limits": "Deterministic native V1 import and production migration on fresh full runs only; resume/retry do not seed or establish this case. No new crash-origin, unfinished-tail or active-session injection test.",
+                },
                 "limits": "Synthetic native provider/MCP; TUI and vault prompt input scripted; real rootless lifecycle/storage and credential selection/decryption.",
             }
             (root / "result.json").write_text(json.dumps(result, indent=2) + "\n")

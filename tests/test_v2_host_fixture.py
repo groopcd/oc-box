@@ -804,6 +804,300 @@ class V2HostFixtureTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "retained native history"):
             fixture.verify_v2_progress(current, expected)
 
+    def test_superseded_v1_reopen_requires_original_unfinished_and_later_messages(self):
+        expected = fixture.superseded_legacy_session(Path("/synthetic/project"))
+        current = json.loads(json.dumps(expected))
+        current["info"]["time"]["updated"] = 100
+        fixture.verify_v1_history(current, expected)
+        for change in (
+            "drop-unfinished",
+            "complete-unfinished",
+            "change-later",
+            "reorder",
+        ):
+            current = json.loads(json.dumps(expected))
+            if change == "drop-unfinished":
+                del current["messages"][1]
+            elif change == "complete-unfinished":
+                current["messages"][1]["info"]["time"]["completed"] = 2
+            elif change == "change-later":
+                current["messages"][3]["parts"][0]["text"] = "changed retained turn"
+            else:
+                current["messages"][1:3] = reversed(current["messages"][1:3])
+            with (
+                self.subTest(change=change),
+                self.assertRaisesRegex(AssertionError, "message/part history"),
+            ):
+                fixture.verify_v1_history(current, expected)
+
+    def superseded_wire(self):
+        """Minimal native wire values for testing the host runner's oracles only."""
+        data = {
+            "id": "a" * 32,
+            "project": "/synthetic/project",
+            "opencode_version": "2.2.6",
+        }
+        messages = [
+            {"id": "msg_v1_superseded_1", "type": "user", "text": "first turn"},
+            {"id": "msg_v1_superseded_2", "type": "assistant", "time": {"created": 2}},
+            {"id": "msg_v1_superseded_3", "type": "user", "text": "later turn"},
+            {
+                "id": "msg_v1_superseded_4",
+                "type": "assistant",
+                "time": {"completed": 4},
+            },
+        ]
+        page = {"data": messages, "cursor": {"next": None}}
+        raw = {
+            "info": {
+                "id": fixture.SUPERSEDED_ID,
+                "location": {"directory": data["project"]},
+            },
+            "messages": [messages[index] for index in (0, 2, 3)],
+        }
+        checked = json.loads(json.dumps(raw))
+        checked[fixture.history_io.INTERRUPTED] = {"assistant": 1}
+        return data, page, raw, checked
+
+    def test_superseded_migration_oracle_requires_original_projection_shape(self):
+        data, page, raw, checked = self.superseded_wire()
+        with (
+            patch.object(
+                fixture.workspace_service, "api", side_effect=[page, {"data": raw}]
+            ),
+            patch.object(
+                box, "export_container_session", return_value=checked
+            ) as export,
+        ):
+            self.assertEqual(fixture.verify_superseded_migration(data, {}), checked)
+        export.assert_called_once_with(data, fixture.SUPERSEDED_ID)
+        for change in (
+            "missing-message",
+            "completed-first",
+            "unfinished-tail",
+            "identity",
+            "order",
+            "next-page",
+        ):
+            data, page, _, _ = self.superseded_wire()
+            if change == "missing-message":
+                del page["data"][1]
+            elif change == "completed-first":
+                page["data"][1]["time"]["completed"] = 2
+            elif change == "unfinished-tail":
+                page["data"][3]["time"].pop("completed")
+            elif change == "identity":
+                page["data"][1]["id"] = "msg_foreign"
+            elif change == "order":
+                page["data"][1:3] = reversed(page["data"][1:3])
+            else:
+                page["cursor"]["next"] = "more"
+            with (
+                self.subTest(change=change),
+                patch.object(fixture.workspace_service, "api", return_value=page),
+                patch.object(box, "export_container_session") as export,
+                self.assertRaisesRegex(AssertionError, "projection|native shape"),
+            ):
+                fixture.verify_superseded_migration(data, {})
+            export.assert_not_called()
+
+    def test_superseded_projection_consumes_native_empty_terminal_page(self):
+        for split in (False, True):
+            data, page, raw, checked = self.superseded_wire()
+            messages = page["data"]
+            token = "native+/cursor="
+            pages = (
+                [
+                    {"data": messages[:2], "cursor": {"next": "first"}},
+                    {"data": messages[2:], "cursor": {"next": token}},
+                ]
+                if split
+                else [{"data": messages, "cursor": {"next": token}}]
+            )
+            with (
+                self.subTest(split=split),
+                patch.object(
+                    fixture.workspace_service,
+                    "api",
+                    side_effect=[
+                        *pages,
+                        {"data": [], "cursor": {"next": None}},
+                        {"data": raw},
+                    ],
+                ) as api,
+                patch.object(box, "export_container_session", return_value=checked),
+            ):
+                self.assertEqual(fixture.verify_superseded_migration(data, {}), checked)
+            routes = [call.args[-1] for call in api.call_args_list]
+            route = "/api/session/" + fixture.SUPERSEDED_ID + "/message?limit=100"
+            self.assertEqual(routes[0], route + "&order=asc")
+            self.assertEqual(routes[-2], route + "&cursor=native%2B%2Fcursor%3D")
+            self.assertTrue(routes[-1].endswith("/export"))
+
+    def test_superseded_projection_refuses_malformed_or_unbounded_pagination(self):
+        data, page, _, _ = self.superseded_wire()
+        valid = page["data"]
+        cases = {
+            "missing-page": [None],
+            "missing-cursor": [{"data": valid}],
+            "invalid-next": [{"data": valid, "cursor": {"next": 1}}],
+            "empty-next": [{"data": valid, "cursor": {"next": ""}}],
+            "repeated-cursor": [
+                {"data": valid, "cursor": {"next": "repeat"}},
+                {"data": [], "cursor": {"next": "repeat"}},
+            ],
+            "repeated-message": [
+                {"data": valid[:2], "cursor": {"next": "more"}},
+                {"data": valid, "cursor": {"next": None}},
+            ],
+            "invalid-message": [{"data": [None], "cursor": {"next": None}}],
+            "extra-message": [
+                {"data": [*valid, {"id": "msg_extra"}], "cursor": {"next": None}}
+            ],
+            "unterminated-empty-pages": [
+                {"data": [], "cursor": {"next": str(number)}} for number in range(8)
+            ],
+        }
+        for name, pages in cases.items():
+            with (
+                self.subTest(name=name),
+                patch.object(fixture.workspace_service, "api", side_effect=pages),
+                patch.object(box, "export_container_session") as export,
+                self.assertRaisesRegex(AssertionError, "projection"),
+            ):
+                fixture.verify_superseded_migration(data, {})
+            export.assert_not_called()
+
+    def test_superseded_raw_export_must_omit_exactly_one_known_assistant(self):
+        for change in (
+            "drop-settled",
+            "retain-unfinished",
+            "changed-settled",
+            "foreign-project",
+            "annotation",
+        ):
+            data, page, raw, checked = self.superseded_wire()
+            raw = json.loads(json.dumps(raw))
+            if change == "drop-settled":
+                del raw["messages"][1]
+            elif change == "retain-unfinished":
+                raw["messages"].insert(1, page["data"][1])
+            elif change == "changed-settled":
+                raw["messages"][0]["text"] = "changed"
+            elif change == "foreign-project":
+                raw["info"]["location"]["directory"] = "/foreign/project"
+            else:
+                raw[fixture.history_io.INTERRUPTED] = {"assistant": 1}
+            with (
+                self.subTest(change=change),
+                patch.object(
+                    fixture.workspace_service, "api", side_effect=[page, {"data": raw}]
+                ),
+                patch.object(
+                    box, "export_container_session", return_value=checked
+                ) as export,
+                self.assertRaisesRegex(AssertionError, "omit exactly"),
+            ):
+                fixture.verify_superseded_migration(data, {})
+            export.assert_not_called()
+
+    def test_superseded_checked_export_requires_independent_count_and_native_messages(
+        self,
+    ):
+        for count in (
+            None,
+            {"assistant": 2},
+            {"assistant": True},
+            {"assistant": 1, "user": 1},
+        ):
+            data, page, raw, checked = self.superseded_wire()
+            checked[fixture.history_io.INTERRUPTED] = count
+            with (
+                self.subTest(count=count),
+                patch.object(
+                    fixture.workspace_service, "api", side_effect=[page, {"data": raw}]
+                ),
+                patch.object(box, "export_container_session", return_value=checked),
+                self.assertRaisesRegex(AssertionError, "count or transcript"),
+            ):
+                fixture.verify_superseded_migration(data, {})
+        data, page, raw, checked = self.superseded_wire()
+        checked["messages"].pop()
+        with (
+            patch.object(
+                fixture.workspace_service, "api", side_effect=[page, {"data": raw}]
+            ),
+            patch.object(box, "export_container_session", return_value=checked),
+            self.assertRaisesRegex(AssertionError, "count or transcript"),
+        ):
+            fixture.verify_superseded_migration(data, {})
+
+    def test_superseded_sync_requires_count_checkpoint_and_native_host_verification(
+        self,
+    ):
+        data, _, _, checked = self.superseded_wire()
+        for change in (
+            None,
+            "count",
+            "boolean-count",
+            "transcript",
+            "annotation",
+            "checkpoint",
+            "host-mapping",
+            "host-refusal",
+        ):
+            with (
+                tempfile.TemporaryDirectory() as temporary,
+                self.subTest(change=change),
+            ):
+                path = Path(temporary) / "workspace.json"
+                archived = box.archive_session(checked, data)
+                ident = archived["info"]["id"]
+                target = path.parent / "history" / (ident + ".json")
+                if change in ("count", "boolean-count"):
+                    archived["info"]["metadata"]["oc-box.archive"]["interrupted"] = {
+                        "assistant": True if change == "boolean-count" else 2
+                    }
+                elif change == "transcript":
+                    archived["messages"].pop()
+                elif change == "annotation":
+                    archived[fixture.history_io.INTERRUPTED] = {"assistant": 1}
+                box.atomic_json(target, archived)
+                state = {
+                    "host_sessions": {fixture.SUPERSEDED_ID: ident},
+                    "synced": {
+                        fixture.SUPERSEDED_ID: fixture.hashlib.sha256(
+                            target.read_bytes()
+                        ).hexdigest()
+                    },
+                }
+                if change == "checkpoint":
+                    state["synced"].clear()
+                elif change == "host-mapping":
+                    state["host_sessions"].clear()
+                with (
+                    patch.object(box, "session_state", return_value=state),
+                    patch.object(box, "verify_host_archive") as verify,
+                ):
+                    if change == "host-refusal":
+                        verify.side_effect = box.BoxError(
+                            "Native host verification refused"
+                        )
+                        with self.assertRaisesRegex(
+                            box.BoxError, "host verification refused"
+                        ):
+                            fixture.verify_superseded_sync(path, data, checked)
+                        verify.assert_called_once_with(path, data, archived)
+                    elif change is not None:
+                        with self.assertRaisesRegex(
+                            AssertionError, "archive or checkpoint"
+                        ):
+                            fixture.verify_superseded_sync(path, data, checked)
+                        verify.assert_not_called()
+                    else:
+                        fixture.verify_superseded_sync(path, data, checked)
+                        verify.assert_called_once_with(path, data, archived)
+
     def exercise_downgrade_retry(self, root, *, changed_v1=False):
         path, source, _ = self.retained_downgrade(root)
         native = {

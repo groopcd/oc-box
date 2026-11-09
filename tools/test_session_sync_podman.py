@@ -64,6 +64,12 @@ CHECKS = frozenset(
         "held_lease_shutdown",
         "running_shell_filtered",
         "incomplete_export_refusal",
+        "pending_fixed_reason",
+        "pending_aggregate_reason",
+        "pending_session_order",
+        "pending_earlier_progress",
+        "pending_later_progress",
+        "pending_archive_preservation",
         "pending_exit",
         "sync_recovery",
         "owner_cleanup",
@@ -1165,7 +1171,14 @@ class Harness:
                     ["start", "--project", str(self.root / "source-a"), "--no-vault"]
                 )
             if expected:
-                require("history sync pending:" in errors.getvalue())
+                require(
+                    [
+                        line
+                        for line in errors.getvalue().splitlines()
+                        if line.startswith("oc-box: history sync pending:")
+                    ]
+                    == ["oc-box: history sync pending: " + self.pending_message()]
+                )
                 require(
                     "Session history synced to your normal host"
                     not in output.getvalue()
@@ -1588,34 +1601,110 @@ class Harness:
             )
         )
         self.check("running_shell_filtered")
-        expect_refusal(
-            lambda: self.box.export_container_session(self.data, self.shell_id),
-            self.box.BoxError,
+        self.refuse_incomplete_export()
+        state = self.box.session_state(self.path)
+        self.pending_earlier = state["sessions"][0]
+        require(
+            state["sessions"].index(self.pending_earlier)
+            < state["sessions"].index(self.shell_id)
         )
+        self.pending_earlier_checkpoint = state["synced"][self.pending_earlier]
+        require(
+            self.pending_earlier_checkpoint
+            == file_hash(self.archive_path(self.pending_earlier))
+        )
+        self.request(
+            "PATCH",
+            "/api/session/" + self.pending_earlier,
+            {"title": "SYNTHETIC_PROGRESS_BEFORE_PENDING"},
+        )
+        self.pending_later = "ses_history_after_pending"
+        require(
+            all(
+                self.pending_later not in state.get(key, {})
+                for key in ("sessions", "synced", "host_sessions")
+            )
+            and not self.archive_path(self.pending_later).exists()
+        )
+        self.seed(self.pending_later)
+        # Do not sync here: the owner's real failing exit pass must both update
+        # the earlier archive and discover/import the new later session.
+        return 0
+
+    def refuse_incomplete_export(self):
+        error = expect_refusal(
+            lambda: self.box.export_container_session(self.data, self.shell_id),
+            self.box.HistoryPending,
+        )
+        require(str(error) == self.box.opencode_v2_io.UNSETTLED)
         preserved(self.shell_before, self.snapshot(self.shell_id))
         self.check("incomplete_export_refusal")
-        return 0
+        self.check("pending_fixed_reason")
+
+    def pending_message(self):
+        return (
+            "1 session(s) not settled yet: "
+            + self.box.opencode_v2_io.UNSETTLED
+            + " Their last archives are retained and other sessions were synchronized."
+        )
+
+    def verify_pending_progress(self, attempted):
+        state = self.box.session_state(self.path)
+        require(
+            state["sessions"].index(self.pending_earlier)
+            < state["sessions"].index(self.shell_id)
+            < state["sessions"].index(self.pending_later)
+        )
+        require(
+            attempted.index(self.pending_earlier)
+            < attempted.index(self.shell_id)
+            < attempted.index(self.pending_later)
+        )
+        self.check("pending_session_order")
+        for ident, name in (
+            (self.pending_earlier, "pending_earlier_progress"),
+            (self.pending_later, "pending_later_progress"),
+        ):
+            checkpoint = state.get("synced", {}).get(ident)
+            require(checkpoint is not None)
+            if ident == self.pending_earlier:
+                require(checkpoint != self.pending_earlier_checkpoint)
+            require(checkpoint == file_hash(self.archive_path(ident)))
+            require(state.get("host_sessions", {}).get(ident) == self.archive_id(ident))
+            self.verify_archive(ident)
+            self.check(name)
+        preserved(self.shell_before, self.snapshot(self.shell_id))
+        self.check("pending_archive_preservation")
 
     def pending_observer(self, original):
         def observe(path, data):
-            failed, real_export = [], self.box.export_container_session
+            attempted, failed, real_export = [], [], self.box.export_container_session
 
             def export(data_, ident):
+                attempted.append(ident)
                 try:
                     return real_export(data_, ident)
-                except BaseException:
-                    failed.append(ident)
+                except BaseException as error:
+                    failed.append(
+                        (
+                            ident,
+                            isinstance(error, self.box.HistoryPending)
+                            and str(error) == self.box.opencode_v2_io.UNSETTLED,
+                        )
+                    )
                     raise
 
             try:
                 with patch.object(self.box, "export_container_session", export):
                     return original(path, data)
-            except self.box.BoxError:
-                require(failed == [self.shell_id])
+            except self.box.BoxError as error:
+                require(failed == [(self.shell_id, True)])
+                require(str(error) == self.pending_message())
+                self.check("pending_aggregate_reason")
                 # Never manufacture or replace a failure. Release only AFTER
                 # production rejects the actual incomplete export; preserve its
                 # exception identity while allowing native completion to persist.
-                preserved(self.shell_before, self.snapshot(self.shell_id))
+                self.verify_pending_progress(attempted)
                 self.gate.release()
                 self.shell_worker.join(25)
                 completed = self.export(self.shell_id)

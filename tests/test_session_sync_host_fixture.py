@@ -391,6 +391,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         for checks in (
             {},
             {name: True for name in runner.CHECKS - {"pending_exit"}},
+            {name: True for name in runner.CHECKS - {"pending_later_progress"}},
             {**dict.fromkeys(runner.CHECKS, True), "host_clean": False},
         ):
             report = runner.result(checks, identity, digest, native)
@@ -499,16 +500,52 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             harness.sync()
         harness.box.sync_sessions.assert_not_called()
 
-    def test_pending_observer_releases_after_actual_refusal_and_reraises_same_error(
-        self,
-    ):
+    def pending_harness(self):
+        """Synthetic observer inputs, never a production-runtime replacement."""
         harness = self.harness()
+        harness.path, harness.data = self.parent / "workspace.json", {}
         harness.shell_id = "ses_history_shell"
         harness.box.BoxError = type("BoxError", (Exception,), {})
-        failure = harness.box.BoxError("private-sentinel")
+        harness.box.HistoryPending = type("HistoryPending", (harness.box.BoxError,), {})
+        harness.box.opencode_v2_io = SimpleNamespace(
+            UNSETTLED="OpenCode 2.x history is unsettled; retry sync after completion."
+        )
+        failure = harness.box.BoxError(harness.pending_message())
         calls = []
+        harness.pending_earlier = "ses_history_earlier"
+        harness.pending_later = "ses_history_after_pending"
+        harness.pending_earlier_checkpoint = hashlib.sha256(
+            b"earlier-before"
+        ).hexdigest()
+        harness.archive_id = lambda ident: "archive_" + ident
+        harness.archive_path = lambda ident: self.parent / (ident + ".json")
+        synced = {}
+        for ident, content in (
+            (harness.pending_earlier, b"earlier-advanced"),
+            (harness.pending_later, b"later-new"),
+        ):
+            harness.archive_path(ident).write_bytes(content)
+            synced[ident] = hashlib.sha256(content).hexdigest()
+        harness.box.session_state = Mock(
+            return_value={
+                "sessions": [
+                    harness.pending_earlier,
+                    harness.shell_id,
+                    harness.pending_later,
+                ],
+                "synced": synced,
+                "host_sessions": {ident: harness.archive_id(ident) for ident in synced},
+            }
+        )
+        harness.verify_archive = Mock(
+            side_effect=lambda ident: calls.append("archive:" + ident)
+        )
         harness.shell_before = {"host": {}, "private": b"old", "synced": "old"}
-        harness.snapshot = Mock(return_value=copy.deepcopy(harness.shell_before))
+        harness.snapshot = Mock(
+            side_effect=lambda _ident: (
+                calls.append("snapshot") or copy.deepcopy(harness.shell_before)
+            )
+        )
         harness.gate = SimpleNamespace(release=lambda: calls.append("release"))
         harness.shell_worker = SimpleNamespace(
             join=lambda timeout: calls.append("join")
@@ -528,20 +565,51 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
 
         def original(path, data):
             calls.append("actual-sync")
-            try:
-                harness.box.export_container_session(data, "ses_history_shell")
-            except harness.box.BoxError:
-                raise failure from None
+            for ident in (
+                harness.pending_earlier,
+                harness.shell_id,
+                harness.pending_later,
+            ):
+                try:
+                    harness.box.export_container_session(data, ident)
+                except harness.box.BoxError:
+                    pass
+            raise failure from None
 
         def refusing(data, ident):
-            raise failure
+            if ident == harness.shell_id:
+                raise harness.box.HistoryPending(harness.box.opencode_v2_io.UNSETTLED)
 
         harness.box.export_container_session = refusing
+        return harness, original, failure, calls
+
+    def test_pending_observer_releases_after_actual_refusal_and_reraises_same_error(
+        self,
+    ):
+        harness, original, failure, calls = self.pending_harness()
         with self.assertRaises(harness.box.BoxError) as raised:
             harness.pending_observer(original)(None, None)
         self.assertIs(raised.exception, failure)
-        self.assertEqual(calls, ["actual-sync", "release", "join"])
-        self.assertTrue(harness.checks["pending_exit"])
+        self.assertEqual(
+            calls,
+            [
+                "actual-sync",
+                "archive:" + harness.pending_earlier,
+                "archive:" + harness.pending_later,
+                "snapshot",
+                "release",
+                "join",
+            ],
+        )
+        for name in (
+            "pending_aggregate_reason",
+            "pending_session_order",
+            "pending_earlier_progress",
+            "pending_later_progress",
+            "pending_archive_preservation",
+            "pending_exit",
+        ):
+            self.assertTrue(harness.checks[name])
         calls.clear()
         self.assertEqual(harness.pending_observer(lambda *_: 7)(None, None), 7)
         self.assertEqual(calls, [])
@@ -562,6 +630,175 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             harness.pending_observer(other)(None, None)
         self.assertEqual(calls, [])
         self.assertNotIn("pending_exit", harness.checks)
+
+    def test_pending_progress_oracles_refuse_before_gate_release(self):
+        for defect in (
+            "missing later checkpoint",
+            "unchanged earlier checkpoint",
+            "wrong later checkpoint",
+            "wrong host association",
+            "wrong loop order",
+            "unverified native archive",
+            "changed private archive",
+            "changed native archive",
+            "changed pending checkpoint",
+        ):
+            harness, original, _failure, calls = self.pending_harness()
+            state = harness.box.session_state.return_value
+            if defect == "missing later checkpoint":
+                state["synced"].pop(harness.pending_later)
+            elif defect == "unchanged earlier checkpoint":
+                state["synced"][harness.pending_earlier] = (
+                    harness.pending_earlier_checkpoint
+                )
+            elif defect == "wrong later checkpoint":
+                state["synced"][harness.pending_later] = "wrong-digest"
+            elif defect == "wrong host association":
+                state["host_sessions"][harness.pending_later] = "unrelated-archive"
+            elif defect == "wrong loop order":
+                state["sessions"] = [
+                    harness.pending_earlier,
+                    harness.pending_later,
+                    harness.shell_id,
+                ]
+            elif defect == "unverified native archive":
+                harness.verify_archive.side_effect = runner.Refusal("oracle")
+            else:
+                key = {
+                    "changed private archive": "private",
+                    "changed native archive": "host",
+                    "changed pending checkpoint": "synced",
+                }[defect]
+                after = copy.deepcopy(harness.shell_before)
+                after[key] = "changed"
+                harness.snapshot.side_effect = None
+                harness.snapshot.return_value = after
+            with self.subTest(defect=defect), self.assertRaises(runner.Refusal):
+                harness.pending_observer(original)(None, None)
+            self.assertNotIn("release", calls)
+            self.assertNotIn("join", calls)
+            self.assertNotIn("pending_archive_preservation", harness.checks)
+            self.assertNotIn("pending_exit", harness.checks)
+            harness.export.assert_not_called()
+
+    def test_pending_reason_oracles_refuse_wrong_type_reason_or_aggregate(self):
+        for defect in (
+            "wrong export type",
+            "wrong fixed reason",
+            "wrong aggregate reason",
+            "wrong aggregate count",
+            "extra private diagnostic",
+        ):
+            harness, original, failure, calls = self.pending_harness()
+            if defect in ("wrong export type", "wrong fixed reason"):
+                error = (
+                    harness.box.BoxError(harness.box.opencode_v2_io.UNSETTLED)
+                    if defect == "wrong export type"
+                    else harness.box.HistoryPending("private-sentinel")
+                )
+                harness.box.export_container_session = Mock(side_effect=error)
+            elif defect == "wrong aggregate reason":
+                failure.args = ("1 session(s) not settled yet: private-sentinel",)
+            elif defect == "wrong aggregate count":
+                failure.args = (
+                    harness.pending_message().replace("1 session(s)", "2 session(s)"),
+                )
+            else:
+                failure.args = (harness.pending_message() + " private-sentinel",)
+            with self.subTest(defect=defect), self.assertRaises(runner.Refusal):
+                harness.pending_observer(original)(None, None)
+            self.assertEqual(calls, ["actual-sync"])
+            harness.snapshot.assert_not_called()
+            harness.verify_archive.assert_not_called()
+            harness.export.assert_not_called()
+            self.assertNotIn("pending_aggregate_reason", harness.checks)
+            self.assertNotIn("pending_exit", harness.checks)
+
+    def test_pending_order_requires_actual_forwarded_exports_not_only_state_order(self):
+        harness, _original, failure, calls = self.pending_harness()
+
+        def wrong_order(path, data):
+            for ident in (
+                harness.pending_later,
+                harness.shell_id,
+                harness.pending_earlier,
+            ):
+                try:
+                    harness.box.export_container_session(data, ident)
+                except harness.box.HistoryPending:
+                    pass
+            raise failure
+
+        with self.assertRaises(runner.Refusal):
+            harness.pending_observer(wrong_order)(None, None)
+        self.assertEqual(calls, [])
+        harness.verify_archive.assert_not_called()
+        harness.snapshot.assert_not_called()
+        self.assertNotIn("pending_session_order", harness.checks)
+        self.assertNotIn("pending_exit", harness.checks)
+
+    def test_direct_pending_export_requires_fixed_reason_before_check_credit(self):
+        for reason, accepted in (
+            ("OpenCode 2.x history is unsettled; retry sync after completion.", True),
+            ("private-sentinel", False),
+        ):
+            harness, _original, _failure, calls = self.pending_harness()
+            harness.box.export_container_session = Mock(
+                side_effect=harness.box.HistoryPending(reason)
+            )
+            with self.subTest(accepted=accepted):
+                if accepted:
+                    harness.refuse_incomplete_export()
+                    self.assertTrue(harness.checks["pending_fixed_reason"])
+                    self.assertTrue(harness.checks["incomplete_export_refusal"])
+                    self.assertEqual(calls, ["snapshot"])
+                else:
+                    with self.assertRaises(runner.Refusal):
+                        harness.refuse_incomplete_export()
+                    self.assertEqual(calls, [])
+                    self.assertNotIn("pending_fixed_reason", harness.checks)
+
+    def test_shell_prepares_earlier_update_and_new_later_session_without_sync(self):
+        harness, _original, _failure, _calls = self.pending_harness()
+        harness.connection = {}
+        state = harness.box.session_state.return_value
+        state["sessions"].remove(harness.pending_later)
+        state["synced"].pop(harness.pending_later)
+        state["host_sessions"].pop(harness.pending_later)
+        harness.archive_path(harness.pending_later).unlink()
+
+        def exported(_data, ident):
+            if ident == "ses_history_background":
+                return {"info": {"id": ident}}
+            raise harness.box.HistoryPending(harness.box.opencode_v2_io.UNSETTLED)
+
+        harness.box.export_container_session = exported
+        harness.export = Mock(return_value={"messages": []})
+        harness.request = Mock(
+            return_value={"data": [{"type": "shell", "status": "running"}]}
+        )
+        harness.service.api = Mock(return_value={"data": {}})
+        harness.sync = Mock()
+        harness.seed = Mock()
+        worker = SimpleNamespace(done=threading.Event())
+        gate = SimpleNamespace(command=lambda: "synthetic-command")
+        with (
+            patch.object(runner, "ShellGate", return_value=gate),
+            patch.object(runner, "Worker", return_value=worker),
+        ):
+            self.assertEqual(harness.shell("ses_selected"), 0)
+        harness.request.assert_any_call(
+            "PATCH",
+            "/api/session/" + harness.pending_earlier,
+            {"title": "SYNTHETIC_PROGRESS_BEFORE_PENDING"},
+        )
+        self.assertEqual(
+            harness.pending_earlier_checkpoint,
+            state["synced"][harness.pending_earlier],
+        )
+        harness.seed.assert_called_once_with(harness.pending_later)
+        harness.sync.assert_not_called()
+        self.assertNotIn(harness.pending_later, state["synced"])
 
     def test_workers_have_bounded_join_and_suppress_private_errors(self):
         worker = runner.Worker(lambda: 42)

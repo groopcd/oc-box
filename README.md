@@ -210,10 +210,17 @@ for up to 30 seconds after client leases drain; normal cleanup still stops the
 container on failure. Archives are mirrors, not bidirectional working copies or
 full backups of pending input and live execution. See the [sync reference](docs/cli.md#sync).
 
-These synchronization/readiness changes have unit and native offline regression
-coverage, but still need focused host-Podman acceptance before stable publication.
-Earlier interactive, vault-edge, and home-component reports tested different
-source revisions and do not validate this change. See [test evidence and release
+An interrupted V1 assistant can remain unfinished after migration even when later
+turns have completed. In an inactive session, sync mirrors native OpenCode's
+export without those superseded assistants and records only their omitted count
+in archive metadata. An unfinished tail, running shell/compaction, or active
+superseded-assistant case stays pending; other sessions can still synchronize.
+
+Stable 1.6.51 passed the earlier history/readiness, global-vault and V1/V2 lifecycle
+host checks. The superseded-assistant correction has unit and native offline
+coverage, including actual V1 process crashes, but needs fresh acceptance on the
+clean integrated candidate before the next stable GitHub/PyPI release. Earlier
+reports do not validate a later source revision. See [test evidence and release
 boundaries](docs/testing.md#v2-session-history-synchronization).
 
 ### Bash completion

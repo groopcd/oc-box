@@ -6,8 +6,8 @@ Podman lifecycle tests for selected-vault and default global-vault workflows.
 The separate scripted global-vault fixture passed first launch/import, new-owner
 rotation/additions, `--no-vault` and full backup/restore; see its exact scope below.
 Unit/native offline checks are not proof of that lifecycle. Upgrade through your
-normal GitHub/curl, uv, pipx or virtual-environment package channel to get the
-1.5 release.
+normal GitHub/curl, uv, pipx or virtual-environment package channel to get a
+current release.
 
 ## Environment and service plan
 
@@ -396,12 +396,14 @@ error text. This is not an atomic history freeze or a backup of pending input
 and live execution. Persistent terminal sessions do not themselves block the wait.
 
 **Release evidence boundary:** native multi-session checks are offline integration,
-not host-Podman acceptance. The reviewed runs on `1.6.44+ga043049`,
-`1.6.46+gacddbd8`, and `1.6.48+g7df5074` do not contain the synchronization changes
-introduced by `d638907`. Their accepted scopes remain valid, but do not establish
-host acceptance of the new archive replacement or shutdown-readiness behavior.
-The integrated candidate needs the [focused host checks](testing.md#v2-session-history-synchronization)
-before stable publication; building candidate wheels/sdists is not acceptance.
+not host-Podman acceptance. Clean `1.6.51+gb5d1ea8` passed the focused
+history/readiness, global-vault and V1/V2 lifecycle fixtures before publication.
+That published version nevertheless refused a migrated V1 session with a
+superseded unfinished assistant. The correction described above has unit and
+native crash/migration coverage, but still needs fresh host acceptance on its
+clean integrated candidate before the next stable release. Older accepted
+reports retain their original identities and scopes; building candidate
+wheels/sdists is not acceptance. See the [release gates](testing.md#v2-session-history-synchronization).
 
 Switching the host executable to 1.x reinstalls its exact container runtime and
 V1 overlay, selecting retained V1 history. Returning to 2.x resumes existing V2

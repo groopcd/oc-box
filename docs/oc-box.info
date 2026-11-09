@@ -296,11 +296,15 @@ An active oc-box launcher holds a workspace lock, so exit it before
 syncing.  Use this after an OpenCode crash, missed exit-time sync, or
 host restart.  Sync failure preserves container data; retry after
 resolving the error.  V2 exports are checked against the paginated
-projected transcript: unfinished assistant, user-shell, or compaction
-messages, or a changing transcript, leave sync pending instead of
-treating native export's filtered output as complete.  History archives
-are not full backups of pending input, execution state, or persistent
-shell terminals; use encrypted workspace backup for full private state.
+projected transcript.  An unfinished tail assistant, running user
+shell/compaction, or changing transcript leaves that session pending,
+while other sessions can still synchronize.  In an inactive session, an
+unfinished assistant followed by settled messages is superseded: sync
+mirrors native's export and annotates the omitted count.  The exception
+is refused while that session is active.  See the Sessions and recovery
+section.  History archives are not full backups of pending input,
+execution state, or persistent shell terminals; use encrypted workspace
+backup for full private state.
 
      oc-box sync --project ~/devel/demo
      oc-box sync --workspace WORKSPACE_ID
@@ -2694,20 +2698,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2540
 Node: Commands6045
-Node: Options58545
-Node: Lifecycle and persistence77873
-Node: Distribution images79993
-Node: Sessions and recovery84868
-Node: Devices and host permissions91453
-Node: Resource reports93799
-Node: Configuration and environment95910
-Node: Files107173
-Node: Exit status112026
-Node: Examples112837
-Node: Troubleshooting114923
-Node: Installation and manuals124251
-Node: Authors and license132198
-Node: See also132805
+Node: Options58786
+Node: Lifecycle and persistence78114
+Node: Distribution images80234
+Node: Sessions and recovery85109
+Node: Devices and host permissions91694
+Node: Resource reports94040
+Node: Configuration and environment96151
+Node: Files107414
+Node: Exit status112267
+Node: Examples113078
+Node: Troubleshooting115164
+Node: Installation and manuals124492
+Node: Authors and license132439
+Node: See also133046
 
 End Tag Table
 

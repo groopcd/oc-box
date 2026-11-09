@@ -223,9 +223,12 @@ preflight and replacement are not an atomic transaction with unrelated host clie
 An active oc-box launcher holds a workspace lock, so exit it before syncing.
 Use this after an OpenCode crash, missed exit-time sync, or host restart.
 Sync failure preserves container data; retry after resolving the error.
-V2 exports are checked against the paginated projected transcript: unfinished
-assistant, user-shell, or compaction messages, or a changing transcript, leave
-sync pending instead of treating native export's filtered output as complete.
+V2 exports are checked against the paginated projected transcript. An unfinished
+tail assistant, running user shell/compaction, or changing transcript leaves that
+session pending, while other sessions can still synchronize. In an inactive
+session, an unfinished assistant followed by settled messages is superseded:
+sync mirrors native's export and annotates the omitted count. The exception is
+refused while that session is active. See the Sessions and recovery section.
 History archives are not full backups of pending input, execution state, or
 persistent shell terminals; use encrypted workspace backup for full private state.
 
