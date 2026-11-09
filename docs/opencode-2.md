@@ -620,6 +620,25 @@ workflow, independently of the earlier 1.5 report. The report's audited Podman
 schema omission list is not a measurement of the actual engine version.
 Expanded vault edge cases and interactive UI acceptance remain separate.
 
+**Reviewed focused vault-edge result:** the user-supplied summary and all ten
+case reports for clean `1.6.46+gacddbd8` (commit
+`acddbd84f91133411949a4e04b928f38dcbfe182`, count 75), native 2.2.6, report
+`PASS` with every required check true and no primary/secondary failures. The
+populated owner retained its snapshot and native PID through encrypted entry
+removal; the next owner omitted the removed entry despite ambient decoys.
+Initialized-empty and absent-vault owning launches preserved their distinct
+unlock/suppression versus crypto-free compatibility/guidance behavior. Real
+start and reset each refused wrong passphrase, corrupt vault and missing crypto
+while preserving ciphertext, stopped resources and protected data. Their child
+exit 1 is the expected successful negative result, not a fixture failure.
+Only the exact native version-check diagnostic log is separately digested and
+leak-checked rather than byte-immutable; DB/config/auth/cache and container-home
+ownership/mode/link guards remain protected. The fixture catalog observed no
+requests; upstream metadata traffic remains possible and network containment is
+not certified. This scripted provider-free run adds no inference, interactive UI,
+backup/restore, actual OAuth refresh or device evidence. Expanded policy/structured
+auth cases remain separate. See [the edge workflow and limits](testing.md).
+
 ### Repeatable host validation
 
 Versions now use **1.6.N**, preserving the original commit-count patch baseline and
@@ -815,15 +834,15 @@ Use only disposable projects, credential selections and backups:
   value and verify it inside that workspace; change the value and relaunch to
   verify refresh. Attached web/TUI/shell clients must retain the owning launch's
   snapshot and must not unlock again.
-- **Additional global-vault host edge cases (not covered by the accepted fixture):**
-  remove entries and start a new owner to check dynamic selection. Verify
-  empty/absent/corrupt vault handling, wrong-password reset
-  preservation, intentional env/selected overrides, V1 return, and one-owning-
-  invocation `--no-vault` without saved-policy changes. Attached clients must
-  retain their snapshot and reject `--no-vault`. First launch/import, rotation,
-  additions and owning-launch opt-out have separate accepted scripted evidence;
-  these expanded edge cases still require new host evidence, not an inference
-  from offline checks or the earlier selected-vault pass.
+- **Further global-vault increments:** intentional global/env/mixed-selected
+  policy transitions, structured saved/OAuth auth independence, selected opt-out
+  constraints and interactive vault/permission-reload observations remain scoped
+  separately. Removal, empty/absent handling and wrong/corrupt/missing-crypto
+  start/reset preservation have the separate accepted 1.6.46 edge report above.
+  First launch/import, rotation/additions, owning opt-out and V1 return retain
+  their earlier accepted evidence; do not relabel those executions or infer new
+  policy/auth coverage from them. Attached clients must retain their snapshot
+  and reject `--no-vault` when repeating relevant regression checks.
 - **V2 backup/restore:** create both full and portable backups after the owner
   and attached clients exit, restore to fresh destinations, then launch and
   verify sessions, internal paths, private-home data and expected OS differences.

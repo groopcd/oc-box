@@ -181,9 +181,10 @@ running-owner rotation/reload/attach, --no-vault and full encrypted backup/resto
 with stopped byte-exact state and restored latest-host-vault/history/OS checks.
 This is scripted synthetic host acceptance, not an interactive TUI pass, real
 provider inference, security certification or a backup of any real project.
-Entry-removal and empty/absent/corrupt-vault host edge cases remain separately
-unverified. Keep all earlier failure evidence; their retries did not establish
-this new full pass and must not be relabeled as accepted runs.
+Entry-removal and empty/absent/corrupt-vault host edge cases are outside that
+1.5 run; a separate accepted 1.6.46 edge report is scoped below. Keep all earlier
+failure evidence; their retries did not establish the full pass and must not be
+relabeled as accepted runs.
 `tools/test_global_vault_podman.py` is the focused V2-only host fixture for first
 global-vault import/new project delivery, scoped Build approvals/reload, opt-out
 and full backup/restore. Require private synthetic state, verified isolated
@@ -202,6 +203,15 @@ owner-capable routing; it does not establish interactive vault/Plan/reload,
 formatter/LSP/device, real-provider or real-project restore acceptance. Preserve
 each execution's source identity and all older evidence; manual observations
 remain NOT_AUTOMATICALLY_PASSED in reports rather than self-certified.
+Focused provider-free edge acceptance passed clean 1.6.46+gacddbd8, native2.2.6:
+all ten reports/check sets passed, four owner exits 0 and six expected refusal
+exits 1, no primary/secondary failures, fixture catalog 0 requests/unexpected.
+It covers live/new-owner removal, initialized-empty/absent vaults, and actual
+wrong/corrupt/missing-crypto start/reset preservation. Only the exact native
+--version diagnostic log is separately hashed/leak-checked; all other protected
+data and container-home ownership/mode/link checks remain strict. This adds no
+inference, UI, backup, actual OAuth refresh, device or network-containment claim;
+policy transitions and structured-auth increments remain separately unverified.
 The global-vault fixture's initial host run failed during the first owning
 launch, not an accepted pass.
 Use --diagnose for validated read-only checkpoints; never print raw errors/env

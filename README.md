@@ -770,6 +770,12 @@ synthetic credentials and `--no-vault`, not interactive vault/Plan/reload testin
 real-provider inference or a real-project backup. Keep this interactive evidence
 separate from the scripted lifecycle reports above.
 
+Focused scripted vault-edge host checks also passed on clean `1.6.46+gacddbd8`:
+live/new-owner entry removal, initialized-empty/absent vaults, and wrong-password,
+corrupt-vault and genuinely missing-crypto refusals for start/reset with protected
+state retained. All ten case reports passed. This provider-free run adds no
+inference, backup, OAuth-refresh or interactive-UI claim.
+
 Runtime code lives in `src/oc_box/`, with tests/tools/docs in their conventional
 top-level directories. Root installer/build entrypoints remain for compatibility.
 Run the source CLI without installing into project/system/user Python:

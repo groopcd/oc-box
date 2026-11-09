@@ -85,9 +85,13 @@ discovery selects a fixture-owned empty-catalog stub, not the normal host servic
 Production environment filtering and credential selection stay unchanged.
 
 Offline `test_global_vault_edges_host_fixture` checks guards and bounded process
-mechanics, not host acceptance. These edge cases remain **host-unverified** until
-a separate reviewed execution. Earlier 1.6.42/43/44 scopes remain unchanged; this
-adds no interactive UI, backup, real OAuth refresh, formatter/LSP/device or
+mechanics, not host acceptance. A separate reviewed user-supplied summary and all
+ten case reports now **PASS on clean 1.6.46+gacddbd8**, count 75, with native
+OpenCode 2.2.6. All required checks are true, with no primary/secondary failures.
+The four owning cases return 0; the six deliberate start/reset refusals return 1
+as expected. The fixture catalog recorded 0 requests and 0 unexpected requests,
+not an audit of other network traffic. Earlier 1.6.42/43/44 scopes remain unchanged;
+this adds no interactive UI, backup, real OAuth refresh, formatter/LSP/device or
 real-provider claim. State preservation covers stopped resources and private
 project/registry/home/native DB/config/auth bytes, not universal engine metadata
 immutability: backend info/locks may touch runtime state.
@@ -98,6 +102,12 @@ known synthetic vault values/passphrases in that file. Other native files and
 the entire container-home manifest remain protected. Removal checks require the
 same verified native PID across the ciphertext change. Catalog verdicts use one
 post-teardown counter snapshot; this does not prove daemon handlers drained.
+
+This accepted run covers dynamic entry removal, initialized-empty and absent
+vaults, and wrong-passphrase/corrupt/missing-crypto start/reset preservation.
+It does not establish every policy-override transition or structured OAuth copy/
+refresh case. Keep expanded acceptance tied to new evidence rather than relabeling
+the earlier lifecycle or interactive runs.
 
 ### Fresh manual UI observation (host only)
 
