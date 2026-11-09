@@ -12,6 +12,7 @@ import contextlib
 import contextvars
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -189,7 +190,7 @@ def client_command(box, data, connection, arguments, *, interactive=False):
     return box.ContainerCommand(command, env)
 
 
-def api(box, data, connection, method, target, value=None):
+def api(box, data, connection, method, target, value=None, *, timeout=60):
     args = [
         box.CONTAINER_OPENCODE,
         "api",
@@ -204,13 +205,93 @@ def api(box, data, connection, method, target, value=None):
         client_command(box, data, connection, args),
         capture=True,
         private=True,
-        timeout=60,
+        timeout=timeout,
     )
     # Native api prints nothing for successful HTTP 204 replies (permission
     # rejection, session deletion, reload, etc.). Match the private HTTP bridge's
     # None convention. run still checks command failure; nonempty malformed JSON
     # must remain an error rather than being mistaken for a no-content success.
     return json.loads(result.stdout) if result.stdout.strip() else None
+
+
+def wait_history(box, data, connection, *, timeout=30, interval=0.2):
+    """Boundedly wait for this private server's drains and job notices to settle.
+
+    Native active sessions cover foreground drains, not background tools. The
+    job inventory also retains finished jobs until their completion notices are
+    admitted, which can wake foreground execution again. Two quiet pairs avoid
+    accepting a single observation across that handoff. This does not certify
+    transcript completeness: user shell fibers and unsettled projected messages
+    need a separate check in the export path. Persistent PTYs are not activity.
+    """
+
+    def fail(category):
+        raise box.BoxError(f"OpenCode 2.x history wait failed ({category}).") from None
+
+    if (
+        not isinstance(timeout, (int, float))
+        or not math.isfinite(timeout)
+        or timeout < 0
+        or not isinstance(interval, (int, float))
+        or not math.isfinite(interval)
+        or interval <= 0
+    ):
+        fail("invalid-wait-options")
+    deadline = time.monotonic() + timeout
+
+    def remaining():
+        budget = deadline - time.monotonic()
+        if budget <= 0:
+            fail("activity-timeout")
+        return budget
+
+    def request(target):
+        budget = remaining()
+        try:
+            result = api(
+                box,
+                data,
+                connection,
+                "GET",
+                target,
+                timeout=min(60, budget),
+            )
+        except (box.BoxError, OSError, ValueError, subprocess.SubprocessError):
+            # Never include native errors: they can contain commands, provider
+            # values, or private response bodies. Deadline expiry stays distinct.
+            remaining()
+            fail("activity-api-failed")
+        remaining()
+        return result
+
+    quiet = 0
+    while True:
+        response = request("/api/session/active")
+        active = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(active, dict) or any(
+            not box.valid_session_id(ident)
+            or not isinstance(state, dict)
+            or state.get("type") != "running"
+            for ident, state in active.items()
+        ):
+            fail("invalid-active-response")
+
+        response = request("/api/experimental/job")
+        jobs = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(jobs, list) or any(
+            not isinstance(job, dict)
+            or not isinstance(job.get("id"), str)
+            or not job["id"]
+            or not box.valid_session_id(job.get("sessionID"))
+            or job.get("kind") not in ("shell", "subagent", "image")
+            or job.get("status") not in ("running", "completed", "error", "cancelled")
+            for job in jobs
+        ):
+            fail("invalid-jobs-response")
+        quiet = quiet + 1 if not active and not jobs else 0
+        if quiet == 2:
+            return
+        time.sleep(min(interval, remaining()))
 
 
 class Owner:

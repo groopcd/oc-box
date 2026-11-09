@@ -51,6 +51,11 @@ their checkout ownership distinct from unrelated source and flat installations.
   native transcripts, private V2 service leases and credential refresh. Preserve
   V1 database/history; never save forwarded vault env in service config or
   connect workspace activity to the host shared service.
+  V2 history discovery includes paginated child sessions; only a complete valid
+  inventory may retire missing source IDs, retaining their archives. Keep host
+  archives independently replaceable, with namespaced relationships as metadata,
+  not native parent links or revived permissions. Reject unsettled/omitted history
+  and verify native imports; CLI conflict success is not proof of synchronization.
 - `workspace_service.py`: foreground V2 owner, same-user runtime-socket client
   leases and host-loopback HTTP/WebSocket relay. Control credentials remain
   ephemeral memory only; no published container/LAN ports or shared host service.
@@ -107,7 +112,7 @@ OpenCode itself and its integrations run natively inside the container. Preserve
 MCPs, formatters, language servers, and plugins. Do not return to replacing
 built-in tools or disabling integrations for containment. Keep mainline OpenCode
 unmodified. Live sessions persist in a private named volume, and host-side
-history is synchronized with supported CLI export/import commands on exit.
+history is synchronized with supported native API/CLI export/import on exit.
 
 ## Git workflow
 

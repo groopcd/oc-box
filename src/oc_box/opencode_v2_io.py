@@ -20,6 +20,133 @@ from urllib.parse import quote, urlparse
 from urllib.request import Request, build_opener, ProxyHandler
 
 
+def endpoint_request(endpoint):
+    """Use a private loopback endpoint without persisting its credentials."""
+    address, password = endpoint["url"], endpoint["password"]
+    parsed = urlparse(address)
+    if (
+        parsed.scheme != "http"
+        or parsed.hostname != "127.0.0.1"
+        or not parsed.port
+        or parsed.username
+        or parsed.password
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or not isinstance(password, str)
+        or not password
+    ):
+        raise ValueError("Invalid private OpenCode 2.x endpoint.")
+    auth = "Basic " + base64.b64encode(("opencode:" + password).encode()).decode()
+    opener = build_opener(ProxyHandler({}))
+
+    def request(method, path, data=None):
+        req = Request(
+            address.rstrip("/") + path,
+            method=method,
+            data=json.dumps(data).encode() if data is not None else None,
+            headers={"Authorization": auth, "Content-Type": "application/json"},
+        )
+        with opener.open(req, timeout=60) as response:
+            body = response.read()
+            return json.loads(body) if body else None
+
+    request.endpoint = {"url": address, "password": password}
+    return request
+
+
+def session_inventory(request, directory):
+    """Read every page, including children and archived sessions, or fail closed."""
+    query = (
+        "/api/session?directory=" + quote(directory, safe="") + "&order=asc&limit=100"
+    )
+    values, identities, cursors = [], set(), set()
+    cursor = None
+    while True:
+        page = request(
+            "GET", query + ("&cursor=" + quote(cursor, safe="") if cursor else "")
+        )
+        if (
+            not isinstance(page, dict)
+            or not isinstance(page.get("data"), list)
+            or not isinstance(page.get("cursor"), dict)
+        ):
+            raise ValueError("Invalid OpenCode 2.x session inventory.")
+        for item in page["data"]:
+            if not isinstance(item, dict):
+                raise ValueError("Invalid OpenCode 2.x session inventory entry.")
+            ident = item.get("id")
+            if (
+                not isinstance(ident, str)
+                or ident in identities
+                or not isinstance(item.get("location"), dict)
+                or item.get("location", {}).get("directory") != directory
+            ):
+                raise ValueError("Inconsistent OpenCode 2.x session inventory.")
+            identities.add(ident)
+            values.append(item)
+        cursor = page["cursor"].get("next")
+        if cursor is None:
+            return values
+        if not isinstance(cursor, str) or not cursor or cursor in cursors:
+            raise ValueError("Invalid OpenCode 2.x session inventory cursor.")
+        cursors.add(cursor)
+
+
+def checked_export(request, ident):
+    """Native export filters unsettled messages; never accept that as full history."""
+    route = "/api/session/" + quote(ident, safe="") + "/message?limit=100"
+    projected, identities, cursors = [], set(), set()
+    cursor = None
+    while True:
+        page = request(
+            "GET",
+            route + ("&cursor=" + quote(cursor, safe="") if cursor else "&order=asc"),
+        )
+        if (
+            not isinstance(page, dict)
+            or not isinstance(page.get("data"), list)
+            or not isinstance(page.get("cursor"), dict)
+        ):
+            raise ValueError("Invalid OpenCode 2.x projected history.")
+        for message in page["data"]:
+            if not isinstance(message, dict) or not isinstance(message.get("id"), str):
+                raise ValueError("Invalid OpenCode 2.x projected message.")
+            if message["id"] in identities:
+                raise ValueError("Inconsistent OpenCode 2.x projected history.")
+            if (
+                message.get("type") == "assistant"
+                and message.get("time", {}).get("completed") is None
+            ) or (
+                message.get("type") in ("shell", "compaction")
+                and message.get("status") == "running"
+            ):
+                raise ValueError(
+                    "OpenCode 2.x history is unsettled; retry sync after completion."
+                )
+            identities.add(message["id"])
+            projected.append(message)
+        cursor = page["cursor"].get("next")
+        if cursor is not None and (not isinstance(cursor, str) or not cursor):
+            raise ValueError("Invalid OpenCode 2.x projected history cursor.")
+        if not page["data"] or cursor is None:
+            break
+        if cursor in cursors:
+            raise ValueError("Invalid OpenCode 2.x projected history cursor.")
+        cursors.add(cursor)
+    response = request(
+        "GET", "/api/experimental/session/" + quote(ident, safe="") + "/export"
+    )
+    if not isinstance(response, dict) or not isinstance(response.get("data"), dict):
+        raise ValueError("Invalid OpenCode 2.x history export.")
+    exported = response["data"]
+    if exported.get("messages") != projected:
+        raise ValueError(
+            "OpenCode 2.x history changed or omitted messages; retry sync."
+        )
+    return exported
+
+
 @contextlib.contextmanager
 def server(binary):
     password = secrets.token_urlsafe(32)
@@ -48,30 +175,7 @@ def server(binary):
                 if len(output) > 65536:
                     raise ValueError("Invalid private OpenCode 2.x readiness response.")
             address = json.loads(output.split(b"\n", 1)[0])["url"]
-            parsed = urlparse(address)
-            if (
-                parsed.scheme != "http"
-                or parsed.hostname != "127.0.0.1"
-                or not parsed.port
-            ):
-                raise ValueError("Private OpenCode 2.x server did not bind loopback.")
-            auth = (
-                "Basic " + base64.b64encode(("opencode:" + password).encode()).decode()
-            )
-            opener = build_opener(ProxyHandler({}))
-
-            def request(method, path, data=None):
-                req = Request(
-                    address + path,
-                    method=method,
-                    data=json.dumps(data).encode() if data is not None else None,
-                    headers={"Authorization": auth, "Content-Type": "application/json"},
-                )
-                with opener.open(req, timeout=60) as response:
-                    body = response.read()
-                    return json.loads(body) if body else None
-
-            request.endpoint = {"url": address, "password": password}
+            request = endpoint_request({"url": address, "password": password})
             request.alive = lambda: child.poll() is None
 
             # Migration is asynchronous in upstream. Do not mistake an empty
@@ -174,6 +278,20 @@ def main(argv):
     elif action == "ready":
         with server(binary):
             pass
+    elif action in ("sessions", "export"):
+        settings = json.load(sys.stdin)
+        endpoint = settings.get("endpoint")
+        with (
+            contextlib.nullcontext(endpoint_request(endpoint))
+            if endpoint is not None
+            else server(binary)
+        ) as request:
+            value = (
+                session_inventory(request, settings["directory"])
+                if action == "sessions"
+                else checked_export(request, settings["session"])
+            )
+            print(json.dumps(value), flush=True)
     elif action == "lease":
         with server(binary) as request:
             # Control credentials are returned only through the owner's pipe,

@@ -19,6 +19,260 @@ from urllib.request import urlopen
 from oc_box import oc_box as box, workspace_service as service, vault
 
 
+class HistoryWaitTests(unittest.TestCase):
+    def setUp(self):
+        self.data = {"id": "synthetic-workspace"}
+        self.connection = {
+            "url": "http://127.0.0.1:12345",
+            "password": "synthetic-private-password",
+        }
+        self.idle = {"data": {}}
+        self.busy = {"data": {"ses_child": {"type": "running"}}}
+        self.no_jobs = {"data": []}
+        self.job = {
+            "id": "job_example",
+            "sessionID": "ses_child",
+            "kind": "shell",
+            "status": "completed",
+            "time": {"started": 1},
+            "shellID": "sh_example",
+            "command": "private-sentinel",
+        }
+        self.now = 100.0
+        for name, options in (
+            ("monotonic", {"side_effect": lambda: self.now}),
+            ("sleep", {"side_effect": self.advance}),
+        ):
+            clock = patch.object(service.time, name, **options)
+            setattr(self, name, clock.start())
+            self.addCleanup(clock.stop)
+        request = patch.object(service, "api")
+        self.api = request.start()
+        self.addCleanup(request.stop)
+
+    def advance(self, seconds):
+        self.assertGreaterEqual(seconds, 0)
+        self.now += seconds
+
+    def assert_wait_error(self, category, **options):
+        with self.assertRaises(box.BoxError) as raised:
+            service.wait_history(box, self.data, self.connection, **options)
+        self.assertEqual(
+            str(raised.exception),
+            f"OpenCode 2.x history wait failed ({category}).",
+        )
+        self.assertTrue(raised.exception.__suppress_context__)
+
+    def test_running_child_then_two_quiet_pairs_uses_only_same_private_inventories(
+        self,
+    ):
+        self.api.side_effect = [
+            self.busy,
+            self.no_jobs,
+            self.idle,
+            self.no_jobs,
+            self.idle,
+            self.no_jobs,
+        ]
+        service.wait_history(box, self.data, self.connection)
+        self.assertEqual(self.api.call_count, 6)
+        self.assertEqual(self.sleep.call_count, 2)
+        for index, call in enumerate(self.api.call_args_list):
+            self.assertIs(call.args[0], box)
+            self.assertIs(call.args[1], self.data)
+            self.assertIs(call.args[2], self.connection)
+            self.assertEqual(
+                call.args[3:],
+                (
+                    "GET",
+                    "/api/session/active"
+                    if index % 2 == 0
+                    else "/api/experimental/job",
+                ),
+            )
+            self.assertGreater(call.kwargs["timeout"], 0)
+            self.assertLessEqual(call.kwargs["timeout"], 30)
+
+    def test_all_known_job_statuses_and_kinds_remain_pending_until_consumed(self):
+        for kind in ("shell", "subagent", "image"):
+            for status in ("running", "completed", "error", "cancelled"):
+                with self.subTest(kind=kind, status=status):
+                    self.api.reset_mock()
+                    self.api.side_effect = [
+                        self.idle,
+                        {"data": [{**self.job, "kind": kind, "status": status}]},
+                        self.idle,
+                        self.no_jobs,
+                        self.idle,
+                        self.no_jobs,
+                    ]
+                    service.wait_history(box, self.data, self.connection)
+                    self.assertEqual(self.api.call_count, 6)
+
+    def test_completed_job_can_wake_foreground_and_later_activity_resets_quiet_pairs(
+        self,
+    ):
+        self.api.side_effect = [
+            self.idle,
+            {"data": [self.job]},
+            self.busy,
+            self.no_jobs,
+            self.idle,
+            self.no_jobs,
+            self.idle,
+            {"data": [{**self.job, "status": "error"}]},
+            self.idle,
+            self.no_jobs,
+            self.idle,
+            self.no_jobs,
+        ]
+        service.wait_history(box, self.data, self.connection)
+        self.assertEqual(self.api.call_count, 12)
+        self.assertEqual(self.sleep.call_count, 5)
+
+    def test_invalid_inventory_matrix_fails_without_exposing_private_payloads(self):
+        active_cases = (
+            None,
+            {},
+            {"data": []},
+            {"data": {"private-sentinel": {"type": "running"}}},
+            {"data": {"ses_child": "private-sentinel"}},
+            {"data": {"ses_child": {"type": "idle", "detail": "private-sentinel"}}},
+        )
+        job_cases = (
+            None,
+            {},
+            {"data": {}},
+            {"data": ["private-sentinel"]},
+            {"data": [{}]},
+            {"data": [{**self.job, "id": ""}]},
+            {"data": [{**self.job, "sessionID": "private-sentinel"}]},
+            {"data": [{**self.job, "kind": "private-sentinel"}]},
+            {"data": [{**self.job, "status": "private-sentinel"}]},
+            {"data": [{**self.job, "status": ["running"]}]},
+        )
+        for category, cases in (
+            ("invalid-active-response", active_cases),
+            ("invalid-jobs-response", job_cases),
+        ):
+            for index, response in enumerate(cases):
+                with self.subTest(category=category, case=index):
+                    self.api.reset_mock()
+                    self.api.side_effect = (
+                        [response]
+                        if category == "invalid-active-response"
+                        else [self.idle, response]
+                    )
+                    self.assert_wait_error(category)
+                    self.assertEqual(
+                        self.api.call_count,
+                        1 if category == "invalid-active-response" else 2,
+                    )
+        self.sleep.assert_not_called()
+
+    def test_api_failure_matrix_reports_fixed_category_for_either_inventory(self):
+        for target in ("active", "jobs"):
+            for error in (
+                box.BoxError("private-sentinel"),
+                OSError("private-sentinel"),
+                ValueError("private-sentinel"),
+                subprocess.TimeoutExpired("private-sentinel", 0.5),
+            ):
+                with self.subTest(target=target, error=type(error).__name__):
+                    self.api.reset_mock()
+                    self.api.side_effect = (
+                        [error] if target == "active" else [self.idle, error]
+                    )
+                    self.assert_wait_error("activity-api-failed")
+                    self.assertEqual(
+                        self.api.call_count, 1 if target == "active" else 2
+                    )
+        self.sleep.assert_not_called()
+
+    def test_busy_deadline_caps_final_sleep_and_never_starts_an_expired_request(self):
+        self.api.side_effect = lambda *args, **kwargs: (
+            self.busy if args[4] == "/api/session/active" else self.no_jobs
+        )
+        self.assert_wait_error("activity-timeout", timeout=0.5)
+        self.assertAlmostEqual(self.now, 100.5)
+        self.assertEqual(self.api.call_count, 6)
+        self.assertEqual(self.sleep.call_count, 3)
+        self.assertAlmostEqual(self.sleep.call_args.args[0], 0.1)
+
+    def test_each_sequential_request_gets_only_remaining_budget(self):
+        costs = iter((3, 1, 3))
+
+        def request(*args, **kwargs):
+            cost = next(costs)
+            self.assertLessEqual(cost, kwargs["timeout"])
+            self.advance(cost)
+            return self.idle if args[4] == "/api/session/active" else self.no_jobs
+
+        self.api.side_effect = request
+        self.assert_wait_error("activity-timeout", timeout=8, interval=1)
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in self.api.call_args_list], [8, 5, 3]
+        )
+        self.assertEqual(self.now, 108)
+        self.assertEqual(self.api.call_count, 3)
+        self.sleep.assert_called_once_with(1)
+
+    def test_last_quiet_response_must_arrive_before_deadline(self):
+        def request(*args, **kwargs):
+            if self.api.call_count == 4:
+                self.advance(kwargs["timeout"])
+            return self.idle if args[4] == "/api/session/active" else self.no_jobs
+
+        self.api.side_effect = request
+        self.assert_wait_error("activity-timeout", timeout=1)
+        self.assertEqual(self.api.call_count, 4)
+        self.assertEqual(self.now, 101)
+
+    def test_deadline_expiring_in_active_request_skips_jobs_request(self):
+        def request(*args, **kwargs):
+            self.advance(kwargs["timeout"])
+            return self.idle
+
+        self.api.side_effect = request
+        self.assert_wait_error("activity-timeout", timeout=1)
+        self.api.assert_called_once()
+        self.assertEqual(self.api.call_args.args[4], "/api/session/active")
+        self.sleep.assert_not_called()
+
+    def test_long_overall_budget_keeps_each_native_request_at_most_sixty_seconds(self):
+        self.api.side_effect = [self.idle, self.no_jobs, self.idle, self.no_jobs]
+        service.wait_history(box, self.data, self.connection, timeout=120)
+        self.assertEqual(
+            [call.kwargs["timeout"] for call in self.api.call_args_list], [60] * 4
+        )
+
+    def test_request_failure_at_deadline_is_a_timeout_not_private_api_error(self):
+        def request(*args, **kwargs):
+            self.advance(kwargs["timeout"])
+            raise box.BoxError("private-sentinel")
+
+        self.api.side_effect = request
+        self.assert_wait_error("activity-timeout", timeout=1)
+        self.api.assert_called_once()
+        self.sleep.assert_not_called()
+
+    def test_zero_budget_and_invalid_wait_options_never_call_native_api(self):
+        self.assert_wait_error("activity-timeout", timeout=0)
+        for options in (
+            {"timeout": -1},
+            {"timeout": float("inf")},
+            {"timeout": float("nan")},
+            {"interval": 0},
+            {"interval": -1},
+            {"interval": float("inf")},
+            {"interval": "private-sentinel"},
+        ):
+            with self.subTest(options=options):
+                self.assert_wait_error("invalid-wait-options", **options)
+        self.api.assert_not_called()
+        self.sleep.assert_not_called()
+
+
 class WorkspaceServiceTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="oc-box-live-service-")
@@ -145,6 +399,32 @@ class WorkspaceServiceTests(unittest.TestCase):
                 self.assertTrue(run.call_args.kwargs["capture"])
                 self.assertTrue(run.call_args.kwargs["private"])
                 self.assertNotIn("check", run.call_args.kwargs)
+                self.assertEqual(run.call_args.kwargs["timeout"], 60)
+
+    def test_api_passes_explicit_request_timeout_without_changing_private_transport(
+        self,
+    ):
+        command = box.ContainerCommand(["synthetic-native-api"], {})
+        with (
+            patch.object(service, "client_command", return_value=command),
+            patch.object(
+                box,
+                "run",
+                return_value=subprocess.CompletedProcess(command, 0, '{"data":{}}', ""),
+            ) as run,
+        ):
+            self.assertEqual(
+                service.api(
+                    box,
+                    self.data,
+                    self.connection,
+                    "GET",
+                    "/api/session/active",
+                    timeout=0.75,
+                ),
+                {"data": {}},
+            )
+        run.assert_called_once_with(command, capture=True, private=True, timeout=0.75)
 
     def test_live_terminal_joins_without_lifecycle_lock_unlock_refresh_or_stop(self):
         with (
@@ -302,6 +582,11 @@ class WorkspaceServiceTests(unittest.TestCase):
                 side_effect=lambda *_: calls.append(("web", None)) or 0,
             ),
             patch.object(
+                service,
+                "wait_history",
+                side_effect=lambda *_: calls.append(("ready", None)),
+            ) as readiness,
+            patch.object(
                 box,
                 "sync_sessions",
                 side_effect=lambda *_: calls.append(("sync", None)),
@@ -313,8 +598,55 @@ class WorkspaceServiceTests(unittest.TestCase):
             )
         self.assertEqual(
             calls,
-            [("publish", "ses_shared"), ("web", None), ("wait", None), ("sync", None)],
+            [
+                ("publish", "ses_shared"),
+                ("web", None),
+                ("wait", None),
+                ("ready", None),
+                ("sync", None),
+            ],
         )
+        readiness.assert_called_once_with(box, self.data, owner.connection)
+
+    def test_readiness_failure_keeps_sync_pending_without_export_or_success_message(
+        self,
+    ):
+        args = box.parser().parse_args(["start"])
+        for code in (0, 7):
+            owner = SimpleNamespace(
+                connection=self.connection,
+                publish=Mock(),
+                wait_clients=Mock(),
+            )
+            output, errors = io.StringIO(), io.StringIO()
+            with (
+                self.subTest(client_code=code),
+                patch.object(
+                    box, "refresh_sessions", return_value={"last": "ses_shared"}
+                ),
+                patch.object(box, "run_tui", return_value=code),
+                patch.object(
+                    service,
+                    "wait_history",
+                    side_effect=box.BoxError(
+                        "OpenCode 2.x history wait failed (activity-timeout)."
+                    ),
+                ) as readiness,
+                patch.object(box, "sync_sessions") as sync,
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(errors),
+            ):
+                self.assertEqual(
+                    box.launch_client(self.path, self.data, args, "2.2.6", None, owner),
+                    code or 1,
+                )
+            owner.wait_clients.assert_called_once()
+            readiness.assert_called_once_with(box, self.data, owner.connection)
+            sync.assert_not_called()
+            self.assertIn("history sync pending", errors.getvalue())
+            self.assertIn("activity-timeout", errors.getvalue())
+            self.assertIn("Container data retained", errors.getvalue())
+            self.assertNotIn("Session history synced", output.getvalue())
 
     def test_failed_active_client_still_waits_for_attached_clients(self):
         owner = SimpleNamespace(
@@ -326,11 +658,13 @@ class WorkspaceServiceTests(unittest.TestCase):
         with (
             patch.object(box, "refresh_sessions", return_value={"last": "ses_shared"}),
             patch.object(box, "run_tui", side_effect=OSError("terminal failed")),
+            patch.object(service, "wait_history") as readiness,
             contextlib.redirect_stdout(io.StringIO()),
             self.assertRaises(OSError),
         ):
             box.launch_client(self.path, self.data, args, "2.2.6", None, owner)
         owner.wait_clients.assert_called_once()
+        readiness.assert_not_called()
 
     def test_local_controller_leases_delay_owner_shutdown_and_preserve_lock(self):
         owner = service.Owner(box, self.path, self.data)

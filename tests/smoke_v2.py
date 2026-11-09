@@ -1308,6 +1308,9 @@ export const Fixture = async () => ({
                         assert (
                             len(terminals) == 1 and terminals[0]["status"] == "running"
                         ), terminals
+                        # History readiness uses foreground/job inventories, not
+                        # the intentionally running detached persistent shell.
+                        workspace_service.wait_history(box, data, joined)
                         master, slave = pty.openpty()
                         resumed = subprocess.Popen(
                             compact,
@@ -1355,7 +1358,7 @@ export const Fixture = async () => ({
                             == first["pid"]
                         )
                     print(
-                        "PASS: native session shell terminal/browser/API, detach/replay/preserved shell state, pairing/cookies and event streaming.",
+                        "PASS: native session shell terminal/browser/API, detach/replay/preserved shell state, idle-PTY history readiness, pairing/cookies and event streaming.",
                         flush=True,
                     )
                 owner.wait_clients()
@@ -1375,5 +1378,8 @@ if __name__ == "__main__":
         help="optional local V1 plugin sources copied into disposable fixture storage",
     )
     args = parser.parse_args()
+    from smoke_session_sync_v2 import main as session_sync_probe
+
+    session_sync_probe(str(Path(args.opencode).resolve()))
     main(args.opencode, args.legacy_plugin_dir)
     host_fixture_probe(str(Path(args.opencode).resolve()))

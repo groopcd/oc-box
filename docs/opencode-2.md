@@ -19,7 +19,8 @@ environment.
 oc-box owns a private authenticated stdio server in each active workspace.
 The full TUI and web clients use native APIs against that same service. The
 terminal command connects to its session-scoped persistent shell PTY. Isolated
-setup/history probes still use **`--standalone`**.
+setup/history probes use private stdio leases or **`--standalone`**, never the
+shared host service.
 The server inherits that owner's current credential snapshot through Podman's
 `--env NAME` forwarding. Values never enter command arguments, host global
 environment, registry metadata, or plaintext service config. Upstream's private,
@@ -294,7 +295,7 @@ interactive TUI permission-prompt/reload pass has been accepted. See the publish
 | MCP | Native tools | Native V2 MCP and default Code Mode preserved |
 | Formatter | Native | Native |
 | LSP | Native language servers | Upstream 2.2.6 does not run LSP/diagnostics; use lint/typecheck/compiler tools |
-| History | V1 export/import, part verification | `session export/import`, native transcript verification, distinct namespace |
+| History | V1 export/import, part verification | Paginated root/child discovery, checked native exports, verified independent host archives and relationship provenance, distinct namespace |
 | Model/new/resume | V1 CLI flags | Session create/switch-model API and launch-local TUI config |
 | Backup/reset/restore | Complete private home | Both databases and major selection preserved, internal paths retained |
 | Status/doctor/completion | Available | Available without starting OpenCode |
@@ -363,6 +364,28 @@ migration status before using history. Original V1 bytes remain intact.
 V2 archives use a distinct namespace so the same source ID cannot replace a V1
 archive. Host imports never overwrite original host conversations.
 
+V2 synchronization discovers all pages of conversations at the exact workspace
+directory, including archived and nested child sessions; forks are separate root
+conversations. Other locations are excluded and automatic resume remains
+root-only. Missing/deleted sources stop blocking later exports, while their last
+private and host archives are retained. Failed or incomplete inventories never
+authorize retiring source IDs.
+
+Host archive copies remain independent roots so replacing one cannot recursively
+delete the other generated archives. Versioned `metadata["oc-box.archive"]`
+annotations retain namespaced parent/fork provenance without reactivating native
+parent links, fork controls, permissions, or reverts. An existing reserved-key
+value is preserved as `sourceMetadata`; these annotations are never authority.
+Replacement refuses observed native host children and re-exports imports to
+verify messages and metadata, since CLI success can represent an import conflict.
+
+After client leases close, normal owner shutdown bounds its native activity wait
+to 30 seconds. Projected-history checks also reject messages omitted by native
+export while an assistant, direct user shell, or compaction is unfinished. Failure
+leaves sync pending/nonzero and retains private data; normal cleanup still stops
+the container. This is not an atomic history freeze or a backup of pending input
+and live execution. Persistent terminal sessions do not themselves block the wait.
+
 Switching the host executable to 1.x reinstalls its exact container runtime and
 V1 overlay, selecting retained V1 history. Returning to 2.x resumes existing V2
 progress rather than reseeding. The histories diverge after transition; there
@@ -393,6 +416,10 @@ services. It checks tools/formatting, MCP Code Mode execution, env substitution,
 Build/Plan behavior, large native history transfer, duplicate protection, host
 sync, credential rotation, and real upstream V1-to-V2 snapshot migration with
 unchanged V1 source bytes. It does not test real provider inference or Podman.
+Its provider-free multi-session fixture also exercises actual child/fork archive
+round-trips, parent-only replacement, missing-source recovery and export-completeness
+checks against separate synthetic databases. These checks are not a new live
+Podman lifecycle acceptance.
 It also checks a live foreground owner, same-user client leases, actual session
 shell detach/replay/retained environment while a browser relay is open, one-use
 browser pairing, cookies, shared process/session identity and event streaming. Binary upgrade

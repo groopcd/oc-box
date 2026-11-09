@@ -184,6 +184,44 @@ def native_archive(export, data, remap_id):
             metadata = message.get("metadata", {})
             if isinstance(metadata.get("keepID"), str):
                 metadata["keepID"] = mapping.get(metadata["keepID"], metadata["keepID"])
+    # Native parent links make deletion recursive, while native import does not
+    # restore fork lineage. Keep independently replaceable, unprivileged archive
+    # sessions and preserve relationships as informational metadata instead.
+    relationships = {}
+    parent = result["info"].get("parentID")
+    if parent is not None:
+        if not isinstance(parent, str) or not re.fullmatch(
+            r"ses[A-Za-z0-9_-]+", parent
+        ):
+            raise ValueError("Invalid OpenCode 2.x parent session identity.")
+        relationships["parentID"] = remap_id(parent, "ses")
+    fork = result["info"].get("fork")
+    if fork is not None:
+        if (
+            not isinstance(fork, dict)
+            or not isinstance(fork.get("sessionID"), str)
+            or not re.fullmatch(r"ses[A-Za-z0-9_-]+", fork["sessionID"])
+            or not isinstance(fork.get("boundary"), dict)
+            or fork["boundary"].get("type") not in ("before", "through")
+            or not isinstance(fork["boundary"].get("messageID"), str)
+            or not re.fullmatch(r"msg[A-Za-z0-9_-]+", fork["boundary"]["messageID"])
+        ):
+            raise ValueError("Invalid OpenCode 2.x fork relationship.")
+        relationships["fork"] = {
+            "sessionID": remap_id(fork["sessionID"], "ses"),
+            "boundary": {
+                "type": fork["boundary"]["type"],
+                "messageID": remap_id(fork["boundary"]["messageID"], "msg"),
+            },
+        }
+    if relationships:
+        metadata = result["info"].setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            raise ValueError("Invalid OpenCode 2.x session metadata.")
+        relationships = {"version": 1, **relationships}
+        if "oc-box.archive" in metadata:
+            relationships["sourceMetadata"] = metadata["oc-box.archive"]
+        metadata["oc-box.archive"] = relationships
     set_directory(result, data["project"])
     for key in ("parentID", "permissions", "fork", "revert"):
         result["info"].pop(key, None)

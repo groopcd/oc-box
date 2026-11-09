@@ -193,13 +193,41 @@ oc-box stop --project ~/devel/demo
 
 Refresh host conversation archives without opening the TUI. Requires an
 existing workspace and an intact project directory. It starts or recreates the
-container if needed, prepares its runtime/configuration, discovers saved root
+container if needed, prepares its runtime/configuration, discovers saved
 sessions, exports them, and imports separate namespaced archive copies into the
 host database. It stops the container afterward, even if it had been running.
+
+On V2, discovery reads every native API page at the workspace's internal project
+directory, including archived conversations, forks, and linked child/subagent
+sessions. Separate conversations are never merged. Sessions at other locations,
+including nested directories, are outside this exact-directory scope. Automatic
+resume still selects a top-level conversation, not a recently active child.
+A successful complete inventory removes missing/deleted or moved-away sources
+from active export tracking while retaining their last private and host archives.
+An unavailable or invalid inventory is an error, never evidence of deletion.
+
+V2 archives remain independent top-level host conversations. Parent and fork
+provenance is retained in versioned `info.metadata["oc-box.archive"]` annotations,
+with workspace-namespaced session and fork-boundary message IDs. These annotations
+are informational, not authority to restore permissions, select projects, or
+delete conversations. Other metadata is preserved; an existing value at this
+reserved key is retained under the annotation's `sourceMetadata` field. Native
+parent links, fork state, permissions, and revert controls are not reactivated.
+Replacing an archive refuses observed native host child links, because native
+deletion would recursively remove those conversations. Successful V2 imports are
+re-exported to verify transcript and metadata before marking them synchronized.
+Treat generated host conversations as archive mirrors, not bidirectional working
+copies. Do not edit them or create native children while sync runs: the child
+preflight and replacement are not an atomic transaction with unrelated host clients.
 
 An active oc-box launcher holds a workspace lock, so exit it before syncing.
 Use this after an OpenCode crash, missed exit-time sync, or host restart.
 Sync failure preserves container data; retry after resolving the error.
+V2 exports are checked against the paginated projected transcript: unfinished
+assistant, user-shell, or compaction messages, or a changing transcript, leave
+sync pending instead of treating native export's filtered output as complete.
+History archives are not full backups of pending input, execution state, or
+persistent shell terminals; use encrypted workspace backup for full private state.
 
 ```sh
 oc-box sync --project ~/devel/demo
@@ -241,6 +269,12 @@ running web-owned session with the full TUI. Additional clients accept selectors
 (and start's `--resume`) only; change model/session/configuration when no owner
 is active. The owning foreground command is needed for web access; closing the
 browser tab alone does not close its relay or terminate the owner.
+After the last client exits, V2 final sync waits up to 30 seconds for the same
+private server's foreground sessions and unconsumed background jobs to settle.
+An idle persistent shell terminal does not block this wait. Timeout or an invalid
+activity response leaves history sync pending and returns nonzero; normal cleanup
+still stops the container, so running work is not promised to continue. This is
+bounded checking, not an atomic freeze of every possible history producer.
 `--no-vault` is accepted only when web becomes a new V2 owner; an attached web
 client rejects it and never changes the owner's credential snapshot.
 
@@ -1876,6 +1910,9 @@ filesystem: no hard links or filesystem-specific utilities are used.
 `sessions.json` (1.x) and `sessions-v2.json` (2.x) hold separate session IDs and
 archive associations. `imports/` and `imports-v2/` hold
 private source exports; `history/` holds private host archive JSON files.
+V2 resume state also records missing source IDs without removing their saved
+archive associations. Archive relationship annotations remain in `history/` and
+host transcript metadata, including private provenance retained by plain purge.
 `lock` serializes mutating commands. These files are outside the project and
 not mounted into the container. Transcript files may contain private content.
 
