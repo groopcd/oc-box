@@ -43,6 +43,7 @@ from oc_box import (
     sync_config,
     workspace_service,
 )
+from interrupted_v1_fixture import create_interrupted_history
 
 
 def host_fixture_probe(binary):
@@ -1163,6 +1164,9 @@ export const Fixture = async () => ({
                     legacy_env,
                     project,
                 )
+            killed_superseded, killed_tail, killed_originals = (
+                create_interrupted_history(legacy_env, project)
+            )
             old_database = Path(legacy_env["XDG_DATA_HOME"]) / "opencode/opencode.db"
             before = old_database.read_bytes()
             migration = {
@@ -1176,35 +1180,71 @@ export const Fixture = async () => ({
                     migrated = request(
                         "GET", "/api/experimental/session/ses_legacy_fixture/export"
                     )["data"]
-                    # Migration keeps V1's never-completed assistant, which V2 does
-                    # not settle and native export omits; only a later settled
-                    # message makes it safely superseded.
-                    page = request(
-                        "GET",
-                        "/api/session/ses_legacy_superseded/message?limit=100&order=asc",
-                    )["data"]
-                    assert [
-                        item["type"] == "assistant"
-                        and item.get("time", {}).get("completed") is None
-                        for item in page
-                    ] == [False, True, False, False], (
-                        "Migrated V1 history changed shape"
-                    )
-                    superseded = bridge.checked_export(request, "ses_legacy_superseded")
-                    assert superseded[bridge.INTERRUPTED] == {"assistant": 1}
-                    assert superseded["messages"] == [
-                        item for item in page if item is not page[1]
-                    ], "Native export did not mirror the projection minus the assistant"
-                    archive = box.archive_session(superseded, data)
-                    assert archive["info"]["metadata"]["oc-box.archive"][
-                        "interrupted"
-                    ] == {"assistant": 1}
-                    try:
-                        bridge.checked_export(request, "ses_legacy_tail")
-                    except bridge.FixedError as error:
-                        assert str(error) == bridge.UNSETTLED
-                    else:
-                        raise AssertionError("Unfinished tail assistant was accepted")
+                    # Check both deterministically imported history and history
+                    # created by actual V1 SIGKILLs with later completed turns.
+                    for session, states in (
+                        ("ses_legacy_superseded", [False, True, False, False]),
+                        (
+                            killed_superseded,
+                            [False, True, False, False, False, True, False, False],
+                        ),
+                    ):
+                        page = request(
+                            "GET",
+                            "/api/session/" + session + "/message?limit=100&order=asc",
+                        )["data"]
+                        assert [
+                            item["type"] == "assistant"
+                            and item.get("time", {}).get("completed") is None
+                            for item in page
+                        ] == states, "Migrated V1 history changed shape"
+                        superseded = bridge.checked_export(request, session)
+                        count = {"assistant": sum(states)}
+                        assert superseded[bridge.INTERRUPTED] == count
+                        assert superseded["messages"] == [
+                            item
+                            for item, incomplete in zip(page, states)
+                            if not incomplete
+                        ], (
+                            "Native export did not mirror the projection minus the assistants"
+                        )
+                        archive = box.archive_session(superseded, data)
+                        assert bridge.INTERRUPTED not in archive
+                        assert (
+                            archive["info"]["metadata"]["oc-box.archive"]["interrupted"]
+                            == count
+                        )
+                        # The count must survive native destination import/export,
+                        # not merely exist in the in-memory archive dictionary.
+                        archive_file = root / "legacy-superseded-archive.json"
+                        box.atomic_json(archive_file, archive)
+                        bounded(
+                            compat.command(
+                                release, binary, ["--pure", "import", str(archive_file)]
+                            ),
+                            env,
+                            registry.parent / "controller",
+                        )
+                        with (
+                            patch.object(box, "private_host_env", return_value=env),
+                            patch.object(
+                                box,
+                                "host_command",
+                                side_effect=lambda _data, *args: compat.command(
+                                    release, binary, args
+                                ),
+                            ),
+                        ):
+                            box.verify_host_archive(registry, data, archive)
+                    for session in ("ses_legacy_tail", killed_tail):
+                        try:
+                            bridge.checked_export(request, session)
+                        except bridge.FixedError as error:
+                            assert str(error) == bridge.UNSETTLED
+                        else:
+                            raise AssertionError(
+                                "Unfinished tail assistant was accepted"
+                            )
             assert "Legacy text" in json.dumps(migrated)
             assert old_database.read_bytes() == before
             v2_database = old_database.with_name("oc-box-v2.db")
@@ -1224,13 +1264,22 @@ export const Fixture = async () => ({
             assert restored_v1["messages"] == legacy["messages"], (
                 "V1 reopened transcript changed"
             )
+            for session, messages in killed_originals.items():
+                reopened = json.loads(
+                    bounded(
+                        ["opencode", "--pure", "export", session], legacy_env, project
+                    )
+                )
+                assert reopened["messages"] == messages, (
+                    "V1 reopened crash-generated transcript changed"
+                )
             assert v2_database.read_bytes() == before_v2, "V1 wrote the V2 database"
             print(
                 "PASS: V2 snapshot migration leaves V1 bytes intact; reopening native V1 retains the exact transcript and leaves V2 bytes intact.",
                 flush=True,
             )
             print(
-                "PASS: migrated V1 never-completed assistants are archived as native's export when superseded and refused at the unfinished tail.",
+                "PASS: imported and SIGKILL-generated V1 interruptions survive migration; superseded archives round-trip with counts, unfinished tails refuse and source messages remain exact.",
                 flush=True,
             )
             # Real foreground owner, same-user concurrent attach and browser

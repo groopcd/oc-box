@@ -243,10 +243,19 @@ integrated candidate for later runtime changes before stable publication.
 Published 1.6.51 refused a real migrated-V1 workspace: a never-completed V1
 assistant survives migration, is omitted by native export, and was treated as
 still changing. The fix branch archives such superseded assistants as native's
-export with a count-only annotation, keeps tail/running/active refusals, shows
-only whitelisted fixed reasons and lets other sessions sync. It has unit and
+export with a count-only annotation, keeps tail/running refusals, refuses the
+superseded exception while active, shows only whitelisted fixed reasons and lets
+other sessions sync. It has unit and
 native V1-to-V2 offline coverage only; it needs fresh host acceptance on a clean
 candidate before any stable release, and 1.6.51 stays as published.
+The native regression covers both imported unfinished history and actual
+SIGKILL-generated V1 turns with subsequent completed turns, native destination
+annotation round-trips and exact V1 reopen preservation. A real held-shell test
+checks fixed bridge subprocess reasons, same-pass progress before/after the
+pending session, unchanged prior archives/checkpoint and recovery. These run
+directly inside oc-box with private synthetic state, not nested Podman. Activity
+refusal in the export bridge applies to the superseded-assistant exception, not
+universally to every export; normal owners separately wait for activity.
 The global-vault fixture's initial host run failed during the first owning
 launch, not an accepted pass.
 Use --diagnose for validated read-only checkpoints; never print raw errors/env

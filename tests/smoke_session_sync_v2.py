@@ -215,11 +215,62 @@ def unsettled_shell(source, host, root, data, path, sync, verify_archive):
             ),
             "Native export no longer filters the running shell fixture.",
         )
-        expect_refusal(
-            lambda: box.export_container_session(data, ident),
-            "Production export accepted native filtered, unsettled history.",
+        try:
+            box.export_container_session(data, ident)
+        except box.HistoryPending as error:
+            require(
+                str(error) == bridge.UNSETTLED,
+                "Native bridge did not propagate the fixed pending reason.",
+            )
+        else:
+            raise FixtureFailure(
+                "Production export accepted native filtered, unsettled history."
+            )
+
+        # Exercise the real sync loop on both sides of the pending session:
+        # changing an existing earlier session is not enough to prove iteration
+        # continues after the refusal. A newly discovered later session must
+        # reach the real host CLI importer in this same failing sync pass.
+        prior_state = box.session_state(path)
+        earlier = prior_state["sessions"][0]
+        earlier_checkpoint = prior_state["synced"][earlier]
+        require(earlier != ident, "Pending-session ordering fixture changed.")
+        rename(source, earlier, "SYNTHETIC_PROGRESS_BEFORE_PENDING")
+        later = seed(source, "ses_fixture_after_pending", data["project"])
+        output = io.StringIO()
+        try:
+            sync(output)
+        except box.BoxError as error:
+            require(
+                str(error)
+                == "1 session(s) not settled yet: "
+                + bridge.UNSETTLED
+                + " Their last archives are retained and other sessions were synchronized.",
+                "Pending sync did not report only the fixed count and reason.",
+            )
+        else:
+            raise FixtureFailure("Production sync accepted a running user shell.")
+        require(
+            "Session history synced" not in output.getvalue(),
+            "Pending sync incorrectly reported complete success.",
         )
-        expect_refusal(sync, "Production sync accepted a running user shell.")
+        state = box.session_state(path)
+        require(
+            state["sessions"].index(earlier)
+            < state["sessions"].index(ident)
+            < state["sessions"].index(later),
+            "Native pending-session fixture did not span the refusal.",
+        )
+        require(
+            {earlier, later} <= set(state["synced"]),
+            "Pending sync skipped an independent session's success checkpoint.",
+        )
+        require(
+            state["synced"][earlier] != earlier_checkpoint,
+            "Pending sync did not advance the earlier session's success checkpoint.",
+        )
+        verify_archive(earlier)
+        verify_archive(later)
         require(
             saved.read_bytes() == before, "Unsettled sync replaced its private archive."
         )
@@ -314,8 +365,10 @@ def exercise(binary, root):
             patch.object(box, "private_host_env", return_value=host_env)
         )
 
-        def sync():
-            with contextlib.redirect_stdout(io.StringIO()):
+        def sync(output=None):
+            with contextlib.redirect_stdout(
+                output if output is not None else io.StringIO()
+            ):
                 box.sync_sessions(path, data)
 
         def archive_id(ident, prefix="ses"):
@@ -688,7 +741,7 @@ def exercise(binary, root):
 
         unsettled_shell(source, host, root, data, path, sync, verify_archive)
         print(
-            "PASS: native V2 running user-shell export refusal and completed-history retry.",
+            "PASS: native V2 fixed pending reasons, same-pass progress around a running shell, archive preservation and completed-history retry.",
             flush=True,
         )
 
