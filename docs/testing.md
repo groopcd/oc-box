@@ -57,6 +57,48 @@ owner-capable secondary CLI routing. It does not cover interactive vault input,
 Plan/deny conversations, reload permission prompts, a second full TUI attachment,
 formatter/LSP/devices, real-provider inference or security certification.
 
+### Fresh provider-free vault edges (host only)
+
+`tools/test_global_vault_edges_podman.py` is a separate fresh-only fixture:
+
+```bash
+python3 -B tools/test_global_vault_edges_podman.py \
+  --work-dir /path/to/fixtures --opencode-v2 /path/to/opencode-2.2.6
+```
+
+Require a clean unchanged checkout, unprivileged host and existing disk-backed
+parent. Host Python needs the optional `cryptography` dependency; missing-crypto
+children use a separate private stdlib-only virtualenv. Optional
+`--temp-dir /path/to/staging-parent` also rejects retained roots
+and descendants. No resume/replay selector or automatic cleanup. Keep its
+`edges.json`, immutable per-case evidence and `edges-result.json` in place; it
+never overwrites the original fixture's `result.json` or reuses completed runs.
+
+Cases use real owning starts, scripted TUI callbacks/masked controlling-terminal
+input and the production native session shell: populated delivery, removal while
+the live owner's snapshot stays unchanged, empty and absent-vault fallback, then
+actual start/reset refusal for wrong passphrase, corrupt vault and genuinely
+missing optional crypto. Only synthetic private projects/config/history/values
+are used. **Provider-free, no inference**; upstream catalog/package metadata
+traffic may occur, with no network-containment guarantee. Optional Lemonade
+discovery selects a fixture-owned empty-catalog stub, not the normal host service.
+Production environment filtering and credential selection stay unchanged.
+
+Offline `test_global_vault_edges_host_fixture` checks guards and bounded process
+mechanics, not host acceptance. These edge cases remain **host-unverified** until
+a separate reviewed execution. Earlier 1.6.42/43/44 scopes remain unchanged; this
+adds no interactive UI, backup, real OAuth refresh, formatter/LSP/device or
+real-provider claim. State preservation covers stopped resources and private
+project/registry/home/native DB/config/auth bytes, not universal engine metadata
+immutability: backend info/locks may touch runtime state.
+Only native 2.2.6's exact `host-data-2/opencode/log/opencode.log` digest is
+diagnostic rather than protected: `--version` appends to it before unlock.
+Per-case before/after hashes are retained, and a read-only scan still refuses
+known synthetic vault values/passphrases in that file. Other native files and
+the entire container-home manifest remain protected. Removal checks require the
+same verified native PID across the ciphertext change. Catalog verdicts use one
+post-teardown counter snapshot; this does not prove daemon handlers drained.
+
 ### Fresh manual UI observation (host only)
 
 `tools/test_interactive_podman.py` is a bounded **interactive-only** fixture, not
