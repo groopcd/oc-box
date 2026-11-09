@@ -3,6 +3,26 @@
 Run development commands from the repository root. Keep public documentation
 portable: use example project paths and synthetic session IDs, not local data.
 
+## Delegation
+
+Use subagents proactively for substantial, independent investigations, bounded
+testing, and independent reviews; no repeated user request is needed. Handle
+small or tightly coupled tasks directly when delegation would add more overhead
+than value. Keep one primary agent responsible for scope, integration, reviewing
+subagent results, and final verification.
+
+Give each subagent a bounded objective, the necessary context, and explicit
+read-only or editing responsibilities. Avoid overlapping edits; use separate Git
+worktrees when parallel edits require isolation. Respect read-only and
+planning-only requests across all delegated work, and never use delegation to
+bypass permissions or host-only test restrictions.
+
+Coordinate tests with edits: record the tested commit and working-tree state,
+and do not claim a result validates a revision changed underneath the test run.
+Wait for shared-checkout tests to finish or run parallel work in isolated
+worktrees. Independently opened sessions do not coordinate automatically; use
+explicit handoffs rather than assuming shared conversation context.
+
 ## Architecture
 
 Runtime implementation is under `src/oc_box/`; module names below refer to that
