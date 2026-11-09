@@ -167,6 +167,50 @@ interactive permission prompts, formatter/LSP/device checks and other lifecycle
 acceptance remain separate. Offline `test_interactive_host_fixture` checks these
 guards and native relay dispatch, not real Podman/UI acceptance.
 
+### Shared home-component ownership (fresh host only, image-free)
+
+`tools/test_home_ownership_podman.py` is a separate **component-only** probe:
+
+```bash
+python3 -B tools/test_home_ownership_podman.py --work-dir /path/to/fixtures
+# After reviewing the new evidence, separately:
+python3 -B tools/test_home_ownership_podman.py --cleanup /path/to/exact-printed-root
+```
+
+Use a clean full-history checkout, unprivileged Linux host, installed Podman/age/
+age-keygen and existing disk-backed parent. Both work and optional `--temp-dir`
+parents reject retained roots/descendants before source probes or allocation,
+including renamed home-component roots retaining only purpose/journal/report
+markers. Never run on a container or reuse/move an old store.
+There are no images, containers, networks, OpenCode, credentials or workspaces:
+only two explicitly labelled local-driver volumes in a verified private store.
+The probe measures the real `podman unshare` UID/GID maps for IDs 0 and 1, checks
+fixed synthetic directories/config/closed SQLite data and a mapped-1 sentinel
+independently, then uses production private `archive_command`, `encrypt_stream`
+and bounded owner-restoring `decrypt_stream`. Keys stay in memory/memfd; only
+`home.age`, nonsecret fingerprints, purpose/journals and immutable reports persist.
+Both root directories must be 0:0; extraction keeps its root private (0700),
+not arbitrary archived root metadata. Atime, ACLs/xattrs and SELinux are not tested.
+
+Both backup kinds capture `home.age` before the full-image branch in `backups.py`
+and restore it before the image/container branches. This probe adds **only shared
+home-component UID/GID/mode/content transport evidence**, not another whole full/
+portable lifecycle, first-mount or keep-id/auto/custom-mapping acceptance. The
+reviewed 1.6.42/43/44/46 scopes above and all completed roots remain unchanged.
+Offline `test_home_ownership_host_fixture` (including real age through a fake
+unshare dispatcher) is not host or mapping acceptance; no new host pass is claimed.
+
+Cleanup holds the fixture lock, verifies purpose, original-boot marker, three
+environment store selection and **both** exact volume metadata/paths before any
+unforced removal. Missing/foreign/unrecorded/ambiguous state refuses. It retains
+all files/ciphertext/images; never use the global fixture cleanup for this empty-
+registry layout. A later clean docs-only checkout may clean up only with unchanged
+audited helper/runtime/native hashes; reports retain the original run identity
+separately. Every info, volume/unshare query and archive dispatch rechecks the
+captured **current invocation** source; missing context or source changes refuse
+before entry. The final return proof also rechecks it. Do not edit/switch source
+during an invocation. Never delete or rewrite a stale/missing boot marker to bypass refusal.
+
 ## Audit result
 
 The audit reduced 558 unit-test methods to 539 across the same 32 files. The
