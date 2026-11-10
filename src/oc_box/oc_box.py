@@ -9,6 +9,7 @@ import fcntl
 import hashlib
 import io
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -395,9 +396,14 @@ def validate_project(path):
         APP,
         Path.home() / ".config/opencode",
         Path.home() / ".local/share/opencode",
+        Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+        / "opencode",
+        Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
+        / "opencode",
         vault.vault_path().parent,
     ):
-        if private.resolve().is_relative_to(project):
+        private = private.resolve()
+        if private.is_relative_to(project) or project.is_relative_to(private):
             raise BoxError(
                 f"Project would expose trusted application/state files: {private}"
             )
@@ -505,6 +511,45 @@ def workspace_lock(path):
                 "This workspace already has an active oc-box process. Exit it before changing its environment."
             ) from exc
         yield
+
+
+def reload_workspace(path):
+    """Reload under the caller's lock, never persist the pre-lock snapshot."""
+    data = read_json(path)
+    if (
+        not isinstance(data, dict)
+        or data.get("id") != path.parent.name
+        or not re.fullmatch(r"[0-9a-f]{32}", path.parent.name)
+        or data.get("version") != 2
+        or not isinstance(data.get("project"), str)
+        or not Path(data["project"]).is_absolute()
+        or not isinstance(data.get("distro"), str)
+        or data.get("distro") not in DISTROS
+    ):
+        raise BoxError(
+            "Workspace registration changed or is invalid; no changes were made."
+        )
+    return data
+
+
+def validate_resource_limits(data):
+    """Reject malformed saved/requested limits before reset removes the old OS."""
+    try:
+        cpus = float(data["cpus"])
+    except (ValueError, TypeError):
+        cpus = -1
+    if not math.isfinite(cpus) or cpus < 0:
+        raise BoxError("--cpus must be a finite nonnegative number.")
+    if not re.fullmatch(
+        r"\d+(?:\.\d+)?[ \t]*[kmgtpe]?(?:i?b)?", str(data["memory"]), re.IGNORECASE
+    ):
+        raise BoxError("--memory must be a nonnegative size, such as 8g, 512m, or 0.")
+    if (
+        not isinstance(data["pids"], int)
+        or isinstance(data["pids"], bool)
+        or data["pids"] < 32
+    ):
+        raise BoxError("--pids-limit must be at least 32.")
 
 
 def repair_workspace(path, data):
@@ -2200,6 +2245,7 @@ def archive_session(export, data):
             data,
             lambda ident, prefix: archive_id(data["id"] + "-v2", ident, prefix),
         )
+    validate_session_export(export, export["info"]["id"])
     # Only schema identity fields are changed; conversation/tool text is intact.
     result = json.loads(json.dumps(export))
     mapping = {}
@@ -2217,20 +2263,21 @@ def archive_session(export, data):
                 raise BoxError("Invalid exported part ID")
             mapping[part["id"]] = archive_id(data["id"], part["id"], "prt")
 
-    def remap(value):
-        if isinstance(value, list):
-            return [remap(item) for item in value]
-        if isinstance(value, dict):
-            return {
-                key: mapping.get(item, item)
-                if key in ("id", "sessionID", "messageID", "parentID", "partID")
-                and isinstance(item, str)
-                else remap(item)
-                for key, item in value.items()
-            }
-        return value
+    def remap_fields(value, fields):
+        for key in fields:
+            if isinstance(value.get(key), str):
+                value[key] = mapping.get(value[key], value[key])
 
-    result = remap(result)
+    # V1 identity references live at these schema paths only. Arbitrary tool
+    # inputs, outputs, metadata, source records and error payloads are opaque,
+    # even when their keys/values happen to look exactly like native IDs.
+    remap_fields(info, ("id",))
+    if isinstance(info.get("revert"), dict):
+        remap_fields(info["revert"], ("messageID", "partID"))
+    for message in result["messages"]:
+        remap_fields(message["info"], ("id", "sessionID", "parentID"))
+        for part in message["parts"]:
+            remap_fields(part, ("id", "sessionID", "messageID"))
     result["info"]["directory"] = data["project"]
     result["info"].pop("parentID", None)
     result["info"].pop("permission", None)
@@ -2242,6 +2289,8 @@ def archive_session(export, data):
 
 def guard_host_archive_children(path, data, ident):
     """Native delete is recursive, even across children not owned by oc-box."""
+    if not valid_session_id(ident):
+        raise BoxError("Invalid stored session ID.")
     result = run(
         host_command(data, "api", "get", "/api/session?parentID=" + ident + "&limit=1"),
         env=private_host_env(path, data),
@@ -2250,12 +2299,30 @@ def guard_host_archive_children(path, data, ident):
         private=True,
         timeout=60,
     )
-    response = json.loads(result.stdout)
+    try:
+        response = json.loads(result.stdout)
+    except ValueError as exc:
+        raise BoxError(
+            "Invalid host archive child inventory; no archive was replaced."
+        ) from exc
     if (
         not isinstance(response, dict)
         or not isinstance(response.get("data"), list)
         or not isinstance(response.get("cursor"), dict)
+        or (
+            response["cursor"].get("next") is not None
+            and (
+                not isinstance(response["cursor"]["next"], str)
+                or not response["cursor"]["next"]
+            )
+        )
         or (not response["data"] and response["cursor"].get("next") is not None)
+        or any(
+            not isinstance(item, dict)
+            or not valid_session_id(item.get("id"))
+            or ("parentID" in item and item["parentID"] != ident)
+            for item in response["data"]
+        )
     ):
         raise BoxError("Invalid host archive child inventory; no archive was replaced.")
     if response["data"]:
@@ -2276,8 +2343,47 @@ def verify_host_archive(path, data, archived):
         private=True,
         timeout=60,
     )
-    imported = json.loads(result.stdout)
-    validate_session_export(imported, ident)
+    try:
+        imported = json.loads(result.stdout)
+        validate_session_export(imported, ident)
+    except (ValueError, BoxError) as exc:
+        if opencode_compat.native(archived):
+            raise
+        raise BoxError(
+            "Host archive verification failed; history sync remains pending."
+        ) from exc
+    if not opencode_compat.native(archived):
+        controller = str(path.parent / "controller")
+        try:
+            if opencode_compat.native(imported):
+                raise BoxError("V1 archive schema differs.")
+            # Reuse only the observed V1 nonpending tool-raw normalization. The
+            # transcript, including opaque input/metadata, must otherwise match.
+            verify_session_import({"project": controller}, archived, imported)
+            if any(
+                key in imported["info"] for key in ("parentID", "permission")
+            ) or any(
+                key in archived["info"]
+                and imported["info"].get(key) != archived["info"][key]
+                for key in (
+                    "title",
+                    "version",
+                    "slug",
+                    "metadata",
+                    "summary",
+                    "cost",
+                    "tokens",
+                    "share",
+                    "revert",
+                    "time",
+                )
+            ):
+                raise BoxError("V1 archive information differs.")
+        except BoxError as exc:
+            raise BoxError(
+                "Host archive verification failed; history sync remains pending."
+            ) from exc
+        return
     source_time = archived["info"].get("time", {})
     idle = source_time.get("idle")
     # Native import preserves creation/archive/idle times, clips busy/viewed to
@@ -2318,6 +2424,69 @@ def verify_host_archive(path, data, archived):
         )
 
 
+def v1_replacement_record(path, data, source, ident, digest):
+    """One private record per replacement, bound to its exact exported payload."""
+    journal = path.parent / "v1-replacements" / (ident + ".json")
+    expected = {
+        "version": 1,
+        "workspace": data["id"],
+        "source": source,
+        "archive": ident,
+        "digest": digest,
+    }
+    if journal.exists() or journal.is_symlink():
+        try:
+            actual = (
+                read_json(journal)
+                if not journal.is_symlink() and journal.is_file()
+                else None
+            )
+            matches = (
+                isinstance(actual, dict)
+                and type(actual.get("version")) is int
+                and actual == expected
+            )
+        except BoxError:
+            matches = False
+        if not matches:
+            raise BoxError(
+                "V1 archive replacement recovery does not match this export; "
+                "retained archives and checkpoint were not changed."
+            )
+    return journal, expected
+
+
+def remove_v1_host_archive(path, data, source, ident, digest):
+    """Only a successful native deletion authorizes a bound replacement retry."""
+    journal, expected = v1_replacement_record(path, data, source, ident, digest)
+    if journal.exists():
+        return journal
+    deleted = run(
+        host_command(data, "--pure", "session", "delete", ident),
+        env=private_host_env(path, data),
+        cwd=path.parent / "controller",
+        capture=True,
+        check=False,
+        private=True,
+        timeout=60,
+    )
+    if deleted.returncode:
+        raise BoxError(
+            "Host archive deletion was not verified; history sync remains pending. "
+            "V1 nonzero delete and roots-only listing cannot prove absence."
+        )
+    try:
+        atomic_json(journal, expected)
+    except OSError as exc:
+        # A crash/error between deletion and this record cannot be inferred on
+        # retry. Keep the prior archive/checkpoint and refuse ambiguous absence.
+        raise BoxError(
+            "V1 archive deletion completed but its recovery record could not be saved; "
+            "retained archives and checkpoint were not changed."
+        ) from exc
+    return journal
+
+
 def sync_sessions(path, data):
     state = refresh_sessions(path, data)
     archives = path.parent / "history"
@@ -2335,38 +2504,71 @@ def sync_sessions(path, data):
         interrupted += bool(exported.get(opencode_v2_io.INTERRUPTED))
         archived = archive_session(exported, data)
         target = archives / (archived["info"]["id"] + ".json")
-        atomic_json(target, archived)
-        digest = hashlib.sha256(target.read_bytes()).hexdigest()
-        state.setdefault("synced", {})
-        if state["synced"].get(ident) == digest:
-            continue
-        if ident in state.get("host_sessions", {}):
-            if opencode_compat.native(archived):
-                guard_host_archive_children(path, data, archived["info"]["id"])
-            # Mainline import appends new messages but does not update existing
-            # parts or metadata. Replace only this namespaced archive copy.
+        native = opencode_compat.native(archived)
+        candidate = (
+            target
+            if native
+            else target.with_name(".pending-" + uuid.uuid4().hex + ".json")
+        )
+        try:
+            atomic_json(candidate, archived)
+            digest = hashlib.sha256(candidate.read_bytes()).hexdigest()
+            state.setdefault("synced", {})
+            if state["synced"].get(ident) == digest:
+                if not native:
+                    # Older V1 checkpoints were not backed by a re-export.
+                    # Never let a cached local digest conceal stale host data.
+                    verify_host_archive(path, data, archived)
+                    journal, _ = v1_replacement_record(
+                        path, data, ident, archived["info"]["id"], digest
+                    )
+                    journal.unlink(missing_ok=True)
+                continue
+            journal = None
+            associated = state.get("host_sessions", {}).get(ident)
+            if associated is not None and (
+                native or associated == archived["info"]["id"]
+            ):
+                if native:
+                    guard_host_archive_children(path, data, archived["info"]["id"])
+                    run(
+                        host_command(
+                            data, "--pure", "session", "delete", archived["info"]["id"]
+                        ),
+                        env=private_host_env(path, data),
+                        cwd=path.parent / "controller",
+                        capture=True,
+                        check=False,
+                        timeout=60,
+                    )
+                else:
+                    journal = remove_v1_host_archive(
+                        path, data, ident, archived["info"]["id"], digest
+                    )
+            # A restored workspace has a fresh archive namespace. Its old
+            # association does not authorize deleting the new ID: handle that
+            # as a verified first import, retaining the original host archive.
+            # Import can succeed as a no-op. Check the real host transcript
+            # before committing the V1 archive or advancing either checkpoint.
             run(
-                host_command(
-                    data, "--pure", "session", "delete", archived["info"]["id"]
-                ),
+                host_command(data, "--pure", "import", str(candidate)),
                 env=private_host_env(path, data),
                 cwd=path.parent / "controller",
                 capture=True,
-                check=False,
+                private=not native,
                 timeout=60,
             )
-        run(
-            host_command(data, "--pure", "import", str(target)),
-            env=private_host_env(path, data),
-            cwd=path.parent / "controller",
-            capture=True,
-            timeout=60,
-        )
-        if opencode_compat.native(archived):
             verify_host_archive(path, data, archived)
-        state["synced"][ident] = digest
-        state.setdefault("host_sessions", {})[ident] = archived["info"]["id"]
-        atomic_json(session_file(path), state)
+            if not native:
+                candidate.replace(target)
+            state["synced"][ident] = digest
+            state.setdefault("host_sessions", {})[ident] = archived["info"]["id"]
+            atomic_json(session_file(path), state)
+            if journal is not None:
+                journal.unlink()
+        finally:
+            if not native:
+                candidate.unlink(missing_ok=True)
     if interrupted:
         print(
             f"oc-box: {interrupted} session(s) contain interrupted unfinished assistant "
@@ -2659,6 +2861,15 @@ def purge(path, data, args):
             + data["id"]
             + "' to retain project files and host history."
         )
+    if (
+        not (args.all or args.delete_sessions or data.get("restore_incomplete"))
+        and (project.exists() or project.is_symlink())
+        and not same
+    ):
+        raise BoxError(
+            "Project directory identity changed; refusing to start or purge its old environment. "
+            "Private home, history, and recovery metadata are retained. Verify the original directory before recovery."
+        )
     if not data.get("restore_incomplete") or args.all or args.delete_sessions:
         release = detect_opencode_release()
         if opencode_compat.major(release) != opencode_compat.major(
@@ -2667,6 +2878,23 @@ def purge(path, data, args):
             raise BoxError(
                 "Host/container OpenCode major versions differ. Run a normal launch or 'oc-box sync' with the new host release before purge so history is migrated and verified; no resources were deleted."
             )
+    deletions = []
+    if args.delete_sessions or args.all:
+        recorded = session_state(path)
+        associations = (
+            recorded.get("host_sessions", {}) if isinstance(recorded, dict) else None
+        )
+        if not isinstance(associations, dict) or any(
+            not valid_session_id(source) or not valid_session_id(archive)
+            for source, archive in associations.items()
+        ):
+            raise BoxError("Invalid stored session ID.")
+        deletions = list(dict.fromkeys(associations.values()))
+        if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
+            # Validate the WHOLE set before any deletion. Unrelated host clients
+            # do not take our lock; this preflight is deliberately not atomic.
+            for ident in deletions:
+                guard_host_archive_children(path, data, ident)
     if not args.yes:
         summary = "sandbox resources and oc-box metadata"
         if args.delete_sessions or args.all:
@@ -2692,10 +2920,7 @@ def purge(path, data, args):
     finally:
         stop_container(data)
     if args.delete_sessions or args.all:
-        recorded = session_state(path)
-        for ident in recorded.get("host_sessions", {}).values():
-            if not re.fullmatch(r"ses[A-Za-z0-9_-]+", ident):
-                raise BoxError("Invalid stored session ID.")
+        for ident in deletions:
             run(
                 host_command(data, "--pure", "session", "delete", ident),
                 env=private_host_env(path, data),
@@ -2984,6 +3209,7 @@ def credentials_command(args):
             "No oc-box workspace registered here. Create it with a normal launch before selecting credentials."
         )
     with workspace_lock(path):
+        data = reload_workspace(path)
         try:
             if (
                 args.credential_mode
@@ -3519,6 +3745,7 @@ def main(argv=None):
                     sys.modules[__name__], data, connection, args
                 )
     with workspace_lock(path), contextlib.ExitStack() as launch_context:
+        data = reload_workspace(path)
         if data.get("restore_incomplete") and args.command != "purge":
             raise BoxError(
                 "This workspace restore did not finish. Do not start it; inspect backup recovery staging and use plain purge by ID before retrying into a new destination."
@@ -3547,6 +3774,17 @@ def main(argv=None):
                     f"Existing workspace uses {data['distro']}. Use 'oc-box reset --distro {args.distro}' to switch."
                 )
             configure_podman_options(data, args)
+            candidate = {**data}
+            for name in ("cpus", "memory"):
+                if getattr(args, name):
+                    if args.command != "reset" and inspect_owned(data):
+                        raise BoxError("Change resource limits using 'oc-box reset'.")
+                    candidate[name] = getattr(args, name)
+            if args.pids_limit is not None:
+                if args.command != "reset" and inspect_owned(data):
+                    raise BoxError("Change resource limits using 'oc-box reset'.")
+                candidate["pids"] = args.pids_limit
+            validate_resource_limits(candidate)
             if args.command == "reset":
                 current_path, _ = find_workspace(data["project"])
                 if current_path != path:
@@ -3564,8 +3802,9 @@ def main(argv=None):
                     )
                 if getattr(args, "_opencode_release", None) is None:
                     args._opencode_release = detect_opencode_release()
-                check_resource_controllers(data)
+                check_resource_controllers(candidate)
                 remove_resources(data, keep_home=True)
+                data = candidate
                 data["ready"] = False
                 # Reset rebuilds the distro, not the captured custom OS image.
                 # Keep any restored internal paths for the preserved home DB.
@@ -3573,17 +3812,8 @@ def main(argv=None):
                 if args.distro:
                     data["distro"] = distro_name(args.distro)
                     data["image"] = DISTROS[data["distro"]][0]
-            for name in ("cpus", "memory"):
-                if getattr(args, name):
-                    if args.command != "reset" and inspect_owned(data):
-                        raise BoxError("Change resource limits using 'oc-box reset'.")
-                    data[name] = getattr(args, name)
-            if args.pids_limit is not None:
-                if args.pids_limit < 32:
-                    raise BoxError("--pids-limit must be at least 32.")
-                if args.command != "reset" and inspect_owned(data):
-                    raise BoxError("Change resource limits using 'oc-box reset'.")
-                data["pids"] = args.pids_limit
+            else:
+                data = candidate
             atomic_json(path, data)
             return launch(path, data, args)
         if args.command == "purge":

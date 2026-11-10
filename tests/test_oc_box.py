@@ -414,13 +414,31 @@ class WorkspaceTests(unittest.TestCase):
             "synced": {"ses_source": "previous"},
         }
         calls = []
+        host = box.archive_session(source, self.data)
+        host["info"]["directory"] = str(self.path.parent / "controller")
 
         def fake(command, **kwargs):
+            nonlocal host
             calls.append(command)
             exporting = "python3" in command and "ses_source" in command
-            return subprocess.CompletedProcess(
-                command, 0, json.dumps(source) if exporting else "", ""
-            )
+            if "list" in command:
+                value = (
+                    []
+                    if host is None
+                    else [{"id": old, "directory": host["info"]["directory"]}]
+                )
+            elif "delete" in command:
+                host = None
+                value = None
+            elif "import" in command:
+                host = box.read_json(Path(command[-1]))
+                host["info"]["directory"] = str(self.path.parent / "controller")
+                value = None
+            elif "export" in command:
+                value = host
+            else:
+                value = source if exporting else None
+            return subprocess.CompletedProcess(command, 0, json.dumps(value), "")
 
         with (
             patch.object(box, "refresh_sessions", return_value=state),

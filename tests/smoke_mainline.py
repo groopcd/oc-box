@@ -482,6 +482,149 @@ def archive_import_regression(root, env, project, exported):
     )
 
 
+def archive_sync_regression(root, env, project, exported):
+    """Provider-free V1 opaque-data/replacement/retry proof through native CLI."""
+    host = {**env, "XDG_DATA_HOME": str(root / "sync-host-data")}
+    host.pop("OPENCODE_CONFIG_CONTENT", None)
+    isolated = {**host, "XDG_DATA_HOME": str(root / "sync-container-data")}
+    executable = shutil.which("opencode")
+    source = json.loads(json.dumps(exported))
+    tool = next(
+        part
+        for message in source["messages"]
+        for part in message["parts"]
+        if part.get("type") == "tool" and part["state"]["status"] == "completed"
+    )
+    opaque = {
+        "id": source["messages"][0]["info"]["id"],
+        "sessionID": source["info"]["id"],
+        "messageID": tool["messageID"],
+        "parentID": source["messages"][0]["info"]["id"],
+        "partID": tool["id"],
+    }
+    opaque["nested"] = [{"sessionID": source["info"]["id"]}]
+    source["info"]["metadata"] = {"opaque": opaque}
+    tool["state"]["input"]["archive-opaque"] = opaque
+    tool["state"].setdefault("metadata", {})["archive-opaque"] = opaque
+    tool["state"]["output"] += "\n" + json.dumps(opaque)
+    source_file = root / "sync-source.json"
+    box.atomic_json(source_file, source)
+    bounded(
+        [executable, "--pure", "import", str(source_file)],
+        env=isolated,
+        cwd=project,
+        timeout=15,
+    )
+
+    def native_source():
+        raw, _ = bounded(
+            [executable, "--pure", "export", source["info"]["id"]],
+            env=isolated,
+            cwd=project,
+            timeout=15,
+        )
+        return json.loads(raw)
+
+    original = native_source()
+    trampoline = "import os,sys; os.chdir(os.environ['PWD']); os.execvpe(sys.argv[1],sys.argv[1:],os.environ)"
+
+    def local_exec(_data, command, **_kwargs):
+        return box.ContainerCommand(
+            [sys.executable, "-c", trampoline, *command],
+            {**isolated, "PWD": str(project)},
+        )
+
+    with patch.dict(os.environ, {"OC_BOX_STATE_HOME": str(root / "sync-registry")}):
+        path, data = box.create_workspace(project, "tumbleweed")
+        with (
+            patch.object(box, "host_cli_env", return_value=host),
+            patch.object(box, "CONTAINER_OPENCODE", executable),
+            patch.object(box, "exec_command", side_effect=local_exec),
+        ):
+            box.sync_sessions(path, data)
+            state = box.session_state(path)
+            archive_id = state["host_sessions"][source["info"]["id"]]
+            target = path.parent / "history" / (archive_id + ".json")
+            first = box.read_json(target)
+            assert first["info"]["metadata"]["opaque"] == opaque
+            copied_tool = next(
+                part
+                for message in first["messages"]
+                for part in message["parts"]
+                if part.get("type") == "tool"
+                and "archive-opaque" in part["state"]["input"]
+            )
+            assert copied_tool["state"]["input"]["archive-opaque"] == opaque
+            assert copied_tool["state"]["metadata"]["archive-opaque"] == opaque
+            assert json.dumps(opaque) in copied_tool["state"]["output"]
+            assert native_source()["messages"] == original["messages"]
+            box.verify_host_archive(path, data, first)
+
+            changed = json.loads(json.dumps(original))
+            changed["info"]["title"] = "Native V1 replacement"
+            changed["info"]["time"]["updated"] += 1
+            text = next(
+                part
+                for message in changed["messages"]
+                for part in message["parts"]
+                if part.get("type") == "text"
+            )
+            text["text"] += "\nNative V1 replacement marker"
+            box.atomic_json(source_file, changed)
+            bounded(
+                [executable, "--pure", "session", "delete", source["info"]["id"]],
+                env=isolated,
+                cwd=project,
+                timeout=15,
+            )
+            bounded(
+                [executable, "--pure", "import", str(source_file)],
+                env=isolated,
+                cwd=project,
+                timeout=15,
+            )
+            before_archive = target.read_bytes()
+            before_state = box.session_file(path).read_bytes()
+            native_run = box.run
+
+            def failed_import(command, **kwargs):
+                if command[:3] == ["opencode", "--pure", "import"]:
+                    raise box.BoxError("Synthetic failure after native host deletion")
+                return native_run(command, **kwargs)
+
+            with patch.object(box, "run", side_effect=failed_import):
+                try:
+                    box.sync_sessions(path, data)
+                except box.BoxError as exc:
+                    assert str(exc) == "Synthetic failure after native host deletion"
+                else:
+                    raise AssertionError(
+                        "Native retry fixture did not reach its import failure"
+                    )
+            assert target.read_bytes() == before_archive
+            assert box.session_file(path).read_bytes() == before_state
+            retried = []
+
+            def observed(command, **kwargs):
+                retried.append(command)
+                return native_run(command, **kwargs)
+
+            with patch.object(box, "run", side_effect=observed):
+                box.sync_sessions(path, data)
+            assert not any(
+                command[:4] == ["opencode", "--pure", "session", "delete"]
+                for command in retried
+            )
+            assert target.read_bytes() != before_archive
+            box.verify_host_archive(path, data, box.read_json(target))
+            assert native_source()["messages"] == changed["messages"]
+            assert not list(target.parent.glob(".pending-*.json"))
+            assert not list((path.parent / "v1-replacements").glob("*.json"))
+    print(
+        "PASS: native V1 opaque archive data, verified replacement, bound successful-delete retry, retained checkpoint/archive on failure, and unchanged source messages."
+    )
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="oc-box-native-") as directory:
         root = Path(directory)
@@ -750,6 +893,7 @@ def main():
             )
             session_import_regression(root, env, project, ident)
             archive_import_regression(root, env, project, json.loads(exported))
+            archive_sync_regression(root, env, project, json.loads(exported))
             warm_start_regression(root, env, project)
             print(
                 "All app data was temporary. Live Podman isolation remains a separate host-terminal check."
