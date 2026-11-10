@@ -492,6 +492,13 @@ class LifecycleHardeningTests(unittest.TestCase):
                 ["--cpus", "0", "--memory", "0"],
                 True,
             ),
+            (
+                "remove unavailable old limits with zero spellings",
+                "4",
+                "8g",
+                ["--cpus", "0.0", "--memory", "0g"],
+                True,
+            ),
             ("invalid memory", "0", "0", ["--memory", "nonsense"], False),
             ("invalid cpu", "0", "0", ["--cpus", "nan"], False),
         )
@@ -530,3 +537,132 @@ class LifecycleHardeningTests(unittest.TestCase):
                     remove.assert_not_called()
                     launch.assert_not_called()
                     self.assertEqual(self.path.read_bytes(), before)
+
+    def test_reset_rejects_invalid_actual_literals_and_int64_overflow_before_mutations(
+        self,
+    ):
+        observed, _ = box.workspace_identity.snapshot(self.project)
+        stable = {
+            "method": "linux-file-handle-v1",
+            "fsid": "synthetic",
+            "handle": {"type": 1, "bytes": "0102"},
+        }
+        cases = (
+            ("cpu whitespace", {}, ["--cpus", " 1 "]),
+            ("cpu Unicode digit", {}, ["--cpus", "٨"]),
+            ("cpu boolean metadata", {"cpus": True}, []),
+            ("cpu nonfinite range", {}, ["--cpus", "1e9999"]),
+            ("cpu empty", {}, ["--cpus", ""]),
+            ("memory Unicode digit", {}, ["--memory", "٨g"]),
+            ("memory Unicode unit", {}, ["--memory", "8K"]),
+            ("memory tab", {}, ["--memory", "8\tg"]),
+            ("memory multiple spaces", {}, ["--memory", "8  g"]),
+            ("memory empty", {}, ["--memory", ""]),
+            ("memory boolean metadata", {"memory": True}, []),
+            ("memory int64 overflow", {}, ["--memory", str(2**63)]),
+            ("memory float64 rounding exceeds int64", {}, ["--memory", str(2**63 - 1)]),
+            ("memory enormous coefficient", {}, ["--memory", "9" * 400 + "g"]),
+            ("memory overflowing unit", {}, ["--memory", "8e"]),
+            ("pids int64 overflow", {}, ["--pids-limit", str(2**63)]),
+            ("pids overflow metadata", {"pids": 2**63}, []),
+            ("pids boolean metadata", {"pids": True}, []),
+        )
+        for name, changes, flags in cases:
+            with self.subTest(case=name):
+                data = copy.deepcopy(self.data)
+                data.update(changes)
+                data.pop(box.workspace_identity.STABLE_IDENTITY_KEY, None)
+                box.atomic_json(self.path, data)
+                before = self.path.read_bytes()
+                with (
+                    patch.object(
+                        box.workspace_identity,
+                        "snapshot",
+                        return_value=(observed, stable),
+                    ),
+                    patch.object(box, "check_backend"),
+                    patch.object(box, "detect_opencode_release", return_value="1.19.5"),
+                    patch.object(box, "launch_credentials") as policy,
+                    patch.object(
+                        box,
+                        "refresh_workspace_identity",
+                        wraps=box.refresh_workspace_identity,
+                    ) as identity,
+                    patch.object(box, "check_resource_controllers") as controllers,
+                    patch.object(box, "remove_resources") as remove,
+                    patch.object(box, "launch", return_value=0) as launch,
+                    contextlib.redirect_stderr(io.StringIO()),
+                    self.assertRaises(box.BoxError),
+                ):
+                    box.main(["reset", "--workspace", data["id"], *flags])
+                for operation in (policy, identity, controllers, remove, launch):
+                    operation.assert_not_called()
+                self.assertEqual(self.path.read_bytes(), before)
+
+    def test_validated_resource_forms_are_the_actual_saved_and_forwarded_arguments(
+        self,
+    ):
+        cases = (
+            ("documented", "4", "8g", 2048, "4", "8g"),
+            ("fractional", ".5", "512m", 2048, ".5", "512m"),
+            ("exponent", "1e0", "16g", 2048, "1e0", "16g"),
+            ("effective zero", "0.0", "0g", 2048, "0", "0"),
+            ("single separator", "1", "1 GiB", 2048, "1", "1 GiB"),
+            ("largest unit within int64", "1", "7e", 2048, "1", "7e"),
+            ("maximum pids", "4", "8g", 2**63 - 1, "4", "8g"),
+        )
+        for name, cpus, memory, pids, expected_cpu, expected_memory in cases:
+            with self.subTest(case=name):
+                box.atomic_json(self.path, self.data)
+                calls = []
+
+                def podman(*args, **kwargs):
+                    calls.append(args)
+                    output = (
+                        json.dumps([{"Labels": {box.LABEL: self.data["id"]}}])
+                        if args[:2] == ("volume", "inspect")
+                        else ""
+                    )
+                    return subprocess.CompletedProcess(args, 0, output, "")
+
+                def launch(path, data, args):
+                    box.create_container(path, data)
+                    return 0
+
+                with (
+                    patch.object(box, "check_backend"),
+                    patch.object(box, "detect_opencode_release", return_value="1.19.5"),
+                    patch.object(box, "check_resource_controllers"),
+                    patch.object(box, "remove_resources"),
+                    patch.object(box, "podman", side_effect=podman),
+                    patch.object(box, "launch", side_effect=launch),
+                    contextlib.redirect_stderr(io.StringIO()),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(
+                        box.main(
+                            [
+                                "reset",
+                                "--workspace",
+                                self.data["id"],
+                                "--cpus",
+                                cpus,
+                                "--memory",
+                                memory,
+                                "--pids-limit",
+                                str(pids),
+                            ]
+                        ),
+                        0,
+                    )
+                command = next(command for command in calls if command[0] == "create")
+                self.assertEqual(command[command.index("--cpus") + 1], expected_cpu)
+                self.assertEqual(
+                    command[command.index("--memory") + 1], expected_memory
+                )
+                self.assertEqual(command[command.index("--pids-limit") + 1], str(pids))
+                saved = box.read_json(self.path)
+                self.assertEqual(
+                    (saved["cpus"], saved["memory"], saved["pids"]),
+                    (expected_cpu, expected_memory, pids),
+                )

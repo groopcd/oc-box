@@ -534,23 +534,57 @@ def reload_workspace(path):
 
 
 def validate_resource_limits(data):
-    """Reject malformed saved/requested limits before reset removes the old OS."""
+    """Validate actual flag literals; canonicalize only effective zero limits."""
+    raw_cpu = data.get("cpus")
+    if type(raw_cpu) not in (str, int, float):
+        raise BoxError("--cpus must be a finite nonnegative ASCII decimal number.")
+    cpu_literal = str(raw_cpu)
+    if not re.fullmatch(
+        r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", cpu_literal
+    ):
+        raise BoxError("--cpus must be a finite nonnegative ASCII decimal number.")
     try:
-        cpus = float(data["cpus"])
-    except (ValueError, TypeError):
+        cpus = float(cpu_literal)
+    except (ValueError, OverflowError):
         cpus = -1
     if not math.isfinite(cpus) or cpus < 0:
         raise BoxError("--cpus must be a finite nonnegative number.")
-    if not re.fullmatch(
-        r"\d+(?:\.\d+)?[ \t]*[kmgtpe]?(?:i?b)?", str(data["memory"]), re.IGNORECASE
-    ):
+    raw_memory = data.get("memory")
+    if type(raw_memory) not in (str, int, float):
         raise BoxError("--memory must be a nonnegative size, such as 8g, 512m, or 0.")
-    if (
-        not isinstance(data["pids"], int)
-        or isinstance(data["pids"], bool)
-        or data["pids"] < 32
-    ):
-        raise BoxError("--pids-limit must be at least 32.")
+    memory_literal = str(raw_memory)
+    size = re.fullmatch(
+        r"([0-9]+(?:\.[0-9]+)?)(?: ?([kmgtpe]i?b?|b))?",
+        memory_literal,
+        re.IGNORECASE | re.ASCII,
+    )
+    if size is None:
+        raise BoxError(
+            "--memory must be an ASCII size with at most one unit separator."
+        )
+    unit = (size[2] or "b")[0].lower()
+    multiplier = 1024 ** "bkmgtpe".index(unit)
+    # Native RAMInBytes parses a float64 coefficient, applies binary units, then
+    # converts to int64. Reject overflow/rounding across that boundary here; do
+    # not infer a kernel/runtime minimum or available host memory from this.
+    amount = float(size[1]) * multiplier
+    if not math.isfinite(amount) or not 0 <= amount < 2**63:
+        raise BoxError(
+            "--memory must fit a finite nonnegative signed 64-bit byte count."
+        )
+    if type(data.get("pids")) is not int or not 32 <= data["pids"] <= 2**63 - 1:
+        raise BoxError("--pids-limit must be between 32 and 9223372036854775807.")
+    data["cpus"] = "0" if cpus == 0 else cpu_literal
+    data["memory"] = "0" if amount < 1 else memory_literal
+
+
+def requested_resource_limits(data, args):
+    limits = {}
+    for key, option in (("cpus", "cpus"), ("memory", "memory"), ("pids", "pids_limit")):
+        requested = getattr(args, option)
+        limits[key] = data.get(key) if requested is None else requested
+    validate_resource_limits(limits)
+    return limits
 
 
 def repair_workspace(path, data):
@@ -3763,6 +3797,10 @@ def main(argv=None):
             raise BoxError(
                 "This workspace restore did not finish. Do not start it; inspect backup recovery staging and use plain purge by ID before retrying into a new destination."
             )
+        if args.command in ("start", "reset", "sync", "web"):
+            # Validate the actual requested literals before even an identity
+            # migration can rewrite metadata, and before credential prompting.
+            limits = requested_resource_limits(data, args)
         if args.command in ("start", "reset", "web"):
             # Validate/unlock before setup or reset changes the environment.
             # Wrong/missing credentials must never destroy the old OS.
@@ -3787,17 +3825,14 @@ def main(argv=None):
                     f"Existing workspace uses {data['distro']}. Use 'oc-box reset --distro {args.distro}' to switch."
                 )
             configure_podman_options(data, args)
-            candidate = {**data}
+            candidate = {**data, **limits}
             for name in ("cpus", "memory"):
-                if getattr(args, name):
+                if getattr(args, name) is not None:
                     if args.command != "reset" and inspect_owned(data):
                         raise BoxError("Change resource limits using 'oc-box reset'.")
-                    candidate[name] = getattr(args, name)
             if args.pids_limit is not None:
                 if args.command != "reset" and inspect_owned(data):
                     raise BoxError("Change resource limits using 'oc-box reset'.")
-                candidate["pids"] = args.pids_limit
-            validate_resource_limits(candidate)
             if args.command == "reset":
                 current_path, _ = find_workspace(data["project"])
                 if current_path != path:
