@@ -1626,6 +1626,110 @@ class WorkspaceBackupTests(unittest.TestCase):
         self.assertTrue(self.archive.is_file())
         self.assertTrue(list((self.path.parent / "backup-captures").glob("*.json")))
 
+    def assert_payload_primary_preserved(self, component, status_name, primary):
+        destination = self.root / (component + "-" + status_name)
+        source_before = {
+            path: (path.read_bytes(), path.stat().st_mode)
+            for path in (
+                self.archive,
+                self.identity,
+                self.path,
+                box.session_file(self.path),
+                self.project / box.MARKER,
+                self.project / "unfinished.txt",
+                self.home / ".local/share/opencode/opencode.db",
+                self.home / ".config/auth.json",
+            )
+        }
+        original = self.decrypt
+        checkpoints = []
+        payload_roots = []
+        volumes_before = dict(self.volumes)
+
+        def decrypt(path, private, consumer):
+            if path.name != component:
+                return original(path, private, consumer)
+            status = Path(consumer[consumer.index("--durability-status") + 1])
+            root = Path(consumer[consumer.index("extract") + 1])
+            payload_roots.append(root)
+            if status_name == "complete":
+                original(path, private, consumer)
+                self.assertEqual(status.read_bytes(), b"complete\n")
+            elif status_name != "pending":
+                checkpoint = root / "partial-payload-checkpoint"
+                checkpoint.write_bytes(b"SYNTHETIC_PARTIAL_PAYLOAD")
+                checkpoints.append(checkpoint)
+                if status_name == "unreadable":
+                    status.unlink()
+                else:
+                    status.write_text(status_name + "\n")
+            else:
+                self.assertEqual(status.read_bytes(), b"pending\n")
+            raise primary
+
+        self.operations.clear()
+        with (
+            patch.object(crypto, "decrypt_stream", side_effect=decrypt),
+            self.assertRaises(BaseException) as error,
+        ):
+            self.restore(destination)
+        records = [
+            (path, box.read_json(path))
+            for path in box.workspace_paths()
+            if box.read_json(path)["project"] == str(destination)
+        ]
+        self.assertFalse(destination.exists())
+        self.assertFalse(
+            any(data["project"] == str(destination) for data in self.created)
+        )
+        if status_name in ("started", "failed", "unreadable"):
+            self.assertEqual(len(records), 1)
+            record_path, record = records[0]
+            self.assertTrue(record["restore_incomplete"])
+            self.assertTrue(record_path.is_file())
+            self.assertTrue(Path(record["restore_staging_project"]).is_dir())
+            self.assertFalse(
+                any(
+                    args[:2] in (("volume", "rm"), ("container", "rm"))
+                    for args in self.operations
+                )
+            )
+            for checkpoint in checkpoints:
+                self.assertEqual(checkpoint.read_bytes(), b"SYNTHETIC_PARTIAL_PAYLOAD")
+            if component != "project.age":
+                self.assertIn(record["home_volume"], self.volumes)
+                self.assertTrue(self.volumes[record["home_volume"]].is_dir())
+        else:
+            self.assertEqual(records, [])
+            self.assertFalse(any(root.exists() for root in payload_roots))
+            self.assertEqual(self.volumes, volumes_before)
+        for path, before in source_before.items():
+            self.assertEqual((path.read_bytes(), path.stat().st_mode), before)
+        self.assertIs(error.exception, primary)
+
+    def test_payload_cancellation_preserves_identity_and_status_scoped_recovery(self):
+        self.backup(portable=True)
+        for component in ("project.age", "home.age", "registry.age"):
+            for status in ("pending", "started", "failed", "unreadable", "complete"):
+                with self.subTest(component=component, status=status):
+                    self.assert_payload_primary_preserved(
+                        component,
+                        status,
+                        KeyboardInterrupt("Synthetic payload cancellation"),
+                    )
+
+    def test_payload_primary_failure_is_not_replaced_by_secondary_durability_state(
+        self,
+    ):
+        self.backup(portable=True)
+        for status in ("started", "failed", "unreadable"):
+            with self.subTest(status=status):
+                self.assert_payload_primary_preserved(
+                    "home.age",
+                    status,
+                    crypto.BackupError("Synthetic authenticated transport failure"),
+                )
+
     def test_each_payload_barrier_failure_retains_its_blocked_journal(self):
         self.backup(portable=True)
         original = self.decrypt

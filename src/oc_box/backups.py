@@ -1043,15 +1043,15 @@ def restore_backup(box, args):
             )
             try:
                 crypto.decrypt_stream(encrypted / name, private, consumer)
-            except BaseException as exc:
+            except BaseException:
                 try:
                     state = read_durability_status(status)
-                except DurabilityError:
+                except BaseException:
                     state = b"unreadable"
                 if state not in (b"pending\n", b"complete\n"):
-                    raise DurabilityError(
-                        "Restore payload durability was not established; blocked recovery state was retained."
-                    ) from exc
+                    # Status uncertainty selects retention, not a new primary
+                    # exception. Preserve the exact transport/cancellation object.
+                    recovery.must_retain = True
                 raise
             state = read_durability_status(status)
             if state != b"complete\n":
