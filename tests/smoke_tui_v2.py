@@ -314,6 +314,36 @@ def exercise(binary, root):
                 flush=True,
             )
 
+            terminal = native(
+                "POST",
+                "/api/experimental/session/" + child + "/terminal",
+                {
+                    "command": "/bin/sh",
+                    "args": ["-c", "sleep 30"],
+                    "cwd": str(foreign),
+                    "title": "Synthetic delete guard",
+                    "env": {},
+                    "size": {"cols": 80, "rows": 24},
+                },
+            )["data"]
+            try:
+                catalog.list()
+                before_mutations = cli.mutation_calls()
+                expect_refusal(
+                    "session-terminal-running", lambda: catalog.prepare_delete(parent)
+                )
+                require(
+                    cli.mutation_calls() == before_mutations,
+                    "Running terminal refusal issued a native session mutation.",
+                )
+            finally:
+                native("DELETE", "/api/experimental/persistent-pty/" + terminal["id"])
+            catalog.list()
+            print(
+                "PASS: a real running persistent shell in a cross-directory child refuses deletion without a session mutation.",
+                flush=True,
+            )
+
             preview = catalog.prepare_delete(parent)
             require(
                 preview["id"] == parent

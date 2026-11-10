@@ -48,6 +48,10 @@ class SessionDemo(DemoBackend):
                 }
             if path == "/api/experimental/job":
                 return {"data": []}
+            if path.startswith("/api/experimental/session/") and path.endswith(
+                "/terminal"
+            ):
+                return {"data": []}
             if path == "/api/session":
                 return {
                     "data": copy.deepcopy(list(self.records.values())),
@@ -293,6 +297,99 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(app, pilot)
             self.assertEqual(app._workspace()["storage"]["project_bytes"], 2 * 1024**3)
             self.assertTrue(app._workspace().get("storage_sampled_at"))
+
+    async def test_disconnect_cancels_pending_connect_and_pagination_without_more_pages(
+        self,
+    ):
+        for phase in ("connect", "page"):
+            with self.subTest(phase=phase):
+
+                class PendingDemo(SessionDemo):
+                    def __init__(self):
+                        super().__init__()
+                        self.entered, self.finish, self.closed_event = (
+                            threading.Event(),
+                            threading.Event(),
+                            threading.Event(),
+                        )
+
+                    def session_connection(self, workspace=None):
+                        base = super().session_connection(workspace)
+                        if phase == "connect":
+                            self.entered.set()
+                            self.finish.wait(5)
+
+                        def request(method, target, body=None):
+                            if (
+                                phase == "page"
+                                and urlparse(target).path == "/api/session"
+                            ):
+                                self.calls.append((method, target, body))
+                                self.entered.set()
+                                self.finish.wait(5)
+                                return {
+                                    "data": [copy.deepcopy(self.records["ses_root"])],
+                                    "cursor": {"next": "next-page"},
+                                }
+                            return base.request(method, target, body)
+
+                        return SessionConnection(
+                            base.origin,
+                            base.store,
+                            request,
+                            base.ownership,
+                            self.closed_event.set,
+                        )
+
+                backend = PendingDemo()
+                app = DashboardApp(backend)
+                async with app.run_test(size=(120, 40)) as pilot:
+                    await self.settle(app, pilot)
+                    app.connect_sessions("global", app.selected)
+                    try:
+                        for _ in range(100):
+                            await pilot.pause(0.01)
+                            if backend.entered.is_set():
+                                break
+                        self.assertTrue(backend.entered.is_set())
+                        app._disconnect_sessions()
+                    finally:
+                        backend.finish.set()
+                    await self.settle(app, pilot)
+                    self.assertTrue(backend.closed_event.is_set())
+                    self.assertIsNone(app.catalog)
+                    self.assertIsNone(app._pending_connection)
+                    self.assertIsNone(app._pending_cancel)
+                    self.assertFalse(
+                        any("cursor=" in target for _, target, _ in backend.calls)
+                    )
+                    self.assertEqual(len(backend.calls), 0 if phase == "connect" else 1)
+
+    async def test_late_mutation_callback_cannot_restore_disconnected_or_replaced_source(
+        self,
+    ):
+        backend = SessionDemo()
+        app = DashboardApp(backend)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.settle(app, pilot)
+            app.connect_sessions("global", app.selected)
+            await self.settle(app, pilot)
+            old_catalog, old_rows, old_generation = (
+                app.catalog,
+                list(app.sessions),
+                app._catalog_generation,
+            )
+            app._disconnect_sessions()
+            app._apply_mutation_result(old_catalog, old_rows, old_generation)
+            self.assertIsNone(app.catalog)
+            self.assertEqual(app.visible_sessions, [])
+            app.connect_sessions("global", app.selected)
+            await self.settle(app, pilot)
+            current, connection = app.catalog, app._session_connection
+            app._apply_mutation_result(old_catalog, [], old_generation)
+            self.assertIs(app.catalog, current)
+            self.assertIs(app._session_connection, connection)
+            self.assertEqual(len(app.visible_sessions), 2)
 
     async def test_terminal_owns_control_keys_but_log_search_remains_clickable(self):
         app = DashboardApp(DemoBackend())

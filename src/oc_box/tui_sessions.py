@@ -339,7 +339,29 @@ class SessionCatalog:
         ):
             _fail("managed-archive-has-children")
         ownership = self._idle([item["id"] for item in selected])
+        self._no_running_terminals(selected)
         return selected, ownership
+
+    def _no_running_terminals(self, selected):
+        # History synchronization deliberately permits idle persistent PTYs.
+        # Deleting their owning session is different: never implicitly interrupt
+        # a shell, including one not represented by foreground/job inventories.
+        for item in selected:
+            response = _call(
+                self.request,
+                "GET",
+                "/api/experimental/session/" + quote(item["id"], safe="") + "/terminal",
+            )
+            terminals = response.get("data") if isinstance(response, dict) else None
+            if not isinstance(terminals, list) or any(
+                not isinstance(terminal, dict)
+                or terminal.get("sessionID") != item["id"]
+                or terminal.get("status") not in ("running", "exited")
+                for terminal in terminals
+            ):
+                _fail("invalid-terminals")
+            if any(terminal["status"] == "running" for terminal in terminals):
+                _fail("session-terminal-running")
 
     def prepare_delete(self, session_id):
         self._validate_binding()
@@ -380,6 +402,7 @@ class SessionCatalog:
             self._unchanged(item)
         if self._idle([item["id"] for item in selected]) != preview["ownership"]:
             _fail("snapshot-changed")
+        self._no_running_terminals(selected)
         self._validate_binding()
         result = _call(
             self.request, "DELETE", "/api/session/" + quote(preview["id"], safe="")

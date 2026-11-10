@@ -10,6 +10,7 @@ from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
+from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
@@ -152,6 +153,10 @@ class DashboardApp(App):
         self._log_lock = threading.Lock()
         self._operation_lock = threading.Lock()
         self._storage_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
+        self._pending_cancel = None
+        self._pending_connection = None
+        self._poll_timer = None
 
     def compose(self) -> ComposeResult:
         yield Static(
@@ -307,7 +312,7 @@ class DashboardApp(App):
         self.query_one("#session-table", DataTable).add_columns(
             "★", "ID", "Title", "Kind", "Native directory"
         )
-        self.set_interval(1, self._tick)
+        self._poll_timer = self.set_interval(1, self._tick)
         self.action_refresh()
 
     def _message(self, value):
@@ -342,16 +347,19 @@ class DashboardApp(App):
         self.query_one("#log-search", Input).focus()
 
     def _tick(self):
-        interval = self.query_one("#refresh-interval", Select).value
-        if (
-            self.query_one("#auto-refresh", Switch).value
-            and time.monotonic() - self._last_report >= interval
-        ):
+        if not self.is_running or not self.is_mounted:
+            return
+        try:
+            interval = self.query_one("#refresh-interval", Select).value
+            auto = self.query_one("#auto-refresh", Switch).value
+            follow = self.query_one("#log-follow", Switch).value
+        except NoMatches:
+            # A timer callback can already be queued while child widgets are
+            # unmounting. Shutdown must not turn it into a UI failure.
+            return
+        if auto and time.monotonic() - self._last_report >= interval:
             self.refresh_report()
-        if (
-            self.query_one("#log-follow", Switch).value
-            and time.monotonic() - self._last_logs >= 2
-        ):
+        if follow and time.monotonic() - self._last_logs >= 2:
             self.refresh_logs()
 
     def action_refresh(self):
@@ -417,6 +425,11 @@ class DashboardApp(App):
             f"CPU {cpu_label}  RAM {size(host.get('memory_bytes'))}/{size(host.get('memory_total_bytes'))}  "
             f"Swap {size(host.get('swap_bytes'))}  Filesystem free {size(fs.get('free_bytes'))}  "
             f"Workspaces {len(workspaces)}"
+            + (
+                f" · {report['inventory_skipped']} invalid registrations skipped"
+                if report.get("inventory_skipped")
+                else ""
+            )
         )
         if cpu is not None:
             self.cpu_history = (self.cpu_history + [cpu])[-60:]
@@ -548,11 +561,9 @@ class DashboardApp(App):
         elif action == "scan-storage":
             self.scan_storage(self.selected)
         elif action == "connect-sessions":
-            self._catalog_generation += 1
             self.connect_sessions(
                 self.query_one("#session-scope", Select).value,
                 self.selected,
-                self._catalog_generation,
             )
         elif action == "disconnect-sessions":
             self._disconnect_sessions()
@@ -682,14 +693,32 @@ class DashboardApp(App):
                 )
             )
 
-    @work(thread=True, group="sessions", exit_on_error=False)
     def connect_sessions(self, scope, workspace, generation=None):
         if self._session_busy or self.demo:
             return
         self._session_busy = True
-        generation = self._catalog_generation if generation is None else generation
+        if generation is None:
+            self._catalog_generation += 1
+            generation = self._catalog_generation
+        cancel = threading.Event()
+        with self._pending_lock:
+            self._pending_cancel = cancel
+        return self._connect_sessions(scope, workspace, generation, cancel)
+
+    @work(thread=True, group="sessions", exit_on_error=False)
+    def _connect_sessions(self, scope, workspace, generation, cancel):
         connection = None
+
+        def cancelled():
+            return (
+                cancel.is_set()
+                or generation != self._catalog_generation
+                or not self.is_running
+            )
+
         try:
+            if cancelled():
+                return
             if scope == "workspace":
                 if not workspace:
                     raise ValueError("No selected workspace")
@@ -700,6 +729,10 @@ class DashboardApp(App):
             connection = self.backend.session_connection(
                 workspace if scope == "workspace" else None
             )
+            with self._pending_lock:
+                if cancelled():
+                    return
+                self._pending_connection = connection
             associations = (
                 self.backend.associations(connection.store)
                 if connection.origin == "host" and self.backend.box
@@ -712,7 +745,7 @@ class DashboardApp(App):
                 ownership=connection.ownership,
                 managed_ids=[a["archive"]["id"] for a in associations],
             )
-            sessions = catalog.list(directory=directory)
+            sessions = catalog.list(directory=directory, cancelled=cancelled)
             if self.is_running:
                 self.call_from_thread(
                     self._connected_sessions,
@@ -721,10 +754,11 @@ class DashboardApp(App):
                     sessions,
                     associations,
                     generation,
+                    cancel,
                 )
                 connection = None
         except Exception:
-            if self.is_running:
+            if self.is_running and not cancelled():
                 self.call_from_thread(
                     self._message,
                     "Session inventory unavailable or incomplete. No workspace was started; previous rows are retained.",
@@ -732,10 +766,23 @@ class DashboardApp(App):
         finally:
             if connection:
                 connection.close()
+            with self._pending_lock:
+                if self._pending_cancel is cancel:
+                    self._pending_cancel = None
+                    self._pending_connection = None
             self._session_busy = False
+
+    def _cancel_pending_connection(self):
+        with self._pending_lock:
+            if self._pending_cancel:
+                self._pending_cancel.set()
+            connection = self._pending_connection
+        if connection:
+            connection.close()
 
     def _disconnect_sessions(self):
         self._catalog_generation += 1
+        self._cancel_pending_connection()
         if self._session_connection:
             self._session_connection.close()
             self._session_connection = None
@@ -743,11 +790,11 @@ class DashboardApp(App):
         self._associations = []
         self._render_sessions()
         self.query_one("#session-details", Static).update(
-            "Session source disconnected; workspace client lease released."
+            "Session source disconnected. Pending inventory is cancelled; its lease releases after the current bounded API request."
         )
 
     def _connected_sessions(
-        self, connection, catalog, sessions, associations, generation
+        self, connection, catalog, sessions, associations, generation, cancel=None
     ):
         if generation != self._catalog_generation:
             connection.close()
@@ -755,6 +802,11 @@ class DashboardApp(App):
                 "Source selection changed; discarded the stale session connection."
             )
             return
+        with self._pending_lock:
+            if self._pending_connection is connection:
+                self._pending_connection = None
+            if self._pending_cancel is cancel:
+                self._pending_cancel = None
         self._disconnect_sessions()
         self._session_connection = connection
         self._associations = associations
@@ -767,6 +819,11 @@ class DashboardApp(App):
         self._message(
             f"Complete {catalog.origin} inventory: {len(sessions)} sessions, including children and archived entries."
         )
+
+    def _apply_mutation_result(self, catalog, sessions, generation):
+        if catalog is not self.catalog or generation != self._catalog_generation:
+            return
+        self._apply_sessions(catalog, sessions)
 
     def _render_sessions(self):
         if not self.is_mounted:
@@ -949,10 +1006,11 @@ class DashboardApp(App):
 
     @work(thread=True, group="session-action", exit_on_error=False)
     def mutate_session(self, catalog, ident, *, archived=None, preview=None):
-        if self.read_only:
+        if self.read_only or catalog is not self.catalog:
             return
         if not self._operation_lock.acquire(blocking=False):
             return
+        generation = self._catalog_generation
         try:
             if archived is None:
                 catalog.delete(preview)
@@ -963,8 +1021,10 @@ class DashboardApp(App):
                     "session.archived" if archived else "session.unarchived", catalog
                 )
             sessions = catalog.list()
-            if self.is_running and catalog is self.catalog:
-                self.call_from_thread(self._apply_sessions, catalog, sessions)
+            if self.is_running:
+                self.call_from_thread(
+                    self._apply_mutation_result, catalog, sessions, generation
+                )
         except Exception:
             if self.is_running:
                 self.call_from_thread(
@@ -1034,6 +1094,10 @@ class DashboardApp(App):
         terminal.focus()
 
     def on_unmount(self):
+        if self._poll_timer:
+            self._poll_timer.stop()
+        self._catalog_generation += 1
+        self._cancel_pending_connection()
         if self._terminal_widget:
             self._terminal_widget.transport.disconnect()
         if self._session_connection:

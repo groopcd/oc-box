@@ -416,13 +416,16 @@ by automatic workspace resume; when no unarchived root remains, the next
 normal start creates a new conversation.  Native deletion is recursive,
 requires a selected verified source/store, descendant review and typed
 ‘DELETE’, with a 50-entry cascade review limit in this initial
-dashboard, and refuses unknown activity/ownership or active/unconsumed
-work.  Host activity checks are process-local and warn about races with
-other native clients; this is not an atomic cross-process transaction.
-There is no bulk delete or permanent mirror suppression.  Source and
-host archive copies are independent, and later normal sync may replace
-or recreate a managed host copy.  Existing V1 launcher commands remain
-supported; these new live manager APIs are V2-only.
+dashboard, and refuses unknown activity/ownership, active/unconsumed
+work, and running persistent terminals anywhere in that cascade
+(including idle shells).  Exit those shells before deletion; archiving
+and history-readiness semantics are unchanged.  Host activity checks are
+process-local and warn about races with other native clients; this is
+not an atomic cross-process transaction.  There is no bulk delete or
+permanent mirror suppression.  Source and host archive copies are
+independent, and later normal sync may replace or recreate a managed
+host copy.  Existing V1 launcher commands remain supported; these new
+live manager APIs are V2-only.
 
 The Terminals tab embeds the existing native persistent-session terminal
 client through a local PTY and optional ‘pyte’ emulator, not a new
@@ -2859,20 +2862,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2613
 Node: Commands6118
-Node: Options64425
-Node: Lifecycle and persistence84554
-Node: Distribution images86674
-Node: Sessions and recovery91549
-Node: Devices and host permissions98134
-Node: Resource reports100480
-Node: Configuration and environment102591
-Node: Files113854
-Node: Exit status119798
-Node: Examples120651
-Node: Troubleshooting122737
-Node: Installation and manuals132065
-Node: Authors and license141285
-Node: See also141892
+Node: Options64600
+Node: Lifecycle and persistence84729
+Node: Distribution images86849
+Node: Sessions and recovery91724
+Node: Devices and host permissions98309
+Node: Resource reports100655
+Node: Configuration and environment102766
+Node: Files114029
+Node: Exit status119973
+Node: Examples120826
+Node: Troubleshooting122912
+Node: Installation and manuals132240
+Node: Authors and license141460
+Node: See also142067
 
 End Tag Table
 

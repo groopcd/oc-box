@@ -336,7 +336,10 @@ when no unarchived root remains, the next normal start creates a new conversatio
 Native deletion is recursive,
 requires a selected verified source/store, descendant review and typed `DELETE`,
 with a 50-entry cascade review limit in this initial dashboard,
-and refuses unknown activity/ownership or active/unconsumed work. Host activity
+and refuses unknown activity/ownership, active/unconsumed work, and running
+persistent terminals anywhere in that cascade (including idle shells).
+Exit those shells before deletion; archiving and history-readiness semantics
+are unchanged. Host activity
 checks are process-local and warn about races with other native clients; this is
 not an atomic cross-process transaction. There is no bulk delete or permanent
 mirror suppression. Source and host archive copies are independent, and later

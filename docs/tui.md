@@ -192,6 +192,13 @@ warning: another host client can change a session after validation and before
 mutation. These guards are not a cross-process transaction or a guarantee that
 recursive deletion cannot race.
 
+Archiving never implicitly closes a running persistent shell. Deletion refuses
+running terminals in its cascade, including idle shells, until they exit.
+The initial inventory can be cancelled by Disconnect or exit; cancellation is
+checked between pages, and its pending lease releases after the current bounded
+native request. A late mutation result cannot restore a disconnected/replaced
+source's rows.
+
 The workspace source and its host archive are independent copies. Deleting or
 archiving a host copy does not delete/archive the workspace source; changing a
 source does not instantly update its mirror. Later normal oc-box sync may

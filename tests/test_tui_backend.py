@@ -58,6 +58,28 @@ class DashboardBackendTests(unittest.TestCase):
         self.assertEqual(self.backend.inventory(), [])
         self.box.run.assert_not_called()
 
+    def test_real_json_wrapper_failure_is_isolated_from_valid_registrations(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            bad, good = root / "bad.json", root / "good.json"
+            bad.write_text("{invalid PRIVATE_VALUE")
+            data = {
+                "id": "a" * 32,
+                "project": "/project",
+                "distro": "debian",
+                "container": "oc-box-fixture",
+                "home_volume": "home-fixture",
+                "image": "debian:stable",
+                "home": "/home/demo",
+            }
+            good.write_text(json.dumps(data))
+            self.box.workspace_paths.return_value = [bad, root / "removed.json", good]
+            self.box.read_json = box.read_json
+            self.assertEqual(self.backend.inventory(), [(good, data)])
+            self.assertEqual(self.backend.inventory_skipped, 2)
+            self.assertEqual(bad.read_text(), "{invalid PRIVATE_VALUE")
+            self.box.run.assert_not_called()
+
     def test_explicit_host_api_has_clean_env_and_204_semantics(self):
         self.box.run.return_value = subprocess.CompletedProcess([], 0, "", "")
         self.assertIsNone(

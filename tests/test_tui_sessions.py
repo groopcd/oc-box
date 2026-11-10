@@ -37,6 +37,7 @@ class NativeFixture:
         self.calls = []
         self.active = {}
         self.jobs = []
+        self.terminals = {}
         self.hook = None
 
     def __call__(self, method, path, body=None):
@@ -47,6 +48,9 @@ class NativeFixture:
             return {"data": copy.deepcopy(self.active)}
         if path == "/api/experimental/job":
             return {"data": copy.deepcopy(self.jobs)}
+        if path.startswith("/api/experimental/session/") and path.endswith("/terminal"):
+            ident = path.split("/")[-2]
+            return {"data": copy.deepcopy(self.terminals.get(ident, []))}
         parsed = urlsplit(path)
         if parsed.path == "/api/session" and method == "GET":
             query = parse_qs(parsed.query)
@@ -431,6 +435,41 @@ class CatalogTests(unittest.TestCase):
                     reason = "snapshot-changed"
                 self.assert_refused(reason, lambda: catalog.delete(preview))
                 self.assertEqual(fixture.mutations(), [])
+
+    def test_delete_refuses_running_terminals_in_other_directory_descendants(self):
+        fixture = NativeFixture(
+            session(), session("ses_child", "/other", parentID="ses_root")
+        )
+        fixture.terminals["ses_child"] = [
+            {"status": "running", "sessionID": "ses_child"}
+        ]
+        catalog = self.catalog(fixture)
+        self.assert_refused(
+            "session-terminal-running", lambda: catalog.prepare_delete("ses_root")
+        )
+        self.assertEqual(fixture.mutations(), [])
+        fixture.terminals["ses_child"] = [
+            {"status": "exited", "sessionID": "ses_child"}
+        ]
+        preview = catalog.prepare_delete("ses_root")
+        fixture.terminals["ses_child"] = [
+            {"status": "running", "sessionID": "ses_child"}
+        ]
+        self.assert_refused("session-terminal-running", lambda: catalog.delete(preview))
+        self.assertEqual(fixture.mutations(), [])
+
+    def test_unknown_terminal_inventory_refuses_delete_without_changing_archive_policy(
+        self,
+    ):
+        fixture = NativeFixture(session())
+        fixture.terminals["ses_root"] = [{"status": "unknown"}]
+        catalog = self.catalog(fixture)
+        self.assert_refused(
+            "invalid-terminals", lambda: catalog.prepare_delete("ses_root")
+        )
+        catalog.list()
+        self.assertIsNone(catalog.archive("ses_root", True))
+        self.assertEqual(len(fixture.mutations()), 1)
 
     def test_preview_tampering_foreign_catalog_and_binding_change_refuse(self):
         fixture = NativeFixture(session())

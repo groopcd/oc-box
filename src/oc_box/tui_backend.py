@@ -156,17 +156,32 @@ class DashboardBackend:
 
     def inventory(self):
         result = []
+        skipped = 0
         for path in self.box.workspace_paths():
             try:
                 data = self.box.read_json(path)
                 if (
                     isinstance(data, dict)
                     and re.fullmatch(r"[0-9a-f]{32}", data.get("id", ""))
-                    and isinstance(data.get("project"), str)
+                    and all(
+                        isinstance(data.get(key), str) and data[key]
+                        for key in (
+                            "project",
+                            "distro",
+                            "container",
+                            "home_volume",
+                            "image",
+                            "home",
+                        )
+                    )
                 ):
                     result.append((path, data))
-            except (OSError, ValueError, TypeError):
+                else:
+                    skipped += 1
+            except (self.box.BoxError, OSError, ValueError, TypeError):
+                skipped += 1
                 continue
+        self.inventory_skipped = skipped
         return result
 
     def selected(self, workspace):
@@ -256,6 +271,7 @@ class DashboardBackend:
             item.pop("podman_args", None)
             item["notes"] = [plain(note) for note in item.get("notes", [])]
         report["host"] = self.sampler.sample()
+        report["inventory_skipped"] = getattr(self, "inventory_skipped", 0)
         report["host"]["filesystem"] = status_report.filesystem_usage(Path.home())
         return report
 
