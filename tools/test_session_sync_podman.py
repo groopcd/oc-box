@@ -3,9 +3,11 @@
 
 Run this file OUTSIDE --source with python3 -I -B. The runner is independently
 hashed; all application and donor helpers come from the clean, full-history
---source/--expect-commit pair. No resume, automatic cleanup, real credentials,
-normal host service, paid inference, or interactive UI acceptance is provided.
+--source/--expect-commit pair. No retained-fixture resume, automatic cleanup, real
+credentials, normal host service, paid inference, or interactive UI acceptance.
 Offline tests of this runner do NOT constitute rootless Podman acceptance.
+Three final ordinary owning starts check archived-root exclusion, creation when
+all roots are archived, and selection after explicit unarchive; no new inference.
 """
 
 import argparse
@@ -72,6 +74,15 @@ CHECKS = frozenset(
         "pending_archive_preservation",
         "pending_exit",
         "sync_recovery",
+        "archived_roots_inventory",
+        "archived_roots_retention",
+        "all_archived_no_resume",
+        "archived_next_start_new_root",
+        "archived_restart_retention",
+        "unarchived_root_eligible",
+        "unarchived_next_start_resume",
+        "unarchived_history_retention",
+        "resume_no_inference",
         "owner_cleanup",
         "unchanged_identity",
         "host_clean",
@@ -120,9 +131,21 @@ CATEGORIES = frozenset(
     )
 )
 SCOPE = (
-    "Scripted native API/CLI, real rootless launcher/history/readiness. "
+    "Scripted native API/CLI, real rootless launcher/history/readiness and "
+    "ordinary owning-start archived-root resume policy. "
     "Not interactive UI, real-provider, network-containment, vault or backup acceptance."
 )
+LAUNCH_STAGES = (
+    "graph",
+    "readiness",
+    "background",
+    "shell",
+    "recovery-sync",
+    "archive_roots",
+    "archived_restart",
+    "unarchived_restart",
+)
+EXPECTED_EXITS = (0, 0, 0, 1, 0, 0, 0, 0)
 STAGES = frozenset(
     (
         "preparation",
@@ -133,6 +156,9 @@ STAGES = frozenset(
         "background",
         "shell",
         "recovery-sync",
+        "archive_roots",
+        "archived_restart",
+        "unarchived_restart",
         "complete",
     )
 )
@@ -494,10 +520,16 @@ def result(
     require(primary is None or primary in CATEGORIES, "report-schema")
     require(all(item in CATEGORIES for item in secondary), "report-schema")
     require(
-        all(type(code) is int and -255 <= code <= 255 for code in exits),
+        len(exits) <= len(LAUNCH_STAGES)
+        and all(type(code) is int and -255 <= code <= 255 for code in exits),
         "report-schema",
     )
-    if primary is None and (set(checks) != CHECKS or not all(checks.values())):
+    if primary is None and (
+        set(checks) != CHECKS
+        or not all(checks.values())
+        or tuple(exits) != EXPECTED_EXITS
+        or stage != "complete"
+    ):
         primary = "missing-checks"
     return {
         "format": FORMAT,
@@ -508,6 +540,8 @@ def result(
         "native": native,
         "checks": checks,
         "launcher_exit_codes": list(exits),
+        "launcher_stages": list(LAUNCH_STAGES[: len(exits)]),
+        "expected_launcher_exit_codes": list(EXPECTED_EXITS),
         "primary_category": primary,
         "secondary_categories": list(secondary),
         "failure_trace": list(failure_trace),
@@ -1261,7 +1295,7 @@ class Harness:
         state = self.box.session_state(self.path)
         require(
             set(state["sessions"]) == graph
-            and state["last"] in graph - {c, d, archived_child}
+            and state["last"] in graph - {c, d, archived, archived_child}
         )
         require(not excluded & set(state["host_sessions"]))
         require(
@@ -1301,7 +1335,7 @@ class Harness:
         require(
             set(state["sessions"]) == graph
             and {a, c, d} <= set(state["missing"])
-            and state["last"] in graph - {archived_child}
+            and state["last"] in graph - {archived, archived_child}
         )
         for ident, before in retained.items():
             preserved(before, self.snapshot(ident))
@@ -1341,6 +1375,8 @@ class Harness:
         self.check("host_child_recovery")
         self.shell_id = self.seed("ses_history_shell")
         self.sync()
+        self.resume_sources = graph | {self.shell_id}
+        self.resume_missing = {a, c, d}
         return 0
 
     def readiness(self, selected):
@@ -1353,6 +1389,7 @@ class Harness:
         self.service.wait_history(self.box, self.data, self.connection, timeout=15)
         self.check("idle_pty_readiness")
         child = self.seed("ses_history_foreground", parent=selected)
+        self.resume_sources.add(child)
         worker = Worker(lambda: self.native_run(child, "SYNTHETIC_HISTORY_FOREGROUND"))
         observer = PairObserver(self.service.api, child)
         observer.phase = "foreground"
@@ -1446,6 +1483,7 @@ class Harness:
 
     def background(self, selected):
         ident = self.seed("ses_history_background", parent=selected)
+        self.resume_sources.add(ident)
         gate = ShellGate(self, marker="SYNTHETIC_HISTORY_BG_DONE")
         self.provider.background = {
             "command": gate.command(),
@@ -1627,6 +1665,7 @@ class Harness:
             and not self.archive_path(self.pending_later).exists()
         )
         self.seed(self.pending_later)
+        self.resume_sources.add(self.pending_later)
         # Do not sync here: the owner's real failing exit pass must both update
         # the earlier archive and discover/import the new later session.
         return 0
@@ -1723,6 +1762,225 @@ class Harness:
 
         return observe
 
+    def resume_inventory(self, expected, *, selected=None):
+        """Use the production complete inventory, bound to known synthetic IDs.
+
+        An omitted archived root, foreign/nested directory, malformed record or
+        duplicate is an oracle refusal, never evidence that a new root is needed.
+        The launcher itself (not this helper) selects/creates every session.
+        """
+        values = self.box.list_container_sessions(self.data)
+        require(isinstance(values, list) and 0 < len(values) <= 32)
+        project = self.box.container_project(self.data)
+        for item in values:
+            require(
+                isinstance(item, dict)
+                and self.box.valid_session_id(item.get("id"))
+                and isinstance(item.get("location"), dict)
+                and item["location"].get("directory") == project
+                and isinstance(item.get("time"), dict)
+                and type(item["time"].get("updated")) in (int, float)
+                and 0 <= item["time"]["updated"] < float("inf")
+                and (
+                    item.get("parentID") is None
+                    or self.box.valid_session_id(item["parentID"])
+                )
+                and (
+                    item["time"].get("archived") is None
+                    or (
+                        type(item["time"]["archived"]) in (int, float)
+                        and 0 <= item["time"]["archived"] < float("inf")
+                    )
+                )
+            )
+        by_id = {item["id"]: item for item in values}
+        require(len(by_id) == len(values) and set(by_id) == expected)
+        if selected is not None:
+            require(
+                selected in by_id
+                and by_id[selected].get("parentID") is None
+                and by_id[selected]["time"].get("archived") is None
+            )
+        return by_id
+
+    def verify_resume_retention(self, expected):
+        values = self.resume_inventory(expected)
+        state = self.box.session_state(self.path)
+        require(
+            set(state["sessions"]) == expected
+            and set(state["missing"]) == self.resume_missing
+        )
+        retained = expected | self.resume_missing
+        require(
+            set(state["synced"]) == retained
+            and set(state["host_sessions"]) == retained
+            and {item.stem for item in (self.path.parent / "history").glob("*.json")}
+            == {self.archive_id(ident) for ident in retained}
+            and {
+                item["id"]
+                for item in self.host("GET", "/api/session?limit=100")["data"]
+            }
+            == {self.archive_id(ident) for ident in retained}
+        )
+        for ident in sorted(retained):
+            require(
+                state["host_sessions"][ident] == self.archive_id(ident)
+                and state["synced"][ident] == file_hash(self.archive_path(ident))
+            )
+        for ident in sorted(expected):
+            source = self.export(ident)
+            require(source == self.resume_exports[ident])
+            require(
+                values[ident].get("parentID") == source["info"].get("parentID")
+                and values[ident]["time"].get("archived")
+                == source["info"]["time"].get("archived")
+            )
+            self.verify_archive(ident)
+        for ident, before in self.resume_deleted.items():
+            preserved(before, self.snapshot(ident))
+
+    def resume_quiet(self):
+        require(
+            (self.provider.requests, self.provider.errors) == self.resume_requests,
+            "provider-contract",
+        )
+
+    def archive_roots(self, selected):
+        # These stages follow shell recovery so archiving cannot change any of
+        # the pre-existing readiness, pending-export or session-order probes.
+        values = self.resume_inventory(self.resume_sources, selected=selected)
+        self.resume_requests = (self.provider.requests, self.provider.errors)
+        self.resume_roots = {
+            ident for ident, item in values.items() if item.get("parentID") is None
+        }
+        self.resume_target = "ses_history_archived"
+        require(
+            selected in self.resume_roots
+            and self.resume_target in self.resume_roots
+            and "ses_history_archived_child" not in self.resume_roots
+        )
+        before = {ident: self.export(ident) for ident in sorted(self.resume_sources)}
+        self.resume_deleted = {
+            ident: self.snapshot(ident) for ident in sorted(self.resume_missing)
+        }
+        require(
+            self.batch(
+                [
+                    ["PATCH", "/api/session/" + ident, {"archived": True}]
+                    for ident in sorted(self.resume_roots)
+                ]
+            )
+            == [None] * len(self.resume_roots)
+        )
+        values = self.resume_inventory(self.resume_sources)
+        self.resume_exports = {}
+        for ident, original in before.items():
+            source = self.export(ident)
+            if ident in self.resume_roots:
+                require(
+                    values[ident]["time"].get("archived") is not None
+                    and source["info"]["time"].get("created")
+                    == original["info"]["time"].get("created")
+                )
+                normalized = json.loads(json.dumps(source))
+                normalized["info"]["time"] = original["info"]["time"]
+                require(normalized == original)
+            else:
+                require(source == original)
+            self.resume_exports[ident] = source
+        self.check("archived_roots_inventory")
+        self.sync()
+        self.verify_resume_retention(self.resume_sources)
+        self.check("archived_roots_retention")
+        require(self.box.session_state(self.path)["last"] is None)
+        self.check("all_archived_no_resume")
+        self.resume_archives = {
+            ident: self.snapshot(ident) for ident in sorted(self.resume_sources)
+        }
+        self.resume_quiet()
+        return 0
+
+    def archived_restart(self, selected):
+        # Selection is observed from the NEXT production owning start, with no
+        # --new, import, resume selector or patched selection/creation function.
+        require(selected not in self.resume_sources | self.resume_missing)
+        expected = self.resume_sources | {selected}
+        values = self.resume_inventory(expected, selected=selected)
+        require(
+            all(
+                values[ident]["time"].get("archived") is not None
+                for ident in self.resume_roots
+            )
+        )
+        self.resume_exports[selected] = self.export(selected)
+        self.sync()
+        require(self.box.session_state(self.path)["last"] == selected)
+        self.verify_resume_retention(expected)
+        self.check("archived_next_start_new_root")
+        for ident, before in self.resume_archives.items():
+            preserved(before, self.snapshot(ident))
+        self.check("archived_restart_retention")
+        self.resume_sources = expected
+        self.resume_new = selected
+
+        # Native title updates advance updated metadata. Require a strictly
+        # newest eligible root before exit; ties cannot certify next-start policy.
+        original = self.resume_exports[self.resume_target]
+
+        def unarchive_latest():
+            require(
+                self.request(
+                    "PATCH",
+                    "/api/session/" + self.resume_target,
+                    {"archived": False, "title": "SYNTHETIC_UNARCHIVED_RESUME_ROOT"},
+                )
+                is None
+            )
+            current = self.resume_inventory(expected, selected=self.resume_target)
+            return current[self.resume_target]["time"]["updated"] > max(
+                item["time"]["updated"]
+                for ident, item in current.items()
+                if ident != self.resume_target
+                and item.get("parentID") is None
+                and item["time"].get("archived") is None
+            )
+
+        self.until(unarchive_latest, timeout=5)
+        source = self.export(self.resume_target)
+        require(
+            source["info"]["time"].get("archived") is None
+            and source["info"]["time"].get("created")
+            == original["info"]["time"].get("created")
+        )
+        normalized = json.loads(json.dumps(source))
+        normalized["info"]["time"] = original["info"]["time"]
+        normalized["info"]["title"] = original["info"]["title"]
+        require(normalized == original)
+        self.resume_exports[self.resume_target] = source
+        self.sync()
+        self.verify_resume_retention(expected)
+        require(self.box.session_state(self.path)["last"] == self.resume_target)
+        self.check("unarchived_root_eligible")
+        self.resume_archives = {
+            ident: self.snapshot(ident) for ident in sorted(expected)
+        }
+        self.resume_quiet()
+        return 0
+
+    def unarchived_restart(self, selected):
+        require(selected == self.resume_target and selected != self.resume_new)
+        self.resume_inventory(self.resume_sources, selected=selected)
+        self.sync()
+        require(self.box.session_state(self.path)["last"] == self.resume_target)
+        self.verify_resume_retention(self.resume_sources)
+        self.check("unarchived_next_start_resume")
+        for ident, before in self.resume_archives.items():
+            preserved(before, self.snapshot(ident))
+        self.check("unarchived_history_retention")
+        self.resume_quiet()
+        self.check("resume_no_inference")
+        return 0
+
     def run(self):
         self.stage = "private-store"
         self.validate(initial=True)
@@ -1772,6 +2030,9 @@ class Harness:
             == file_hash(self.archive_path(self.shell_id))
         )
         self.check("sync_recovery")
+        self.launch(self.archive_roots)
+        self.launch(self.archived_restart)
+        self.launch(self.unarchived_restart)
         self.check("owner_cleanup")
         self.same_identity()
         self.check("unchanged_identity")

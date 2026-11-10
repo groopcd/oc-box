@@ -310,6 +310,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         native.write_bytes(b"synthetic-native")
         harness = runner.Harness(loaded, self.parent, native, runner.file_hash(SCRIPT))
         harness.validate_native_config = Mock()
+        harness.resume_sources = set()
         return harness
 
     def test_validate_refusals_never_reach_engine_or_resource_inspection(self):
@@ -402,9 +403,41 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             identity,
             digest,
             native,
-            exits=(0, 0, 0, 1, 0),
+            exits=runner.EXPECTED_EXITS,
+            stage="complete",
         )
         self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["launcher_stages"], list(runner.LAUNCH_STAGES))
+        self.assertEqual(
+            report["expected_launcher_exit_codes"], list(runner.EXPECTED_EXITS)
+        )
+        self.assertEqual(len(report["checks"]), 42)
+        for missing in runner.CHECKS:
+            incomplete = runner.result(
+                dict.fromkeys(runner.CHECKS - {missing}, True),
+                identity,
+                digest,
+                native,
+                exits=runner.EXPECTED_EXITS,
+                stage="complete",
+            )
+            self.assertEqual(incomplete["status"], "FAIL", missing)
+        for exits, stage in (
+            ((0, 0, 0, 1, 0), "complete"),
+            (runner.EXPECTED_EXITS[:-1], "complete"),
+            ((0,) * 8, "complete"),
+            (runner.EXPECTED_EXITS, "unarchived_restart"),
+        ):
+            with self.subTest(exits=exits, stage=stage):
+                incomplete = runner.result(
+                    dict.fromkeys(runner.CHECKS, True),
+                    identity,
+                    digest,
+                    native,
+                    exits=exits,
+                    stage=stage,
+                )
+                self.assertEqual(incomplete["status"], "FAIL")
         self.assertIn(
             "transient completed-job row (not required or claimed)",
             report["not_covered"],
@@ -416,6 +449,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             ({}, "private-sentinel", (), ()),
             ({}, None, ("private-sentinel",), ()),
             ({}, None, (), (True,)),
+            ({}, None, (), (0,) * 9),
         ):
             with (
                 self.subTest(checks=checks, primary=primary),
@@ -499,6 +533,569 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         with self.assertRaises(runner.Refusal):
             harness.sync()
         harness.box.sync_sessions.assert_not_called()
+
+    def resume_harness(self):
+        """Private synthetic oracle inputs, not a native/runtime implementation."""
+        harness = self.harness()
+        harness.path, harness.data = self.parent / "workspace.json", {"id": "fixture"}
+        project = "/synthetic/source-a"
+        harness.box.container_project = Mock(return_value=project)
+        harness.box.valid_session_id = lambda ident: (
+            isinstance(ident, str) and ident.startswith("ses_") and ident.isascii()
+        )
+        harness.box.read_json = lambda path: json.loads(path.read_text())
+        harness.box.verify_host_archive = Mock()
+        harness.box.session_file = lambda _path: self.parent / "sessions.json"
+        harness.archive_id = lambda ident, prefix="ses": prefix + "_copy_" + ident
+        harness.provider = SimpleNamespace(requests=4, errors=0)
+        active, target = "ses_history_active", "ses_history_archived"
+        child, archived_child = "ses_history_child", "ses_history_archived_child"
+        deleted = "ses_history_deleted"
+        sources = {
+            ident: harness.seed_value(ident, project, parent=parent, archived=archived)
+            for ident, parent, archived in (
+                (active, None, False),
+                (target, None, True),
+                (child, active, False),
+                (archived_child, target, True),
+            )
+        }
+        # Native export omits the import envelope's location member.
+        for value in sources.values():
+            value.pop("location")
+        harness.resume_sources = set(sources)
+        harness.resume_missing = {deleted}
+        state = {
+            "sessions": [],
+            "missing": [deleted],
+            "synced": {},
+            "host_sessions": {},
+        }
+        harness.box.session_state = Mock(return_value=state)
+        history = self.parent / "history"
+        history.mkdir(exist_ok=True)
+        copies, calls = {}, []
+
+        def copy_source(ident, source):
+            value = copy.deepcopy(source)
+            info = value["info"]
+            info["id"] = harness.archive_id(ident)
+            info["title"] = "[oc-box source-a] " + info.get("title", "Session")
+            if info.get("parentID"):
+                info["metadata"]["oc-box.archive"] = {
+                    "version": 1,
+                    "parentID": harness.archive_id(info["parentID"]),
+                }
+            for field in ("permissions", "parentID", "fork", "revert"):
+                info.pop(field, None)
+            for message in value["messages"]:
+                message["id"] = harness.archive_id(message["id"], "msg")
+            path = harness.archive_path(ident)
+            path.write_text(json.dumps(value, sort_keys=True))
+            copies[harness.archive_id(ident)] = value
+            state["synced"][ident] = runner.file_hash(path)
+            state["host_sessions"][ident] = harness.archive_id(ident)
+
+        def inventory():
+            return [copy.deepcopy(value["info"]) for value in sources.values()]
+
+        harness.box.list_container_sessions = Mock(
+            side_effect=lambda _data: inventory()
+        )
+        harness.export = Mock(
+            side_effect=lambda ident, host=False: copy.deepcopy(
+                copies[ident] if host else sources[ident]
+            )
+        )
+        harness.host = Mock(
+            side_effect=lambda method, route: {
+                "data": [copy.deepcopy(value["info"]) for value in copies.values()]
+            }
+        )
+        tick = 100
+
+        def request(method, route, value=None):
+            nonlocal tick
+            self.assertEqual(method, "PATCH")
+            ident = route.removeprefix("/api/session/")
+            self.assertIn(ident, sources)
+            calls.append((method, ident, copy.deepcopy(value)))
+            info = sources[ident]["info"]
+            tick += 1
+            info["time"]["updated"] = tick
+            if value["archived"]:
+                info["time"]["archived"] = tick
+            else:
+                info["time"].pop("archived", None)
+            if "title" in value:
+                info["title"] = value["title"]
+            return None
+
+        harness.request = Mock(side_effect=request)
+        harness.batch = Mock(
+            side_effect=lambda operations: [
+                request(*operation) for operation in operations
+            ]
+        )
+
+        def sync():
+            calls.append("sync")
+            state["sessions"] = list(sources)
+            roots = [
+                info
+                for info in inventory()
+                if not info.get("parentID") and info["time"].get("archived") is None
+            ]
+            state["last"] = (
+                max(roots, key=lambda info: info["time"]["updated"])["id"]
+                if roots
+                else None
+            )
+            for ident, source in sources.items():
+                copy_source(ident, source)
+            harness.box.session_file(harness.path).write_text(json.dumps(state))
+
+        harness.sync = Mock(side_effect=sync)
+        deleted_source = harness.seed_value(deleted, project)
+        deleted_source.pop("location")
+        copy_source(deleted, deleted_source)
+        sync()
+        calls.clear()
+        return harness, sources, copies, state, calls
+
+    def test_resume_stages_preserve_all_sources_children_deleted_and_host_copies(self):
+        harness, sources, _copies, state, calls = self.resume_harness()
+        original = copy.deepcopy(sources)
+        old_ids = set(sources)
+        self.assertEqual(harness.archive_roots("ses_history_active"), 0)
+        self.assertIsNone(state["last"])
+        self.assertEqual(set(state["sessions"]), old_ids)
+        self.assertEqual(
+            [item[1] for item in calls if isinstance(item, tuple)],
+            ["ses_history_active", "ses_history_archived"],
+        )
+        for ident in ("ses_history_child", "ses_history_archived_child"):
+            self.assertEqual(sources[ident], original[ident])
+        self.assertTrue(
+            all(
+                source["messages"] == original[ident]["messages"]
+                for ident, source in sources.items()
+            )
+        )
+        new = "ses_history_new"
+        sources[new] = harness.seed_value(new, "/synthetic/source-a")
+        sources[new].pop("location")
+        sources[new]["info"]["time"]["updated"] = 100
+        self.assertEqual(harness.archived_restart(new), 0)
+        self.assertEqual(state["last"], "ses_history_archived")
+        self.assertEqual(set(state["sessions"]), old_ids | {new})
+        self.assertEqual(harness.unarchived_restart("ses_history_archived"), 0)
+        self.assertEqual(
+            set(harness.checks),
+            {
+                "archived_roots_inventory",
+                "archived_roots_retention",
+                "all_archived_no_resume",
+                "archived_next_start_new_root",
+                "archived_restart_retention",
+                "unarchived_root_eligible",
+                "unarchived_next_start_resume",
+                "unarchived_history_retention",
+                "resume_no_inference",
+            },
+        )
+        self.assertEqual(harness.provider.requests, 4)
+        harness.box.verify_host_archive.assert_any_call(
+            harness.path, harness.data, harness.box.read_json(harness.archive_path(new))
+        )
+
+    def test_resume_inventory_refuses_incomplete_invalid_or_ineligible_selection(self):
+        mutations = {
+            "omitted archived root": lambda rows: rows.pop(1),
+            "duplicate": lambda rows: rows.append(copy.deepcopy(rows[0])),
+            "foreign": lambda rows: rows[0]["location"].update(directory="/foreign"),
+            "nested": lambda rows: rows[0]["location"].update(
+                directory="/synthetic/source-a/nested"
+            ),
+            "invalid id": lambda rows: rows[0].update(id=None),
+            "invalid parent": lambda rows: rows[0].update(parentID=7),
+            "missing time": lambda rows: rows[0].pop("time"),
+            "invalid updated": lambda rows: rows[0]["time"].update(updated=True),
+            "nan updated": lambda rows: rows[0]["time"].update(updated=float("nan")),
+            "invalid archived": lambda rows: rows[1]["time"].update(archived="private"),
+            "non-record": lambda rows: rows.append(None),
+        }
+        for name, mutate in mutations.items():
+            harness, _sources, _copies, _state, _calls = self.resume_harness()
+            rows = harness.box.list_container_sessions(harness.data)
+            mutate(rows)
+            harness.box.list_container_sessions.side_effect = None
+            harness.box.list_container_sessions.return_value = rows
+            with self.subTest(defect=name), self.assertRaises(runner.Refusal):
+                harness.archive_roots("ses_history_active")
+            harness.batch.assert_not_called()
+            self.assertEqual(harness.checks, {})
+        harness, _sources, _copies, _state, _calls = self.resume_harness()
+        for ident in (
+            "ses_history_archived",
+            "ses_history_child",
+            "ses_history_archived_child",
+            "ses_foreign",
+        ):
+            with self.subTest(selected=ident), self.assertRaises(runner.Refusal):
+                harness.resume_inventory(harness.resume_sources, selected=ident)
+
+    def test_existing_graph_checkpoints_both_refuse_an_archived_root_as_last(self):
+        # Execute the old graph's two selection assertions with synthetic
+        # transports. This catches regression to root-only (not archive-aware)
+        # selection without replacing any assertion in the host runner.
+        for failing_sync in (1, 3):
+            harness = self.harness()
+            harness.path, harness.data = self.parent / "workspace.json", {}
+            project = "/synthetic/source-a"
+            harness.box.container_project = lambda _data: project
+            harness.container_python = Mock()
+            harness.archive_id = lambda ident: "ses_copy_" + ident
+            harness.verify_archive = Mock()
+            harness.snapshot = lambda _ident: {
+                "private": b"old",
+                "host": {},
+                "synced": "old",
+            }
+            source = {"ses_initial": harness.seed_value("ses_initial", project)}
+            archives = set()
+            state = {}
+            count = 0
+
+            def inventory(_data):
+                return [
+                    value["info"]
+                    for value in source.values()
+                    if value["info"]["location"]["directory"] == project
+                ]
+
+            def request(method, route, value=None):
+                if route == "/api/experimental/session/import":
+                    source[value["info"]["id"]] = copy.deepcopy(value)
+                elif route.endswith("/fork"):
+                    source["ses_fork"] = harness.seed_value("ses_fork", project)
+                    return {"data": {"id": "ses_fork"}}
+                elif route.endswith("/revert/stage"):
+                    source["ses_history_a"]["info"]["revert"] = value
+                elif route.startswith("/api/session?"):
+                    return {"data": inventory(None)[:100], "cursor": {"next": "next"}}
+                elif method == "PATCH":
+                    source[route.rsplit("/", 1)[-1]]["info"].update(value)
+                elif method == "DELETE":
+                    ident = route.rsplit("/", 1)[-1]
+                    for removed in (
+                        {ident, "ses_history_c", "ses_history_d"}
+                        if ident == "ses_history_a"
+                        else {ident}
+                    ):
+                        source.pop(removed)
+                return None
+
+            def sync():
+                nonlocal count
+                count += 1
+                ids = {item["id"] for item in inventory(None)}
+                state.update(
+                    sessions=list(ids),
+                    missing=["ses_history_a", "ses_history_c", "ses_history_d"]
+                    if count >= 3
+                    else [],
+                )
+                state["last"] = (
+                    "ses_history_archived" if count == failing_sync else "ses_history_b"
+                )
+                state["host_sessions"] = {
+                    ident: harness.archive_id(ident) for ident in ids
+                }
+                archives.update(harness.archive_id(ident) for ident in ids)
+
+            harness.request = request
+            harness.batch = lambda operations: [
+                request(*operation) for operation in operations
+            ]
+            harness.export = lambda ident: {
+                key: copy.deepcopy(source[ident][key]) for key in ("info", "messages")
+            }
+            harness.box.list_container_sessions = inventory
+            harness.box.session_state = lambda _path: state
+            harness.sync = sync
+            harness.host = lambda *_args: {
+                "data": [{"id": ident} for ident in archives]
+            }
+
+            # Only file names are observed before the second selection check.
+            def history_glob(path, pattern):
+                self.assertEqual(pattern, "*.json")
+                return [path / (ident + ".json") for ident in archives]
+
+            with (
+                self.subTest(checkpoint=failing_sync),
+                patch.object(Path, "glob", history_glob),
+                self.assertRaises(runner.Refusal),
+            ):
+                harness.graph("ses_initial")
+            self.assertEqual(count, failing_sync)
+            self.assertNotIn("deleted_source_retention", harness.checks)
+            self.assertEqual("scoped_graph" in harness.checks, failing_sync == 3)
+
+    def test_next_start_cannot_reuse_old_archived_child_missing_or_foreign_session(
+        self,
+    ):
+        for defect in (
+            "old root",
+            "child",
+            "deleted",
+            "foreign",
+            "archived new",
+            "new child",
+            "extra new",
+        ):
+            harness, sources, _copies, _state, _calls = self.resume_harness()
+            harness.archive_roots("ses_history_active")
+            selected = {
+                "old root": "ses_history_archived",
+                "child": "ses_history_child",
+                "deleted": "ses_history_deleted",
+            }.get(defect, "ses_history_new")
+            if selected not in harness.resume_sources | harness.resume_missing:
+                sources[selected] = harness.seed_value(selected, "/synthetic/source-a")
+                sources[selected].pop("location")
+                info = sources[selected]["info"]
+                if defect == "foreign":
+                    info["location"]["directory"] = "/synthetic/foreign"
+                elif defect == "archived new":
+                    info["time"]["archived"] = 1
+                elif defect == "new child":
+                    info["parentID"] = "ses_history_archived"
+                elif defect == "extra new":
+                    sources["ses_extra"] = harness.seed_value(
+                        "ses_extra", "/synthetic/source-a"
+                    )
+            with self.subTest(defect=defect), self.assertRaises(runner.Refusal):
+                harness.archived_restart(selected)
+            self.assertNotIn("archived_next_start_new_root", harness.checks)
+
+    def test_resume_retention_refuses_lost_history_parent_links_archives_or_host_copy(
+        self,
+    ):
+        for defect in (
+            "source removed",
+            "source messages",
+            "source parent",
+            "inventory parent",
+            "state source",
+            "state missing",
+            "state association",
+            "deleted association",
+            "state checkpoint",
+            "private copy",
+            "host copy",
+            "deleted copy",
+        ):
+            harness, sources, copies, state, _calls = self.resume_harness()
+            harness.archive_roots("ses_history_active")
+            child, active = "ses_history_child", "ses_history_active"
+            if defect == "source removed":
+                sources.pop(child)
+            elif defect == "source messages":
+                sources[child]["messages"] = []
+            elif defect == "source parent":
+                sources[child]["info"]["parentID"] = "ses_other"
+            elif defect == "inventory parent":
+                rows = harness.box.list_container_sessions(harness.data)
+                next(row for row in rows if row["id"] == child)["parentID"] = (
+                    "ses_other"
+                )
+                harness.box.list_container_sessions = Mock(return_value=rows)
+            elif defect == "state source":
+                state["sessions"].remove(child)
+            elif defect == "state missing":
+                state["missing"] = []
+            elif defect == "state association":
+                state["host_sessions"][child] = harness.archive_id(active)
+            elif defect == "deleted association":
+                state["host_sessions"]["ses_history_deleted"] = harness.archive_id(
+                    active
+                )
+            elif defect == "state checkpoint":
+                state["synced"][child] = "old"
+            elif defect == "private copy":
+                harness.archive_path(child).write_text("{}")
+            elif defect == "host copy":
+                copies[harness.archive_id(child)]["messages"] = []
+            else:
+                copies[harness.archive_id("ses_history_deleted")]["messages"] = []
+            with self.subTest(defect=defect), self.assertRaises(runner.Refusal):
+                harness.verify_resume_retention(harness.resume_sources)
+
+    def test_unarchived_next_start_requires_actual_target_not_only_last_metadata(self):
+        harness, sources, _copies, state, _calls = self.resume_harness()
+        harness.archive_roots("ses_history_active")
+        new = "ses_history_new"
+        sources[new] = harness.seed_value(new, "/synthetic/source-a")
+        sources[new].pop("location")
+        harness.archived_restart(new)
+        self.assertEqual(state["last"], harness.resume_target)
+        for selected in (
+            new,
+            "ses_history_child",
+            "ses_history_archived_child",
+            "ses_other",
+        ):
+            with self.subTest(selected=selected), self.assertRaises(runner.Refusal):
+                harness.unarchived_restart(selected)
+            self.assertNotIn("unarchived_next_start_resume", harness.checks)
+        harness.provider.requests += 1
+        with self.assertRaisesRegex(runner.Refusal, "provider-contract"):
+            harness.unarchived_restart(harness.resume_target)
+        self.assertNotIn("resume_no_inference", harness.checks)
+
+    def test_unarchive_requires_strictly_newest_native_metadata_with_bounded_wait(self):
+        harness, sources, _copies, _state, _calls = self.resume_harness()
+        harness.archive_roots("ses_history_active")
+        new = "ses_history_new"
+        sources[new] = harness.seed_value(new, "/synthetic/source-a")
+        sources[new].pop("location")
+        # A future-dated eligible root must not produce a metadata-only pass.
+        sources[new]["info"]["time"]["updated"] = 10000
+        with (
+            patch.object(runner.time, "monotonic", side_effect=(0, 6)),
+            self.assertRaisesRegex(runner.Refusal, "gate-timeout"),
+        ):
+            harness.archived_restart(new)
+        harness.request.assert_called_once_with(
+            "PATCH",
+            "/api/session/ses_history_archived",
+            {"archived": False, "title": "SYNTHETIC_UNARCHIVED_RESUME_ROOT"},
+        )
+        self.assertNotIn("unarchived_root_eligible", harness.checks)
+
+    def test_archive_roots_requires_real_no_content_mutations_and_empty_resume_choice(
+        self,
+    ):
+        for defect in (
+            "json success",
+            "root unchanged",
+            "child changed",
+            "source history",
+            "last still set",
+        ):
+            harness, sources, _copies, state, _calls = self.resume_harness()
+            batch, sync = harness.batch.side_effect, harness.sync.side_effect
+
+            def mutate(operations):
+                result = batch(operations)
+                if defect == "json success":
+                    return [{"success": True}] * len(operations)
+                if defect == "root unchanged":
+                    sources["ses_history_active"]["info"]["time"].pop("archived")
+                elif defect == "child changed":
+                    sources["ses_history_child"]["info"]["time"]["archived"] = 1
+                elif defect == "source history":
+                    sources["ses_history_active"]["messages"] = []
+                return result
+
+            def wrong_last():
+                sync()
+                state["last"] = "ses_history_archived"
+
+            harness.batch.side_effect = mutate
+            if defect == "last still set":
+                harness.sync.side_effect = wrong_last
+            with self.subTest(defect=defect), self.assertRaises(runner.Refusal):
+                harness.archive_roots("ses_history_active")
+            self.assertNotIn("all_archived_no_resume", harness.checks)
+
+    def test_launch_uses_ordinary_no_vault_start_and_observes_its_selected_session(
+        self,
+    ):
+        harness = self.harness()
+        selected = "ses_native_selection"
+        harness.validate = Mock()
+        harness.stopped = Mock()
+        harness.bind = Mock(return_value=selected)
+        harness.f.no_vault_probe = contextlib.nullcontext
+        harness.service.Owner = SimpleNamespace(publish=Mock(), wait_clients=Mock())
+        harness.service.api = Mock(return_value={"native": True})
+
+        @contextlib.contextmanager
+        def attach(_box, _path, _data):
+            yield {"session": selected}
+
+        harness.service.attach = attach
+        harness.box.run_tui = Mock()
+        harness.box.main = Mock(
+            side_effect=lambda arguments: harness.box.run_tui(["native-client"])
+        )
+        harness.path, harness.data = self.parent / "workspace.json", {}
+        observed = []
+
+        def archived_restart(ident):
+            observed.append(ident)
+            return 0
+
+        harness.launch(archived_restart)
+        harness.box.main.assert_called_once_with(
+            [
+                "start",
+                "--project",
+                str(self.parent / "source-a"),
+                "--no-vault",
+            ]
+        )
+        harness.bind.assert_called_once_with(["native-client"])
+        self.assertEqual(observed, [selected])
+        self.assertEqual(harness.exits, [0])
+        harness.stopped.assert_called_once()
+
+    def test_run_preserves_old_launch_sequence_then_three_final_ordinary_starts(self):
+        harness, _sources, _copies, _state, _calls = self.resume_harness()
+        harness.validate = Mock()
+        harness.stopped = Mock()
+        harness.same_identity = Mock()
+        harness.f.prepare_native_cli = Mock()
+        harness.box.main = Mock(return_value=0)
+        harness.box.sync_sessions = Mock()
+        harness.lease = SimpleNamespace(join=Mock())
+        harness.shell_id = "ses_history_active"
+        stages = []
+
+        def launch(callback, *, expected=0, **_options):
+            stages.append(callback.__name__)
+            harness.exits.append(expected)
+
+        harness.launch = launch
+        harness.box.read_json = Mock(
+            return_value={
+                "messages": [{"type": "shell", "status": "exited", "exit": 0}]
+            }
+        )
+        harness.run()
+        self.assertEqual(
+            stages,
+            [
+                "graph",
+                "readiness",
+                "background",
+                "shell",
+                "archive_roots",
+                "archived_restart",
+                "unarchived_restart",
+            ],
+        )
+        self.assertEqual(tuple(harness.exits), (0, 0, 0, 1, 0, 0, 0, 0))
+        self.assertEqual(tuple(harness.exits), runner.EXPECTED_EXITS)
+        self.assertEqual(
+            runner.LAUNCH_STAGES, tuple(stages[:4] + ["recovery-sync"] + stages[4:])
+        )
+        harness.box.main.assert_called_once_with(["sync", "--workspace", "fixture"])
+        harness.lease.join.assert_called_once_with(5)
+        self.assertEqual(harness.stage, "complete")
 
     def pending_harness(self):
         """Synthetic observer inputs, never a production-runtime replacement."""
