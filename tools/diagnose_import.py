@@ -188,37 +188,42 @@ def live_export(path, data, session, source, state):
             )
         state["stage"] = "backend"
         box.check_backend()
-        state["stage"] = "inspect"
-        info = box.inspect_owned(data)
-        if info is None:
-            raise box.BoxError("Workspace container is missing")
-        running = info["State"]["Running"]
-        if type(running) is not bool:
-            raise ValueError("Invalid container state")
-        primary = None
-        try:
-            if not running:
-                state["stage"] = "start"
-                box.podman("start", data["container"], capture=True, private=True)
-            state["stage"] = "export"
-            actual = box.export_container_session(data, session)
-            validate_export(actual, session)
-            return actual
-        except BaseException as error:
-            primary = error
-            raise
-        finally:
-            if not running:
-                try:
-                    box.stop_container(data)
-                except BaseException as error:
-                    if primary is None:
-                        state["stage"] = "stop"
-                        raise
-                    if error is not primary:
-                        state["secondary_failures"].append(
-                            {"stage": "stop", "category": error_category(error)}
-                        )
+        return export_owned_transcript(data, session, state)
+
+
+def export_owned_transcript(data, session, state):
+    """Export with running-state recovery; caller holds the lock and preflight."""
+    state["stage"] = "inspect"
+    info = box.inspect_owned(data, private=True)
+    if info is None:
+        raise box.BoxError("Workspace container is missing")
+    running = info["State"]["Running"]
+    if type(running) is not bool:
+        raise ValueError("Invalid container state")
+    primary = None
+    try:
+        if not running:
+            state["stage"] = "start"
+            box.podman("start", data["container"], capture=True, private=True)
+        state["stage"] = "export"
+        actual = box.export_container_session(data, session, private=True)
+        validate_export(actual, session)
+        return actual
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        if not running:
+            try:
+                box.stop_container(data, private=True)
+            except BaseException as error:
+                if primary is None:
+                    state["stage"] = "stop"
+                    raise
+                if error is not primary:
+                    state["secondary_failures"].append(
+                        {"stage": "stop", "category": error_category(error)}
+                    )
 
 
 def validate_export(exported, session):

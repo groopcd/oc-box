@@ -100,7 +100,7 @@ class DiagnoseImportTests(unittest.TestCase):
             workspace_lock=Mock(side_effect=lambda path: contextlib.nullcontext()),
             inspect_owned=Mock(return_value={"State": {"Running": True}}),
             export_container_session=Mock(
-                side_effect=lambda data, session: copy.deepcopy(self.actual)
+                side_effect=lambda data, session, **options: copy.deepcopy(self.actual)
             ),
             verify_session_import=box.verify_session_import,
             container_project=box.container_project,
@@ -592,7 +592,7 @@ class DiagnoseImportTests(unittest.TestCase):
             report["secondary_failures"], [{"stage": "stop", "category": "os-error"}]
         )
         self.assert_private_absent(output, errors)
-        self.fake.stop_container.assert_called_once_with(self.data)
+        self.fake.stop_container.assert_called_once_with(self.data, private=True)
 
     def test_successful_live_body_stop_failure_even_inside_caller_except_is_error(self):
         self.fake.inspect_owned.return_value = {"State": {"Running": False}}
@@ -619,7 +619,7 @@ class DiagnoseImportTests(unittest.TestCase):
         with self.assertRaises(box.BoxError) as raised:
             diagnostic.main(self.arguments)
         self.assertIs(raised.exception, primary)
-        self.fake.stop_container.assert_called_once_with(self.data)
+        self.fake.stop_container.assert_called_once_with(self.data, private=True)
         self.fake.export_container_session.assert_not_called()
 
     def test_live_cancellation_identity_survives_stop_failure_in_actual_main(self):
@@ -871,7 +871,9 @@ class DiagnoseImportTests(unittest.TestCase):
                     self.fake.podman.assert_called_once_with(
                         "start", self.data["container"], capture=True, private=True
                     )
-                    self.fake.stop_container.assert_called_once_with(self.data)
+                    self.fake.stop_container.assert_called_once_with(
+                        self.data, private=True
+                    )
 
     def test_lock_finalizer_failure_preserves_primary_identity_and_fails_success(self):
         class FailingLock:
@@ -893,8 +895,8 @@ class DiagnoseImportTests(unittest.TestCase):
             state["secondary_failures"],
             [{"stage": "workspace-unlock", "category": "os-error"}],
         )
-        self.fake.export_container_session.side_effect = lambda data, session: (
-            copy.deepcopy(self.actual)
+        self.fake.export_container_session.side_effect = (
+            lambda data, session, **options: copy.deepcopy(self.actual)
         )
         try:
             raise RuntimeError("handled caller exception")
@@ -999,6 +1001,8 @@ class DiagnoseImportTests(unittest.TestCase):
     def test_locked_freshness_refuses_completed_intervening_changes_before_native_io(
         self,
     ):
+        self.data["project_identity"] = [11, 22]
+        self.data["registration_context"] = {"policy": {"selected": ["original"]}}
         original_data, original_source = (
             copy.deepcopy(self.data),
             copy.deepcopy(self.source),
@@ -1007,6 +1011,7 @@ class DiagnoseImportTests(unittest.TestCase):
             "unchanged",
             "version",
             "identity",
+            "registration-nested",
             "container",
             "registration-path",
             "source",
@@ -1024,34 +1029,48 @@ class DiagnoseImportTests(unittest.TestCase):
                     replacement["opencode_version"] = "2.2.6"
                 elif case == "identity":
                     replacement["project_identity"] = [991, 882]
+                elif case == "registration-nested":
+                    replacement["registration_context"]["policy"]["selected"] = [
+                        "replacement"
+                    ]
                 elif case == "container":
                     replacement["container"] = "replacement-never-executed"
                 elif case == "source":
                     replacement_source["messages"][0]["parts"][0]["state"]["input"] = {}
-                entered = False
                 observations = []
+                snapshot = SimpleNamespace(
+                    root=root,
+                    case=case,
+                    registration=registration,
+                    import_path=import_path,
+                    replacement=replacement,
+                    replacement_source=replacement_source,
+                    entered=False,
+                    observations=observations,
+                )
 
-                def discover(**options):
+                def discover(snapshot=snapshot, **options):
                     selected = (
-                        root / "replacement.json"
-                        if entered and case == "registration-path"
-                        else registration
+                        snapshot.root / "replacement.json"
+                        if snapshot.entered and snapshot.case == "registration-path"
+                        else snapshot.registration
                     )
-                    observations.append((entered, selected))
+                    snapshot.observations.append((snapshot.entered, selected))
                     return selected, json.loads(
-                        registration.read_text(encoding="utf-8")
+                        snapshot.registration.read_text(encoding="utf-8")
                     )
 
                 @contextlib.contextmanager
-                def lock(path):
-                    nonlocal entered
+                def lock(path, snapshot=snapshot):
                     # A different owner completed its update before our lock was
                     # acquired: use independently decoded/replaced file contents.
-                    registration.write_text(json.dumps(replacement), encoding="utf-8")
-                    import_path.write_text(
-                        json.dumps(replacement_source), encoding="utf-8"
+                    snapshot.registration.write_text(
+                        json.dumps(snapshot.replacement), encoding="utf-8"
                     )
-                    entered = True
+                    snapshot.import_path.write_text(
+                        json.dumps(snapshot.replacement_source), encoding="utf-8"
+                    )
+                    snapshot.entered = True
                     yield
 
                 self.fake.find_workspace.side_effect = discover
@@ -1124,6 +1143,41 @@ class DiagnoseImportTests(unittest.TestCase):
         self.fake.check_backend.assert_not_called()
         self.fake.find_workspace.assert_not_called()
 
+    def test_saved_import_major_and_path_are_bound_before_and_under_lock(self):
+        for version, folder in (("1.19.5", "imports"), ("2.2.6", "imports-v2")):
+            with self.subTest(version=version):
+                self.data["opencode_version"] = version
+                if folder == "imports-v2":
+                    self.source = self.native_export()
+                self.actual = copy.deepcopy(self.source)
+                observation = SimpleNamespace(locked=False, reads=[])
+
+                def read(path, observation=observation):
+                    observation.reads.append((observation.locked, path))
+                    return copy.deepcopy(self.source)
+
+                @contextlib.contextmanager
+                def lock(path, observation=observation):
+                    observation.locked = True
+                    yield
+
+                self.fake.read_json.side_effect = read
+                self.fake.workspace_lock.side_effect = lock
+                self.fake.find_workspace.side_effect = lambda **options: (
+                    Path("/synthetic/registry/workspace.json"),
+                    copy.deepcopy(self.data),
+                )
+                code, output, errors = self.invoke()
+                self.assertEqual(code, 0)
+                self.assertEqual(errors, "")
+                self.assertTrue(json.loads(output)["transcript_verified"])
+                expected = (
+                    Path("/synthetic/registry") / folder / (self.session + ".json")
+                )
+                self.assertEqual(
+                    observation.reads, [(False, expected), (True, expected)]
+                )
+
     def test_malformed_live_export_remains_primary_over_stop_failure(self):
         self.fake.inspect_owned.return_value = {"State": {"Running": False}}
         self.fake.podman.side_effect = None
@@ -1160,6 +1214,240 @@ class DiagnoseImportTests(unittest.TestCase):
         self.fake.podman.assert_not_called()
         self.fake.stop_container.assert_not_called()
         self.fake.export_container_session.assert_not_called()
+
+
+class DiagnosticPrivateIoTests(unittest.TestCase):
+    """Consumer privacy oracle: real helpers/run/capture, never native processes.
+
+    The bounded production export body is called after its lock/preflight layer;
+    only native subprocess IO is replaced. No inspect/stop/export/command-builder
+    or capture helper is mocked, and credential-unlocked state is explicitly false.
+    """
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        environment = {
+            "PATH": os.defpath,
+            "HOME": str(self.root / "home"),
+            "XDG_CONFIG_HOME": str(self.root / "config"),
+            "XDG_DATA_HOME": str(self.root / "data"),
+            "XDG_STATE_HOME": str(self.root / "state"),
+            "XDG_CACHE_HOME": str(self.root / "cache"),
+            "OC_BOX_STATE_HOME": str(self.root / "registry"),
+        }
+        isolated = patch.dict(os.environ, environment, clear=True)
+        isolated.start()
+        self.addCleanup(isolated.stop)
+        self.private = (
+            "SYNTHETIC_PRIVATE_CREATE_TIME_ENV",
+            "SYNTHETIC_PRIVATE_TRANSCRIPT",
+            "SYNTHETIC_PRIVATE_NATIVE_STDERR",
+        )
+        self.data = {
+            "id": "a" * 32,
+            "container": "synthetic-diagnostic-no-engine",
+            "home": "/home/synthetic",
+            "project": str(self.root / "project"),
+            "opencode_version": "1.19.5",
+            "credentials": {"mode": "env", "env": [], "vault": []},
+            "env_file": None,
+        }
+        self.session = "ses_private_consumer"
+        self.calls = []
+
+    def transcript(self):
+        if self.data["opencode_version"].startswith("2."):
+            return {
+                "info": {
+                    "id": self.session,
+                    "location": {"directory": self.data["project"]},
+                },
+                "messages": [
+                    {
+                        "id": "msg_private_consumer",
+                        "type": "assistant",
+                        "content": [{"type": "text", "text": self.private[1]}],
+                    }
+                ],
+            }
+        return {
+            "info": {"id": self.session, "directory": self.data["project"]},
+            "messages": [
+                {
+                    "info": {"id": "msg_private_consumer", "sessionID": self.session},
+                    "parts": [
+                        {
+                            "id": "prt_private_consumer",
+                            "messageID": "msg_private_consumer",
+                            "sessionID": self.session,
+                            "type": "text",
+                            "text": self.private[1],
+                        }
+                    ],
+                }
+            ],
+        }
+
+    @contextlib.contextmanager
+    def native_io(
+        self, *, running=False, failure=None, export_error=None, stop_failure=False
+    ):
+        def execute(command, *, stdout, stderr, **options):
+            nonlocal running
+            self.assertTrue(command[0] == "podman", "unexpected process boundary")
+            for stream in (stdout, stderr):
+                target = os.readlink(f"/proc/self/fd/{stream.fileno()}")
+                self.assertTrue(
+                    "memfd:oc-box-private-output" in target,
+                    "private native stream is not anonymous memory",
+                )
+            code, output = 0, ""
+            if command[1:3] == ["container", "inspect"]:
+                operation = "inspect"
+                code = 125 if failure == "inspect" else 0
+                output = json.dumps(
+                    [
+                        {
+                            "State": {"Running": running},
+                            "Config": {
+                                "Labels": {box.LABEL: self.data["id"]},
+                                "Env": ["SYNTHETIC_KEY=" + self.private[0]],
+                            },
+                        }
+                    ]
+                )
+            elif command[1:3] == ["container", "exists"]:
+                operation = "exists"
+            elif command[1] == "start":
+                operation = "start"
+                running = True  # including a side-effect-then-failure start
+                code = 125 if failure == "start" else 0
+            elif command[1] == "stop":
+                operation = "stop"
+                code = 125 if failure == "stop" or stop_failure else 0
+                if not code:
+                    running = False
+            elif command[1] == "exec":
+                operation = "export"
+                code = 125 if failure == "export" else 0
+                output = (
+                    self.private[1]
+                    if failure == "malformed"
+                    else json.dumps(self.transcript())
+                )
+            else:
+                self.fail("unexpected native operation")
+            self.calls.append(operation)
+            self.assertFalse(
+                any(value in json.dumps(command) for value in self.private),
+                "private values entered native argv",
+            )
+            stdout.write(output.encode("utf-8"))
+            stderr.write(self.private[2].encode("utf-8"))
+            if operation == "export" and export_error is not None:
+                raise export_error
+            return subprocess.CompletedProcess(command, code)
+
+        output, errors = io.StringIO(), io.StringIO()
+        with (
+            patch.object(box.credentials, "has_unlocked_values", return_value=False),
+            patch.object(
+                box.tempfile,
+                "TemporaryFile",
+                side_effect=AssertionError("plaintext host capture requested"),
+            ),
+            patch.object(box.subprocess, "run", side_effect=execute),
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+        ):
+            yield
+        self.assertTrue(
+            output.getvalue() == errors.getvalue() == "",
+            "private export body unexpectedly printed output",
+        )
+
+    def test_real_private_io_both_majors_and_original_running_states(self):
+        for version in ("1.19.5", "2.2.6"):
+            for running in (False, True):
+                with self.subTest(version=version, running=running):
+                    self.calls.clear()
+                    self.data["opencode_version"] = version
+                    state = {"stage": "preflight-completed", "secondary_failures": []}
+                    with self.native_io(running=running):
+                        actual = diagnostic.export_owned_transcript(
+                            self.data, self.session, state
+                        )
+                    self.assertTrue(
+                        actual == self.transcript(), "private native transcript changed"
+                    )
+                    expected = (
+                        ["inspect", "export"]
+                        if running
+                        else ["inspect", "start", "export", "inspect", "stop"]
+                    )
+                    self.assertEqual(self.calls, expected)
+                    self.assertEqual(state["secondary_failures"], [])
+
+    def test_real_private_io_failure_paths_and_successful_body_cleanup_failure(self):
+        for version in ("1.19.5", "2.2.6"):
+            for failure in ("inspect", "start", "export", "malformed", "stop"):
+                with self.subTest(version=version, failure=failure):
+                    self.calls.clear()
+                    self.data["opencode_version"] = version
+                    state = {"stage": "preflight-completed", "secondary_failures": []}
+                    kind = ValueError if failure == "malformed" else box.BoxError
+                    with (
+                        self.native_io(failure=failure),
+                        self.assertRaises(kind) as raised,
+                    ):
+                        diagnostic.export_owned_transcript(
+                            self.data, self.session, state
+                        )
+                    self.assertFalse(
+                        any(value in str(raised.exception) for value in self.private),
+                        "private native error was disclosed",
+                    )
+                    expected_stage = "export" if failure == "malformed" else failure
+                    self.assertEqual(state["stage"], expected_stage)
+                    self.assertEqual(state["secondary_failures"], [])
+                    if failure == "inspect":
+                        self.assertEqual(self.calls, ["inspect", "exists"])
+                    else:
+                        self.assertEqual(self.calls[-2:], ["inspect", "stop"])
+
+    def test_real_private_io_preserves_primary_objects_over_stop_failure(self):
+        for version in ("1.19.5", "2.2.6"):
+            for primary in (
+                OSError(self.private[2]),
+                KeyboardInterrupt(self.private[2]),
+                SystemExit(73),
+            ):
+                with self.subTest(version=version, kind=type(primary).__name__):
+                    self.calls.clear()
+                    self.data["opencode_version"] = version
+                    state = {"stage": "preflight-completed", "secondary_failures": []}
+                    with (
+                        self.native_io(export_error=primary, stop_failure=True),
+                        self.assertRaises(type(primary)) as raised,
+                    ):
+                        diagnostic.export_owned_transcript(
+                            self.data, self.session, state
+                        )
+                    self.assertIs(raised.exception, primary)
+                    self.assertEqual(
+                        state,
+                        {
+                            "stage": "export",
+                            "secondary_failures": [
+                                {"stage": "stop", "category": "box-error"}
+                            ],
+                        },
+                    )
+                    self.assertEqual(
+                        self.calls, ["inspect", "start", "export", "inspect", "stop"]
+                    )
 
 
 if __name__ == "__main__":
