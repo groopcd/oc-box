@@ -12,6 +12,7 @@ import py_compile
 import subprocess
 import sys
 import tempfile
+import traceback
 import unittest
 from unittest.mock import Mock, patch
 
@@ -205,6 +206,166 @@ print('SOURCE_AND_ORIGIN_OK')
             self.assertEqual(exits[0]["stage"], stage)
             self.assertEqual(exits[0]["expected"], "success")
             self.assertIs(exits[0]["exact_int"], type(code) is int)
+
+    def assert_launcher_journal_failure(
+        self,
+        action,
+        *,
+        main_error,
+        code,
+        journal_error,
+        handled_caller,
+        expected_error,
+        expected_identity=None,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            path = Path(temporary) / "PRIVATE_JOURNAL_PATH.json"
+            exits = fixture.LauncherExits(path)
+
+            def invoke():
+                try:
+                    action(exits)
+                except BaseException as error:
+                    return error
+                self.fail("launcher/journal failure returned success")
+
+            with (
+                patch.object(
+                    box, "main", side_effect=main_error, return_value=code
+                ) as launch,
+                patch.object(box, "atomic_json", side_effect=journal_error) as journal,
+                contextlib.redirect_stdout(io.StringIO()) as stdout,
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+            ):
+                if handled_caller:
+                    try:
+                        raise LookupError("already handled by caller")
+                    except LookupError:
+                        error = invoke()
+                else:
+                    error = invoke()
+            if expected_identity is not None:
+                self.assertIs(error, expected_identity)
+            else:
+                self.assertIs(type(error), AssertionError)
+                self.assertEqual(str(error), expected_error)
+            launch.assert_called_once()
+            journal.assert_called_once_with(
+                path, {"format": fixture.REPORT_FORMAT, "launcher_exits": exits}
+            )
+            self.assertEqual(len(exits), 1)
+            self.assertFalse(path.exists())
+            self.assertEqual(stdout.getvalue(), "")
+            self.assertEqual(stderr.getvalue(), "")
+            rendered = "".join(
+                traceback.format_exception(type(error), error, error.__traceback__)
+            )
+            self.assertNotIn("PRIVATE_JOURNAL_ERROR", rendered)
+            self.assertNotIn("PRIVATE_JOURNAL_PATH", str(error))
+            return exits[0]
+
+    def test_success_launcher_journal_failure_preserves_local_primary_matrix(self):
+        cases = (
+            ("keyboard-interrupt", KeyboardInterrupt("original interrupt"), None, None),
+            ("box-primary", box.BoxError("original launcher error"), None, None),
+            ("other-primary", RuntimeError("original launcher error"), None, None),
+            ("success", None, 0, "launcher-journal"),
+            ("nonzero", None, 1, "launcher-exit"),
+            ("none", None, None, "launcher-exit"),
+            ("false", None, False, "launcher-exit"),
+            ("true", None, True, "launcher-exit"),
+        )
+        for (name, primary, code, expected), journal_kind, handled in product(
+            cases, (OSError, KeyboardInterrupt), (False, True)
+        ):
+            with self.subTest(
+                case=name, journal=journal_kind.__name__, caller_handled=handled
+            ):
+                record = self.assert_launcher_journal_failure(
+                    lambda exits: fixture.launch_success(exits, "source-v2", ["start"]),
+                    main_error=primary,
+                    code=code,
+                    journal_error=journal_kind(
+                        "PRIVATE_JOURNAL_ERROR /private/details"
+                    ),
+                    handled_caller=handled,
+                    expected_error=expected,
+                    expected_identity=primary,
+                )
+                self.assertEqual(
+                    record,
+                    {
+                        "stage": "source-v2",
+                        "expected": "success",
+                        "exit": code if primary is None and type(code) is int else None,
+                        "exact_int": primary is None and type(code) is int,
+                    },
+                )
+
+    def test_intended_refusal_journal_failure_preserves_only_escaping_primary_matrix(
+        self,
+    ):
+        wrong_password = box.BoxError("Unable to unlock synthetic fixture")
+        cases = (
+            (
+                "keyboard-interrupt",
+                KeyboardInterrupt("original interrupt"),
+                None,
+                None,
+                True,
+            ),
+            (
+                "unexpected-box-primary",
+                box.BoxError("other launcher refusal"),
+                None,
+                None,
+                True,
+            ),
+            ("other-primary", RuntimeError("other launcher error"), None, None, True),
+            ("expected-refusal", wrong_password, None, "launcher-journal", False),
+            (
+                "returned-zero",
+                None,
+                0,
+                "Reset accepted the wrong synthetic vault password",
+                False,
+            ),
+            (
+                "returned-nonzero",
+                None,
+                1,
+                "Reset accepted the wrong synthetic vault password",
+                False,
+            ),
+        )
+        for (name, primary, code, expected, escaping), journal_kind, handled in product(
+            cases, (OSError, KeyboardInterrupt), (False, True)
+        ):
+            with self.subTest(
+                case=name, journal=journal_kind.__name__, caller_handled=handled
+            ):
+                record = self.assert_launcher_journal_failure(
+                    lambda exits: fixture.launch_unlock_refusal(exits, ["reset"]),
+                    main_error=primary,
+                    code=code,
+                    journal_error=journal_kind(
+                        "PRIVATE_JOURNAL_ERROR /private/details"
+                    ),
+                    handled_caller=handled,
+                    expected_error=expected,
+                    expected_identity=primary if escaping else None,
+                )
+                self.assertEqual(
+                    record,
+                    {
+                        "stage": "wrong-password-reset",
+                        "expected": "refusal",
+                        "exit": code,
+                        "outcome": "expected-unlock-refusal"
+                        if primary is wrong_password
+                        else "not-refused",
+                    },
+                )
 
     def test_host_guard_includes_nonroot_docker_and_podman_before_allocation(self):
         for marker in ("/.dockerenv", "/run/.containerenv"):

@@ -316,17 +316,47 @@ def launch_success(exits, stage, arguments, binding=None):
     checkpoint(binding)
     record = {"stage": stage, "expected": "success", "exit": None, "exact_int": False}
     exits.append(record)
+    primary = None
     try:
         code = box.main(arguments)
         record.update(
             exit=code if type(code) is int else None, exact_int=type(code) is int
         )
+        if type(code) is not int or code != 0:
+            raise AssertionError("launcher-exit")
+    except BaseException as error:
+        primary = error
+        raise
     finally:
         if isinstance(exits, LauncherExits):
-            exits.save()
-    if type(code) is not int or code != 0:
-        raise AssertionError("launcher-exit")
+            exits.save(primary=primary)
     checkpoint(binding)
+
+
+def launch_unlock_refusal(exits, arguments, binding=None):
+    checkpoint(binding)
+    refusal = {
+        "stage": "wrong-password-reset",
+        "expected": "refusal",
+        "exit": None,
+        "outcome": "not-refused",
+    }
+    exits.append(refusal)
+    primary = None
+    try:
+        try:
+            refusal["exit"] = box.main(arguments)
+        except box.BoxError as exc:
+            if "Unable to unlock" not in str(exc):
+                raise
+            refusal["outcome"] = "expected-unlock-refusal"
+        else:
+            raise AssertionError("Reset accepted the wrong synthetic vault password")
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        exits.save(primary=primary)
 
 
 class LauncherExits(list):
@@ -336,8 +366,16 @@ class LauncherExits(list):
         if path.exists() or path.is_symlink():
             raise ValueError("retained-launcher-exits")
 
-    def save(self):
-        box.atomic_json(self.path, {"format": REPORT_FORMAT, "launcher_exits": self})
+    def save(self, *, primary=None):
+        try:
+            box.atomic_json(
+                self.path, {"format": REPORT_FORMAT, "launcher_exits": self}
+            )
+        except BaseException:
+            # Only this invocation's escaping failure has precedence. A caller's
+            # handled exception must not hide a successful-body journal failure.
+            if primary is None:
+                raise AssertionError("launcher-journal") from None
 
 
 def write_report_new(path, result):
@@ -2730,26 +2768,9 @@ def run(root, v1, v2, distro, *, resume=False, binding=None):
             )
             before_reset = stopped_container(data)["Id"]
             with patch.object(vault, "hidden", return_value=password + "-wrong"):
-                checkpoint(binding)
-                refusal = {
-                    "stage": "wrong-password-reset",
-                    "expected": "refusal",
-                    "exit": None,
-                    "outcome": "not-refused",
-                }
-                exits.append(refusal)
-                try:
-                    refusal["exit"] = box.main(["reset", "--workspace", data["id"]])
-                except box.BoxError as exc:
-                    if "Unable to unlock" not in str(exc):
-                        raise
-                    refusal["outcome"] = "expected-unlock-refusal"
-                else:
-                    raise AssertionError(
-                        "Reset accepted the wrong synthetic vault password"
-                    )
-                finally:
-                    exits.save()
+                launch_unlock_refusal(
+                    exits, ["reset", "--workspace", data["id"]], binding
+                )
             if stopped_container(data)["Id"] != before_reset:
                 raise AssertionError("Failed vault unlock deleted the source container")
             with (
