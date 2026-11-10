@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
@@ -17,6 +18,403 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from oc_box import oc_box as box, workspace_service as service, vault
+
+
+class GatewayRelayTests(unittest.TestCase):
+    """Real loopback sockets and the shipped proxy; no Podman/native service."""
+
+    @contextlib.contextmanager
+    def transport(self, handler, *, proxy_prefix="", launch_hook=None):
+        listener = socket.socket()
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(8)
+        listener.settimeout(0.1)
+        stopping = threading.Event()
+        connections, handlers, children, workers, errors = [], [], [], [], []
+        real_thread, real_popen = threading.Thread, subprocess.Popen
+
+        def accepted(stream):
+            try:
+                stream.settimeout(8)
+                handler(stream)
+            except (OSError, AssertionError) as error:
+                if not stopping.is_set():
+                    errors.append(type(error).__name__)
+            finally:
+                stream.close()
+
+        def serve():
+            while not stopping.is_set():
+                try:
+                    stream, _ = listener.accept()
+                except socket.timeout:
+                    continue
+                except OSError:
+                    return
+                connections.append(stream)
+                thread = real_thread(target=accepted, args=(stream,), daemon=True)
+                handlers.append(thread)
+                thread.start()
+
+        server = real_thread(target=serve, daemon=True)
+        server.start()
+
+        def local_relay(_box, _data, port):
+            return box.ContainerCommand(
+                [sys.executable, "-B", "-c", proxy_prefix + service.PROXY, str(port)],
+                box.maintenance_host_env(),
+            )
+
+        def launch(*args, **kwargs):
+            child = real_popen(*args, **kwargs)
+            children.append(child)
+            if launch_hook:
+                launch_hook(child)
+            return child
+
+        def thread_factory(*args, **kwargs):
+            thread = real_thread(*args, **kwargs)
+            target = kwargs.get("target")
+            if getattr(target, "__name__", None) == "forward":
+                workers.append(thread)
+            return thread
+
+        gateway = service.Gateway(
+            box,
+            {},
+            {
+                "url": "http://127.0.0.1:" + str(listener.getsockname()[1]),
+                "session": "ses_synthetic",
+            },
+        )
+        clients = []
+
+        def connect():
+            stream = socket.create_connection(
+                ("127.0.0.1", urlparse(gateway.url).port), timeout=4
+            )
+            clients.append(stream)
+            return stream
+
+        try:
+            with (
+                patch.object(service, "relay_command", side_effect=local_relay),
+                patch.object(service.subprocess, "Popen", side_effect=launch),
+                patch.object(service.threading, "Thread", side_effect=thread_factory),
+                gateway,
+            ):
+                yield SimpleNamespace(
+                    gateway=gateway,
+                    connect=connect,
+                    children=children,
+                    workers=workers,
+                    errors=errors,
+                )
+        finally:
+            stopping.set()
+            listener.close()
+            for stream in [*clients, *connections]:
+                try:
+                    stream.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+                stream.close()
+            # Also clean old/broken implementations after a red assertion.
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=3)
+                for pipe in (child.stdin, child.stdout):
+                    if pipe:
+                        pipe.close()
+            for thread in [server, *handlers, *workers]:
+                thread.join(timeout=3)
+                self.assertFalse(thread.is_alive(), "synthetic relay thread leaked")
+
+    @staticmethod
+    def headers(stream):
+        result = bytearray()
+        while not result.endswith(b"\r\n\r\n"):
+            chunk = stream.recv(1)
+            if not chunk:
+                raise OSError("incomplete synthetic headers")
+            result.extend(chunk)
+        return bytes(result)
+
+    def test_real_proxy_half_close_drains_the_complete_delayed_response(self):
+        response = (
+            b"HTTP/1.1 200 OK\r\nContent-Length: 32768\r\n\r\n"
+            + bytes(range(256)) * 128
+        )
+
+        def handler(stream):
+            self.headers(stream)
+            self.assertEqual(stream.recv(1), b"")
+            time.sleep(0.05)
+            stream.sendall(response)
+
+        with self.transport(handler) as transport:
+            client = transport.connect()
+            client.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            client.shutdown(socket.SHUT_WR)
+            actual = bytearray()
+            while chunk := client.recv(65536):
+                actual.extend(chunk)
+            self.assertEqual(len(actual), len(response))
+            self.assertEqual(actual, response)
+            self.assertEqual(transport.errors, [])
+
+    def test_real_proxy_eight_mib_bidirectional_and_slow_reader_are_lossless(self):
+        upload = bytes(range(256)) * 32768
+        download = upload[::-1]
+        upgrade = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+        for slow in (False, True):
+            with self.subTest(slow_reader=slow):
+                received, sending_errors = [], []
+
+                def handler(stream):
+                    self.headers(stream)
+                    stream.sendall(upgrade)
+                    stream.sendall(download)
+                    content = bytearray()
+                    while chunk := stream.recv(65536):
+                        content.extend(chunk)
+                        if slow:
+                            time.sleep(0.0002)
+                    received.append(bytes(content))
+
+                with self.transport(handler) as transport:
+                    client = transport.connect()
+                    client.sendall(b"GET /upgrade HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    self.assertEqual(self.headers(client), upgrade)
+
+                    def send():
+                        try:
+                            client.sendall(upload)
+                            client.shutdown(socket.SHUT_WR)
+                        except OSError as error:
+                            sending_errors.append(type(error).__name__)
+
+                    sender = threading.Thread(target=send, daemon=True)
+                    sender.start()
+                    try:
+                        actual = bytearray()
+                        while chunk := client.recv(4096 if slow else 65536):
+                            actual.extend(chunk)
+                            if slow:
+                                time.sleep(0.0002)
+                        sender.join(timeout=3)
+
+                        self.assertFalse(sender.is_alive())
+                        self.assertEqual(sending_errors, [])
+                        self.assertEqual(len(actual), len(download))
+                        self.assertEqual(
+                            hashlib.sha256(actual).digest(),
+                            hashlib.sha256(download).digest(),
+                        )
+                        deadline = time.monotonic() + 2
+                        while not received and time.monotonic() < deadline:
+                            time.sleep(0.01)
+                        self.assertEqual(len(received), 1)
+                        self.assertEqual(len(received[0]), len(upload))
+                        self.assertEqual(
+                            hashlib.sha256(received[0]).digest(),
+                            hashlib.sha256(upload).digest(),
+                        )
+                        self.assertEqual(transport.errors, [])
+                    finally:
+                        if sender.is_alive():
+                            client.shutdown(socket.SHUT_RDWR)
+                        sender.join(timeout=3)
+
+    def test_backend_half_close_keeps_the_upload_direction_open(self):
+        upload = bytes(range(256)) * 512
+        response = b"HTTP/1.1 200 OK\r\n\r\n" + upload[::-1]
+        received = []
+
+        def handler(stream):
+            self.headers(stream)
+            stream.sendall(response)
+            stream.shutdown(socket.SHUT_WR)
+            content = bytearray()
+            while chunk := stream.recv(65536):
+                content.extend(chunk)
+            received.append(bytes(content))
+
+        with self.transport(handler) as transport:
+            client = transport.connect()
+            client.sendall(b"POST / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            actual = bytearray()
+            while chunk := client.recv(65536):
+                actual.extend(chunk)
+            self.assertEqual(len(actual), len(response))
+            self.assertEqual(actual, response)
+            client.sendall(upload)
+            client.shutdown(socket.SHUT_WR)
+            deadline = time.monotonic() + 2
+            while not received and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(received, [upload])
+            self.assertEqual(transport.errors, [])
+
+    def test_shutdown_interrupts_blocked_downloads_and_idle_headers(self):
+        writing = threading.Event()
+
+        def handler(stream):
+            self.headers(stream)
+            writing.set()
+            stream.sendall(b"HTTP/1.1 200 OK\r\n\r\n" + b"x" * (8 * 1024 * 1024))
+
+        prefix = "import signal; signal.signal(signal.SIGTERM,signal.SIG_IGN)\n"
+        with self.transport(handler, proxy_prefix=prefix) as transport:
+            for _ in range(4):
+                client = transport.connect()
+                client.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+                client.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            idle = transport.connect()
+            idle.sendall(b"GET /partial")
+            self.assertTrue(writing.wait(timeout=3))
+            deadline = time.monotonic() + 3
+            while len(transport.children) < 4 and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(len(transport.children), 4)
+            time.sleep(0.2)
+            started = time.monotonic()
+            transport.gateway.__exit__(None, None, None)
+            self.assertLess(time.monotonic() - started, 2.5)
+            self.assertTrue(transport.workers)
+            self.assertTrue(all(not thread.is_alive() for thread in transport.workers))
+            self.assertTrue(
+                all(child.poll() is not None for child in transport.children)
+            )
+
+    def test_partial_writes_are_lossless_and_host_queues_stay_bounded(self):
+        payload = bytes(range(256)) * 1024
+        response = b"HTTP/1.1 200 OK\r\n\r\n" + payload
+        received, writes = [], []
+
+        def handler(stream):
+            self.headers(stream)
+            content = bytearray()
+            while chunk := stream.recv(65536):
+                content.extend(chunk)
+            received.append(bytes(content))
+            stream.sendall(response)
+
+        real_write = os.write
+
+        def partial_write(fd, content):
+            writes.append(len(content))
+            return real_write(fd, content[:257])
+
+        prefix = "import os; _write=os.write; os.write=lambda fd,data:_write(fd,data[:257])\n"
+        with (
+            self.transport(handler, proxy_prefix=prefix) as transport,
+            patch.object(service.os, "write", side_effect=partial_write),
+        ):
+            client = transport.connect()
+            client.sendall(b"POST / HTTP/1.1\r\nHost: localhost\r\n\r\n" + payload)
+            client.shutdown(socket.SHUT_WR)
+            actual = bytearray()
+            while chunk := client.recv(65536):
+                actual.extend(chunk)
+            self.assertEqual(len(actual), len(response))
+            self.assertEqual(actual, response)
+            self.assertEqual(received, [payload])
+            self.assertTrue(writes)
+            self.assertLessEqual(max(writes), service.RELAY_BUFFER)
+
+    def test_shutdown_waits_for_child_creation_already_owned_by_a_worker(self):
+        creating, release, stopped = (
+            threading.Event(),
+            threading.Event(),
+            threading.Event(),
+        )
+        failures = []
+
+        def launching(_child):
+            creating.set()
+            if not release.wait(timeout=3):
+                raise OSError("synthetic launch gate timed out")
+
+        def handler(stream):
+            self.headers(stream)
+            stream.recv(1)
+
+        with self.transport(handler, launch_hook=launching) as transport:
+            client = transport.connect()
+            client.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            self.assertTrue(creating.wait(timeout=3))
+
+            def shutdown():
+                try:
+                    transport.gateway.__exit__(None, None, None)
+                except Exception as error:
+                    failures.append(type(error).__name__)
+                finally:
+                    stopped.set()
+
+            closer = threading.Thread(target=shutdown, daemon=True)
+            closer.start()
+            try:
+                self.assertTrue(transport.gateway.closed.wait(timeout=2))
+                transport.gateway.thread.join(timeout=1)
+                self.assertFalse(stopped.wait(timeout=0.1))
+            finally:
+                release.set()
+                closer.join(timeout=3)
+            self.assertFalse(closer.is_alive())
+            self.assertTrue(stopped.is_set())
+            self.assertEqual(failures, [])
+            self.assertTrue(
+                all(child.poll() is not None for child in transport.children)
+            )
+            self.assertTrue(all(not worker.is_alive() for worker in transport.workers))
+
+    def test_oversized_request_and_pairing_headers_refuse_without_unbounded_staging(
+        self,
+    ):
+        for request in (True, False):
+            with self.subTest(request_headers=request):
+
+                def handler(stream):
+                    self.headers(stream)
+                    stream.sendall(b"HTTP/1.1 200 OK\r\nX-Fill: " + b"x" * 65536)
+
+                with self.transport(handler) as transport:
+                    client = transport.connect()
+                    client.sendall(
+                        b"GET / " + b"x" * (65536 - 6)
+                        if request
+                        else b"GET /auth/connect/synthetic HTTP/1.1\r\nHost: localhost\r\n\r\n"
+                    )
+                    self.assertEqual(client.recv(1), b"")
+                    if request:
+                        self.assertEqual(transport.children, [])
+
+    def test_pairing_rewrite_never_changes_response_body(self):
+        body = b"Location: /\r\n\x00\xff"
+        response = (
+            b"HTTP/1.1 302 Found\r\nLocation: /unchanged\r\nContent-Length: "
+            + str(len(body)).encode()
+            + b"\r\n\r\n"
+            + body
+        )
+
+        def handler(stream):
+            self.headers(stream)
+            for chunk in (response[:20], response[20:]):
+                stream.sendall(chunk)
+
+        with self.transport(handler) as transport:
+            client = transport.connect()
+            client.sendall(
+                b"GET /auth/connect/synthetic HTTP/1.1\r\nHost: localhost\r\n\r\n"
+            )
+            actual = bytearray()
+            while chunk := client.recv(65536):
+                actual.extend(chunk)
+            self.assertEqual(actual, response)
 
 
 class HistoryWaitTests(unittest.TestCase):

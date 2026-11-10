@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import select
+import selectors
 import signal
 import socket
 import stat
@@ -31,21 +32,57 @@ from urllib.request import Request, build_opener, ProxyHandler
 
 CONNECTION = contextvars.ContextVar("oc_box_v2_connection")
 MAX_CONTROL = 16384
-PROXY = """import os,select,socket,sys
-s=socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=10); s.settimeout(None)
-readers=[s,sys.stdin.buffer]
-while readers:
-    ready,_,_=select.select(readers,[],[],1)
-    for item in ready:
-        if item is s:
-            data=s.recv(65536)
-            if not data: sys.exit(0)
-            sys.stdout.buffer.write(data); sys.stdout.buffer.flush()
-        else:
-            data=os.read(0,65536)
-            if not data:
-                readers.remove(sys.stdin.buffer); s.shutdown(socket.SHUT_WR)
-            else: s.sendall(data)
+RELAY_BUFFER = 65536
+RELAY_STOP_TIMEOUT = 3.0
+# Keep the container transport self-contained: it runs without package imports.
+# Each direction has one bounded queue; stdout EOF and stdin EOF are independent.
+PROXY = """import os,selectors,socket,sys
+limit=65536
+with socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=10) as s, selectors.DefaultSelector() as selector:
+    s.setblocking(False)
+    os.set_blocking(0,False); os.set_blocking(1,False)
+    incoming=bytearray(); outgoing=bytearray()
+    stdin_open=server_open=True
+    write_closed=stdout_closed=False
+    while True:
+        if not stdin_open and not incoming and not write_closed:
+            s.shutdown(socket.SHUT_WR); write_closed=True
+        if not server_open and not outgoing and not stdout_closed:
+            os.close(1); stdout_closed=True
+        if write_closed and stdout_closed:
+            break
+        for key in list(selector.get_map().values()):
+            selector.unregister(key.fd)
+        events=0
+        if server_open and len(outgoing)<limit: events|=selectors.EVENT_READ
+        if incoming: events|=selectors.EVENT_WRITE
+        if events: selector.register(s,events)
+        if stdin_open and len(incoming)<limit: selector.register(0,selectors.EVENT_READ)
+        if outgoing: selector.register(1,selectors.EVENT_WRITE)
+        for key,events in selector.select(.2):
+            try:
+                if key.fd==0:
+                    data=os.read(0,limit-len(incoming))
+                    if data: incoming.extend(data)
+                    else: stdin_open=False
+                elif key.fd==1:
+                    count=os.write(1,outgoing)
+                    if not count: raise BrokenPipeError()
+                    del outgoing[:count]
+                else:
+                    if events & selectors.EVENT_READ:
+                        data=s.recv(limit-len(outgoing))
+                        if data: outgoing.extend(data)
+                        else: server_open=False
+                    if events & selectors.EVENT_WRITE:
+                        count=s.send(incoming)
+                        if not count: raise BrokenPipeError()
+                        del incoming[:count]
+            except BlockingIOError:
+                pass
+            except BrokenPipeError:
+                if key.fd!=s.fileno(): raise
+                stdin_open=False; incoming.clear(); write_closed=True
 """
 
 
@@ -548,8 +585,12 @@ class Gateway:
         self.box, self.data, self.connection, self.port = box, data, connection, port
         self.closed = threading.Event()
         self.children = set()
+        self.streams = set()
+        self.workers = set()
         self.lock = threading.Lock()
         self.capacity = threading.BoundedSemaphore(32)
+        self.stop_deadline = None
+        self.cleanup_failed = False
 
     def __enter__(self):
         self.listener = socket.socket()
@@ -557,12 +598,12 @@ class Gateway:
             self.listener.bind(("127.0.0.1", self.port))
             self.listener.listen(32)
             self.listener.settimeout(0.2)
+            self.url = "http://127.0.0.1:" + str(self.listener.getsockname()[1])
+            self.thread = threading.Thread(target=self.serve, daemon=True)
+            self.thread.start()
         except BaseException:
             self.listener.close()
             raise
-        self.url = "http://127.0.0.1:" + str(self.listener.getsockname()[1])
-        self.thread = threading.Thread(target=self.serve, daemon=True)
-        self.thread.start()
         return self
 
     def serve(self):
@@ -576,12 +617,42 @@ class Gateway:
             if not self.capacity.acquire(blocking=False):
                 stream.close()
                 continue
-            threading.Thread(target=self.forward, args=(stream,), daemon=True).start()
+            with self.lock:
+                if self.closed.is_set():
+                    stream.close()
+                    self.capacity.release()
+                    return
+                self.workers = {worker for worker in self.workers if worker.is_alive()}
+                worker = threading.Thread(
+                    target=self.forward, args=(stream,), daemon=True
+                )
+                self.streams.add(stream)
+                self.workers.add(worker)
+                try:
+                    worker.start()
+                except RuntimeError:
+                    self.workers.discard(worker)
+                    self.streams.discard(stream)
+                    stream.close()
+                    self.capacity.release()
 
     def forward(self, stream):
         child = None
         with stream:
             try:
+                # Read only bounded request headers before creating a relay.
+                # Gateway cancellation shuts down this socket to interrupt recv.
+                stream.settimeout(15)
+                headers = bytearray()
+                while b"\r\n\r\n" not in headers:
+                    if len(headers) == RELAY_BUFFER:
+                        return
+                    data = stream.recv(min(4096, RELAY_BUFFER - len(headers)))
+                    if not data:
+                        return
+                    headers.extend(data)
+                if self.closed.is_set():
+                    return
                 port = urlparse(self.connection["url"]).port
                 command = relay_command(self.box, self.data, port)
                 child = subprocess.Popen(
@@ -591,89 +662,208 @@ class Gateway:
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,
                     start_new_session=True,
+                    bufsize=0,
                 )
                 assert child.stdin is not None and child.stdout is not None
                 with self.lock:
                     self.children.add(child)
-                stream.settimeout(15)
-                headers = bytearray()
-                while b"\r\n\r\n" not in headers and len(headers) < 65536:
-                    data = stream.recv(4096)
-                    if not data:
-                        return
-                    headers.extend(data)
-                if b"\r\n\r\n" not in headers:
-                    return
-                pairing = bytes(headers).startswith(b"GET /auth/connect/")
-                child.stdin.write(headers)
-                child.stdin.flush()
-                stream.settimeout(None)
-                readers = [stream, child.stdout]
-                response = bytearray()
-                while not self.closed.is_set():
-                    ready, _, _ = select.select(readers, [], [], 0.2)
-                    for item in ready:
-                        if item is stream:
-                            data = stream.recv(65536)
-                            if not data:
-                                return
-                            child.stdin.write(data)
-                            child.stdin.flush()
-                        else:
-                            data = os.read(child.stdout.fileno(), 65536)
-                            if not data:
-                                return
-                            if pairing:
-                                response.extend(data)
-                                if b"\r\n\r\n" not in response:
-                                    if len(response) > 65536:
-                                        return
-                                    continue
-                                route = self.session_route()
-                                data = re.sub(
-                                    rb"(?im)^location: /\r$",
-                                    b"location: " + route.encode() + b"\r",
-                                    bytes(response),
-                                    count=1,
-                                )
-                                pairing = False
-                            stream.sendall(data)
+                self.pump(stream, child, headers)
             except (OSError, ValueError):
                 pass
             finally:
                 if child:
-                    if child.poll() is None:
-                        child.terminate()
-                        try:
-                            child.wait(timeout=3)
-                        except subprocess.TimeoutExpired:
-                            child.kill()
-                            child.wait(timeout=3)
-                    for pipe in (child.stdin, child.stdout):
-                        if pipe:
-                            pipe.close()
-                    with self.lock:
-                        self.children.discard(child)
-                self.capacity.release()
+                    self.finish_child(child)
+                with self.lock:
+                    self.children.discard(child)
+                    self.streams.discard(stream)
+                    self.capacity.release()
+
+    def pump(self, stream, child, headers):
+        """Two 64-KiB queues, independent EOF, and no blocking directional write.
+
+        Pairing alone stages at most 64 KiB of response headers/body before the
+        delimiter; the rewritten header adds only the validated session route.
+        Staged bytes drain before more backend reads. Bodies are never rewritten.
+        """
+        assert child.stdin is not None and child.stdout is not None
+        stream.setblocking(False)
+        os.set_blocking(child.stdin.fileno(), False)
+        os.set_blocking(child.stdout.fileno(), False)
+        incoming, outgoing = headers, bytearray()
+        response = bytearray()
+        pairing = headers.startswith(b"GET /auth/connect/")
+        input_open = output_open = True
+        write_closed = response_closed = False
+        with selectors.DefaultSelector() as selector:
+            while not self.closed.is_set():
+                if not pairing and response:
+                    count = min(RELAY_BUFFER - len(outgoing), len(response))
+                    outgoing.extend(response[:count])
+                    del response[:count]
+                if not input_open and not incoming and not write_closed:
+                    child.stdin.close()
+                    write_closed = True
+                if (
+                    not output_open
+                    and not outgoing
+                    and not response
+                    and not response_closed
+                ):
+                    stream.shutdown(socket.SHUT_WR)
+                    response_closed = True
+                if write_closed and response_closed:
+                    return
+                for key in list(selector.get_map().values()):
+                    selector.unregister(key.fd)
+                events = 0
+                if input_open and len(incoming) < RELAY_BUFFER:
+                    events |= selectors.EVENT_READ
+                if outgoing:
+                    events |= selectors.EVENT_WRITE
+                if events:
+                    selector.register(stream, events)
+                if incoming:
+                    selector.register(child.stdin, selectors.EVENT_WRITE)
+                if output_open and (
+                    pairing or (not response and len(outgoing) < RELAY_BUFFER)
+                ):
+                    selector.register(child.stdout, selectors.EVENT_READ)
+                for key, events in selector.select(0.2):
+                    try:
+                        if key.fileobj is stream:
+                            if events & selectors.EVENT_READ:
+                                data = stream.recv(RELAY_BUFFER - len(incoming))
+                                if data:
+                                    incoming.extend(data)
+                                else:
+                                    input_open = False
+                            if events & selectors.EVENT_WRITE:
+                                count = stream.send(outgoing)
+                                if not count:
+                                    return
+                                del outgoing[:count]
+                        elif key.fileobj is child.stdin:
+                            count = os.write(child.stdin.fileno(), incoming)
+                            if not count:
+                                return
+                            del incoming[:count]
+                        else:
+                            room = RELAY_BUFFER - len(response if pairing else outgoing)
+                            data = os.read(child.stdout.fileno(), room)
+                            if not data:
+                                if pairing:
+                                    raise ValueError(
+                                        "Incomplete browser pairing headers."
+                                    )
+                                output_open = False
+                            elif pairing:
+                                response.extend(data)
+                                boundary = response.find(b"\r\n\r\n")
+                                if boundary < 0:
+                                    if len(response) == RELAY_BUFFER:
+                                        raise ValueError(
+                                            "Oversized browser pairing headers."
+                                        )
+                                    continue
+                                header = re.sub(
+                                    rb"(?im)^location: /\r$",
+                                    b"location: "
+                                    + self.session_route().encode()
+                                    + b"\r",
+                                    bytes(response[: boundary + 2]),
+                                    count=1,
+                                )
+                                response[: boundary + 2] = header
+                                pairing = False
+                            else:
+                                outgoing.extend(data)
+                    except BlockingIOError:
+                        continue
+                    except BrokenPipeError:
+                        if key.fileobj is not child.stdin:
+                            raise
+                        input_open = False
+                        incoming.clear()
+                        child.stdin.close()
+                        write_closed = True
+
+    def signal_child(self, child, sig):
+        # Every relay was started in its own session. Signal its owned group even
+        # if the leader exited, so an inherited pipe cannot keep a helper alive.
+        try:
+            os.killpg(child.pid, sig)
+        except ProcessLookupError:
+            pass
+        except OSError:
+            self.cleanup_failed = True
+
+    def finish_child(self, child):
+        deadline = self.stop_deadline or time.monotonic() + RELAY_STOP_TIMEOUT
+        self.signal_child(child, signal.SIGTERM)
+        try:
+            child.wait(timeout=min(1, max(0, deadline - time.monotonic())))
+        except subprocess.TimeoutExpired:
+            pass
+        except OSError:
+            self.cleanup_failed = True
+        self.signal_child(child, signal.SIGKILL)
+        try:
+            child.wait(timeout=max(0, deadline - time.monotonic()))
+        except (OSError, subprocess.TimeoutExpired):
+            self.cleanup_failed = True
+        for pipe in (child.stdin, child.stdout):
+            if pipe:
+                try:
+                    pipe.close()
+                except OSError:
+                    self.cleanup_failed = True
 
     def session_route(self):
         encoded = base64.urlsafe_b64encode(self.url.encode()).decode().rstrip("=")
         return "/server/" + encoded + "/session/" + self.connection["session"]
 
-    def __exit__(self, *_):
-        self.closed.set()
-        self.listener.close()
-        self.thread.join(timeout=2)
+    def __exit__(self, _kind, primary, _traceback):
         with self.lock:
-            children = tuple(self.children)
-        for child in children:
-            if child.poll() is None:
-                child.terminate()
-            try:
-                child.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                child.kill()
-                child.wait(timeout=3)
+            if self.stop_deadline is None:
+                self.stop_deadline = time.monotonic() + RELAY_STOP_TIMEOUT
+            self.closed.set()
+        self.listener.close()
+        self.thread.join(timeout=max(0, self.stop_deadline - time.monotonic()))
+        # Workers are registered before start/Popen. A late Popen result therefore
+        # cannot escape the common deadline or be silently added after shutdown.
+        while True:
+            with self.lock:
+                streams = tuple(self.streams)
+                children = tuple(self.children)
+                self.workers = {worker for worker in self.workers if worker.is_alive()}
+                workers = tuple(self.workers)
+            for stream in streams:
+                try:
+                    stream.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            for child in children:
+                self.signal_child(child, signal.SIGTERM)
+            if not workers:
+                break
+            remaining = self.stop_deadline - time.monotonic()
+            if remaining <= 0:
+                for child in children:
+                    self.signal_child(child, signal.SIGKILL)
+                self.cleanup_failed = True
+                break
+            for worker in workers:
+                worker.join(
+                    timeout=min(0.05, max(0, self.stop_deadline - time.monotonic()))
+                )
+        if self.cleanup_failed:
+            message = (
+                "Private browser relay cleanup failed; private output was not logged."
+            )
+            if primary is not None:
+                print("oc-box: " + message, file=sys.stderr)
+            else:
+                raise self.box.BoxError(message) from None
 
 
 def web_session(box, data, connection, args):
