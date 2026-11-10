@@ -11,27 +11,41 @@ Evidence is retained, including on failure. --cleanup removes only
 verified fixture-owned containers/volumes/networks, never files or images.
 
 Run on a regular host, not inside oc-box, with an existing disk-backed parent:
-  python3 -B tools/test_global_vault_podman.py --work-dir /path/to/fixtures \
-      --opencode-v2 /path/to/unmodified/opencode
+  python3 -I -B tools/test_global_vault_podman.py --work-dir /path/to/fixtures \
+      --opencode-v2 /path/to/unmodified/opencode --expect-commit COMMIT
 """
+
+import sys
+
+# Only builtin sys may load before interpreter/path prerequisites are checked.
+if __name__ == "__main__" and (not sys.flags.isolated or not sys.dont_write_bytecode):
+    sys.stderr.write(
+        "global-vault fixture: use python3 -I -B from a regular host terminal\n"
+    )
+    raise SystemExit(2)
 
 import argparse
 import base64
 import contextlib
+from contextvars import ContextVar
+from dataclasses import asdict
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import inspect
+import importlib
+import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path
+from types import ModuleType
 import re
 import secrets
 import shlex
 import shutil
 import stat
 import subprocess
-import sys
 import tarfile
 import tempfile
 import threading
@@ -39,34 +53,108 @@ from unittest.mock import patch
 from urllib.parse import quote
 
 APP = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(APP))
-sys.path.insert(0, str(APP / "src"))
-from oc_box import (
-    backup_crypto as crypto,
-    backups,
-    credentials,
-    oc_box as box,
-    opencode_compat as compat,
-    opencode_v2_io as bridge,
-    vault,
-    workspace_service,
+
+
+def load_runtime():
+    """Candidate imports occur only after the CLI's independent bootstrap."""
+    if all(name in globals() for name in ("box", "crypto", "guards")):
+        return
+    global crypto, backups, credentials, box, compat, bridge, vault, workspace_service
+    global guards
+    global \
+        check_native_version, \
+        digest_home, \
+        native_env, \
+        storage_config, \
+        temporary_location, \
+        verify_v2_progress, \
+        get_version_info
+    from oc_box import (
+        backup_crypto as crypto,
+        backups,
+        credentials,
+        oc_box as box,
+        opencode_compat as compat,
+        opencode_v2_io as bridge,
+        vault,
+        workspace_service,
+    )
+    from tools.test_v2_podman import (
+        check_native_version,
+        digest_home,
+        native_env,
+        storage_config,
+        temporary_location,
+        verify_v2_progress,
+    )
+    from oc_box.version_info import get_version_info
+    from tools import acceptance_guards as guards
+
+
+# Normal module definitions are stdlib-only too. Verified external bootstraps may
+# request legacy exports AFTER their own proof, without a second bootstrap.
+RUNTIME_EXPORTS = frozenset(
+    (
+        "box",
+        "crypto",
+        "backups",
+        "credentials",
+        "compat",
+        "bridge",
+        "vault",
+        "workspace_service",
+        "guards",
+        "get_version_info",
+        "check_native_version",
+        "digest_home",
+        "native_env",
+        "storage_config",
+        "temporary_location",
+        "verify_v2_progress",
+    )
 )
-from tools.test_v2_podman import (
-    check_native_version,
-    digest_home,
-    native_env,
-    storage_config,
-    temporary_location,
-    verify_v2_progress,
-)
-from oc_box.version_info import get_version_info
+
+
+def __getattr__(name):
+    if name in RUNTIME_EXPORTS:
+        load_runtime()
+        return globals()[name]
+    raise AttributeError(name)
+
 
 PREFIX = "oc-box-gv-host-"
 FORMAT = "oc-box-global-vault-host-acceptance"
 NATIVE_VERSION = "2.2.6"
 PODMAN_CONFIGFILE_OMISSIONS = frozenset({"6.1.4"})
 PROJECTS = ("source-a", "source-b", "restored-full")
+SOURCE_DONORS = (
+    "tools/test_global_vault_podman.py",
+    "tools/test_v2_podman.py",
+    "tools/acceptance_guards.py",
+)
+DISTRO_CHOICES = ("tumbleweed", "leap", "ubuntu", "debian", "fedora", "arch", "alpine")
+RETAINED_PREFIXES = (PREFIX, "oc-box-live-v2-", "oc-box-live-backup-")
+RETAINED_MARKERS = (
+    "fixture.json",
+    "fixture-ids.json",
+    "interactive.json",
+    "edges.json",
+    "edges-result.json",
+    "history-purpose.json",
+    "history-result.json",
+    "cleanup-purpose.json",
+    "result.json",
+    "first-launch-failure.json",
+    "source-binding.json",
+    "home-component.json",
+    "home-ready.json",
+    "home-created-source.json",
+    "home-created-destination.json",
+    "home-run-*-report.json",
+    "home-cleanup-*-report.json",
+)
 KEY = "ACCEPTANCE_API_KEY"
+_BINDING = ContextVar("global_fixture_binding", default=None)
 SIDE = "ACCEPTANCE_SIDE_SECRET"
 ADDED = "ACCEPTANCE_ADDED_SECRET"
 AMBIENT = "ACCEPTANCE_AMBIENT_TOKEN"
@@ -374,30 +462,360 @@ def existing_directory(path):
     return path.resolve(strict=True)
 
 
-def safe_path(root, relative, *, directory=False, optional=False):
-    path = no_symlinks(root / relative)
-    require(path.is_relative_to(root) and path != root, "unsafe-path")
-    if optional and not path.exists():
-        return path
-    info = path.lstat()
+def guard_call(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except guards.GuardError as error:
+        code = {
+            "private-file": "unsafe-metadata",
+            "private-json": "unsafe-metadata",
+            "native-executable": "native-podman",
+        }.get(error.code, error.code)
+        raise FixtureError(code) from None
+
+
+def fresh_parent(path):
+    if "guards" in globals():
+        return guard_call(
+            guards.fresh_parent,
+            Path(path).expanduser(),
+            prefixes=RETAINED_PREFIXES,
+            markers=RETAINED_MARKERS,
+        )
+    parent = existing_directory(path)
+    for ancestor in (parent, *parent.parents):
+        require(
+            not ancestor.name.startswith(RETAINED_PREFIXES)
+            and not any(any(ancestor.glob(name)) for name in RETAINED_MARKERS),
+            "fresh-parent-required",
+        )
+    return parent
+
+
+def source_snapshot(source, expected):
+    """Independent stdlib bootstrap: no candidate imports, bytecode, or fallback."""
+    source = no_symlinks(Path(source).expanduser())
     require(
-        stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode),
-        "unsafe-path",
+        source == APP and re.fullmatch(r"[0-9a-f]{40}", expected or ""),
+        "clean-source-required",
     )
+    environment = {
+        "PATH": os.defpath,
+        "LANG": "C.UTF-8",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_NO_REPLACE_OBJECTS": "1",
+    }
+
+    def git(*args):
+        return subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-C",
+                str(source),
+                *args,
+            ],
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=True,
+            timeout=15,
+        ).stdout
+
+    require(
+        git("rev-parse", "--show-toplevel").decode().strip() == str(source)
+        and git("rev-parse", "HEAD").decode().strip() == expected
+        and git("rev-parse", "--is-shallow-repository").strip() == b"false"
+        and not git("status", "--porcelain", "--untracked-files=all"),
+        "clean-source-required",
+    )
+    ignored = git(
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "-z",
+        "--",
+        "src",
+        "tools",
+        ":(top,glob)*.py",
+        ":(top,glob)*/__init__.py",
+    ).split(b"\0")
+    egg = {
+        b"PKG-INFO",
+        b"SOURCES.txt",
+        b"dependency_links.txt",
+        b"entry_points.txt",
+        b"requires.txt",
+        b"top_level.txt",
+    }
+    require(
+        all(
+            (name.endswith(b".pyc") and b"/__pycache__/" in b"/" + name)
+            or (
+                name.startswith(b"src/oc_box.egg-info/")
+                and name.rsplit(b"/", 1)[-1] in egg
+            )
+            for name in ignored
+            if name
+        ),
+        "clean-source-required",
+    )
+    hashes = {}
+    for row in filter(
+        None,
+        git("ls-tree", "-r", "-z", expected, "--", "src/oc_box", "tools").split(b"\0"),
+    ):
+        header, name = row.split(b"\t", 1)
+        mode, kind, blob = header.split()
+        require(
+            mode in (b"100644", b"100755") and kind == b"blob", "clean-source-required"
+        )
+        relative = name.decode()
+        content = safe_bootstrap_file(source, relative).read_bytes()
+        require(
+            hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content)
+            .hexdigest()
+            .encode()
+            == blob,
+            "source-changed",
+        )
+        hashes[relative] = hashlib.sha256(content).hexdigest()
+    require(
+        set(SOURCE_DONORS) <= hashes.keys() and "src/oc_box/oc_box.py" in hashes,
+        "clean-source-required",
+    )
+    count = int(git("rev-list", "--count", "HEAD"))
+    require(count > 29, "clean-source-required")
+    return {
+        "commit": expected,
+        "commit_count": count,
+        "version": f"1.6.{count - 29}+g{expected[:7]}",
+        "dirty": False,
+        "sha256": hashes,
+    }
+
+
+def safe_bootstrap_file(source, relative):
+    path = no_symlinks(source / relative)
+    require(path.is_relative_to(source) and path.is_file(), "source-changed")
     return path
 
 
-def private_json(root, relative):
-    path = safe_path(root, relative)
-    info = path.stat()
-    require(
-        info.st_uid == os.getuid()
-        and not info.st_mode & 0o077
-        and info.st_nlink == 1
-        and info.st_size <= crypto.MAX_SMALL,
-        "unsafe-metadata",
+def import_origins(identity):
+    for name, module in tuple(sys.modules.items()):
+        filename = getattr(module, "__file__", None)
+        if filename:
+            loaded = Path(filename).resolve()
+            if loaded.is_relative_to(APP):
+                require(
+                    loaded.relative_to(APP).as_posix() in identity["sha256"],
+                    "source-shadowing",
+                )
+        if name in ("oc_box", "tools") or name.startswith(("oc_box.", "tools.")):
+            spec = getattr(module, "__spec__", None)
+            require(spec is not None and spec.name == name, "source-shadowing")
+            if filename:
+                require(
+                    isinstance(spec.origin, str)
+                    and Path(spec.origin).resolve() == Path(filename).resolve(),
+                    "source-shadowing",
+                )
+            if spec.submodule_search_locations is not None:
+                base = (
+                    APP / "tools"
+                    if name.split(".")[0] == "tools"
+                    else APP / "src/oc_box"
+                )
+                expected_directory = base.joinpath(*name.split(".")[1:])
+                require(
+                    list(getattr(module, "__path__", ()))
+                    == list(spec.submodule_search_locations)
+                    == [str(expected_directory)],
+                    "source-shadowing",
+                )
+            locations = (
+                [filename] if filename else list(getattr(module, "__path__", ()))
+            )
+            require(bool(locations), "source-shadowing")
+            for item in locations:
+                path = Path(item).resolve()
+                require(path.is_relative_to(APP), "source-shadowing")
+                if filename:
+                    require(
+                        path.relative_to(APP).as_posix() in identity["sha256"],
+                        "source-shadowing",
+                    )
+
+
+def capture_binding(source, expected, binaries=()):
+    identity = source_snapshot(source, expected)
+    if _BINDING.get() is None:
+        require(
+            not any(
+                name in ("oc_box", "tools") or name.startswith(("oc_box.", "tools."))
+                for name in sys.modules
+            ),
+            "source-shadowing",
+        )
+        for name, module in tuple(sys.modules.items()):
+            filename = getattr(module, "__file__", None)
+            if filename and Path(filename).resolve().is_relative_to(APP):
+                require(
+                    name == "__main__" and vars(module) is globals(), "source-shadowing"
+                )
+    else:
+        require(identity == _BINDING.get()["source"], "source-changed")
+    import_origins(identity)
+    sys.dont_write_bytecode = True
+    sys.pycache_prefix = "/nonexistent-oc-box-bytecode-" + secrets.token_hex(16)
+    prune_candidate_roots()
+    if _BINDING.get() is None:
+        pin_candidate_packages(identity)
+    load_runtime()
+    # Older authenticated donors may add their checkout to sys.path. Packages
+    # are already pinned; remove these broad admission roots before any effects.
+    prune_candidate_roots()
+    import_origins(identity)
+    require(source_snapshot(source, expected) == identity, "source-changed")
+    native = {}
+    for role, binary in binaries:
+        pinned = guard_call(
+            guards.native_identity, Path(binary), outside=(APP,), resolve_entry=True
+        )
+        native[role] = {
+            "path": str(pinned.path),
+            "sha256": pinned.sha256,
+            "bytes": pinned.bytes,
+        }
+    return {"source": identity, "native": native}
+
+
+def prune_candidate_roots():
+    retained = []
+    for item in sys.path:
+        try:
+            candidate = Path(item or os.curdir).resolve()
+        except (OSError, ValueError, TypeError):
+            raise FixtureError("source-shadowing") from None
+        if not candidate.is_relative_to(APP):
+            retained.append(item)
+    sys.path[:] = retained
+
+
+def pin_candidate_packages(identity):
+    """Pin search locations before executing any candidate package code."""
+    for name, directory in (("tools", APP / "tools"), ("oc_box", APP / "src/oc_box")):
+        directory = no_symlinks(directory)
+        require(directory.is_dir(), "source-shadowing")
+        init = directory / "__init__.py"
+        if init.exists() or init.is_symlink():
+            relative = init.relative_to(APP).as_posix()
+            require(
+                relative in identity["sha256"]
+                and hashlib.sha256(
+                    safe_bootstrap_file(APP, relative).read_bytes()
+                ).hexdigest()
+                == identity["sha256"][relative],
+                "source-shadowing",
+            )
+            spec = importlib.util.spec_from_file_location(
+                name, init, submodule_search_locations=[str(directory)]
+            )
+            require(spec is not None and spec.loader is not None, "source-shadowing")
+            require(
+                spec.origin == str(init)
+                and list(spec.submodule_search_locations or ()) == [str(directory)],
+                "source-shadowing",
+            )
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+        else:
+            require(name == "tools", "source-shadowing")
+            spec = importlib.machinery.ModuleSpec(name, loader=None, is_package=True)
+            spec.submodule_search_locations = [str(directory)]
+            module = ModuleType(name)
+            module.__package__, module.__path__, module.__spec__ = (
+                name,
+                [str(directory)],
+                spec,
+            )
+            sys.modules[name] = module
+
+
+def executing_commit():
+    """Retained maintenance binds its executing checkout, not an old artifact."""
+    return (
+        subprocess.run(
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-C",
+                str(APP),
+                "rev-parse",
+                "HEAD",
+            ],
+            env={
+                "PATH": os.defpath,
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_NO_REPLACE_OBJECTS": "1",
+            },
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=True,
+            timeout=15,
+        )
+        .stdout.decode()
+        .strip()
     )
-    return json.loads(path.read_text())
+
+
+def verify_binding(binding):
+    require(
+        source_snapshot(APP, binding["source"]["commit"]) == binding["source"],
+        "source-changed",
+    )
+    import_origins(binding["source"])
+    for native in binding["native"].values():
+        guard_call(
+            guards.check_native,
+            guards.NativeIdentity(
+                Path(native["path"]), native["sha256"], native["bytes"]
+            ),
+        )
+
+
+def safe_path(root, relative, *, directory=False, optional=False):
+    load_runtime()
+    return guard_call(
+        guards.checked_path,
+        relative,
+        root=root,
+        kind="directory" if directory else "file",
+        optional=optional,
+    )
+
+
+def private_json(root, relative):
+    load_runtime()
+    return guard_call(
+        guards.read_private_json,
+        root,
+        relative,
+        uid=os.getuid(),
+        max_bytes=crypto.MAX_SMALL,
+    )
 
 
 def write_json_new(path, value):
@@ -408,10 +826,28 @@ def write_json_new(path, value):
 
 
 def launcher(arguments):
-    require(box.main(arguments) == 0, "launcher-exit")
+    checkpoint_binding()
+    code = box.main(arguments)
+    require(type(code) is int and code == 0, "launcher-exit")
+
+
+def checkpoint_binding():
+    binding = _BINDING.get()
+    if binding is not None:
+        verify_binding(binding)
+        if "fixture_root" in binding:
+            root = Path(binding["fixture_root"])
+            validate_fixture(root, allow_unrecorded=True)
+            if "original_provenance" in binding:
+                require(
+                    private_json(root, "source-binding.json")
+                    == binding["original_provenance"],
+                    "source-changed",
+                )
 
 
 def isolated_env(root, baseline=None):
+    load_runtime()
     """Positive runtime allowlist; never inspect ambient credential values."""
     baseline = box.maintenance_host_env() if baseline is None else baseline
     env = {
@@ -462,6 +898,7 @@ def isolated_env(root, baseline=None):
         OPENCODE_DISABLE_MODELS_FETCH="1",
         OPENCODE_DISABLE_AUTOUPDATE="1",
     )
+    env.update(guard_call(guards.private_selectors, root))
     return env
 
 
@@ -613,6 +1050,19 @@ def validate_fixture(root, *, allow_unrecorded=False):
     )
     validate_native_podman(mapping["podman"], root)
     validate_native_podman(mapping["interpreter"], root)
+    binding = _BINDING.get()
+    if binding:
+        for role in ("podman", "interpreter"):
+            if role in binding["native"]:
+                require(
+                    mapping[role] == binding["native"][role]["path"], "native-changed"
+                )
+        if "opencode" in binding["native"] and (root / "executables.json").exists():
+            require(
+                private_json(root, "executables.json")
+                == {"2": binding["native"]["opencode"]["path"]},
+                "native-changed",
+            )
     wrapper = safe_path(root, "bin/podman")
     require(
         wrapper.read_text() == podman_wrapper_source(mapping["interpreter"])
@@ -644,64 +1094,28 @@ def runtime_boot_checkpoint(root):
     Never follow that advice here or rewrite the marker to conceal the mismatch.
     https://github.com/containers/podman/blob/v6.1.4/libpod/runtime_linux.go
     """
-    marker = safe_path(root, "podman-tmp/alive", optional=True)
-    cached = None
-    if marker.exists():
-        descriptor = os.open(marker, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-        with os.fdopen(descriptor, "rb") as stream:
-            info = os.fstat(stream.fileno())
-            require(
-                stat.S_ISREG(info.st_mode)
-                and info.st_uid == os.getuid()
-                and info.st_nlink == 1
-                and info.st_size <= 128,
-                "runtime-boot-marker",
-            )
-            cached = stream.read(129)
-    current = system_boot_id()
-    pattern = rb"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\n?"
-    valid_cached = isinstance(cached, bytes) and bool(re.fullmatch(pattern, cached))
-    valid_current = isinstance(current, bytes) and bool(re.fullmatch(pattern, current))
-    matches = (cached == current) if valid_cached and valid_current else None
-    return {
-        "cached_marker_present": cached is not None,
-        "cached_marker_empty": cached == b"",
-        "cached_id_valid": valid_cached,
-        "current_id_valid": valid_current,
-        "boot_ids_match": matches,
-    }
+    load_runtime()
+    checkpoint = guard_call(
+        guards.boot_checkpoint,
+        root / "podman-tmp/alive",
+        system_boot_id(),
+        uid=os.getuid(),
+    )
+    return asdict(checkpoint)
 
 
 def require_runtime_boot(root, *, allow_uninitialized=False):
     checkpoint = runtime_boot_checkpoint(root)
-    require(checkpoint["current_id_valid"], "runtime-boot-current")
-    if allow_uninitialized and (
-        not checkpoint["cached_marker_present"] or checkpoint["cached_marker_empty"]
-    ):
-        return checkpoint
-    require(checkpoint["cached_id_valid"], "runtime-boot-marker")
-    require(checkpoint["boot_ids_match"] is True, "runtime-boot-mismatch")
+    guard_call(
+        guards.require_boot,
+        guards.BootCheckpoint(**checkpoint),
+        fresh_empty=allow_uninitialized,
+    )
     return checkpoint
 
 
 def validate_store_info(root, info, temporary=None):
     """Independent native Podman proof; labels alone never authorize cleanup."""
-    require(isinstance(info, dict), "private-store")
-    require(
-        info.get("host", {}).get("security", {}).get("rootless") is True, "rootless"
-    )
-    require(info.get("host", {}).get("serviceIsRemote") is False, "remote-engine")
-    store = info.get("store", {})
-    require(store.get("graphDriverName") == "overlay", "storage-driver")
-    for field, relative in (
-        ("graphRoot", "data/containers/storage"),
-        ("runRoot", "podman-run"),
-        ("volumePath", "data/containers/storage/volumes"),
-    ):
-        expected = safe_path(root, relative, directory=True)
-        actual = store.get(field)
-        require(isinstance(actual, str) and Path(actual) == expected, "private-store")
-        require(no_symlinks(actual).resolve(strict=True) == expected, "private-store")
     # Podman 5.6.2 exposes configFile. The separately audited v6.1.4
     # libpod/define/info.go removes it; define/version.go reports Version with
     # that exact capitalization. Only that verified omission is supported:
@@ -709,35 +1123,39 @@ def validate_store_info(root, info, temporary=None):
     # Unknown omissions fail closed. Exposed fields are ALWAYS validated, even
     # for 6.1.4. This exception also revalidates the exact selector source,
     # native executable mapping and private config; it is not label-only proof.
-    if "configFile" in store:
-        config = store["configFile"]
-        require(
-            isinstance(config, str)
-            and no_symlinks(config) == root / "config/containers/storage.conf",
-            "store-info-shape",
-        )
-    else:
-        version = info.get("version")
-        require(
-            isinstance(version, dict)
-            and version.get("Version") in PODMAN_CONFIGFILE_OMISSIONS,
-            "store-info-shape",
-        )
+    load_runtime()
+    omitted = (
+        isinstance(info, dict)
+        and isinstance(info.get("store"), dict)
+        and "configFile" not in info["store"]
+    )
+    audited = (
+        omitted
+        and isinstance(info.get("version"), dict)
+        and info["version"].get("Version") == "6.1.4"
+    )
+    if audited:
         validate_fixture(root, allow_unrecorded=True)
     temporary = no_symlinks(temporary or root / "temporary")
-    info = temporary.stat()
+    temporary_info = temporary.stat()
     require(
-        stat.S_ISDIR(info.st_mode)
-        and info.st_uid == os.getuid()
-        and not info.st_mode & 0o077,
+        stat.S_ISDIR(temporary_info.st_mode)
+        and temporary_info.st_uid == os.getuid()
+        and not temporary_info.st_mode & 0o077,
         "temporary-path",
     )
-    image_tmp = store.get("imageCopyTmpDir")
-    require(
-        isinstance(image_tmp, str)
-        and no_symlinks(image_tmp).resolve(strict=True)
-        == temporary.resolve(strict=True),
-        "image-temporary-path",
+    expected = guards.StorePaths(
+        safe_path(root, "data/containers/storage", directory=True),
+        safe_path(root, "podman-run", directory=True),
+        safe_path(root, "data/containers/storage/volumes", directory=True),
+        temporary,
+        safe_path(root, "config/containers/storage.conf"),
+    )
+    guard_call(
+        guards.validate_store_info,
+        info,
+        expected,
+        allow_audited_614_omission=bool(audited),
     )
 
 
@@ -748,6 +1166,7 @@ def validate_store(root, *, allow_unrecorded=False):
     # require an existing matching marker. A known mismatch NEVER reaches info.
     require_runtime_boot(root, allow_uninitialized=not workspace_records(root))
     normal = isolated_env(root)
+    binary = private_json(root, "podman-executable.json")["podman"]
     # temporary_location deliberately sets both env and Python's tempfile cache.
     # Only an already-isolated fixture caller may contribute this optional path.
     if os.environ.get("OC_BOX_STATE_HOME") == str(root / "registry"):
@@ -756,8 +1175,9 @@ def validate_store(root, *, allow_unrecorded=False):
         )
     with patch.dict(os.environ, normal, clear=True):
         for env in (normal, box.maintenance_host_env(), crypto.environment()):
+            env.update(guard_call(guards.private_selectors, root))
             result = box.run(
-                ["podman", "info", "--format", "json"],
+                [binary, "info", "--format", "json"],
                 env=env,
                 stdin=subprocess.DEVNULL,
                 capture=True,
@@ -768,6 +1188,7 @@ def validate_store(root, *, allow_unrecorded=False):
 
 
 def prepare_root(root, distro):
+    load_runtime()
     for relative in (
         "host-home",
         "config/opencode",
@@ -835,6 +1256,7 @@ os.execve(binary,[binary,*sys.argv[1:]],env)
 
 
 def prepare_native_cli(root, binary):
+    load_runtime()
     """A single-version selector, never a host installation or service client."""
     check_native_version(root, binary, "2")
     for name in ("config", "data", "state", "cache"):
@@ -1119,7 +1541,14 @@ def make_provider(state):
     server = ThreadingHTTPServer(("127.0.0.1", 0), Provider)
     server.daemon_threads = True
     worker = threading.Thread(target=server.serve_forever, daemon=True)
-    worker.start()
+    try:
+        worker.start()
+    except BaseException as primary:
+        try:
+            server.server_close()
+        except BaseException as error:
+            record_secondary(primary, "provider-close", error)
+        raise
     return server, worker
 
 
@@ -1496,6 +1925,7 @@ def trace_complete(trace):
 
 
 def run_native(data, connection, ident, state, port, values, trace=None):
+    checkpoint_binding()
     if trace is not None:
         trace("plugin-readiness")
     assert_plugins(
@@ -1614,12 +2044,13 @@ def no_vault_probe():
 
 
 def write_vault(values, password):
+    checkpoint_binding()
     with vault.locked(vault.vault_path(), create=True):
         vault.write_encrypted(vault.vault_path(), values, password)
 
 
 def assert_host_vault_clean():
-    require(not credentials.has_unlocked_values(), "host-value-retention")
+    require(not host_cache_retained(), "host-value-retention")
     require(
         all(name not in os.environ for name in (KEY, SIDE, ADDED)), "host-value-leak"
     )
@@ -1628,6 +2059,181 @@ def assert_host_vault_clean():
 def assert_host_clean():
     assert_host_vault_clean()
     require(all(name not in os.environ for name in KNOWN), "host-value-leak")
+
+
+def host_cache_retained():
+    # Presence only: an empty value cache or effective-policy context still leaks
+    # launch authority even when has_unlocked_values() is false.
+    return (
+        credentials.has_unlocked_values()
+        or credentials._UNLOCKED.get() is not None
+        or credentials._EFFECTIVE_POLICY.get() is not None
+    )
+
+
+def record_secondary(primary, stage, error):
+    """Keep the original exception object; persist only fixed diagnostics."""
+    entry = {"stage": stage, "error_class": safe_error_class(error)}
+    if isinstance(error, FixtureError) and str(error) in {
+        "host-environment-changed",
+        "host-restoration-changed",
+        "host-value-retention",
+    }:
+        entry["category"] = str(error)
+    nested = (
+        list(getattr(error, "fixture_secondary", ())) if error is not primary else []
+    )
+    if isinstance(primary, FirstLaunchFailure):
+        primary.shutdown_errors.append(entry)
+        primary.shutdown_errors.extend(nested)
+    else:
+        if not hasattr(primary, "fixture_secondary"):
+            primary.fixture_secondary = []
+        primary.fixture_secondary.append(entry)
+        primary.fixture_secondary.extend(nested)
+
+
+def assert_host_state(expected, *, restored=False):
+    # Check BOTH invariants; an environment mismatch must not skip the cache probe.
+    failure = None
+    if dict(os.environ) != expected:
+        failure = FixtureError(
+            "host-restoration-changed" if restored else "host-environment-changed"
+        )
+    if host_cache_retained():
+        cache_error = FixtureError("host-value-retention")
+        if failure is None:
+            failure = cache_error
+        else:
+            record_secondary(failure, "host-cache-clean", cache_error)
+    if failure is not None:
+        raise failure
+
+
+@contextlib.contextmanager
+def scoped_host_environment(updates=None, *, clear=False):
+    """Inspect the live scope even on failure, before patch restoration hides it."""
+    baseline = dict(os.environ)
+    primary = None
+    try:
+        with patch.dict(os.environ, updates or {}, clear=clear):
+            expected = dict(os.environ)
+            try:
+                yield
+            except BaseException as error:
+                primary = error
+                raise
+            finally:
+                try:
+                    assert_host_state(expected)
+                except BaseException as error:
+                    if primary is None:
+                        error.fixture_stage = "host-scoped-clean"
+                        primary = error
+                        raise
+                    record_secondary(primary, "host-scoped-clean", error)
+    finally:
+        try:
+            assert_host_state(baseline, restored=True)
+        except BaseException as error:
+            if primary is None:
+                raise
+            record_secondary(primary, "host-restored-clean", error)
+
+
+def finish_provider(server, worker, *, primary):
+    """Attempt every mandatory finalizer using this invocation's explicit primary."""
+    failure = primary
+
+    def joined():
+        worker.join(timeout=3)
+        require(not worker.is_alive(), "provider-cleanup-timeout")
+
+    for stage, action in (
+        ("provider-shutdown", server.shutdown),
+        ("provider-close", server.server_close),
+        ("provider-join", joined),
+    ):
+        try:
+            action()
+        except BaseException as error:
+            if failure is None:
+                error.fixture_stage = stage
+                failure = error
+            else:
+                record_secondary(failure, stage, error)
+    if primary is None and failure is not None:
+        raise failure
+
+
+def run_and_journal(root, binary, distro, report):
+    primary = result = None
+    try:
+        result = run(root, binary, distro, report)
+        require(
+            type(result) is dict and result.get("status") == "passed",
+            "missing-terminal-result",
+        )
+    except BaseException as error:
+        primary = error
+    try:
+        record_ids(root)
+    except BaseException as error:
+        if primary is None:
+            error.fixture_stage = "journal-reconciliation"
+            primary = error
+        else:
+            record_secondary(primary, "journal-reconciliation", error)
+    if primary is not None:
+        raise primary
+    return result
+
+
+def terminal_report(root, checks, *, result=None, primary=None, identity=None):
+    """One immutable terminal verdict, only after caller-owned finalization."""
+    value = dict(result or {})
+    diagnostic = None
+    if isinstance(primary, FirstLaunchFailure):
+        diagnostic = primary.diagnostic
+    elif primary is not None:
+        diagnostic = {"error_class": safe_error_class(primary)}
+        stage = getattr(primary, "fixture_stage", None)
+        if stage in {
+            "host-scoped-clean",
+            "provider-shutdown",
+            "provider-close",
+            "provider-join",
+            "journal-reconciliation",
+        }:
+            diagnostic["stage"] = stage
+        if isinstance(primary, FixtureError) and str(primary) in {
+            "host-environment-changed",
+            "host-restoration-changed",
+            "host-value-retention",
+            "provider-cleanup-timeout",
+            "source-changed",
+            "source-shadowing",
+            "native-changed",
+        }:
+            diagnostic["category"] = str(primary)
+    value.update(
+        format=FORMAT + "-v2",
+        status="failed" if primary is not None else "passed",
+        scope="full-global-vault",
+        checks=list(checks),
+        source_identity=identity["source"] if identity else None,
+        executing_binding=identity,
+        error=diagnostic,
+        secondary_errors=list(
+            getattr(
+                primary, "shutdown_errors", getattr(primary, "fixture_secondary", ())
+            )
+        )
+        if primary is not None
+        else [],
+    )
+    write_json_new(root / "result.json", value)
+    return value
 
 
 def tree_digest(root):
@@ -1664,6 +2270,7 @@ def snapshot_source(root, path, data):
 
 
 def full_backup_restore(root, baseline, expected, state, port, password, report):
+    checkpoint_binding()
     path, source = workspace(root, "source-a")
     before = snapshot_source(root, path, source)
     vault_before = crypto.digest(vault.vault_path())
@@ -1769,6 +2376,7 @@ def full_backup_restore(root, baseline, expected, state, port, password, report)
         return 0
 
     with (
+        scoped_host_environment(),
         patch.object(vault, "hidden", return_value=password) as hidden,
         patch.object(box, "run_tui", side_effect=relaunched),
     ):
@@ -1789,6 +2397,7 @@ def full_backup_restore(root, baseline, expected, state, port, password, report)
 
 def run(root, binary, distro, report=None):
     host_guard()
+    checkpoint_binding()
     address = (
         Path(isolated_env(root)["XDG_RUNTIME_DIR"])
         / ("oc-box-live-" + str(os.getuid()))
@@ -1839,6 +2448,7 @@ def run(root, binary, distro, report=None):
     write_vault(initial, password)
     state = {"values": {}, "requests": 0, "before": 0, "markers": set(), "errors": 0}
     server, worker = make_provider(state)
+    primary = None
     try:
         write_json_new(
             root / "config/opencode/opencode.json",
@@ -1896,6 +2506,7 @@ def run(root, binary, distro, report=None):
                     trace=trace,
                 )
                 with trace.checkpoint("config-reload"):
+                    checkpoint_binding()
                     request("POST", "/api/location/reload")
                 run_native(
                     data,
@@ -1942,7 +2553,7 @@ def run(root, binary, distro, report=None):
 
         with first_launch_trace(root) as trace:
             with (
-                patch.dict(os.environ, ambient),
+                scoped_host_environment(ambient),
                 patch.object(vault, "hidden", return_value=password) as hidden,
                 patch.object(box, "run_tui", side_effect=first_owner),
             ):
@@ -2004,7 +2615,7 @@ def run(root, binary, distro, report=None):
             return 0
 
         with (
-            patch.dict(os.environ, ambient),
+            scoped_host_environment(ambient),
             patch.object(vault, "hidden", return_value=password) as hidden,
             patch.object(box, "run_tui", side_effect=second_owner),
         ):
@@ -2046,7 +2657,7 @@ def run(root, binary, distro, report=None):
             return 0
 
         with (
-            patch.dict(os.environ, compatibility),
+            scoped_host_environment(compatibility),
             no_vault_probe(),
             patch.object(box, "run_tui", side_effect=opt_out),
         ):
@@ -2085,40 +2696,25 @@ def run(root, binary, distro, report=None):
         require(
             set(ids) == set(PROJECTS) and len(set(ids.values())) == 3, "fixture-ids"
         )
-        write_json_new(
-            root / "result.json",
-            {
-                "status": "passed",
-                "checks": report.checks,
-                "source_identity": get_version_info(APP),
-                "native_version": NATIVE_VERSION,
-                "podman_info_schema": {
-                    "exposed_configFile": "exact private storage.conf required",
-                    "audited_configFile_omissions": sorted(PODMAN_CONFIGFILE_OMISSIONS),
-                    "omission_requirement": "exact native Version plus fully validated private selector/config and rootless/nonremote/overlay/store/temp paths in every environment",
-                },
-                "workspace_ids": ids,
-                "scope": "Scripted TUI exit and masked prompt input; real rootless lifecycle, native Build tools and full encrypted backup/restore. Not interactive TUI acceptance or a security certification.",
+        result = {
+            "status": "passed",
+            "checks": report.checks,
+            "source_identity": _BINDING.get()["source"] if _BINDING.get() else None,
+            "native_version": NATIVE_VERSION,
+            "podman_info_schema": {
+                "exposed_configFile": "exact private storage.conf required",
+                "audited_configFile_omissions": sorted(PODMAN_CONFIGFILE_OMISSIONS),
+                "omission_requirement": "exact native Version plus fully validated private selector/config and rootless/nonremote/overlay/store/temp paths in every environment",
             },
-        )
-        report("passed")
+            "workspace_ids": ids,
+            "scope": "Scripted TUI exit and masked prompt input; real rootless lifecycle, native Build tools and full encrypted backup/restore. Not interactive TUI acceptance or a security certification.",
+        }
+    except BaseException as error:
+        primary = error
+        raise
     finally:
-        primary = sys.exc_info()[1]
-        for stage, action in (
-            ("provider-shutdown", server.shutdown),
-            ("provider-close", server.server_close),
-            ("provider-join", lambda: worker.join(timeout=3)),
-        ):
-            try:
-                action()
-            except BaseException as error:
-                if not isinstance(primary, FirstLaunchFailure):
-                    raise
-                # The first-launch report is already frozen. Retain secondary
-                # provider cleanup separately in the final fixed public summary.
-                primary.shutdown_errors.append(
-                    {"stage": stage, "error_class": safe_error_class(error)}
-                )
+        finish_provider(server, worker, primary=primary)
+    return result
 
 
 def cleanup(root):
@@ -2401,6 +2997,11 @@ def diagnose(root):
                     "private-volume",
                 )
             imports = path.parent / "imports-v2"
+            selected = box.session_state(path).get("last")
+            valid_selected = (
+                isinstance(selected, str)
+                and re.fullmatch(r"ses[A-Za-z0-9_-]{1,200}", selected) is not None
+            )
             result["workspaces"][name] = {
                 "id": data["id"],
                 "native_version": data.get("opencode_version"),
@@ -2415,7 +3016,12 @@ def diagnose(root):
                 else None,
                 "container_error_category": state_error_category(state.get("Error")),
                 "private_home_present": volume.returncode == 0,
-                "selected_session": box.session_state(path).get("last"),
+                "selected_session": selected if valid_selected else None,
+                "selected_session_validity": "valid"
+                if valid_selected
+                else "absent"
+                if selected is None
+                else "invalid",
                 "native_import_exports": len(list(imports.glob("*.json")))
                 if imports.is_dir()
                 else 0,
@@ -2432,7 +3038,7 @@ SOURCE_LOADING_STAGES = {
     "Finding workspace session": "session-resolve",
     "Syncing session history": "history-sync",
     "Stopping container": "container-stop",
-    **{f"Starting {name} container": "container-start" for name in box.DISTROS},
+    **{f"Starting {name} container": "container-start" for name in DISTRO_CHOICES},
 }
 SOURCE_STAGES = (
     frozenset(SOURCE_LOADING_STAGES.values())
@@ -2703,7 +3309,7 @@ class SourceRetryTrace:
                     code,
                     private_stderr(owner.error_file),
                 )
-                original_error = sys.exc_info()[1]
+                original_error = kwargs.get("primary")
                 if original_error is not None:
                     self.fail(original_error)
             try:
@@ -2744,6 +3350,7 @@ def first_launch_trace(root):
             yield trace
         except BaseException as error:
             trace.fail(error)
+            trace.cleanup_errors.extend(getattr(error, "fixture_secondary", ()))
             result = {
                 "status": "failed",
                 "scope": "new-fixture-first-owning-launch",
@@ -2756,7 +3363,11 @@ def first_launch_trace(root):
             report_written = False
             report_error = None
             try:
-                result["source_identity"] = get_version_info(APP)
+                result["source_identity"] = (
+                    _BINDING.get()["source"]
+                    if _BINDING.get()
+                    else get_version_info(APP)
+                )
             except Exception as journal_error:
                 report_error = safe_error_class(journal_error)
                 result["report_error_class"] = report_error
@@ -2775,6 +3386,59 @@ def first_launch_trace(root):
 def validate_source_retry(root):
     """Read-only checkpoint validation. Never consult/decrypt the old vault."""
     root = validate_fixture(root)
+    original = root / "source-binding.json"
+    if original.exists():
+        captured = private_json(root, "source-binding.json")
+        require(
+            type(captured) is dict
+            and set(captured) == {"format", "root", "source_identity", "native"}
+            and captured["format"] == FORMAT + "-binding-v1"
+            and captured["root"] == str(root),
+            "retry-original-provenance",
+        )
+        identity = captured["source_identity"]
+        require(
+            type(identity) is dict
+            and set(identity)
+            == {"commit", "commit_count", "version", "dirty", "sha256"}
+            and isinstance(identity["commit"], str)
+            and re.fullmatch(r"[0-9a-f]{40}", identity["commit"])
+            and type(identity["commit_count"]) is int
+            and identity["commit_count"] > 29
+            and identity["dirty"] is False
+            and identity["version"]
+            == f"1.6.{identity['commit_count'] - 29}+g{identity['commit'][:7]}"
+            and type(identity["sha256"]) is dict
+            and bool(identity["sha256"]),
+            "retry-original-provenance",
+        )
+        for name, digest in identity["sha256"].items():
+            require(
+                isinstance(name, str)
+                and name.startswith(("src/oc_box/", "tools/"))
+                and ".." not in Path(name).parts
+                and isinstance(digest, str)
+                and re.fullmatch(r"[0-9a-f]{64}", digest),
+                "retry-original-provenance",
+            )
+        require(
+            type(captured["native"]) is dict
+            and set(captured["native"]) == {"opencode", "podman", "interpreter"},
+            "retry-original-provenance",
+        )
+        for native in captured["native"].values():
+            require(
+                type(native) is dict
+                and set(native) == {"path", "sha256", "bytes"}
+                and isinstance(native["path"], str)
+                and Path(native["path"]).is_absolute()
+                and not any(ord(c) < 32 for c in native["path"])
+                and isinstance(native["sha256"], str)
+                and re.fullmatch(r"[0-9a-f]{64}", native["sha256"])
+                and type(native["bytes"]) is int
+                and native["bytes"] > 0,
+                "retry-original-provenance",
+            )
 
     def later_evidence(name):
         return (
@@ -2792,7 +3456,20 @@ def validate_source_retry(root):
         )
 
     for entry in root.iterdir():
-        require(not later_evidence(entry.name), "retry-later-evidence")
+        if entry.name == "result.json":
+            try:
+                prior = private_json(root, entry.name)
+            except (ValueError, OSError, FixtureError):
+                raise FixtureError("retry-later-evidence") from None
+            require(
+                isinstance(prior, dict)
+                and prior.get("format") == FORMAT + "-v2"
+                and prior.get("status") == "failed"
+                and prior.get("scope") == "full-global-vault",
+                "retry-later-evidence",
+            )
+        else:
+            require(not later_evidence(entry.name), "retry-later-evidence")
     # Never traverse/move the graphroot/runroot. These small synthetic project,
     # registry and temporary journals suffice for this fixture's later stages.
     scanned = 0
@@ -2929,6 +3606,9 @@ def source_evidence_digests(root, path):
         "data/oc-box/credentials/vault.json",
     )
     result = {name: crypto.digest(safe_path(root, name)) for name in files}
+    for name in ("result.json", "first-launch-failure.json", "source-binding.json"):
+        if (root / name).exists():
+            result[name] = crypto.digest(safe_path(root, name))
     for directory in (root / "config", path.parent / "imports-v2", root / "vault"):
         if directory.exists():
             safe_path(root, directory.relative_to(root), directory=True)
@@ -2964,6 +3644,7 @@ def verify_stopped_source(root, data):
 def retry_source(root, temp_parent=None):
     """Retry one retained owner/native check, NOT the complete acceptance fixture."""
     host_guard()
+    checkpoint_binding()
     root, path, source, baseline, binary = validate_source_retry(root)
     if temp_parent is not None:
         temp_parent = existing_directory(temp_parent)
@@ -2994,9 +3675,25 @@ def retry_source(root, temp_parent=None):
     server = worker = None
     resources_verified = False
     try:
-        result["source_identity"] = get_version_info(APP)
+        result["format"] = FORMAT + "-retry-v2"
+        result["source_identity"] = _BINDING.get()["source"] if _BINDING.get() else None
+        result["executing_binding"] = _BINDING.get()
+        prior = root / "source-binding.json"
+        result["original_source_identity"] = (
+            private_json(root, "source-binding.json").get("source_identity")
+            if prior.exists()
+            else None
+        )
+        result["original_provenance"] = (
+            "recorded"
+            if result["original_source_identity"]
+            else "legacy-unbound-not-promoted"
+        )
+        result["original_binding"] = (
+            private_json(root, "source-binding.json") if prior.exists() else None
+        )
         with (
-            patch.dict(os.environ, isolated_env(root), clear=True),
+            scoped_host_environment(isolated_env(root), clear=True),
             temporary_location(root, temp_parent),
             trace.installed(),
         ):
@@ -3142,8 +3839,7 @@ def retry_source(root, temp_parent=None):
                 # Only the owner gets the new config. Podman still resolves the
                 # UNCHANGED original selector/config/store and original registry.
                 with (
-                    patch.dict(
-                        os.environ,
+                    scoped_host_environment(
                         {
                             "XDG_CONFIG_HOME": str(attempt / "config"),
                             "PATH": str(attempt / "bin") + ":" + os.environ["PATH"],
@@ -3169,6 +3865,7 @@ def retry_source(root, temp_parent=None):
             result["status"] = "passed"
     except BaseException as error:
         trace.fail(error)
+        trace.cleanup_errors.extend(getattr(error, "fixture_secondary", ()))
     finally:
         if resources_verified:
             trace("source-stop-check")
@@ -3193,9 +3890,7 @@ def retry_source(root, temp_parent=None):
         if server is not None:
             trace("provider-shutdown")
             try:
-                server.shutdown()
-                server.server_close()
-                worker.join(timeout=3)
+                finish_provider(server, worker, primary=None)
                 trace.completed()
             except BaseException as error:
                 trace.fail(error)
@@ -3214,6 +3909,13 @@ def retry_source(root, temp_parent=None):
             result["status"] = "failed"
             result["error"] = trace.failure
         report_path = attempt / "retry-result.json"
+        try:
+            checkpoint_binding()
+        except BaseException as error:
+            trace("evidence-preservation")
+            trace.fail(error)
+            result["status"] = "failed"
+            result["error"] = trace.failure
         write_json_new(report_path, result)
     return report_path, result
 
@@ -3242,7 +3944,14 @@ def parser():
         type=Path,
         help="Existing parent for private temporary image/encrypted staging; defaults inside the fixture",
     )
-    value.add_argument("--distro", choices=tuple(box.DISTROS), default="tumbleweed")
+    value.add_argument(
+        "--source", type=Path, default=APP, help="This entrypoint's checkout only"
+    )
+    value.add_argument(
+        "--expect-commit",
+        help="Exact clean full-history source commit required for fresh runs; retained operations bind the executing checkout when omitted",
+    )
+    value.add_argument("--distro", choices=DISTRO_CHOICES, default="tumbleweed")
     value.add_argument(
         "--cleanup",
         type=Path,
@@ -3265,6 +3974,9 @@ def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
     args = parser().parse_args(arguments)  # --help is harmless inside containers.
     root = None
+    fresh = False
+    binding = token = None
+    terminal_written = False
     phase = "host-guard"
     old_umask = os.umask(0o077)
     output = os.fdopen(os.dup(1), "w", buffering=1)
@@ -3274,12 +3986,34 @@ def main(argv=None):
         phase = name
         if name != "passed":
             report.checks.append(name)
+            if root is not None and (root / "progress").is_dir():
+                write_json_new(
+                    root / "progress" / (str(len(report.checks)).zfill(4) + ".json"),
+                    {"format": FORMAT + "-progress-v1", "stage": name},
+                )
         print("global-vault fixture: " + name, file=output, flush=True)
 
     report.checks = []
 
     try:
         host_guard()
+        require(no_symlinks(args.source.expanduser()) == APP, "source-checkout")
+        if args.cleanup is None and args.diagnose is None and args.retry_source is None:
+            require(args.work_dir is not None, "work-dir-required")
+            fresh_parent(args.work_dir)
+            if args.temp_dir is not None:
+                fresh_parent(args.temp_dir)
+        retained = (
+            args.cleanup is not None
+            or args.diagnose is not None
+            or args.retry_source is not None
+        )
+        if __name__ == "__main__" or args.retry_source is not None:
+            if args.expect_commit is None and retained:
+                args.expect_commit = executing_commit()
+            require(args.expect_commit is not None, "expected-source-required")
+            binding = capture_binding(APP, args.expect_commit)
+            token = _BINDING.set(binding)
         if args.retry_source is not None:
             require(
                 args.cleanup is None
@@ -3294,6 +4028,25 @@ def main(argv=None):
             )
             phase = "retry-source-validation"
             root = validate_fixture(args.retry_source)
+            binary = private_json(root, "executables.json")["2"]
+            mapping = private_json(root, "podman-executable.json")
+            binding = capture_binding(
+                APP,
+                args.expect_commit,
+                (
+                    ("opencode", binary),
+                    ("podman", mapping["podman"]),
+                    ("interpreter", mapping["interpreter"]),
+                    (
+                        "retry-interpreter",
+                        Path(getattr(sys, "_base_executable", sys.executable)).resolve(
+                            strict=True
+                        ),
+                    ),
+                ),
+            )
+            binding["fixture_root"] = str(root)
+            _BINDING.set(binding)
             with private_output():
                 report_path, result = retry_source(root, args.temp_dir)
             print("Retained root: " + str(root), file=output)
@@ -3363,42 +4116,82 @@ def main(argv=None):
                 print("Workspace " + name + ": " + ident, file=output)
             return 0
         require(args.work_dir is not None, "work-dir-required")
-        parent = existing_directory(args.work_dir)
+        parent = fresh_parent(args.work_dir)
         if args.temp_dir is not None:
-            existing_directory(args.temp_dir)
+            fresh_parent(args.temp_dir)
+        require(args.expect_commit is not None, "expected-source-required")
+        if binding is None:
+            binding = capture_binding(APP, args.expect_commit)
+            token = _BINDING.set(binding)
         discovered = args.opencode_v2 or shutil.which(
             "opencode", path=box.maintenance_host_env().get("PATH", "/usr/bin:/bin")
         )
         require(discovered is not None, "native-executable")
-        binary = Path(discovered).expanduser().resolve(strict=True)
+        binary = Path(discovered).expanduser().absolute()
         require(binary.is_file() and os.access(binary, os.X_OK), "native-executable")
         native_podman = shutil.which(
             "podman", path=box.maintenance_host_env().get("PATH", "/usr/bin:/bin")
         )
         require(native_podman is not None, "native-podman")
-        native_podman = Path(native_podman).resolve(strict=True)
+        native_podman = Path(native_podman).absolute()
+        binding = capture_binding(
+            APP,
+            args.expect_commit,
+            (
+                ("opencode", binary),
+                ("podman", native_podman),
+                ("interpreter", Path(sys.executable).resolve()),
+            ),
+        )
+        binary = (
+            Path(binding["native"]["opencode"]["path"])
+            if "opencode" in binding["native"]
+            else binary
+        )
+        native_podman = (
+            Path(binding["native"]["podman"]["path"])
+            if "podman" in binding["native"]
+            else native_podman
+        )
+        _BINDING.set(binding)
         root = Path(tempfile.mkdtemp(prefix=PREFIX, dir=parent))
+        fresh = True
         root.chmod(0o700)
         print("Retained root: " + str(root), file=output)
         phase = "fixture-preparation"
         with private_output():
+            binding["original_provenance"] = {
+                "format": FORMAT + "-binding-v1",
+                "root": str(root),
+                "source_identity": binding["source"],
+                "native": binding["native"],
+            }
+            write_json_new(root / "source-binding.json", binding["original_provenance"])
             prepare_root(root, args.distro)
             prepare_podman_cli(root, native_podman)
+            binding["fixture_root"] = str(root)
+            (root / "progress").mkdir(mode=0o700)
             with (
-                patch.dict(os.environ, isolated_env(root), clear=True),
+                scoped_host_environment(isolated_env(root), clear=True),
                 temporary_location(root, args.temp_dir),
             ):
-                try:
-                    run(root, binary, args.distro, report)
-                finally:
-                    # Journal production-created IDs even after a later failure.
-                    record_ids(root)
+                result = run_and_journal(root, binary, args.distro, report)
+        checkpoint_binding()
+        terminal_report(root, report.checks, result=result, identity=binding)
+        terminal_written = True
+        report("passed")
         ids = private_json(root, "fixture-ids.json")
         for name, ident in sorted(ids.items()):
             print("Workspace " + name + ": " + ident, file=output)
         print("Report: " + str(root / "result.json"), file=output)
         return 0
     except BaseException as error:
+        if fresh and root is not None:
+            try:
+                terminal_report(root, report.checks, primary=error, identity=binding)
+                terminal_written = True
+            except BaseException as reporting:
+                record_secondary(error, "terminal-report", reporting)
         if isinstance(error, FirstLaunchFailure):
             diagnostic = error.diagnostic
             print(
@@ -3472,6 +4265,8 @@ def main(argv=None):
             )
         if root is not None:
             print("Retained root: " + str(root), file=output)
+            if terminal_written:
+                print("Report: " + str(root / "result.json"), file=output)
             if (
                 args.diagnose is None
                 and args.cleanup is None
@@ -3500,6 +4295,8 @@ def main(argv=None):
                 pass
         return 1
     finally:
+        if token is not None:
+            _BINDING.reset(token)
         os.umask(old_umask)
         output.close()
 
