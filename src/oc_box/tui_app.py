@@ -30,7 +30,7 @@ from textual.widgets import (
 
 if __package__:
     from . import status_report
-    from .tui_backend import plain
+    from .tui_backend import plain, TerminalAttachmentError
     from .tui_logs import LogBuffer, LogEntry
     from .tui_sessions import FavoriteStore, SessionCatalog
     from .tui_terminal import NativeTerminal
@@ -38,7 +38,7 @@ if __package__:
     from .tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
 else:
     import status_report
-    from tui_backend import plain
+    from tui_backend import plain, TerminalAttachmentError
     from tui_logs import LogBuffer, LogEntry
     from tui_sessions import FavoriteStore, SessionCatalog
     from tui_terminal import NativeTerminal
@@ -1193,11 +1193,14 @@ class DashboardApp(App):
             if self.is_running:
                 self.call_from_thread(self._attach_terminal, handle, workspace)
                 handle = None
+        except TerminalAttachmentError as error:
+            if self.is_running:
+                self.call_from_thread(self._message, str(error))
         except Exception:
             if self.is_running:
                 self.call_from_thread(
                     self._message,
-                    "Terminal attachment refused. No owning launch, maintenance fallback or credential refresh was attempted.",
+                    str(TerminalAttachmentError("client-launch")),
                 )
         finally:
             if handle:

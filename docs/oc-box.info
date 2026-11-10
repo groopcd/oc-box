@@ -475,7 +475,13 @@ closes its clients/leases only, not the workspace owner or native
 persistent PTY. This is not a complete xterm implementation: no mouse,
 images, complex-grapheme or extended-keyboard support is promised.
 Actual embedded rendering/input/resize/detach acceptance still needs a
-new clean-host interactive run.
+new clean-host interactive run.  Immediate attachment refusals include
+fixed categories such as ‘workspace-not-running’, ‘workspace-identity’,
+‘owner-unavailable’, ‘session-unavailable’ or ‘client-launch’.  They
+identify the failed stage without printing native output, credentials or
+control replies.  Compare the ordinary ‘oc-box terminal --project PATH’
+attach-only path for the same running workspace; do not reset, repair or
+start a replacement merely to bypass a refusal.
 
 The Logs tab defaults to ‘log/activity.jsonl’ under the configured state
 root, with rotations ‘.1’ through ‘.3’: four files capped at 256 KiB
@@ -2901,20 +2907,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2613
 Node: Commands6118
-Node: Options67161
-Node: Lifecycle and persistence87290
-Node: Distribution images89410
-Node: Sessions and recovery94285
-Node: Devices and host permissions100870
-Node: Resource reports103216
-Node: Configuration and environment105327
-Node: Files116590
-Node: Exit status122534
-Node: Examples123387
-Node: Troubleshooting125473
-Node: Installation and manuals134801
-Node: Authors and license144021
-Node: See also144628
+Node: Options67631
+Node: Lifecycle and persistence87760
+Node: Distribution images89880
+Node: Sessions and recovery94755
+Node: Devices and host permissions101340
+Node: Resource reports103686
+Node: Configuration and environment105797
+Node: Files117060
+Node: Exit status123004
+Node: Examples123857
+Node: Troubleshooting125943
+Node: Installation and manuals135271
+Node: Authors and license144491
+Node: See also145098
 
 End Tag Table
 

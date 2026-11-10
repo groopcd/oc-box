@@ -305,6 +305,72 @@ class DashboardBackendTests(unittest.TestCase):
         handle.close()
         lease.__exit__.assert_called_once()
 
+    def test_terminal_refusals_are_fixed_categories_not_private_exception_text(self):
+        cases = (
+            (
+                "Workspace is not running; start it before attaching a client.",
+                "workspace-not-running",
+            ),
+            (
+                "Workspace identity changed; refusing live session access.",
+                "workspace-identity",
+            ),
+            (
+                "Container workspace mount does not match the host registry.",
+                "workspace-mount",
+            ),
+            (
+                "Live service does not match this workspace/version/session.",
+                "owner-mismatch",
+            ),
+            (
+                "No ready live OpenCode 2.x workspace service. Start oc-box or 'oc-box web' first; no credentials were refreshed.",
+                "owner-unavailable",
+            ),
+            ("PRIVATE_OUTPUT token=synthetic-private", "workspace-validation"),
+        )
+        data = {"id": "a" * 32, "opencode_version": "2.2.6"}
+        self.backend.selected = Mock(
+            return_value=(Path("/private/workspace.json"), data)
+        )
+        for message, reason in cases:
+            with self.subTest(reason=reason):
+                lease = Mock()
+                lease.__enter__ = Mock(side_effect=box.BoxError(message))
+                lease.__exit__ = Mock()
+                with patch.object(
+                    backend.workspace_service, "attach", return_value=lease
+                ):
+                    with self.assertRaises(backend.TerminalAttachmentError) as caught:
+                        self.backend.terminal(data["id"])
+                self.assertEqual(caught.exception.reason, reason)
+                self.assertNotIn("PRIVATE_OUTPUT", str(caught.exception))
+                self.assertNotIn("synthetic-private", str(caught.exception))
+                lease.__exit__.assert_not_called()
+
+    def test_terminal_session_api_failure_releases_lease_and_hides_private_output(self):
+        data = {"id": "a" * 32, "opencode_version": "2.2.6"}
+        lease = Mock()
+        lease.__enter__ = Mock(return_value={"session": "ses_demo"})
+        lease.__exit__ = Mock(return_value=False)
+        self.box.valid_session_id = box.valid_session_id
+        self.backend.selected = Mock(
+            return_value=(Path("/private/workspace.json"), data)
+        )
+        with (
+            patch.object(backend.workspace_service, "attach", return_value=lease),
+            patch.object(
+                backend.workspace_service,
+                "api",
+                side_effect=box.BoxError("PRIVATE_OUTPUT"),
+            ),
+        ):
+            with self.assertRaises(backend.TerminalAttachmentError) as caught:
+                self.backend.terminal(data["id"])
+        self.assertEqual(caught.exception.reason, "session-unavailable")
+        self.assertNotIn("PRIVATE_OUTPUT", str(caught.exception))
+        lease.__exit__.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

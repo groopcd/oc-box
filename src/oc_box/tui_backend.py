@@ -23,6 +23,44 @@ class DashboardError(ValueError):
     """Fixed, non-private diagnostic suitable for presentation."""
 
 
+TERMINAL_REFUSALS = {
+    "workspace-missing": "The selected workspace is no longer registered. Refresh and select it again.",
+    "unsupported-version": "Live session terminals require an existing OpenCode V2 workspace.",
+    "workspace-not-running": "The selected workspace container is stopped or paused. Select the running workspace; no start was attempted.",
+    "workspace-identity": "Workspace identity or project-marker validation failed. Inspect oc-box status; no repair was attempted.",
+    "workspace-mount": "The container project mount does not match the host registration.",
+    "workspace-ownership": "Container ownership validation failed; the resource was not used.",
+    "owner-unavailable": "The private workspace owner service is unavailable or not ready. An already-running owner is required; no new owner was started.",
+    "owner-mismatch": "The private owner does not match the workspace, native version or advertised session.",
+    "workspace-validation": "Workspace or private-service validation failed. Compare with 'oc-box terminal' for this same workspace.",
+    "invalid-session": "The requested session ID is invalid.",
+    "session-unavailable": "The private service could not return the requested session. For an old owner-selected session, choose an existing live workspace source instead.",
+    "session-scope": "The requested session does not belong to this workspace's internal project directory.",
+    "client-build": "The native terminal helper could not be prepared. Check that the dashboard checkout/installation is complete.",
+    "client-launch": "The local native terminal client could not start. No maintenance shell or owning launch was attempted.",
+}
+_ATTACH_REASONS = {
+    "Workspace is not running; start it before attaching a client.": "workspace-not-running",
+    "Workspace identity changed; refusing live session access.": "workspace-identity",
+    "Container workspace mount does not match the host registry.": "workspace-mount",
+    "Container ownership label mismatch; refusing to manage it.": "workspace-ownership",
+    "Container ownership label mismatch; resource not measured.": "workspace-ownership",
+    "No ready live OpenCode 2.x workspace service. Start oc-box or 'oc-box web' first; no credentials were refreshed.": "owner-unavailable",
+    "Workspace service is not ready; retry after startup.": "owner-unavailable",
+    "Live service does not match this workspace/version/session.": "owner-mismatch",
+}
+
+
+class TerminalAttachmentError(DashboardError):
+    """Never exposes native errors, control responses, env, or command output."""
+
+    def __init__(self, reason):
+        self.reason = reason if reason in TERMINAL_REFUSALS else "workspace-validation"
+        super().__init__(
+            f"Terminal attachment refused ({self.reason}): {TERMINAL_REFUSALS[self.reason]}"
+        )
+
+
 def plain(value, limit=4096):
     """Render metadata literally, without terminal controls or markup execution."""
     return "".join(c if c.isprintable() else " " for c in str(value))[:limit]
@@ -423,17 +461,22 @@ class DashboardBackend:
 
     def terminal(self, workspace, session=None):
         """Explicit attach/takeover. The caller owns and must close the lease."""
-        path, data = self.selected(workspace)
+        try:
+            path, data = self.selected(workspace)
+        except DashboardError:
+            raise TerminalAttachmentError("workspace-missing") from None
         if not str(data.get("opencode_version", "")).startswith("2."):
-            raise DashboardError("Live session terminals require OpenCode V2.")
+            raise TerminalAttachmentError("unsupported-version")
         lease = workspace_service.attach(self._queries, path, data)
         entered = False
+        stage = "attach"
         try:
             connection = lease.__enter__()
             entered = True
             target = session or connection["session"]
             if not self.box.valid_session_id(target):
-                raise DashboardError("Invalid selected session.")
+                raise TerminalAttachmentError("invalid-session")
+            stage = "session"
             response = workspace_service.api(
                 self.box,
                 data,
@@ -445,9 +488,8 @@ class DashboardBackend:
             if info.get("id") != target or info.get("location", {}).get(
                 "directory"
             ) != self.box.container_project(data):
-                raise DashboardError(
-                    "Selected session does not belong to this workspace directory."
-                )
+                raise TerminalAttachmentError("session-scope")
+            stage = "client"
             command = workspace_service.client_command(
                 self.box,
                 data,
@@ -468,13 +510,23 @@ class DashboardBackend:
                 lambda: lease.__exit__(None, None, None),
                 target,
             )
-        except BaseException:
+        except BaseException as error:
             if entered:
                 try:
                     lease.__exit__(None, None, None)
                 except Exception:
                     pass
-            raise
+            if isinstance(error, TerminalAttachmentError) or not isinstance(
+                error, Exception
+            ):
+                raise
+            if stage == "attach":
+                # Only exact known static refusals are categorized. Arbitrary
+                # exception text/control replies are never presented or logged.
+                reason = _ATTACH_REASONS.get(str(error), "workspace-validation")
+            else:
+                reason = "session-unavailable" if stage == "session" else "client-build"
+            raise TerminalAttachmentError(reason) from None
 
     def logs(self, workspace=None):
         if __package__:

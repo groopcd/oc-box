@@ -389,7 +389,12 @@ Closing the dashboard closes its clients/leases only, not the workspace owner or
 native persistent PTY. This is not a complete xterm implementation: no mouse,
 images, complex-grapheme or extended-keyboard support is promised. Actual embedded
 rendering/input/resize/detach acceptance still needs a new clean-host interactive
-run.
+run. Immediate attachment refusals include fixed categories such as
+`workspace-not-running`, `workspace-identity`, `owner-unavailable`,
+`session-unavailable` or `client-launch`. They identify the failed stage without
+printing native output, credentials or control replies. Compare the ordinary
+`oc-box terminal --project PATH` attach-only path for the same running workspace;
+do not reset, repair or start a replacement merely to bypass a refusal.
 
 The Logs tab defaults to `log/activity.jsonl` under the configured state root,
 with rotations `.1` through `.3`: four files capped at 256 KiB each, private files

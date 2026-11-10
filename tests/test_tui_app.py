@@ -7,7 +7,11 @@ from unittest.mock import Mock, patch
 from urllib.parse import urlparse
 
 from oc_box.tui import DemoBackend
-from oc_box.tui_backend import SessionConnection
+from oc_box.tui_backend import (
+    SessionConnection,
+    TerminalAttachmentError,
+    TerminalHandle,
+)
 from oc_box.tui_logs import LogEntry
 
 AVAILABLE = all(importlib.util.find_spec(name) for name in ("textual", "pyte"))
@@ -712,6 +716,38 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(app.selected, "b" * 32)
             self.assertEqual([s["id"] for s in app.visible_sessions], ["ses_child"])
             self.assertEqual(len(backend.calls), calls)
+
+    async def test_terminal_failure_shows_safe_category_and_never_raw_errors(self):
+        backend = SessionDemo()
+        backend.terminal = Mock(
+            side_effect=TerminalAttachmentError("owner-unavailable")
+        )
+        app = DashboardApp(backend)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.settle(app, pilot)
+            app.open_terminal(app.selected, None)
+            await self.settle(app, pilot)
+            self.assertIn("owner-unavailable", app.query_one("#notice").render().plain)
+            close = Mock()
+            backend.terminal.side_effect = None
+            backend.terminal.return_value = TerminalHandle(
+                ["synthetic-client"],
+                {"PRIVATE": "synthetic-private"},
+                close,
+                "ses_demo",
+            )
+            with patch.object(
+                app._terminal_widget,
+                "connect",
+                side_effect=RuntimeError("PRIVATE_OUTPUT synthetic-private"),
+            ):
+                app.open_terminal(app.selected, None)
+                await self.settle(app, pilot)
+            message = app.query_one("#notice").render().plain
+            self.assertIn("client-launch", message)
+            self.assertNotIn("PRIVATE_OUTPUT", message)
+            self.assertNotIn("synthetic-private", message)
+            close.assert_called_once()
 
 
 if __name__ == "__main__":
