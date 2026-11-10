@@ -343,6 +343,14 @@ class Owner:
         self.child = None
         self.listener = None
         self.bound = False
+        self.bound_identity = None
+        self.thread = None
+        self.handlers = set()
+        self.streams = set()
+        self.errors = None
+        self.errors_entered = False
+        self.error_file = None
+        self.token = None
 
     def __enter__(self):
         box = self.box
@@ -368,9 +376,10 @@ class Owner:
         command = box.exec_command(
             self.data, ["python3", "-c", script, "lease", box.CONTAINER_OPENCODE]
         )
-        self.errors = box.captured_output(private=True)
-        self.error_file = self.errors.__enter__()
         try:
+            self.errors = box.captured_output(private=True)
+            self.error_file = self.errors.__enter__()
+            self.errors_entered = True
             self.child = subprocess.Popen(
                 command,
                 env=command.environment,
@@ -399,14 +408,16 @@ class Owner:
             self.listener = socket.socket(socket.AF_UNIX)
             self.listener.bind(str(self.address))
             self.bound = True
+            info = self.address.lstat()
+            self.bound_identity = info.st_dev, info.st_ino
             self.address.chmod(0o600)
             self.listener.listen(16)
             self.listener.settimeout(0.2)
             self.thread = threading.Thread(target=self.serve, daemon=True)
             self.thread.start()
             return self
-        except BaseException:
-            self.shutdown()
+        except BaseException as primary:
+            self.shutdown(primary=primary)
             raise
 
     def publish(self, session):
@@ -424,10 +435,32 @@ class Owner:
                 continue
             except OSError:
                 break
-            threading.Thread(target=self.handle, args=(stream,), daemon=True).start()
+            with self.condition:
+                if self.closing:
+                    stream.close()
+                    return
+                self.handlers = {
+                    thread for thread in self.handlers if thread.is_alive()
+                }
+                thread = threading.Thread(
+                    target=self.handle, args=(stream,), daemon=True
+                )
+                self.handlers.add(thread)
+                self.streams.add(stream)
+                try:
+                    thread.start()
+                except RuntimeError:
+                    self.handlers.discard(thread)
+                    self.streams.discard(stream)
+                    stream.close()
 
     def handle(self, stream):
-        assert self.child is not None
+        child = self.child
+        if child is None:
+            stream.close()
+            with self.condition:
+                self.streams.discard(stream)
+            return
         held = False
         with stream:
             try:
@@ -467,7 +500,7 @@ class Owner:
                 )
                 if held:
                     stream.settimeout(0.5)
-                    while not self.closing and self.child.poll() is None:
+                    while not self.closing and child.poll() is None:
                         try:
                             if not stream.recv(1):
                                 break
@@ -476,8 +509,9 @@ class Owner:
             except (OSError, ValueError):
                 pass
             finally:
-                if held:
-                    with self.condition:
+                with self.condition:
+                    self.streams.discard(stream)
+                    if held:
                         self.clients -= 1
                         self.condition.notify_all()
 
@@ -493,31 +527,126 @@ class Owner:
                 self.condition.wait(timeout=0.2)
             self.closing = True
 
-    def shutdown(self):
-        self.closing = True
-        if self.listener:
-            self.listener.close()
-            if hasattr(self, "thread"):
-                self.thread.join(timeout=2)
-            if self.bound:
-                self.address.unlink(missing_ok=True)
-        if self.child:
-            if self.child.stdin:
-                self.child.stdin.close()
-            try:
-                self.child.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                os.killpg(self.child.pid, signal.SIGKILL)
-                self.child.wait(timeout=5)
-            if self.child.stdout:
-                self.child.stdout.close()
-        if hasattr(self, "token"):
-            CONNECTION.reset(self.token)
-        if hasattr(self, "errors"):
-            self.errors.__exit__(None, None, None)
+    def shutdown(self, *, primary=None):
+        """Release independent acquisitions even when another cleanup fails.
 
-    def __exit__(self, *_):
-        self.shutdown()
+        Keep failed acquisitions retryable, but never reset a used token, re-exit
+        an output context, join an unstarted thread, or signal a reaped child on
+        a subsequent call. Diagnostics contain fixed resource categories only.
+        """
+        failures = []
+
+        def attempt(category, action):
+            try:
+                action()
+                return True
+            except BaseException:
+                failures.append(category)
+                return False
+
+        with self.condition:
+            self.closing = True
+            self.ready = False
+        if self.listener is not None:
+            attempt("listener-close", self.listener.close)
+        deadline = time.monotonic() + 2
+        if self.thread is not None and self.thread.ident is not None:
+            attempt("listener-join", lambda: self.thread.join(timeout=2))
+            if self.thread.is_alive():
+                failures.append("listener-active")
+        with self.condition:
+            streams, handlers = tuple(self.streams), tuple(self.handlers)
+        for stream in streams:
+            # shutdown interrupts read_control; close is a separate release even
+            # if shutdown fails (for example after peer EOF).
+            def interrupt(stream=stream):
+                try:
+                    stream.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+
+            attempt("client-shutdown", interrupt)
+            attempt("client-close", stream.close)
+        for thread in handlers:
+            attempt(
+                "client-join",
+                lambda thread=thread: thread.join(
+                    timeout=max(0, deadline - time.monotonic())
+                ),
+            )
+            if thread.is_alive():
+                failures.append("client-active")
+
+        def remove_socket():
+            try:
+                info = self.address.lstat()
+            except FileNotFoundError:
+                self.bound = False
+                return
+            if (
+                not stat.S_ISSOCK(info.st_mode)
+                or info.st_uid != os.getuid()
+                or (info.st_dev, info.st_ino) != self.bound_identity
+            ):
+                raise self.box.BoxError("Private workspace controller path changed.")
+            self.address.unlink()
+            self.bound = False
+
+        if self.bound:
+            attempt("socket-remove", remove_socket)
+        child = self.child
+        if child is not None:
+            input_closed = True
+            if child.stdin is not None:
+                input_closed = attempt("child-input", child.stdin.close)
+            try:
+                child.wait(timeout=10 if input_closed else 0)
+            except subprocess.TimeoutExpired:
+                pass
+            except BaseException:
+                failures.append("child-wait")
+
+            def kill_group():
+                try:
+                    # The group may outlive its leader. This is only the private
+                    # child session created by this Owner, never a shared service.
+                    os.killpg(child.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+            attempt("child-stop", kill_group)
+            reaped = attempt("child-reap", lambda: child.wait(timeout=5))
+            if child.stdout is not None:
+                attempt("child-output", child.stdout.close)
+            if reaped:
+                self.child = None
+        if self.token is not None:
+            if attempt("connection-reset", lambda: CONNECTION.reset(self.token)):
+                self.token = None
+                self.connection = None
+        if self.errors_entered:
+            self.errors_entered = False
+            attempt("output-context", lambda: self.errors.__exit__(None, None, None))
+        if self.error_file is not None:
+            # Also close directly if an output context failed before releasing it.
+            attempt("output-close", self.error_file.close)
+        self.errors = None
+        if failures:
+            message = (
+                "Private workspace service cleanup failed ("
+                + ", ".join(sorted(set(failures)))
+                + "); private output was not logged."
+            )
+            if primary is not None:
+                try:
+                    print("oc-box: " + message, file=sys.stderr)
+                except OSError:
+                    pass
+            else:
+                raise self.box.BoxError(message) from None
+
+    def __exit__(self, _kind, primary, _traceback):
+        self.shutdown(primary=primary)
 
 
 @contextlib.contextmanager

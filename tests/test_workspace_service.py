@@ -163,6 +163,9 @@ class GatewayRelayTests(unittest.TestCase):
             self.assertEqual(len(actual), len(response))
             self.assertEqual(actual, response)
             self.assertEqual(transport.errors, [])
+            self.assertTrue(transport.children)
+            for child in transport.children:
+                self.assertEqual(child.wait(timeout=2), 0)
 
     def test_real_proxy_eight_mib_bidirectional_and_slow_reader_are_lossless(self):
         upload = bytes(range(256)) * 32768
@@ -222,6 +225,8 @@ class GatewayRelayTests(unittest.TestCase):
                             hashlib.sha256(upload).digest(),
                         )
                         self.assertEqual(transport.errors, [])
+                        for child in transport.children:
+                            self.assertEqual(child.wait(timeout=2), 0)
                     finally:
                         if sender.is_alive():
                             client.shutdown(socket.SHUT_RDWR)
@@ -254,6 +259,8 @@ class GatewayRelayTests(unittest.TestCase):
             deadline = time.monotonic() + 2
             while not received and time.monotonic() < deadline:
                 time.sleep(0.01)
+            self.assertEqual(len(received), 1)
+            self.assertEqual(len(received[0]), len(upload))
             self.assertEqual(received, [upload])
             self.assertEqual(transport.errors, [])
 
@@ -415,6 +422,337 @@ class GatewayRelayTests(unittest.TestCase):
             while chunk := client.recv(65536):
                 actual.extend(chunk)
             self.assertEqual(actual, response)
+
+
+class OwnerCleanupTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="oc-box-owner-cleanup-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        environment = patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(self.root)})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.addCleanup(service.CONNECTION.reset, service.CONNECTION.set(None))
+        self.children, self.outputs, self.owners = [], [], []
+        self.primary = None
+        self.output_failure = False
+        self.program = (
+            "import json,sys; print(json.dumps({'url':'http://127.0.0.1:12345',"
+            "'password':'a'*43}),flush=True); sys.stdin.read()"
+        )
+
+        @contextlib.contextmanager
+        def capture(**kwargs):
+            self.assertEqual(kwargs, {"private": True})
+            with box.captured_output(**kwargs) as output:
+                self.outputs.append(output)
+                self.assertIn(
+                    "memfd:oc-box-private-output",
+                    os.readlink("/proc/self/fd/" + str(output.fileno())),
+                )
+                yield output
+            if self.output_failure:
+                raise OSError("private-cleanup-sentinel")
+
+        self.box = SimpleNamespace(
+            BoxError=box.BoxError,
+            PACKAGE=box.PACKAGE,
+            CONTAINER_OPENCODE="synthetic-unused",
+            state_root=lambda: self.root / "state",
+            captured_output=capture,
+            exec_command=lambda *_: box.ContainerCommand(
+                [sys.executable, "-B", "-c", self.program], box.maintenance_host_env()
+            ),
+        )
+        real_popen = subprocess.Popen
+
+        def launch(*args, **kwargs):
+            if self.primary is not None:
+                raise self.primary
+            child = real_popen(*args, **kwargs)
+            self.children.append(child)
+            return child
+
+        launching = patch.object(service.subprocess, "Popen", side_effect=launch)
+        launching.start()
+        self.addCleanup(launching.stop)
+        self.addCleanup(self.finish_owned_resources)
+
+    def owner(self):
+        owner = service.Owner(
+            self.box,
+            self.root / "workspace.json",
+            {"id": "synthetic-" + str(len(self.owners))},
+        )
+        self.owners.append(owner)
+        return owner
+
+    def finish_owned_resources(self):
+        # A red implementation must not leave the synthetic child/context behind.
+        self.output_failure = False
+        for owner in self.owners:
+            thread = getattr(owner, "thread", None)
+            if thread is not None and thread.ident is None:
+                owner.thread = None
+            try:
+                owner.shutdown()
+            except (AttributeError, OSError, RuntimeError, box.BoxError):
+                pass
+            connection = getattr(owner, "connection", None)
+            token = getattr(owner, "token", None)
+            if token is not None and service.live_connection() is connection:
+                service.CONNECTION.reset(token)
+        for child in self.children:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=3)
+            for pipe in (child.stdin, child.stdout):
+                if pipe:
+                    pipe.close()
+        for output in self.outputs:
+            output.close()
+
+    def assert_released(self, owner, previous=None):
+        self.assertTrue(all(child.poll() is not None for child in self.children))
+        self.assertTrue(all(output.closed for output in self.outputs))
+        self.assertFalse(owner.address.exists())
+        self.assertIs(service.live_connection(), previous)
+        self.assertIsNone(getattr(owner, "connection", None))
+
+    def test_thread_start_failure_preserves_primary_and_releases_private_resources(
+        self,
+    ):
+        owner = self.owner()
+        primary = RuntimeError("synthetic thread-start refusal")
+        with (
+            patch.object(service.threading.Thread, "start", side_effect=primary),
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            owner.__enter__()
+        self.assertIs(raised.exception, primary)
+        self.assert_released(owner)
+
+    def test_launch_readiness_and_bind_failure_matrix_releases_acquired_resources(self):
+        valid = self.program
+        for failure in ("launch", "json", "endpoint", "oversized", "exit", "bind"):
+            with self.subTest(failure=failure), contextlib.ExitStack() as stack:
+                self.program = valid
+                self.primary = (
+                    OSError("synthetic launch refusal") if failure == "launch" else None
+                )
+                if failure in ("json", "endpoint", "oversized"):
+                    content = {
+                        "json": "not JSON",
+                        "endpoint": json.dumps(
+                            {"url": "http://example.test:1", "password": "a" * 43}
+                        ),
+                        "oversized": "x" * (service.MAX_CONTROL + 1),
+                    }[failure]
+                    self.program = (
+                        "import sys; print("
+                        + repr(content)
+                        + ",flush=True); sys.stdin.read()"
+                    )
+                elif failure == "exit":
+                    self.program = "import sys; sys.exit(1)"
+                if failure == "bind":
+                    listener = socket.socket(socket.AF_UNIX)
+                    refused = Mock(wraps=listener)
+                    refused.bind.side_effect = OSError("synthetic bind refusal")
+                    stack.enter_context(
+                        patch.object(service.socket, "socket", return_value=refused)
+                    )
+                owner = self.owner()
+                with self.assertRaises((OSError, ValueError, box.BoxError)) as raised:
+                    owner.__enter__()
+                if self.primary is not None:
+                    self.assertIs(raised.exception, self.primary)
+                self.assert_released(owner)
+                self.primary = None
+
+    def test_independent_cleanup_faults_restore_outer_context_and_close_memfd(self):
+        for stage in ("listener", "join", "stdin", "wait", "socket", "output-context"):
+            with self.subTest(stage=stage), contextlib.ExitStack() as stack:
+                previous = {"synthetic": "outer connection"}
+                outer = service.CONNECTION.set(previous)
+                stack.callback(service.CONNECTION.reset, outer)
+                owner = self.owner().__enter__()
+                child = self.children[-1]
+                if stage == "listener":
+                    listener = owner.listener
+                    owner.listener = Mock(wraps=listener)
+
+                    def close():
+                        listener.close()
+                        raise OSError("private-cleanup-sentinel")
+
+                    owner.listener.close.side_effect = close
+                    stack.callback(setattr, owner, "listener", listener)
+                elif stage == "join":
+                    stack.enter_context(
+                        patch.object(
+                            owner.thread,
+                            "join",
+                            side_effect=RuntimeError("private-cleanup-sentinel"),
+                        )
+                    )
+                elif stage == "stdin":
+                    pipe = child.stdin
+                    child.stdin = Mock(wraps=pipe)
+
+                    def close():
+                        pipe.close()
+                        raise OSError("private-cleanup-sentinel")
+
+                    child.stdin.close.side_effect = close
+                    stack.callback(setattr, child, "stdin", pipe)
+                elif stage == "wait":
+                    wait = child.wait
+                    calls = []
+
+                    def faulty_wait(*args, **kwargs):
+                        if not calls:
+                            calls.append(True)
+                            raise OSError("private-cleanup-sentinel")
+                        return wait(*args, **kwargs)
+
+                    stack.enter_context(
+                        patch.object(child, "wait", side_effect=faulty_wait)
+                    )
+                elif stage == "socket":
+                    unlink = Path.unlink
+
+                    def refuse(path, *args, **kwargs):
+                        if path == owner.address:
+                            raise OSError("private-cleanup-sentinel")
+                        return unlink(path, *args, **kwargs)
+
+                    stack.enter_context(patch.object(Path, "unlink", refuse))
+                else:
+                    self.output_failure = True
+                with self.assertRaisesRegex(box.BoxError, "cleanup failed") as raised:
+                    owner.shutdown()
+                self.assertNotIn("private-cleanup-sentinel", str(raised.exception))
+                self.assertIs(service.live_connection(), previous)
+                self.assertIsNone(owner.connection)
+                self.assertTrue(child.stdout.closed)
+                self.assertTrue(all(output.closed for output in self.outputs))
+                self.assertIsNotNone(child.poll())
+                self.output_failure = False
+                # Socket refusal is intentional; retry only after fault removal.
+                if stage == "socket":
+                    stack.close()
+                    owner.shutdown()
+
+    def test_cleanup_secondary_is_fixed_and_does_not_replace_startup_primary(self):
+        owner = self.owner()
+        primary = RuntimeError("synthetic primary")
+        self.output_failure = True
+        errors = io.StringIO()
+        with (
+            patch.object(service.threading.Thread, "start", side_effect=primary),
+            contextlib.redirect_stderr(errors),
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            owner.__enter__()
+        self.assertIs(raised.exception, primary)
+        self.assertIn("cleanup failed", errors.getvalue())
+        self.assertNotIn("private-cleanup-sentinel", errors.getvalue())
+        self.assert_released(owner)
+
+    def test_shutdown_is_repeatable_and_does_not_remove_a_replacement_file(self):
+        owner = self.owner().__enter__()
+        owner.address.unlink()
+        owner.address.write_text("unrelated replacement")
+        with self.assertRaisesRegex(box.BoxError, "cleanup failed"):
+            owner.shutdown()
+        self.assertEqual(owner.address.read_text(), "unrelated replacement")
+        self.assertIsNone(service.live_connection())
+        self.assertTrue(all(output.closed for output in self.outputs))
+        self.assertTrue(all(child.poll() is not None for child in self.children))
+        owner.address.unlink()
+        owner.shutdown()
+        owner.shutdown()
+
+    def test_pending_control_reader_is_interrupted_and_joined_before_child_release(
+        self,
+    ):
+        owner = self.owner().__enter__()
+        with socket.socket(socket.AF_UNIX) as stream:
+            stream.settimeout(2)
+            stream.connect(str(owner.address))
+            stream.sendall(b'{"action":')
+            deadline = time.monotonic() + 2
+            while not owner.streams and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertTrue(owner.streams)
+            started = time.monotonic()
+            owner.shutdown()
+            self.assertLess(time.monotonic() - started, 2.5)
+            self.assertEqual(stream.recv(1), b"")
+        self.assertTrue(all(not thread.is_alive() for thread in owner.handlers))
+        self.assertEqual(owner.streams, set())
+        self.assertEqual(owner.clients, 0)
+        self.assert_released(owner)
+
+    def test_output_context_enter_failure_has_no_child_or_connection_acquisition(self):
+        primary = OSError("synthetic capture refusal")
+        refused = Mock()
+        refused.__enter__ = Mock(side_effect=primary)
+        refused.__exit__ = Mock()
+        owner = self.owner()
+        with (
+            patch.object(self.box, "captured_output", return_value=refused),
+            self.assertRaises(OSError) as raised,
+        ):
+            owner.__enter__()
+        self.assertIs(raised.exception, primary)
+        refused.__exit__.assert_not_called()
+        self.assertEqual(self.children, [])
+        self.assert_released(owner)
+
+    def test_memfd_closes_even_if_output_context_refuses_to_exit(self):
+        real = box.captured_output(private=True)
+        refused = Mock()
+
+        def enter():
+            output = real.__enter__()
+            self.outputs.append(output)
+            return output
+
+        refused.__enter__ = Mock(side_effect=enter)
+        refused.__exit__ = Mock(side_effect=OSError("private-cleanup-sentinel"))
+        with patch.object(self.box, "captured_output", return_value=refused):
+            owner = self.owner().__enter__()
+        try:
+            with self.assertRaisesRegex(box.BoxError, "output-context"):
+                owner.shutdown()
+            self.assert_released(owner)
+            owner.shutdown()
+            refused.__exit__.assert_called_once()
+        finally:
+            real.__exit__(None, None, None)
+
+    def test_group_disappearing_during_cleanup_is_not_a_private_failure(self):
+        owner = self.owner().__enter__()
+        child = self.children[-1]
+        with patch.object(service.os, "killpg", side_effect=ProcessLookupError) as kill:
+            owner.shutdown()
+        kill.assert_called_once_with(child.pid, service.signal.SIGKILL)
+        self.assert_released(owner)
+
+    def test_body_failure_identity_survives_a_secondary_cleanup_failure(self):
+        owner = self.owner()
+        primary = OSError("synthetic client failure")
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), self.assertRaises(OSError) as raised:
+            with owner:
+                self.output_failure = True
+                raise primary
+        self.assertIs(raised.exception, primary)
+        self.assertIn("cleanup failed", errors.getvalue())
+        self.assertNotIn("private-cleanup-sentinel", errors.getvalue())
+        self.assert_released(owner)
 
 
 class HistoryWaitTests(unittest.TestCase):
