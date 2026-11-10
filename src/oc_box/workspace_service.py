@@ -712,7 +712,14 @@ class Gateway:
                     stream.shutdown(socket.SHUT_WR)
                     response_closed = True
                 if write_closed and response_closed:
-                    return
+                    # stdout EOF can precede the proxy draining its stdin pipe
+                    # into a half-closed backend. Do not terminate that proxy
+                    # while the final upload is still in flight. Cancellation
+                    # remains active and owns the same bounded cleanup path.
+                    if child.poll() is not None:
+                        return
+                    self.closed.wait(0.05)
+                    continue
                 for key in list(selector.get_map().values()):
                     selector.unregister(key.fd)
                 events = 0
