@@ -4,6 +4,7 @@ import hashlib
 from http.client import HTTPConnection
 import importlib.util
 import io
+from itertools import product
 import json
 import os
 from pathlib import Path
@@ -1078,14 +1079,16 @@ class V2HostFixtureTests(unittest.TestCase):
                 )
 
     def test_cleanup_invalid_later_record_never_removes_an_earlier_workspace(self):
-        for name in ("project", "identity", "origin", "home", "resource-name"):
+        for position, name in product(
+            (1, 2), ("project", "identity", "origin", "home", "resource-name")
+        ):
             with (
                 tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary,
-                self.subTest(name=name),
+                self.subTest(record_position=position + 1, name=name),
             ):
                 root = Path(temporary)
                 records, resources, info = self.cleanup_state(root, restored=True)
-                path, data = max(records, key=lambda item: item[0])
+                path, data = sorted(records, key=lambda item: item[0])[position]
                 if name == "project":
                     data["project"] = str(root / "unrecorded-project")
                 elif name == "identity":
@@ -1232,10 +1235,12 @@ class V2HostFixtureTests(unittest.TestCase):
                 self.assertEqual(resources, {})
 
     def test_cleanup_reloads_under_all_locks_and_refuses_contention_before_engine(self):
-        for name in ("metadata-change", "lock-refusal"):
+        for position, name in product(
+            (1, 2), ("metadata-change", "lock-refusal", "actual-lock-refusal")
+        ):
             with (
                 tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary,
-                self.subTest(name=name),
+                self.subTest(record_position=position + 1, name=name),
             ):
                 root = Path(temporary)
                 records, resources, info = self.cleanup_state(root, restored=True)
@@ -1243,20 +1248,33 @@ class V2HostFixtureTests(unittest.TestCase):
 
                 def at_lock(path):
                     count.append(path)
-                    if len(count) == len(records):
+                    if len(count) == position + 1:
                         if name == "lock-refusal":
                             raise box.BoxError("private-sentinel lock held")
                         data = box.read_json(path)
                         data["pids"] += 1
                         box.atomic_json(path, data)
 
-                with self.cleanup_engine(
-                    root, records, resources, info, lock_action=at_lock
-                ) as (events, removals):
+                paths = sorted(path for path, _ in records)
+                holder = (
+                    box.workspace_lock(paths[position])
+                    if name == "actual-lock-refusal"
+                    else contextlib.nullcontext()
+                )
+                with (
+                    holder,
+                    self.cleanup_engine(
+                        root, records, resources, info, lock_action=at_lock
+                    ) as (events, removals),
+                ):
                     with self.assertRaises(fixture.CleanupRefusal) as error:
                         fixture.cleanup(root)
                 self.assertEqual(events, [])
                 self.assertEqual(removals, [])
+                if name == "lock-refusal":
+                    self.assertEqual(count, paths[: position + 1])
+                elif name == "actual-lock-refusal":
+                    self.assertEqual(count, paths[:position])
                 self.assertNotIn("private-sentinel", str(error.exception))
 
     def test_cleanup_late_preflight_errors_are_fixed_and_remove_nothing(self):
