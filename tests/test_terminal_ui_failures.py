@@ -29,6 +29,7 @@ root = Path(sys.argv[1])
 # Reap only this fixture's orphaned descendants, including killed group members.
 assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0
 unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(8)"], start_new_session=True)
+before_fds = set(os.listdir("/proc/self/fd"))
 def previous(*_):
     pass
 signals = (signal.SIGINT, signal.SIGTERM, signal.SIGWINCH)
@@ -57,6 +58,7 @@ finally:
     signal.alarm(0)
     result["terminal_restored"] = before is None or termios.tcgetattr(0) == before
     result["handlers_restored"] = all(signal.getsignal(sig) is previous for sig in signals)
+    result["fds_restored"] = set(os.listdir("/proc/self/fd")) == before_fds
     result["unrelated_alive"] = unrelated.poll() is None
     unrelated.kill()
     unrelated.wait(timeout=1)
@@ -179,8 +181,14 @@ class TerminalUIFailures(unittest.TestCase):
         result = json.loads((root / "result.json").read_text())
         self.assertTrue(result["terminal_restored"], result)
         self.assertTrue(result["handlers_restored"], result)
+        self.assertTrue(result["fds_restored"], result)
         self.assertTrue(result["unrelated_alive"], result)
         self.assertTrue(result["no_children"], result)
+        ownership = root / "ownership.json"
+        if ownership.exists():
+            pid, group, session, parent_group = json.loads(ownership.read_text())
+            self.assertEqual((pid, group, session), (pid, pid, pid))
+            self.assertNotEqual(group, parent_group)
         return result
 
     def test_fragmented_first_output_keeps_controls_and_utf8_contiguous(self):
@@ -262,13 +270,19 @@ class TerminalUIFailures(unittest.TestCase):
             "children=[os.getpid()]; "
             + (
                 "child=subprocess.Popen([sys.executable,'-c',"
-                "'import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
-                "signal.signal(signal.SIGHUP,signal.SIG_IGN); time.sleep(4.5)']); "
-                "children.append(child.pid); time.sleep(0.1); "
+                "'import signal,sys,time; from pathlib import Path; "
+                "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+                "signal.signal(signal.SIGHUP,signal.SIG_IGN); "
+                "Path(sys.argv[1]).touch(); time.sleep(4.5)', str(root/'descendant_ready')]); "
+                "children.append(child.pid); deadline=time.monotonic()+1; "
+                "\nwhile not (root/'descendant_ready').exists() and time.monotonic()<deadline: time.sleep(0.01)"
+                "\nassert (root/'descendant_ready').exists(); "
                 if descendant
                 else ""
             )
             + "(root/'children.json').write_text(json.dumps(children)); "
+            "(root/'ownership.json').write_text(json.dumps([os.getpid(),os.getpgrp(),"
+            "os.getsid(0),os.getpgid(os.getppid())])); "
             "(root/'ready').touch(); os.write(1,b'CHILD_READY'); "
             + ("sys.exit(0)" if leader_exits else "time.sleep(4.5)")
         )
@@ -283,11 +297,20 @@ class TerminalUIFailures(unittest.TestCase):
                         self.child_fixture(ignoring=ignoring), interactive=interactive
                     )
                     requested = []
+                    last_signal = [0]
 
                     def terminate(output):
+                        now = time.monotonic()
                         if b"CHILD_READY" in output and not requested:
-                            requested.append(time.monotonic())
+                            requested.append(now)
+                        if (
+                            requested
+                            and (not last_signal[0] or ignoring)
+                            and now - last_signal[0] >= 0.1
+                            and process.poll() is None
+                        ):
                             os.kill(process.pid, signal.SIGTERM)
+                            last_signal[0] = now
 
                     self.collect(process, fd, observe=terminate)
                     self.assertTrue(requested)
@@ -335,6 +358,23 @@ class TerminalUIFailures(unittest.TestCase):
         )
         self.collect(process, fd)
         self.assertEqual(self.assert_restored(root).get("error"), "KeyboardInterrupt")
+
+    def test_pipe_sigint_still_reaches_child_in_its_owned_group(self):
+        fixture = (
+            "import os,signal,sys,time; "
+            "signal.signal(signal.SIGINT,lambda *_:sys.exit(23)); "
+            "os.write(1,b'CHILD_READY'); time.sleep(4.5)"
+        )
+        root, process, fd, _ = self.launch(fixture, interactive=False)
+        sent = []
+
+        def interrupt(output):
+            if b"CHILD_READY" in output and not sent:
+                sent.append(True)
+                os.kill(process.pid, signal.SIGINT)
+
+        self.collect(process, fd, observe=interrupt)
+        self.assertEqual(self.assert_restored(root).get("returncode"), 23)
 
 
 if __name__ == "__main__":

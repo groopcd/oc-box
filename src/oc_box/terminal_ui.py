@@ -117,6 +117,36 @@ def write_all(fd, content):
         view = view[count:]
 
 
+_STOP_GRACE = 1.0
+_POLL_INTERVAL = 0.05
+
+
+def _signal_group(process, sig):
+    # Every child below starts a new session before exec. Never target a shared
+    # foreground group, process name, or service, even after its leader exits.
+    try:
+        os.killpg(process.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
+def _stop_group(process, deadline, term_sent):
+    deadline = time.monotonic() + _STOP_GRACE if deadline is None else deadline
+    if not term_sent:
+        _signal_group(process, signal.SIGTERM)
+    while time.monotonic() < deadline:
+        process.poll()
+        try:
+            os.killpg(process.pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(min(_POLL_INTERVAL, max(0, deadline - time.monotonic())))
+    # Leader liveness is not group liveness: descendants can still hold a PTY or
+    # pipe. Escalate that same owned group even when wait() already reaped it.
+    _signal_group(process, signal.SIGKILL)
+    process.wait(timeout=_STOP_GRACE)
+
+
 def run_tui(
     command, *, env=None, input_fd=None, output_fd=None, refresh=1.0, show_loading=True
 ):
@@ -132,7 +162,46 @@ def run_tui(
     process = None
     old_terminal = None
     handlers = {}
+    stop_deadline = None
+    term_sent = False
+
+    def request_stop(*_):
+        nonlocal stop_deadline
+        if stop_deadline is None:
+            stop_deadline = time.monotonic() + _STOP_GRACE
+
+    def interrupt(*_):
+        # Interactive Ctrl-C travels as a raw input byte to the child PTY. In
+        # pipe mode preserve foreground SIGINT delivery despite the owned group.
+        if not interactive and process is not None:
+            _signal_group(process, signal.SIGINT)
+
+    def advance_stop():
+        nonlocal term_sent
+        if stop_deadline is None:
+            return False
+        if not term_sent:
+            _signal_group(process, signal.SIGTERM)
+            term_sent = True
+        if time.monotonic() >= stop_deadline:
+            _signal_group(process, signal.SIGKILL)
+            return True
+        return False
+
+    def wait_for_child():
+        while True:
+            if advance_stop():
+                return process.wait(timeout=_STOP_GRACE)
+            try:
+                return process.wait(timeout=_POLL_INTERVAL)
+            except subprocess.TimeoutExpired:
+                pass
+
     try:
+        # Install before spawning or entering raw mode, closing the setup window
+        # where SIGTERM could otherwise strand the caller's terminal settings.
+        handlers[signal.SIGTERM] = signal.signal(signal.SIGTERM, request_stop)
+        handlers[signal.SIGINT] = signal.signal(signal.SIGINT, interrupt)
         if interactive:
             master, slave = pty.openpty()
 
@@ -146,13 +215,14 @@ def run_tui(
             resize()
             # A separate session provides the same terminal semantics as a
             # directly attached podman exec. Acquire a controlling terminal.
-            child_code = "import fcntl,os,sys,termios; os.setsid(); fcntl.ioctl(0,termios.TIOCSCTTY,0); os.execvp(sys.argv[1],sys.argv[1:])"
+            child_code = "import fcntl,os,sys,termios; fcntl.ioctl(0,termios.TIOCSCTTY,0); os.execvp(sys.argv[1],sys.argv[1:])"
             process = subprocess.Popen(
                 [sys.executable, "-c", child_code, *command],
                 stdin=slave,
                 stdout=slave,
                 stderr=slave,
                 env=env,
+                start_new_session=True,
             )
             os.close(slave)
             slave = None
@@ -160,13 +230,9 @@ def run_tui(
             tty.setraw(input_fd)
             handlers[signal.SIGWINCH] = signal.signal(signal.SIGWINCH, resize)
         else:
-            process = subprocess.Popen(command, env=env)
-        handlers[signal.SIGINT] = signal.signal(signal.SIGINT, signal.SIG_IGN)
-        handlers[signal.SIGTERM] = signal.signal(
-            signal.SIGTERM, lambda *_: process.terminate()
-        )
+            process = subprocess.Popen(command, env=env, start_new_session=True)
         if not interactive:
-            return process.wait()
+            return wait_for_child()
 
         stream = _LoadingOutput()
         loading = show_loading
@@ -203,12 +269,16 @@ def run_tui(
                 banner(clear=True)
 
         while True:
+            if process.poll() is not None:
+                request_stop()
+            if advance_stop():
+                break
             now = time.monotonic()
             if loading and now >= next_update and stream.safe_to_draw():
                 banner()
                 next_update = now + refresh
             readers = [master] + ([input_fd] if stdin_open else [])
-            ready, _, _ = select.select(readers, [], [], refresh)
+            ready, _, _ = select.select(readers, [], [], min(refresh, _POLL_INTERVAL))
             if master in ready:
                 try:
                     output = os.read(master, 65536)
@@ -233,19 +303,20 @@ def run_tui(
         stream.finish(forward)
         if banner_drawn and stream.safe_to_draw():
             banner(clear=True)
-        return process.wait()
+        return wait_for_child()
     finally:
-        if old_terminal is not None:
-            termios.tcsetattr(input_fd, termios.TCSADRAIN, old_terminal)
-        for sig, previous in handlers.items():
-            signal.signal(sig, previous)
-        for fd in (master, slave):
-            if fd is not None:
-                os.close(fd)
-        if process and process.poll() is None:
-            process.terminate()
+        try:
+            if process is not None:
+                _stop_group(process, stop_deadline, term_sent)
+        finally:
             try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+                if old_terminal is not None:
+                    termios.tcsetattr(input_fd, termios.TCSANOW, old_terminal)
+            finally:
+                try:
+                    for sig, previous in handlers.items():
+                        signal.signal(sig, previous)
+                finally:
+                    for fd in (master, slave):
+                        if fd is not None:
+                            os.close(fd)
