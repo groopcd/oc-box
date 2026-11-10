@@ -249,6 +249,89 @@ def owned_container(box, data):
     return info
 
 
+def validate_managed_mounts(box, data, info, volume):
+    mounts = info.get("Mounts")
+    if not isinstance(mounts, list) or not all(
+        isinstance(mount, dict) for mount in mounts
+    ):
+        raise BackupError("Invalid managed container mount inspection.")
+    expected = (
+        ("project", data["project"], box.container_project(data), "bind"),
+        ("private home", volume["Mountpoint"], data["home"], "volume"),
+    )
+    for description, source, destination, kind in expected:
+        selected = [
+            mount for mount in mounts if mount.get("Destination") == destination
+        ]
+        if (
+            len(selected) != 1
+            or selected[0].get("Source") != source
+            or selected[0].get("Type") != kind
+        ):
+            raise BackupError(
+                f"Container {description} mount does not match the selected registry."
+            )
+    approved = {(source, destination) for _, source, destination, _ in expected}
+    if any(
+        (mount.get("Source"), mount.get("Destination")) not in approved
+        and mount.get("Type") in ("bind", "volume")
+        for mount in mounts
+    ):
+        raise BackupError(
+            "This container has additional bind mounts/volumes. Back up those separately and remove them from a dedicated backup fixture first; implicit capture of outside host data is refused."
+        )
+
+
+def verify_restored_container(box, data, result):
+    """Native success is not proof: bind returned CID to fresh inspected state."""
+    if (
+        not isinstance(result, subprocess.CompletedProcess)
+        or type(result.returncode) is not int
+        or result.returncode != 0
+        or not isinstance(result.stdout, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", result.stdout.strip())
+    ):
+        raise BackupError(
+            "Invalid private container creation response; restore was not completed."
+        )
+    info = owned_container(box, data)
+    if info is None:
+        raise BackupError(
+            "Created restore container could not be positively inspected."
+        )
+    identity = info.get("Id", info.get("ID"))
+    if (
+        not isinstance(identity, str)
+        or identity.removeprefix("sha256:") != result.stdout.strip()
+    ):
+        raise BackupError(
+            "Created restore container identity does not match its creation response."
+        )
+    if info.get("Name") not in (data["container"], "/" + data["container"]):
+        raise BackupError(
+            "Created restore container name does not match the fresh resource."
+        )
+    state = info["State"]
+    if any(
+        state.get(key, False) is not False
+        for key in ("Running", "Paused", "Restarting", "Dead")
+    ):
+        raise BackupError("Created restore container is not verified stopped.")
+    if state.get("Status") not in ("created", "configured", "exited", "stopped"):
+        raise BackupError(
+            "Created restore container lifecycle state is not verified stopped."
+        )
+    expected_image = inspected_image(box, data["image"])
+    actual_image = info.get("Image")
+    if not isinstance(actual_image, str) or actual_image.removeprefix(
+        "sha256:"
+    ) != image_identity(expected_image):
+        raise BackupError(
+            "Created restore container image does not match the selected image."
+        )
+    validate_managed_mounts(box, data, info, owned_volume(box, data))
+
+
 def archive_command(box, action, root, *, private=False, limit=None, status=None):
     result = [sys.executable, str(box.PACKAGE / "backup_archive.py"), action, str(root)]
     if private:
@@ -540,42 +623,8 @@ def make_backup(box, args):
         volume = owned_volume(box, data)
         if output.is_relative_to(Path(volume["Mountpoint"]).resolve()):
             raise BackupError("Backup output cannot be inside the private home volume.")
-        # A labeled volume can exist without being the container's actual home.
-        # Require one exact mount at each managed destination, rather than
-        # archiving stale data underneath an ambiguous/overriding mount.
-        expected_mounts = (
-            ("project", data["project"], box.container_project(data), "bind"),
-            ("private home", volume["Mountpoint"], data["home"], "volume"),
-        )
-        for description, source, destination, kind in expected_mounts:
-            mounts = [
-                mount
-                for mount in info.get("Mounts", [])
-                if mount.get("Destination") == destination
-            ]
-            if (
-                len(mounts) != 1
-                or mounts[0].get("Source") != source
-                or mounts[0].get("Type") != kind
-            ):
-                raise BackupError(
-                    f"Container {description} mount does not match the selected registry."
-                )
-        # External mounts and volumes are never silently captured. A full backup
-        # records their requirements but is not claimed to preserve their data.
-        approved = {
-            (source, destination) for _, source, destination, _ in expected_mounts
-        }
-        additional = [
-            m
-            for m in info.get("Mounts", [])
-            if (m.get("Source"), m.get("Destination")) not in approved
-            and m.get("Type") in ("bind", "volume")
-        ]
-        if additional:
-            raise BackupError(
-                "This container has additional bind mounts/volumes. Back up those separately and remove them from a dedicated backup fixture first; implicit capture of outside host data is refused."
-            )
+        # A labeled volume may be stale; validate the actual unique typed mounts.
+        validate_managed_mounts(box, data, info, volume)
         if info["State"]["Running"]:
             print(
                 "Stopping the existing container for a consistent backup. It will remain stopped; host editors/builds must also stay idle.",
@@ -1141,9 +1190,13 @@ def restore_backup(box, args):
                 data["restore_attempted_resources"].append("container")
                 durable_json(box, directory / "workspace.json", data)
                 container_created = True
-                box.create_container(
-                    directory / "workspace.json", data, environment=crypto.environment()
+                created = box.create_container(
+                    directory / "workspace.json",
+                    data,
+                    environment=crypto.environment(),
+                    private=True,
                 )
+                verify_restored_container(box, data, created)
                 data["ready"] = manifest["kind"] == "full" and bool(config.get("ready"))
                 durable_json(box, directory / "workspace.json", data)
                 publish_completed_restore(box, directory, data, recovery=recovery)

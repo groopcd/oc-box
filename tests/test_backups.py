@@ -147,8 +147,32 @@ class WorkspaceBackupTests(unittest.TestCase):
                     json.dumps(
                         [
                             {
+                                "Id": created["id"] * 2,
+                                "Name": created["container"],
+                                "Image": self.snapshot_image
+                                if created["image"].removeprefix("sha256:")
+                                == self.snapshot_image
+                                else self.base_image,
                                 "Config": {"Labels": {box.LABEL: created["id"]}},
-                                "State": {"Running": False},
+                                "State": {
+                                    "Running": False,
+                                    "Paused": False,
+                                    "Status": "created",
+                                },
+                                "Mounts": [
+                                    {
+                                        "Type": "bind",
+                                        "Source": created["project"],
+                                        "Destination": box.container_project(created),
+                                    },
+                                    {
+                                        "Type": "volume",
+                                        "Source": str(
+                                            self.volumes[created["home_volume"]]
+                                        ),
+                                        "Destination": created["home"],
+                                    },
+                                ],
                             }
                         ]
                     ),
@@ -201,7 +225,20 @@ class WorkspaceBackupTests(unittest.TestCase):
                 args,
                 0,
                 json.dumps(
-                    [self.images.get(args[2], {"Id": "sha256:" + self.snapshot_image})]
+                    [
+                        self.images.get(
+                            args[2],
+                            {
+                                "Id": "sha256:"
+                                + (
+                                    self.snapshot_image
+                                    if args[2].removeprefix("sha256:")
+                                    == self.snapshot_image
+                                    else self.base_image
+                                )
+                            },
+                        )
+                    ]
                 ),
                 "",
             )
@@ -247,6 +284,68 @@ class WorkspaceBackupTests(unittest.TestCase):
         self.assertTrue(data["restore_incomplete"])
         self.created.append(json.loads(json.dumps(data)))
         data["ready"] = False
+        return subprocess.CompletedProcess([], 0, data["id"] * 2 + "\n", "")
+
+    @contextlib.contextmanager
+    def real_creation_dispatch(self, *, output=None, failure=None):
+        """Use the real constructor/run capture path, replacing only native IO."""
+        original_run = subprocess.run
+        calls = []
+        sentinel = "PRIVATE_SYNTHETIC_NATIVE_OUTPUT"
+
+        def native(arguments, **kwargs):
+            if arguments[0] != "podman":
+                return original_run(arguments, **kwargs)
+            args = tuple(arguments[1:])
+            calls.append(
+                all(
+                    hasattr(kwargs.get(name), "fileno")
+                    and "memfd:"
+                    in os.readlink(f"/proc/self/fd/{kwargs[name].fileno()}")
+                    for name in ("stdout", "stderr")
+                )
+            )
+            if args[0] == "create":
+                name = args[args.index("--name") + 1]
+                record = next(
+                    box.read_json(path)
+                    for path in box.workspace_paths()
+                    if box.read_json(path)["container"] == name
+                )
+                self.created.append(json.loads(json.dumps(record)))
+                result = subprocess.CompletedProcess(
+                    arguments,
+                    0,
+                    record["id"] * 2 + "\n" if output is None else output,
+                    sentinel,
+                )
+            else:
+                result = self.podman(box, *args)
+            if (failure == "volume-inspect" and args[:2] == ("volume", "inspect")) or (
+                failure == "create" and args[0] == "create"
+            ):
+                result = subprocess.CompletedProcess(arguments, 125, "", sentinel)
+            for name in ("stdout", "stderr"):
+                value = getattr(result, name, "") or ""
+                target = kwargs.get(name)
+                if hasattr(target, "write"):
+                    target.write(value.encode())
+                    target.flush()
+                elif value:
+                    print(
+                        value,
+                        end="",
+                        file=sys.stdout if name == "stdout" else sys.stderr,
+                    )
+            if failure == "timeout" and args[0] == "create":
+                raise subprocess.TimeoutExpired(arguments, 1, stderr=sentinel.encode())
+            return subprocess.CompletedProcess(arguments, result.returncode)
+
+        with (
+            patch.object(box, "create_container", wraps=self.real_create_container),
+            patch.object(subprocess, "run", side_effect=native),
+        ):
+            yield calls, sentinel
 
     def backup(self, portable=False):
         args = argparse.Namespace(
@@ -973,6 +1072,200 @@ class WorkspaceBackupTests(unittest.TestCase):
                 self.assertTrue(record["restore_incomplete"])
                 self.assertEqual(
                     record["restore_attempted_resources"], ["volume", "image"]
+                )
+
+    def test_real_restore_creation_failures_keep_native_output_private(self):
+        self.backup(portable=True)
+        for failure in ("volume-inspect", "create", "timeout"):
+            with self.subTest(failure=failure):
+                output = io.StringIO()
+                destination = self.root / ("private-create-" + failure)
+                args = argparse.Namespace(
+                    project=destination, file=self.archive, identity=[self.identity]
+                )
+                with (
+                    self.real_creation_dispatch(failure=failure) as (calls, sentinel),
+                    contextlib.redirect_stdout(output),
+                    contextlib.redirect_stderr(output),
+                    self.assertRaises((box.BoxError, crypto.BackupError)) as error,
+                ):
+                    backups.restore_backup(box, args)
+                self.assertFalse(
+                    sentinel in output.getvalue(),
+                    "Native private output reached the console",
+                )
+                self.assertFalse(
+                    sentinel in str(error.exception),
+                    "Native private output reached the public error",
+                )
+                self.assertTrue(
+                    calls and all(calls),
+                    "Native constructor IO was not captured in private memory",
+                )
+                self.assertFalse(destination.exists())
+                self.assertEqual(self.created, [])
+
+    def test_real_restore_creation_validates_returned_id_before_completion(self):
+        for portable in (False, True):
+            self.archive = self.root / f"real-create-{portable}.ocbox"
+            self.backup(portable=portable)
+            for name, response in (
+                ("valid", None),
+                ("empty", ""),
+                ("malformed", "PRIVATE_BAD_CID"),
+                ("mismatched", "f" * 64),
+            ):
+                with self.subTest(portable=portable, response=name):
+                    destination = self.root / f"real-create-{portable}-{name}"
+                    output = io.StringIO()
+                    args = argparse.Namespace(
+                        project=destination, file=self.archive, identity=[self.identity]
+                    )
+                    with (
+                        self.real_creation_dispatch(output=response) as (
+                            calls,
+                            sentinel,
+                        ),
+                        contextlib.redirect_stdout(output),
+                        contextlib.redirect_stderr(output),
+                    ):
+                        if name == "valid":
+                            backups.restore_backup(box, args)
+                        else:
+                            with self.assertRaises(crypto.BackupError) as error:
+                                backups.restore_backup(box, args)
+                            self.assertFalse(
+                                "PRIVATE" in str(error.exception),
+                                "Native response reached the public error",
+                            )
+                    self.assertFalse(
+                        sentinel in output.getvalue(),
+                        "Native warning reached the console",
+                    )
+                    self.assertTrue(
+                        calls and all(calls),
+                        "Native constructor IO was not captured in private memory",
+                    )
+                    if name == "valid":
+                        _, record = box.find_workspace(destination)
+                        self.assertNotIn("restore_incomplete", record)
+                        self.assertEqual(
+                            (destination / "unfinished.txt").read_text(),
+                            "uncommitted source edits",
+                        )
+                    else:
+                        records = [
+                            box.read_json(path)
+                            for path in box.workspace_paths()
+                            if box.read_json(path)["project"] == str(destination)
+                        ]
+                        self.assertTrue(
+                            not records
+                            or all(
+                                record.get("restore_incomplete") for record in records
+                            )
+                        )
+
+    def test_real_restore_creation_independently_verifies_named_container(self):
+        self.backup(portable=True)
+        for shape in (
+            "null",
+            "empty",
+            "multiple",
+            "missing-id",
+            "wrong-id",
+            "wrong-name",
+            "foreign-label",
+            "running",
+            "paused",
+            "invalid-state",
+            "wrong-project-source",
+            "wrong-project-type",
+            "wrong-home-source",
+            "wrong-home-type",
+            "duplicate-home",
+            "wrong-image",
+        ):
+            with self.subTest(shape=shape):
+                destination = self.root / ("verify-created-" + shape)
+                injected = []
+
+                def commands(box_arg, *args, **kwargs):
+                    result = self.podman(box_arg, *args, **kwargs)
+                    if (
+                        args[:2] == ("container", "inspect")
+                        and args[2] != self.data["container"]
+                        and not injected
+                    ):
+                        injected.append(True)
+                        record = json.loads(result.stdout)[0]
+                        if shape == "missing-id":
+                            record.pop("Id")
+                        elif shape == "wrong-id":
+                            record["Id"] = "d" * 64
+                        elif shape == "wrong-name":
+                            record["Name"] = "foreign-container"
+                        elif shape == "foreign-label":
+                            record["Config"]["Labels"] = {box.LABEL: "f" * 32}
+                        elif shape in ("running", "paused"):
+                            record["State"][shape.title()] = True
+                        elif shape == "invalid-state":
+                            record["State"]["Status"] = "running"
+                        elif shape.startswith("wrong-project"):
+                            record["Mounts"][0][
+                                "Source" if shape.endswith("source") else "Type"
+                            ] = "/foreign" if shape.endswith("source") else "volume"
+                        elif shape.startswith("wrong-home"):
+                            record["Mounts"][1][
+                                "Source" if shape.endswith("source") else "Type"
+                            ] = "/foreign" if shape.endswith("source") else "bind"
+                        elif shape == "duplicate-home":
+                            record["Mounts"].append(dict(record["Mounts"][1]))
+                        elif shape == "wrong-image":
+                            record["Image"] = "d" * 64
+                        payload = (
+                            None
+                            if shape == "null"
+                            else []
+                            if shape == "empty"
+                            else [record, {}]
+                            if shape == "multiple"
+                            else [record]
+                        )
+                        return subprocess.CompletedProcess(
+                            args, 0, json.dumps(payload), ""
+                        )
+                    return result
+
+                output = io.StringIO()
+                args = argparse.Namespace(
+                    project=destination, file=self.archive, identity=[self.identity]
+                )
+                with (
+                    self.real_creation_dispatch() as (calls, sentinel),
+                    patch.object(backups, "command", side_effect=commands),
+                    contextlib.redirect_stdout(output),
+                    contextlib.redirect_stderr(output),
+                    self.assertRaises(crypto.BackupError) as error,
+                ):
+                    backups.restore_backup(box, args)
+                self.assertEqual(injected, [True])
+                self.assertFalse(
+                    sentinel in output.getvalue(), "Native warning reached the console"
+                )
+                self.assertFalse(
+                    "PRIVATE" in str(error.exception),
+                    "Native response reached the public error",
+                )
+                self.assertTrue(calls and all(calls))
+                records = [
+                    box.read_json(path)
+                    for path in box.workspace_paths()
+                    if box.read_json(path)["project"] == str(destination)
+                ]
+                self.assertTrue(
+                    not records
+                    or all(record.get("restore_incomplete") for record in records)
                 )
 
     def test_cleanup_failed_inspection_is_not_inferred_absent(self):
