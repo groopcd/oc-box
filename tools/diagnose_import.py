@@ -3,6 +3,7 @@
 
 import argparse
 import json
+import math
 from pathlib import Path
 import re
 import subprocess
@@ -47,6 +48,8 @@ def differences(expected, actual, path="", limit=20):
         elif kind is list:
             for child in value:
                 validate(child, depth + 1)
+        elif kind is float and not math.isfinite(value):
+            raise ValueError("Invalid comparison data")
         elif kind not in (str, int, float, bool, type(None)):
             # Do not expose user-defined type names or call their repr/equality.
             raise ValueError("Invalid comparison data")

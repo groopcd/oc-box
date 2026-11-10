@@ -14,6 +14,17 @@ from unittest.mock import Mock, patch
 from oc_box import oc_box as box
 from tools import diagnose_import as diagnostic
 
+NONFINITE_FLOATS = (
+    ("nan", float("nan")),
+    ("positive-infinity", float("inf")),
+    ("negative-infinity", float("-inf")),
+    ("json-nan", json.loads("NaN")),
+    ("json-positive-infinity", json.loads("Infinity")),
+    ("json-negative-infinity", json.loads("-Infinity")),
+    ("json-exponent-overflow", json.loads("1e309")),
+    ("json-negative-exponent-overflow", json.loads("-1e309")),
+)
+
 
 class DiagnoseImportTests(unittest.TestCase):
     def setUp(self):
@@ -177,6 +188,46 @@ class DiagnoseImportTests(unittest.TestCase):
                 with self.assertRaises(ValueError) as raised:
                     diagnostic.differences(left, right, **options)
                 self.assert_private_absent(str(raised.exception))
+
+    def test_nonfinite_float_comparison_values_are_refused_in_both_operands(self):
+        for case, value in NONFINITE_FLOATS:
+            for side in ("source", "container"):
+                with self.subTest(case=case, side=side):
+                    invalid = [{"number": value}]
+                    left, right = (invalid, []) if side == "source" else ([], invalid)
+                    with self.assertRaises(ValueError) as raised:
+                        diagnostic.differences(left, right)
+                    self.assertTrue(
+                        str(raised.exception) == "Invalid comparison data",
+                        "nonfinite values require a fixed validation error",
+                    )
+        for value in (0.0, -0.0, 1.5, 1e308, -1e308):
+            with self.subTest(finite=value):
+                self.assertEqual(diagnostic.differences(value, value), [])
+
+    def test_nonfinite_float_transcripts_have_fixed_invalid_data_cli_errors(self):
+        baseline = copy.deepcopy(self.source)
+        for case, value in NONFINITE_FLOATS:
+            for side in ("source", "container"):
+                with self.subTest(case=case, side=side):
+                    self.source = copy.deepcopy(baseline)
+                    self.actual = copy.deepcopy(baseline)
+                    target = self.source if side == "source" else self.actual
+                    target["messages"][0]["parts"][0]["state"]["input"]["number"] = (
+                        value
+                    )
+                    code, output, errors = self.invoke()
+                    self.assert_private_absent(output, errors)
+                    self.assertEqual(code, 1)
+                    self.assertTrue(
+                        output == "", "invalid data must not emit a count report"
+                    )
+                    self.assertTrue(
+                        errors == "diagnose-import: category=invalid-data\n",
+                        "nonfinite values require the fixed invalid-data category",
+                    )
+        self.fake.podman.assert_not_called()
+        self.fake.stop_container.assert_not_called()
 
     def test_v1_and_v2_reports_preserve_fields_without_payload_or_implicit_ids(self):
         fields = {
