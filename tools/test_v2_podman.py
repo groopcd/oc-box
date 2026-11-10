@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import secrets
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -756,39 +757,453 @@ def run_fixture_session(data, session_id, state, provider_port):
         raise
 
 
-def cleanup(root):
-    if (
-        root.is_symlink()
-        or not root.name.startswith(PREFIX)
-        or root.stat().st_uid != os.getuid()
-    ):
-        raise ValueError("Not an owned V2 acceptance fixture directory")
-    root = root.resolve(strict=True)
-    recorded = json.loads((root / "fixture-ids.json").read_text())
-    if not isinstance(recorded, list):
-        raise ValueError("Invalid V2 acceptance fixture resource list")
-    registry = root / "registry"
-    if registry.is_symlink() or (registry / "workspaces").is_symlink():
-        raise ValueError(
-            "Fixture registry must not redirect cleanup outside its private root"
+class CleanupRefusal(ValueError):
+    """Fixed cleanup diagnostics, never private metadata or engine output."""
+
+    def __init__(self, category):
+        super().__init__(
+            "V2 cleanup refused: category=" + category + ". Preserve the retained "
+            "fixture and evidence; do not rewrite markers, move storage, reset or "
+            "prune. Older fixtures without these proofs require separate operator "
+            "review, not automatic migration. Use a fresh fixture for new acceptance."
         )
-    with patch.dict(os.environ, isolated_env(root), clear=True):
-        paths = list(box.workspace_paths())
-        for path in paths:
-            if path.is_symlink() or path.parent.is_symlink():
-                raise ValueError("Fixture workspace metadata must not be symlinked")
-            data = box.read_json(path)
-            if (
-                data["id"] != path.parent.name
-                or Path(data["project"]).resolve().parent != root
-                or Path(data["project"]).name
-                not in ("source", "restored-full", "restored-portable")
-            ):
-                raise ValueError(
-                    "Unrecognized resource in the isolated fixture registry"
+
+
+def cleanup_require(value, category):
+    if not value:
+        raise CleanupRefusal(category)
+
+
+def cleanup_helpers():
+    # Import lazily: the donor imports our unchanged native/transport helpers.
+    # Its file-only path/boot/selector primitives are shared, not its different
+    # fixture schema or side-effectful journal/identity reconciliation.
+    from tools import test_global_vault_podman
+
+    return test_global_vault_podman
+
+
+def prepare_cleanup_authorization(root):
+    """Fresh runs only: pin private engine selectors and the original boot/root."""
+    guards = cleanup_helpers()
+    for relative in (
+        "podman-tmp",
+        "podman-run",
+        "data/libpod",
+        "data/containers/storage/volumes",
+        "temporary",
+    ):
+        (root / relative).mkdir(parents=True, mode=0o700, exist_ok=True)
+    config = root / "config/containers/containers.conf"
+    with config.open("x") as output:
+        output.write(guards.containers_config(root))
+    config.chmod(0o600)
+    (root / "config/containers/storage.conf").chmod(0o600)
+    binary = shutil.which(
+        "podman", path=box.maintenance_host_env().get("PATH", os.defpath)
+    )
+    cleanup_require(binary is not None, "native-podman")
+    guards.prepare_podman_cli(root, Path(binary).resolve(strict=True))
+    identity = {}
+    box.workspace_identity.record(identity, *box.workspace_identity.snapshot(root))
+    guards.write_json_new(
+        root / "cleanup-purpose.json",
+        {
+            "format": "oc-box-v2-cleanup-v1",
+            "root": str(root),
+            "identity": identity,
+            "boot_id": guards.system_boot_id().decode("ascii"),
+        },
+    )
+
+
+def cleanup_fixture(root, guards):
+    """File-only, non-repairing authorization; complete before any engine call."""
+    root = guards.no_symlinks(Path(root).expanduser())
+    info = root.stat()
+    cleanup_require(
+        root.name.startswith(PREFIX)
+        and stat.S_ISDIR(info.st_mode)
+        and info.st_uid == os.getuid()
+        and not info.st_mode & 0o077,
+        "fixture-root",
+    )
+    for relative in (
+        "registry",
+        "registry/workspaces",
+        "host-home",
+        "config",
+        "config/containers",
+        "data",
+        "data/libpod",
+        "data/containers",
+        "data/containers/storage",
+        "data/containers/storage/volumes",
+        "podman-run",
+        "podman-tmp",
+        "temporary",
+        "bin",
+    ):
+        directory = guards.safe_path(root, relative, directory=True).stat()
+        cleanup_require(
+            directory.st_uid == os.getuid() and not directory.st_mode & 0o022,
+            "fixture-directory",
+        )
+    purpose = guards.private_json(root, "cleanup-purpose.json")
+    cleanup_require(
+        isinstance(purpose, dict)
+        and set(purpose) == {"format", "root", "identity", "boot_id"}
+        and purpose["format"] == "oc-box-v2-cleanup-v1"
+        and purpose["root"] == str(root)
+        and isinstance(purpose["identity"], dict)
+        and box.workspace_identity.same_project(purpose["identity"], root),
+        "fixture-purpose",
+    )
+    boot = purpose["boot_id"]
+    cleanup_require(
+        isinstance(boot, str)
+        and re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\n?", boot)
+        and boot.encode("ascii") == guards.system_boot_id(),
+        "original-boot",
+    )
+    # A missing/stale/invalid retained marker must NEVER reach podman info.
+    guards.require_runtime_boot(root)
+    cleanup_require(
+        guards.safe_path(root, "config/containers/storage.conf").read_text()
+        == guards.expected_storage(root)
+        and guards.safe_path(root, "config/containers/containers.conf").read_text()
+        == guards.containers_config(root),
+        "storage-config",
+    )
+    for relative in (
+        "config/containers/storage.conf",
+        "config/containers/containers.conf",
+        "bin/podman",
+    ):
+        item = guards.safe_path(root, relative).stat()
+        cleanup_require(
+            item.st_uid == os.getuid()
+            and item.st_nlink == 1
+            and not item.st_mode & 0o077,
+            "private-selector",
+        )
+    mapping = guards.private_json(root, "podman-executable.json")
+    cleanup_require(
+        isinstance(mapping, dict)
+        and set(mapping) == {"podman", "interpreter"}
+        and all(isinstance(value, str) for value in mapping.values()),
+        "podman-selector",
+    )
+    for binary in mapping.values():
+        guards.validate_native_podman(binary, root)
+    cleanup_require(
+        (root / "bin/podman").read_text()
+        == guards.podman_wrapper_source(mapping["interpreter"])
+        and os.access(root / "bin/podman", os.X_OK),
+        "podman-selector",
+    )
+    recorded = guards.private_json(root, "fixture-ids.json")
+    cleanup_require(
+        isinstance(recorded, list)
+        and 1 <= len(recorded) <= 3
+        and all(
+            isinstance(ident, str) and re.fullmatch(r"[0-9a-f]{32}", ident)
+            for ident in recorded
+        )
+        and len(set(recorded)) == len(recorded),
+        "fixture-journal",
+    )
+    folders = list((root / "registry/workspaces").iterdir())
+    cleanup_require(
+        {path.name for path in folders} == set(recorded), "fixture-inventory"
+    )
+    records, projects = {}, {}
+    for ident in sorted(recorded):
+        folder = guards.safe_path(root, "registry/workspaces/" + ident, directory=True)
+        for child in (folder, *folder.rglob("*")):
+            guards.no_symlinks(child)
+            item = child.stat()
+            cleanup_require(
+                item.st_uid == os.getuid()
+                and not item.st_mode & 0o022
+                and (
+                    stat.S_ISDIR(item.st_mode)
+                    or (stat.S_ISREG(item.st_mode) and item.st_nlink == 1)
+                ),
+                "private-registry",
+            )
+        path = folder / "workspace.json"
+        data = guards.private_json(root, path.relative_to(root))
+        cleanup_require(
+            isinstance(data, dict) and isinstance(data.get("project"), str),
+            "workspace-schema",
+        )
+        project = guards.no_symlinks(data["project"])
+        name = project.name
+        cleanup_require(
+            project == root / name
+            and data["project"] == str(project)
+            and name in ("source", "restored-full", "restored-portable")
+            and name not in projects
+            and data.get("id") == ident
+            and data.get("version") == 2
+            and data.get("home") == str(root / "host-home")
+            and data.get("distro") in box.DISTROS
+            and data.get("container") == "oc-box-" + ident
+            and data.get("home_volume") == "oc-box-home-" + ident
+            and not data.get("devices")
+            and not data.get("podman_args")
+            and not data.get("restore_incomplete")
+            and not data.get("restore_staging_project"),
+            "workspace-allowlist",
+        )
+        guards.safe_path(root, name, directory=True)
+        cleanup_require(
+            box.workspace_identity.same_project(data, project), "workspace-identity"
+        )
+        marker = guards.safe_path(root, name + "/" + box.MARKER)
+        item = marker.stat()
+        cleanup_require(
+            item.st_uid == os.getuid()
+            and item.st_nlink == 1
+            and item.st_size <= 64
+            and not item.st_mode & 0o022
+            and marker.read_text().strip() == ident,
+            "workspace-marker",
+        )
+        records[ident], projects[name] = (path, data), data
+    cleanup_require(
+        "source" in projects and recorded[0] == projects["source"]["id"],
+        "fixture-source",
+    )
+    source = projects["source"]
+    cleanup_require(
+        not source.get("restored_from")
+        and box.container_project(source) == source["project"],
+        "fixture-source",
+    )
+    for name, data in projects.items():
+        if name != "source":
+            origin = data.get("restored_from")
+            cleanup_require(
+                isinstance(origin, dict)
+                and origin.get("kind") == name.removeprefix("restored-")
+                and origin.get("workspace_id") == source["id"]
+                and box.container_project(data) == source["project"],
+                "restore-origin",
+            )
+    return root, records, mapping
+
+
+def cleanup_command(root, binary, *arguments, check=True):
+    # Direct pinned native executable, with BOTH private selectors, even for
+    # read-only probes. No fallback query of an unknown/default host store.
+    env = isolated_env(root)
+    env.update(
+        HOME=str(root / "host-home"),
+        CONTAINERS_STORAGE_CONF=str(root / "config/containers/storage.conf"),
+        CONTAINERS_CONF=str(root / "config/containers/containers.conf"),
+        TMPDIR=str(root / "temporary"),
+    )
+    result = box.run(
+        [binary, *arguments],
+        env=env,
+        stdin=subprocess.DEVNULL,
+        capture=True,
+        private=True,
+        check=check,
+        timeout=30,
+    )
+    cleanup_require(
+        type(result.returncode) is int
+        and (not check or result.returncode == 0)
+        and isinstance(result.stdout, str)
+        and len(result.stdout) <= crypto.MAX_SMALL,
+        "engine-output",
+    )
+    return result
+
+
+def cleanup_store(root, binary, guards):
+    info = json.loads(cleanup_command(root, binary, "info", "--format", "json").stdout)
+    cleanup_require(isinstance(info, dict), "private-store")
+    host, store = info.get("host", {}), info.get("store", {})
+    cleanup_require(
+        host.get("security", {}).get("rootless") is True
+        and host.get("serviceIsRemote") is False
+        and store.get("graphDriverName") == "overlay",
+        "private-store",
+    )
+    for field, relative in (
+        ("graphRoot", "data/containers/storage"),
+        ("runRoot", "podman-run"),
+        ("volumePath", "data/containers/storage/volumes"),
+        ("imageCopyTmpDir", "temporary"),
+    ):
+        cleanup_require(store.get(field) == str(root / relative), "private-store")
+        guards.safe_path(root, relative, directory=True)
+    if "configFile" in store:
+        cleanup_require(
+            store["configFile"] == str(root / "config/containers/storage.conf"),
+            "store-selector",
+        )
+    else:
+        cleanup_require(
+            info.get("version", {}).get("Version")
+            in guards.PODMAN_CONFIGFILE_OMISSIONS,
+            "store-selector",
+        )
+
+
+def cleanup_resources(root, records, binary, guards):
+    pending = []
+    for _, data in records.values():
+        present = set()
+        for kind, expected, listing in (
+            ("container", data["container"], ("ps", "-aq")),
+            ("volume", data["home_volume"], ("volume", "ls", "-q")),
+            ("network", "oc-box-" + data["id"], ("network", "ls", "-q")),
+        ):
+            tokens = cleanup_command(
+                root, binary, *listing, "--filter", box.LABEL + "=" + data["id"]
+            ).stdout.split()
+            cleanup_require(len(tokens) <= 1, "resource-inventory")
+            exists = cleanup_command(
+                root, binary, kind, "exists", expected, check=False
+            ).returncode
+            cleanup_require(
+                exists in (0, 1) and bool(tokens) == (exists == 0), "resource-inventory"
+            )
+            if not tokens:
+                continue  # Authorized, already-removed resources remain idempotent.
+            token = tokens[0]
+            cleanup_require(
+                token == expected
+                if kind == "volume"
+                else re.fullmatch(r"[0-9a-f]{12,64}", token),
+                "resource-token",
+            )
+            response = json.loads(
+                cleanup_command(root, binary, kind, "inspect", token).stdout
+            )
+            cleanup_require(
+                isinstance(response, list)
+                and len(response) == 1
+                and isinstance(response[0], dict),
+                "resource-shape",
+            )
+            info = response[0]
+            labels = info.get(
+                "Labels", info.get("labels", info.get("Config", {}).get("Labels", {}))
+            )
+            cleanup_require(
+                info.get("Name", info.get("name", "")).lstrip("/") == expected
+                and isinstance(labels, dict)
+                and labels.get(box.LABEL) == data["id"],
+                "resource-owner",
+            )
+            if kind != "volume":
+                actual = info.get("Id", info.get("ID", info.get("id")))
+                cleanup_require(
+                    isinstance(actual, str)
+                    and re.fullmatch(r"[0-9a-f]{64}", actual)
+                    and actual.startswith(token),
+                    "resource-token",
                 )
-            with box.workspace_lock(path):
-                box.remove_resources(data)
+                token = actual  # Pin the complete native ID, not a mutable name.
+            home = (
+                root / "data/containers/storage/volumes" / data["home_volume"] / "_data"
+            )
+            if kind == "volume":
+                cleanup_require(info.get("Mountpoint") == str(home), "private-volume")
+                guards.safe_path(root, home.relative_to(root), directory=True)
+            if kind == "container":
+                cleanup_require(
+                    not info.get("HostConfig", {}).get("PortBindings"),
+                    "published-ports",
+                )
+                mounts = info.get("Mounts")
+                cleanup_require(
+                    isinstance(mounts, list)
+                    and len(mounts) == 2
+                    and all(isinstance(item, dict) for item in mounts),
+                    "resource-mounts",
+                )
+                approved = {
+                    ("bind", data["project"], box.container_project(data), None),
+                    ("volume", str(home), data["home"], data["home_volume"]),
+                }
+                cleanup_require(
+                    {
+                        (
+                            item.get("Type"),
+                            item.get("Source"),
+                            item.get("Destination"),
+                            item.get("Name") or None,
+                        )
+                        for item in mounts
+                    }
+                    == approved,
+                    "resource-mounts",
+                )
+            present.add(kind)
+            pending.append((kind, token))
+        cleanup_require(
+            "container" not in present or "volume" in present, "private-volume"
+        )
+    return pending
+
+
+def cleanup(root):
+    guards = cleanup_helpers()
+    try:
+        root, records, mapping = cleanup_fixture(root, guards)
+        with contextlib.ExitStack() as stack:
+            for path, _ in records.values():
+                stack.enter_context(box.workspace_lock(path))
+            # Reload under ALL locks. No refresh_workspace_identity, journal
+            # reconciliation, marker repair, launch, reset, prune or file deletion.
+            cleanup_require(
+                cleanup_fixture(root, guards) == (root, records, mapping),
+                "fixture-changed",
+            )
+            binary = mapping["podman"]
+            cleanup_store(root, binary, guards)
+            pending = cleanup_resources(root, records, binary, guards)
+            cleanup_require(
+                cleanup_fixture(root, guards) == (root, records, mapping),
+                "fixture-changed",
+            )
+            cleanup_store(root, binary, guards)
+            cleanup_require(
+                cleanup_fixture(root, guards) == (root, records, mapping),
+                "fixture-changed",
+            )
+            # All validation is complete before the first removal. Operational
+            # engine failures can still leave a partial *authorized* cleanup;
+            # its unchanged journal permits the same strict idempotent retry.
+            for kind, ident in pending:
+                cleanup_command(
+                    root,
+                    binary,
+                    kind,
+                    "rm",
+                    *(["--force"] if kind == "container" else []),
+                    ident,
+                )
+    except CleanupRefusal:
+        raise
+    except (
+        OSError,
+        ValueError,
+        TypeError,
+        KeyError,
+        AttributeError,
+        box.BoxError,
+        crypto.BackupError,
+        guards.FixtureError,
+    ):
+        raise CleanupRefusal("validation-or-engine") from None
     print(
         "Fixture-owned Podman resources removed; test projects/archives remain at "
         + str(root)
@@ -1304,7 +1719,8 @@ def run(root, v1, v2, distro, *, resume=False):
     (settings / "config.json").write_text(json.dumps({"default_distro": distro}))
     if not resume:
         storage_config(root)
-        (root / "fixture-ids.json").write_text("[]")
+        prepare_cleanup_authorization(root)
+        cleanup_helpers().write_json_new(root / "fixture-ids.json", [])
     server, worker = make_provider(state)
     try:
         with (

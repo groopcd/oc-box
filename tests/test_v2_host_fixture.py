@@ -1,4 +1,6 @@
 import contextlib
+import copy
+import hashlib
 from http.client import HTTPConnection
 import importlib.util
 import io
@@ -12,6 +14,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from oc_box import oc_box as box, vault
+from tools import test_global_vault_podman as cleanup_guards
 
 APP = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location(
@@ -740,23 +743,629 @@ class V2HostFixtureTests(unittest.TestCase):
             )
             self.assertFalse((root / "full-restore-result.json").exists())
 
+    def cleanup_state(self, root, *, restored=False):
+        """Independent synthetic authorization files and command-routed engine."""
+        path, source = self.retained_source(root)
+        records = [(path, source)]
+        if restored:
+            with (
+                patch.dict(os.environ, fixture.isolated_env(root), clear=True),
+                patch.object(Path, "home", return_value=root / "host-home"),
+            ):
+                for kind in ("full", "portable"):
+                    project = root / ("restored-" + kind)
+                    project.mkdir()
+                    item_path, data = box.create_workspace(project, "tumbleweed")
+                    data.update(
+                        container_project=source["project"],
+                        restored_from={"workspace_id": source["id"], "kind": kind},
+                    )
+                    box.atomic_json(item_path, data)
+                    records.append((item_path, data))
+        (root / "fixture-ids.json").write_text(
+            json.dumps([data["id"] for _, data in records])
+        )
+        (root / "fixture-ids.json").chmod(0o600)
+        for name in (
+            "podman-tmp",
+            "data/libpod",
+            "data/containers/storage/volumes",
+            "temporary",
+        ):
+            (root / name).mkdir(parents=True, mode=0o700, exist_ok=True)
+        (root / "config/containers/storage.conf").chmod(0o600)
+        cleanup_guards.write_json_new(
+            root / "cleanup-purpose.json",
+            {
+                "format": "oc-box-v2-cleanup-v1",
+                "root": str(root),
+                "identity": {
+                    "project_identity": list(box.workspace_identity.snapshot(root)[0])
+                },
+                "boot_id": "11111111-2222-3333-4444-555555555555\n",
+            },
+        )
+        (root / "podman-tmp/alive").write_text("11111111-2222-3333-4444-555555555555\n")
+        (root / "podman-tmp/alive").chmod(0o600)
+        config = root / "config/containers/containers.conf"
+        config.write_text(cleanup_guards.containers_config(root))
+        config.chmod(0o600)
+        cleanup_guards.prepare_podman_cli(root, Path(sys.executable).resolve())
+        resources = {}
+        for _, data in records:
+            volume = (
+                root / "data/containers/storage/volumes" / data["home_volume"] / "_data"
+            )
+            volume.mkdir(parents=True)
+            resources[("volume", data["home_volume"])] = {
+                "Name": data["home_volume"],
+                "Labels": {box.LABEL: data["id"]},
+                "Mountpoint": str(volume),
+            }
+            for kind in ("container", "network"):
+                token = hashlib.sha256((kind + data["id"]).encode()).hexdigest()
+                info = {
+                    "Id": token,
+                    "Name": "oc-box-" + data["id"],
+                    "Labels": {box.LABEL: data["id"]},
+                }
+                if kind == "container":
+                    info.update(
+                        Config={"Labels": {box.LABEL: data["id"]}},
+                        HostConfig={"PortBindings": {}},
+                        Mounts=[
+                            {
+                                "Type": "bind",
+                                "Source": data["project"],
+                                "Destination": box.container_project(data),
+                            },
+                            {
+                                "Type": "volume",
+                                "Name": data["home_volume"],
+                                "Source": str(volume),
+                                "Destination": data["home"],
+                            },
+                        ],
+                    )
+                    info.pop("Labels")
+                resources[(kind, token)] = info
+        info = {
+            "host": {"security": {"rootless": True}, "serviceIsRemote": False},
+            "store": {
+                "graphDriverName": "overlay",
+                "graphRoot": str(root / "data/containers/storage"),
+                "runRoot": str(root / "podman-run"),
+                "volumePath": str(root / "data/containers/storage/volumes"),
+                "imageCopyTmpDir": str(root / "temporary"),
+                "configFile": str(root / "config/containers/storage.conf"),
+            },
+            "version": {"Version": "6.1.4"},
+        }
+        return records, resources, info
+
+    @contextlib.contextmanager
+    def cleanup_engine(
+        self, root, records, resources, info, *, intercept=None, lock_action=None
+    ):
+        events, removals, held = [], [], set()
+        lock = box.workspace_lock
+
+        @contextlib.contextmanager
+        def locked(path):
+            with lock(path):
+                held.add(path)
+                try:
+                    if lock_action is not None:
+                        lock_action(path)
+                    yield
+                finally:
+                    held.remove(path)
+
+        def command(argv, **options):
+            args = argv[1:]
+            events.append(tuple(args))
+            self.assertEqual(held, {path for path, _ in records})
+            self.assertEqual(options["stdin"], subprocess.DEVNULL)
+            self.assertTrue(options["private"])
+            env = options["env"]
+            self.assertEqual(
+                env["CONTAINERS_STORAGE_CONF"],
+                str(root / "config/containers/storage.conf"),
+            )
+            self.assertEqual(
+                env["CONTAINERS_CONF"], str(root / "config/containers/containers.conf")
+            )
+            self.assertNotIn("CONTAINERS_CONF_OVERRIDE", env)
+            if intercept is not None:
+                result = intercept(argv, options, events)
+                if result is not None:
+                    return result
+            if args[0] == "info":
+                return subprocess.CompletedProcess(argv, 0, json.dumps(info), "")
+            if args[0] == "ps" or args[1] == "ls":
+                kind = "container" if args[0] == "ps" else args[0]
+                ident = args[-1].split("=", 2)[-1]
+                tokens = [
+                    token
+                    for (item_kind, token), value in resources.items()
+                    if item_kind == kind
+                    and value.get(
+                        "Labels", value.get("Config", {}).get("Labels", {})
+                    ).get(box.LABEL)
+                    == ident
+                ]
+                return subprocess.CompletedProcess(argv, 0, "\n".join(tokens), "")
+            kind, action, token = args[:3]
+            if action == "exists":
+                found = any(
+                    k == kind and value["Name"].lstrip("/") == token
+                    for (k, _), value in resources.items()
+                )
+                return subprocess.CompletedProcess(argv, 0 if found else 1, "", "")
+            if action == "inspect":
+                return subprocess.CompletedProcess(
+                    argv, 0, json.dumps([resources[(kind, token)]]), ""
+                )
+            self.assertEqual(action, "rm")
+            token = args[-1]
+            removals.append((kind, token))
+            resources.pop((kind, token))
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        with (
+            patch.object(box, "run", side_effect=command),
+            patch.object(box, "workspace_lock", side_effect=locked),
+            patch.object(
+                box,
+                "remove_resources",
+                side_effect=lambda data: removals.append(("old", data["id"])),
+            ),
+            patch.object(
+                cleanup_guards,
+                "system_boot_id",
+                return_value=b"11111111-2222-3333-4444-555555555555\n",
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            yield events, removals
+
+    def assert_cleanup_refuses(
+        self, root, records, resources, info, *, file_only=False
+    ):
+        before = {
+            path: path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file() and not path.is_symlink()
+        }
+        failure = None
+        with self.cleanup_engine(root, records, resources, info) as (events, removals):
+            try:
+                fixture.cleanup(root)
+            except ValueError as error:
+                failure = error
+        self.assertEqual(removals, [], "a cleanup refusal removed resources")
+        if file_only:
+            self.assertEqual(events, [], "a file-only refusal reached the engine")
+        self.assertIsNotNone(failure, "cleanup accepted unauthorized state")
+        self.assertNotIn("private-sentinel", str(failure))
+        for path, content in before.items():
+            self.assertEqual(
+                path.read_bytes(), content, "cleanup rewrote retained evidence"
+            )
+
     def test_fixture_cleanup_refuses_projects_outside_fixture_root(self):
         with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
             root = Path(temporary)
-            (root / "fixture-ids.json").write_text(json.dumps(["a" * 32]))
-            path = root / "registry/workspaces" / ("a" * 32) / "workspace.json"
-            path.parent.mkdir(parents=True)
-            path.write_text(
-                json.dumps(
-                    {"id": "a" * 32, "project": str(root.parent / "real-project")}
-                )
-            )
+            records, resources, info = self.cleanup_state(root)
+            path, data = records[0]
+            data["project"] = str(root.parent / "synthetic-unrelated-project")
+            box.atomic_json(path, data)
+            self.assert_cleanup_refuses(root, records, resources, info, file_only=True)
+
+    def test_cleanup_journal_requires_exact_nonempty_unique_inventory(self):
+        for name, journal in {
+            "empty": [],
+            "unrecorded": ["f" * 32],
+            "duplicate": None,
+            "object": {},
+            "invalid-id": ["not-an-id"],
+            "nonstring": [1],
+            "missing-record": None,
+            "malformed-json": "{",
+        }.items():
             with (
-                patch.object(box, "remove_resources") as remove,
-                self.assertRaisesRegex(ValueError, "Unrecognized resource"),
+                tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary,
+                self.subTest(name=name),
+            ):
+                root = Path(temporary)
+                records, resources, info = self.cleanup_state(root)
+                ident = records[0][1]["id"]
+                if name == "duplicate":
+                    journal = [ident, ident]
+                elif name == "missing-record":
+                    journal = [ident, "f" * 32]
+                (root / "fixture-ids.json").write_text(
+                    journal if name == "malformed-json" else json.dumps(journal)
+                )
+                self.assert_cleanup_refuses(
+                    root, records, resources, info, file_only=True
+                )
+
+    def test_cleanup_file_guards_refuse_before_engine_and_preserve_evidence(self):
+        for name in (
+            "storage",
+            "engine-config",
+            "registry-link",
+            "selector",
+            "missing-purpose",
+            "missing-boot",
+            "invalid-boot",
+            "stale-boot",
+            "shared-root",
+            "shared-journal",
+            "journal-hardlink",
+            "project-replaced",
+            "purpose-boot",
+            "mapping",
+            "registry-descendant-link",
+            "storage-link",
+            "selector-link",
+        ):
+            with (
+                tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary,
+                self.subTest(name=name),
+            ):
+                root = Path(temporary)
+                records, resources, info = self.cleanup_state(root)
+                if name == "storage":
+                    (root / "config/containers/storage.conf").write_text(
+                        '[storage]\ngraphroot="/synthetic-external"\n'
+                    )
+                elif name == "engine-config":
+                    (root / "config/containers/containers.conf").write_text(
+                        "[engine]\nremote=true\n"
+                    )
+                elif name == "registry-link":
+                    (root / "registry").rename(root / "redirected-registry")
+                    (root / "registry").symlink_to(
+                        root / "redirected-registry", target_is_directory=True
+                    )
+                elif name == "selector":
+                    (root / "bin/podman").write_text("#!/bin/sh\nexit 0\n")
+                elif name == "missing-purpose":
+                    (root / "cleanup-purpose.json").unlink()
+                elif name == "missing-boot":
+                    (root / "podman-tmp/alive").unlink()
+                elif name in ("invalid-boot", "stale-boot"):
+                    (root / "podman-tmp/alive").write_text(
+                        "invalid"
+                        if name == "invalid-boot"
+                        else "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n"
+                    )
+                elif name == "shared-root":
+                    root.chmod(0o755)
+                elif name == "shared-journal":
+                    (root / "fixture-ids.json").chmod(0o644)
+                elif name == "journal-hardlink":
+                    os.link(root / "fixture-ids.json", root / "journal-copy")
+                elif name == "purpose-boot":
+                    path = root / "cleanup-purpose.json"
+                    purpose = json.loads(path.read_text())
+                    purpose["boot_id"] = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee\n"
+                    path.write_text(json.dumps(purpose))
+                elif name == "mapping":
+                    (root / "podman-executable.json").write_text(
+                        '{"podman":"private-sentinel"}'
+                    )
+                elif name == "registry-descendant-link":
+                    records[0][0].with_name("foreign-link").symlink_to(
+                        root / "cleanup-purpose.json"
+                    )
+                elif name == "storage-link":
+                    config = root / "config/containers/storage.conf"
+                    config.rename(config.with_name("retained-storage.conf"))
+                    config.symlink_to(config.with_name("retained-storage.conf"))
+                elif name == "selector-link":
+                    wrapper = root / "bin/podman"
+                    wrapper.rename(wrapper.with_name("retained-podman"))
+                    wrapper.symlink_to(wrapper.with_name("retained-podman"))
+                else:
+                    (root / "source").rename(root / "original-source")
+                    (root / "source").mkdir()
+                    (root / "source" / box.MARKER).write_text(records[0][1]["id"])
+                self.assert_cleanup_refuses(
+                    root, records, resources, info, file_only=True
+                )
+
+    def test_cleanup_invalid_later_record_never_removes_an_earlier_workspace(self):
+        for name in ("project", "identity", "origin", "home", "resource-name"):
+            with (
+                tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary,
+                self.subTest(name=name),
+            ):
+                root = Path(temporary)
+                records, resources, info = self.cleanup_state(root, restored=True)
+                path, data = max(records, key=lambda item: item[0])
+                if name == "project":
+                    data["project"] = str(root / "unrecorded-project")
+                elif name == "identity":
+                    data["project_identity"][1] += 1
+                elif name == "origin":
+                    data["restored_from"] = {"kind": "full", "workspace_id": "f" * 32}
+                elif name == "home":
+                    data["home"] = "/synthetic-external-home"
+                else:
+                    data["container"] = "oc-box-foreign"
+                box.atomic_json(path, data)
+                self.assert_cleanup_refuses(
+                    root, records, resources, info, file_only=True
+                )
+
+    def test_cleanup_actual_store_refusals_precede_all_resource_queries(self):
+        for name in (
+            "rootful",
+            "remote",
+            "graphRoot",
+            "runRoot",
+            "volumePath",
+            "configFile",
+            "imageCopyTmpDir",
+            "unknown-omission",
+        ):
+            with (
+                tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary,
+                self.subTest(name=name),
+            ):
+                root = Path(temporary)
+                records, resources, info = self.cleanup_state(root)
+                if name == "rootful":
+                    info["host"]["security"]["rootless"] = False
+                elif name == "remote":
+                    info["host"]["serviceIsRemote"] = True
+                elif name == "unknown-omission":
+                    del info["store"]["configFile"]
+                    info["version"]["Version"] = "999.0.0"
+                else:
+                    info["store"][name] = "/synthetic-external-store"
+                with self.cleanup_engine(root, records, resources, info) as (
+                    events,
+                    removals,
+                ):
+                    failure = None
+                    try:
+                        fixture.cleanup(root)
+                    except ValueError as error:
+                        failure = error
+                self.assertEqual(removals, [])
+                self.assertIsNotNone(failure)
+                self.assertTrue(events)
+                self.assertTrue(all(event[0] == "info" for event in events))
+
+    def test_cleanup_prevalidates_every_resource_before_first_removal(self):
+        for name in (
+            "label",
+            "project-mount",
+            "home-mount",
+            "mount-type",
+            "duplicate-mount",
+            "published-port",
+            "volume-path",
+            "network-name",
+            "volume-label",
+            "extra-labelled-resource",
+        ):
+            with (
+                tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary,
+                self.subTest(name=name),
+            ):
+                root = Path(temporary)
+                records, resources, info = self.cleanup_state(root, restored=True)
+                data = records[-1][1]
+                if name == "extra-labelled-resource":
+                    token = "f" * 64
+                    resources[("network", token)] = {
+                        "Id": token,
+                        "Name": "foreign-network",
+                        "Labels": {box.LABEL: data["id"]},
+                    }
+                elif name == "volume-label":
+                    resources[("volume", data["home_volume"])]["Labels"][box.LABEL] = (
+                        "f" * 32
+                    )
+                elif name == "volume-path":
+                    resources[("volume", data["home_volume"])]["Mountpoint"] = (
+                        "/synthetic-external-volume"
+                    )
+                else:
+                    kind = "network" if name == "network-name" else "container"
+                    value = next(
+                        value
+                        for (k, _), value in resources.items()
+                        if k == kind and value["Name"] == data["container"]
+                    )
+                    if name == "label":
+                        value["Config"]["Labels"][box.LABEL] = "f" * 32
+                    elif name == "project-mount":
+                        value["Mounts"][0]["Source"] = "/synthetic-foreign-project"
+                    elif name == "home-mount":
+                        value["Mounts"].pop()
+                    elif name == "mount-type":
+                        value["Mounts"][1]["Type"] = "bind"
+                    elif name == "duplicate-mount":
+                        value["Mounts"].append(copy.deepcopy(value["Mounts"][0]))
+                    elif name == "published-port":
+                        value["HostConfig"]["PortBindings"] = {"80/tcp": [{}]}
+                    else:
+                        value["Name"] = "foreign-network"
+                self.assert_cleanup_refuses(root, records, resources, info)
+
+    def test_cleanup_holds_all_locks_and_removes_only_prevalidated_resources(self):
+        for omitted_config in (False, True):
+            with (
+                tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary,
+                self.subTest(omitted_config=omitted_config),
+            ):
+                root = Path(temporary)
+                records, resources, info = self.cleanup_state(root, restored=True)
+                if omitted_config:
+                    del info["store"]["configFile"]
+                expected = set(resources)
+                with self.cleanup_engine(root, records, resources, info) as (
+                    events,
+                    removals,
+                ):
+                    fixture.cleanup(root)
+                    self.assertEqual(set(removals), expected)
+                    first_removal = next(
+                        index
+                        for index, event in enumerate(events)
+                        if len(event) > 1 and event[1] == "rm"
+                    )
+                    self.assertFalse(
+                        any(
+                            len(event) > 1 and event[1] == "inspect"
+                            for event in events[first_removal:]
+                        )
+                    )
+                    fixture.cleanup(root)
+                    self.assertEqual(len(removals), len(expected))
+                self.assertEqual(resources, {})
+
+    def test_cleanup_reloads_under_all_locks_and_refuses_contention_before_engine(self):
+        for name in ("metadata-change", "lock-refusal"):
+            with (
+                tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary,
+                self.subTest(name=name),
+            ):
+                root = Path(temporary)
+                records, resources, info = self.cleanup_state(root, restored=True)
+                count = []
+
+                def at_lock(path):
+                    count.append(path)
+                    if len(count) == len(records):
+                        if name == "lock-refusal":
+                            raise box.BoxError("private-sentinel lock held")
+                        data = box.read_json(path)
+                        data["pids"] += 1
+                        box.atomic_json(path, data)
+
+                with self.cleanup_engine(
+                    root, records, resources, info, lock_action=at_lock
+                ) as (events, removals):
+                    with self.assertRaises(fixture.CleanupRefusal) as error:
+                        fixture.cleanup(root)
+                self.assertEqual(events, [])
+                self.assertEqual(removals, [])
+                self.assertNotIn("private-sentinel", str(error.exception))
+
+    def test_cleanup_late_preflight_errors_are_fixed_and_remove_nothing(self):
+        for name in ("invalid-info", "engine-error", "final-store", "final-metadata"):
+            with (
+                tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary,
+                self.subTest(name=name),
+            ):
+                root = Path(temporary)
+                records, resources, info = self.cleanup_state(root, restored=True)
+
+                def intercept(argv, options, events):
+                    if argv[1] != "info":
+                        return None
+                    second = sum(event[0] == "info" for event in events) == 2
+                    if name == "invalid-info" or (name == "final-store" and second):
+                        return subprocess.CompletedProcess(
+                            argv, 0, "private-sentinel malformed JSON", ""
+                        )
+                    if name == "engine-error":
+                        raise box.BoxError("private-sentinel private engine stderr")
+                    if name == "final-metadata" and second:
+                        path, data = records[-1]
+                        changed = copy.deepcopy(data)
+                        changed["pids"] += 1
+                        box.atomic_json(path, changed)
+                    return None
+
+                with self.cleanup_engine(
+                    root, records, resources, info, intercept=intercept
+                ) as (_events, removals):
+                    with self.assertRaises(fixture.CleanupRefusal) as error:
+                        fixture.cleanup(root)
+                self.assertEqual(removals, [])
+                self.assertNotIn("private-sentinel", str(error.exception))
+
+    def test_cleanup_operational_partial_removal_retries_only_known_remaining_resources(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            records, resources, info = self.cleanup_state(root, restored=True)
+            expected = set(resources)
+            journal = (root / "fixture-ids.json").read_bytes()
+
+            def intercept(argv, options, events):
+                if (
+                    "rm" in argv
+                    and sum(len(event) > 1 and event[1] == "rm" for event in events)
+                    == 2
+                ):
+                    return subprocess.CompletedProcess(
+                        argv, 1, "private-sentinel", "private-sentinel"
+                    )
+                return None
+
+            with self.cleanup_engine(
+                root, records, resources, info, intercept=intercept
+            ) as (_events, first):
+                with self.assertRaises(fixture.CleanupRefusal) as error:
+                    fixture.cleanup(root)
+            self.assertEqual(len(first), 1)
+            self.assertNotIn("private-sentinel", str(error.exception))
+            with self.cleanup_engine(root, records, resources, info) as (
+                _events,
+                remaining,
             ):
                 fixture.cleanup(root)
-            remove.assert_not_called()
+            self.assertEqual(set(first + remaining), expected)
+            self.assertEqual(len(first + remaining), len(expected))
+            self.assertEqual(resources, {})
+            self.assertEqual((root / "fixture-ids.json").read_bytes(), journal)
+
+    def test_fresh_cleanup_authorization_is_file_only_and_never_replaces_existing_proofs(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root = Path(temporary)
+            (root / "bin").mkdir()
+            fixture.storage_config(root)
+            with (
+                patch.object(
+                    fixture.shutil,
+                    "which",
+                    return_value=str(Path(sys.executable).resolve()),
+                ),
+                patch.object(
+                    cleanup_guards,
+                    "system_boot_id",
+                    return_value=b"11111111-2222-3333-4444-555555555555\n",
+                ),
+                patch.object(
+                    box, "run", side_effect=AssertionError("engine must not run")
+                ) as engine,
+            ):
+                fixture.prepare_cleanup_authorization(root)
+                purpose = (root / "cleanup-purpose.json").read_bytes()
+                self.assertFalse((root / "podman-tmp/alive").exists())
+                with self.assertRaises(FileExistsError):
+                    fixture.prepare_cleanup_authorization(root)
+                self.assertEqual((root / "cleanup-purpose.json").read_bytes(), purpose)
+                engine.assert_not_called()
+            self.assertEqual(
+                (root / "cleanup-purpose.json").stat().st_mode & 0o777, 0o600
+            )
+            self.assertEqual(
+                (root / "bin/podman").read_text(),
+                cleanup_guards.podman_wrapper_source(),
+            )
 
     def test_v1_history_check_allows_access_metadata_but_rejects_changed_parts_or_identity(
         self,
