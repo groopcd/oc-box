@@ -7,6 +7,7 @@ not secrets previously copied in OpenCode config/auth, files, or other processes
 import contextlib
 from contextvars import ContextVar
 import os
+import struct
 import sys
 
 if __package__:
@@ -15,9 +16,11 @@ else:
     import opencode_compat
     import vault
 
-# Reserve exec-environment headroom for runtime settings, config and argv.
-# Explicit per-name policies retain their existing selection limits.
+# This public cap is only an upper bound; actual exec limits can be smaller.
+# Explicit per-name policies retain their existing selection cap semantics.
 MAX_GLOBAL_ENV_BYTES = 1024 * 1024
+EXEC_ARGV_HEADROOM = 128 * 1024
+EXEC_ARGV_POINTER_HEADROOM = 256
 
 _UNLOCKED: ContextVar[tuple[str, dict[str, str]] | None] = ContextVar(
     "oc_box_vault_launch", default=None
@@ -163,6 +166,8 @@ def unlocked(data, *, version=None, no_vault=False):
         try:
             policy_token = _EFFECTIVE_POLICY.set((data["id"], selected))
             try:
+                if global_vault or values:
+                    _check_exec_budget(data, version=version)
                 yield values
             finally:
                 _EFFECTIVE_POLICY.reset(policy_token)
@@ -185,6 +190,79 @@ def _check_global_env_budget(values):
         raise vault.VaultError(
             "Global vault environment size limit exceeded (1 MiB). Use selected mode with fewer credentials."
         )
+
+
+def _check_exec_budget(data, *, version=None):
+    """Conservative launch preflight, not a guarantee about future execs.
+
+    Build the normal commands/environments without starting any process. Count
+    both Podman's host environment and the delivered container environment; the
+    former still includes ambient variables even in global/selected mode. Leave
+    room for runtime settings, inline helper code, additional argv and pointers.
+    Never modify host os.environ or retain these extra plaintext dictionaries.
+    """
+
+    def refuse():
+        raise vault.VaultError(
+            "Credential launch exec budget/limit exceeded or unavailable. "
+            "Reduce the inherited host environment or select fewer credentials; "
+            "check the host stack/exec limits before retrying."
+        ) from None
+
+    try:
+        maximum = os.sysconf("SC_ARG_MAX")
+        page_size = os.sysconf("SC_PAGESIZE")
+    except (OSError, ValueError):
+        refuse()
+    if (
+        type(maximum) is not int
+        or type(page_size) is not int
+        or min(maximum, page_size) <= 0
+    ):
+        refuse()
+    # Linux bounds each argv/environment string to 32 pages, including NUL.
+    per_string = 32 * page_size
+    if __package__:
+        from . import oc_box as box
+    else:
+        import oc_box as box
+    planned = dict(data)
+    if version is not None:
+        planned["opencode_version"] = version
+    environments = [dict(os.environ)]
+    try:
+        command = box.exec_command(planned, ["/bin/true"])
+        environments.append(command.environment)
+        environments.append(box.container_env(planned))
+        # These production helpers are passed as single Python -c arguments.
+        helpers = [
+            (box.PACKAGE / name).stat().st_size + 1
+            for name in ("bootstrap.py", "sync_config.py", "opencode_v2_io.py")
+        ]
+        arguments = [len(os.fsencode(str(arg))) + 1 for arg in command]
+        if max([*helpers, *arguments], default=0) > per_string:
+            refuse()
+        argv_bytes = sum(arguments) + max(helpers) + EXEC_ARGV_HEADROOM
+        pointers = struct.calcsize("P") * (
+            len(arguments) + EXEC_ARGV_POINTER_HEADROOM + 2
+        )
+        for environment in environments:
+            sizes = [
+                len(os.fsencode(name)) + len(os.fsencode(value)) + 2
+                for name, value in environment.items()
+            ]
+            if max(sizes, default=0) > per_string:
+                refuse()
+            if (
+                sum(sizes) + argv_bytes + pointers + struct.calcsize("P") * len(sizes)
+                > maximum
+            ):
+                refuse()
+    except (OSError, UnicodeError):
+        refuse()
+    finally:
+        for environment in environments:
+            environment.clear()
 
 
 def _setup_guidance(*, initialized):

@@ -186,6 +186,35 @@ class GlobalVaultLaunchTests(TestCase):
         self.assertEqual(path.read_bytes(), before)
         self.assertFalse(credentials.is_active(data))
 
+    def test_effective_exec_budget_refuses_reset_before_resource_or_registry_changes(
+        self,
+    ):
+        path, data = self.existing()
+        before = path.read_bytes()
+        values = {"BRAVE_API_KEY": self.value}
+        with (
+            patch.object(vault, "select_all", return_value=values),
+            patch.object(
+                credentials.os,
+                "sysconf",
+                side_effect=lambda name: {"SC_ARG_MAX": 131072, "SC_PAGESIZE": 4096}[
+                    name
+                ],
+            ),
+            patch.object(box, "remove_resources") as remove,
+            patch.object(box, "refresh_workspace_identity") as identity,
+            patch.object(box, "check_resource_controllers"),
+            patch.object(box, "launch", return_value=0),
+            self.assertRaisesRegex(box.BoxError, "exec.*budget|exec.*limit") as error,
+        ):
+            box.main(["reset", "--workspace", data["id"]])
+        remove.assert_not_called()
+        identity.assert_not_called()
+        self.assertNotIn(self.value, str(error.exception))
+        self.assertEqual(values, {})
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse(credentials.is_active(data))
+
     def test_no_vault_is_one_launch_compatibility_not_a_saved_policy(self):
         path, data = self.existing()
         before = path.read_bytes()
@@ -335,6 +364,31 @@ class GlobalVaultLaunchTests(TestCase):
                 )
         unlock.assert_called_once()
         self.assertFalse(hasattr(args, "_opencode_release"))
+
+    def test_credentials_cli_repairs_known_global_lists_without_unlock_or_losing_metadata(
+        self,
+    ):
+        path, data = self.existing()
+        data["credentials"] = {"mode": "vault", "env": ["SYNTHETIC_TOKEN"], "vault": []}
+        data["unrelated"] = {"keep": ["metadata"]}
+        box.atomic_json(path, data)
+        with (
+            patch.object(vault, "is_present") as presence,
+            patch.object(vault, "select_all") as unlock,
+            patch.object(vault, "hidden") as prompt,
+        ):
+            self.assertEqual(
+                box.main(
+                    ["credentials", "--workspace", data["id"], "--clear-credentials"]
+                ),
+                0,
+            )
+        for operation in (presence, unlock, prompt, self.release):
+            operation.assert_not_called()
+        saved = box.read_json(path)
+        self.assertEqual(
+            saved, {**data, "credentials": {"mode": "vault", "env": [], "vault": []}}
+        )
 
     def test_invalid_reset_option_is_rejected_before_unlock_or_resource_removal(self):
         _, data = self.existing()
