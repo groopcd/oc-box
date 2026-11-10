@@ -5,6 +5,7 @@ import io
 import json
 import os
 from pathlib import Path
+import py_compile
 import socket
 import subprocess
 import sys
@@ -14,11 +15,17 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 from urllib.request import ProxyHandler, Request, build_opener
+from importlib.util import cache_from_source
 
 from oc_box import oc_box as box, terminal_ui, vault
+from tools import test_global_vault_podman as fixture
 from tools import test_interactive_podman as ui
+from tools import acceptance_guards
 
-fixture = ui.fixture
+# Unit-only dependency injection; the executable's independent stdlib bootstrap
+# is exercised separately in isolated subprocesses with private Git fixtures.
+ui.fixture, ui.box, ui.terminal_ui = fixture, box, terminal_ui
+ui.guards = acceptance_guards
 
 
 class InteractiveHostFixtureTests(unittest.TestCase):
@@ -37,7 +44,13 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             "commit": "a" * 40,
             "commit_count": 72,
             "dirty": False,
+            "sha256": {},
         }
+        # Stage orchestration tests use a synthetic source snapshot. Real Git,
+        # import origins, and bytecode controls are tested below, out of process.
+        self.enter(patch.object(ui, "source_snapshot", return_value=self.source))
+        self.enter(patch.object(ui, "import_guard"))
+        self.enter(patch.object(ui, "git", return_value=self.source["commit"].encode()))
         self.boot = b"00000000-0000-0000-0000-000000000001\n"
         self.environment = {
             "PATH": os.defpath,
@@ -218,7 +231,7 @@ class InteractiveHostFixtureTests(unittest.TestCase):
         self.assertIn("host-only", self.output.getvalue())
 
     def test_help_is_harmless_and_invalid_arguments_never_echo_private_input(self):
-        with patch.object(fixture, "host_guard") as guard:
+        with patch.object(ui, "host_guard") as guard:
             with self.assertRaises(SystemExit) as exited:
                 ui.main(["--help"])
             self.assertEqual(exited.exception.code, 0)
@@ -241,7 +254,7 @@ class InteractiveHostFixtureTests(unittest.TestCase):
                     ):
                         ui.require_tty(mode)
         with (
-            patch.object(fixture, "host_guard"),
+            patch.object(ui, "host_guard"),
             patch.object(sys.stdin, "isatty", return_value=False),
             patch.object(ui, "source_identity") as source,
         ):
@@ -266,6 +279,11 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             ("renamed-ids", "fixture-ids.json"),
             ("renamed-global", "fixture.json"),
             ("renamed-interactive", "interactive.json"),
+            ("renamed-edge", "edges.json"),
+            ("renamed-history", "history-purpose.json"),
+            ("renamed-home", "home-component.json"),
+            ("renamed-home-created", "home-created-source.json"),
+            ("renamed-home-report", "home-run-synthetic-report.json"),
         ):
             retained = self.parent / name
             child = retained / "nested"
@@ -334,30 +352,27 @@ class InteractiveHostFixtureTests(unittest.TestCase):
         )
 
     def test_source_identity_refuses_dirty_unknown_and_changed_versions(self):
-        info = {k: v for k, v in self.source.items() if k != "checkout"}
+        info = self.source.copy()
         with (
-            patch.object(fixture, "get_version_info", return_value=info),
+            patch.object(ui, "source_snapshot", return_value=info) as snapshot,
             patch.object(
-                ui.subprocess, "run", return_value=SimpleNamespace(stdout=b"")
-            ) as git,
+                ui,
+                "git",
+                return_value=info["commit"].encode(),
+            ),
         ):
             identity = ui.source_identity()
             self.assertEqual(identity["commit"], info["commit"])
-            self.assertIn("--untracked-files=all", git.call_args.args[0])
-        for change, status in (
-            ({"dirty": True}, b""),
-            ({"commit": None}, b""),
-            ({"version": "1.6.0+unknown"}, b""),
-            ({}, b"?? extra.py"),
+            snapshot.assert_called_once_with(ui.APP, info["commit"])
+        for change in (
+            {"dirty": True},
+            {"commit": None},
+            {"version": "1.6.0+unknown"},
         ):
             with (
-                self.subTest(change=change, status=status),
-                patch.object(
-                    fixture, "get_version_info", return_value={**info, **change}
-                ),
-                patch.object(
-                    ui.subprocess, "run", return_value=SimpleNamespace(stdout=status)
-                ),
+                self.subTest(change=change),
+                patch.object(ui, "source_snapshot", return_value={**info, **change}),
+                patch.object(ui, "git", return_value=info["commit"].encode()),
             ):
                 with self.assertRaisesRegex(
                     fixture.FixtureError, "clean-source-required"
@@ -404,6 +419,20 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             ui.validate_interactive(self.root, self.source)
         self.run.assert_not_called()
 
+    def test_legacy_observation_metadata_is_not_promoted_to_bound_provenance(self):
+        self.record()
+        path = self.root / "interactive.json"
+        metadata = json.loads(path.read_text())
+        metadata["version"] = 1
+        box.atomic_json(path, metadata)
+        with (
+            patch.object(fixture, "validate_store") as engine,
+            self.assertRaisesRegex(fixture.FixtureError, "interactive-format"),
+        ):
+            ui.validate_interactive(self.root, self.source)
+        engine.assert_not_called()
+        self.run.assert_not_called()
+
     def test_native_entrypoint_pins_symlink_target_and_refuses_nonexecutables(self):
         entry = self.parent / "native-entry"
         entry.symlink_to(self.binary)
@@ -415,7 +444,7 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             ui.native_binary(plain)
         entry.unlink()
         entry.symlink_to(self.parent / "missing")
-        with self.assertRaises(FileNotFoundError):
+        with self.assertRaisesRegex(fixture.FixtureError, "native-executable"):
             ui.native_binary(entry)
         self.run.assert_not_called()
 
@@ -957,6 +986,24 @@ class InteractiveHostFixtureTests(unittest.TestCase):
                 with ui.provider(ui.provider_state()):
                     pass
 
+    def test_provider_body_primary_identity_survives_multiple_cleanup_failures(self):
+        original = KeyboardInterrupt()
+
+        def failed_close():
+            raise OSError("private-close")
+
+        server = SimpleNamespace(
+            server_port=1, shutdown=failed_close, server_close=failed_close
+        )
+        worker = SimpleNamespace(join=lambda **kwargs: None, is_alive=lambda: False)
+        state = ui.provider_state()
+        with patch.object(fixture, "make_provider", return_value=(server, worker)):
+            with self.assertRaises(KeyboardInterrupt) as raised:
+                with ui.provider(state):
+                    raise original
+        self.assertIs(raised.exception, original)
+        self.assertEqual(state["finalization_errors"], ["os-error", "os-error"])
+
     def test_owner_store_refusal_precedes_native_provider_and_ui_without_private_output(
         self,
     ):
@@ -1059,6 +1106,23 @@ class InteractiveHostFixtureTests(unittest.TestCase):
         self.assertIn("reporting-error", text)
         self.assertNotIn("private-report", text)
 
+    def test_terminal_output_failure_cannot_mask_primary_or_leave_success_report(self):
+        for original in (None, KeyboardInterrupt()):
+            with self.subTest(primary=type(original).__name__):
+                failures = ui.Failures()
+                if original is None:
+                    failures.returned(0, "launcher")
+                else:
+                    failures.record(original)
+                with patch("builtins.print", side_effect=OSError("private-output")):
+                    self.assertEqual(
+                        failures.report(self.root, "start", self.source),
+                        1 if original is None else 130,
+                    )
+                if original is not None:
+                    self.assertIs(failures.primary, original)
+        self.assertEqual(self.reports("start"), [])
+
     def test_successful_body_cleanup_failure_inside_callers_except_is_failure(self):
         with self.owner_boundaries(
             cleanup_error=fixture.FixtureError("provider-cleanup-timeout")
@@ -1078,6 +1142,86 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             (report["outcome"], report["category"]),
             ("failed", "provider-cleanup-timeout"),
         )
+
+    def test_provider_errors_during_finalization_are_not_late_success(self):
+        @contextlib.contextmanager
+        def late_error(state):
+            try:
+                yield 12345
+            finally:
+                state["errors"] += 1
+
+        with self.owner_boundaries() as (roots, _):
+            with patch.object(ui, "provider", side_effect=late_error):
+                self.assertEqual(ui.own(self.owner_args(), self.source), 1)
+        report = json.loads(
+            next(roots[0].glob("interactive-start-*-report.json")).read_text()
+        )
+        self.assertEqual(report["category"], "provider-contract")
+        self.assertEqual(report["provider"]["errors"], 1)
+
+    def test_pinned_native_change_during_preparation_refuses_before_native_launch(self):
+        binary = self.parent / "native-copy"
+        binary.write_bytes(self.binary.read_bytes())
+        binary.chmod(0o700)
+        args = self.owner_args()
+        args.opencode_v2 = binary
+
+        def changed(root):
+            with binary.open("ab") as stream:
+                stream.write(b"synthetic-replacement")
+
+        with (
+            patch.object(ui.shutil, "which", return_value=str(self.binary)),
+            patch.object(fixture, "validate_store", side_effect=changed),
+            patch.object(fixture, "prepare_native_cli") as native,
+            patch.object(box, "main") as launch,
+        ):
+            self.assertEqual(ui.own(args, self.source), 1)
+        native.assert_not_called()
+        launch.assert_not_called()
+        report = json.loads(
+            next(
+                self.parent.glob(
+                    fixture.PREFIX + "interactive-*/interactive-start-*-report.json"
+                )
+            ).read_text()
+        )
+        self.assertEqual(report["category"], "native-changed")
+        self.assertEqual(
+            report["executables"]["opencode"]["sha256"], ui.file_hash(self.binary)
+        )
+
+    def test_native_finalization_change_never_replaces_initial_hash_or_emits_success(
+        self,
+    ):
+        binary = self.parent / "native-copy"
+        binary.write_bytes(self.binary.read_bytes())
+        binary.chmod(0o700)
+        initial = ui.file_hash(binary)
+        args = self.owner_args()
+        args.opencode_v2 = binary
+
+        @contextlib.contextmanager
+        def provider(state):
+            try:
+                yield 12345
+            finally:
+                with binary.open("ab") as stream:
+                    stream.write(b"changed-after-body")
+
+        with self.owner_boundaries() as (roots, _):
+            with patch.object(ui, "provider", side_effect=provider):
+                self.assertEqual(ui.own(args, self.source), 1)
+        report = json.loads(
+            next(roots[0].glob("interactive-start-*-report.json")).read_text()
+        )
+        metadata = fixture.private_json(roots[0], "interactive.json")
+        self.assertEqual(
+            (report["outcome"], report["category"]), ("failed", "native-changed")
+        )
+        self.assertEqual(report["executables"]["opencode"]["sha256"], initial)
+        self.assertEqual(metadata["executables"], report["executables"])
 
     def test_attach_primary_survives_lease_and_report_failures(self):
         self.record()
@@ -1364,6 +1508,275 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             (report["outcome"], report["category"]), ("failed", "source-changed")
         )
         self.assertEqual(report["source"], self.source)
+
+
+class InteractiveBootstrapTests(unittest.TestCase):
+    """Private Git/module fixtures only; no host guard, engine or user TTY."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="interactive-source-")
+        self.addCleanup(temporary.cleanup)
+        self.parent = Path(temporary.name)
+        self.source = self.parent / "checkout"
+        self.source.mkdir()
+        self.marker = self.parent / "candidate-imported"
+        self.engine = self.parent / "engine-called"
+        self.stale = self.parent / "stale-executed"
+        (self.source / "tools").mkdir()
+        (self.source / "src/oc_box").mkdir(parents=True)
+        (self.source / "tools/test_interactive_podman.py").write_bytes(
+            Path(ui.__file__).read_bytes()
+        )
+        self.write(".gitignore", "__pycache__/\nignored.py\n")
+        self.write("src/oc_box/__init__.py", "")
+        self.write(
+            "src/oc_box/terminal_ui.py", "VALUE = 'tracked'\n#" + "x" * 500 + "\n"
+        )
+        self.write("tools/test_v2_podman.py", "VALUE = 'tracked'\n")
+        self.write("tools/acceptance_guards.py", "VALUE = 'tracked'\n")
+        self.write(
+            "tools/test_global_vault_podman.py",
+            (
+                "import os\nfrom pathlib import Path\nfrom types import SimpleNamespace\n"
+                "from tools import test_v2_podman\n"
+                "class FixtureError(Exception): pass\n"
+                "Path(os.environ['INTERACTIVE_IMPORT_MARKER']).write_text('imported')\n"
+                "box = SimpleNamespace(PACKAGE=Path(__file__).resolve().parents[1] / 'src/oc_box')\n"
+                "PREFIX = 'oc-box-gv-host-'\n"
+                "SHELL_MARKER = 'shell'\nMCP_MARKER = 'mcp'\nTOOL_MARKER = 'tool'\n"
+                "def validate_store(*args):\n"
+                "    Path(os.environ['INTERACTIVE_ENGINE_MARKER']).write_text('engine')\n"
+            ),
+        )
+        self.git("init", "-q")
+        self.git("add", ".")
+        self.git("commit", "-qm", "synthetic source")
+        tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        parent = self.git("rev-parse", "HEAD").strip()
+        for _ in range(30):
+            parent = self.git(
+                "commit-tree", tree, "-p", parent, "-m", "synthetic"
+            ).strip()
+        self.git("update-ref", "HEAD", parent)
+        self.commit = parent
+
+    def write(self, name, value):
+        (self.source / name).write_text(value)
+
+    def git(self, *args):
+        return subprocess.run(
+            ["git", "-C", str(self.source), *args],
+            env={
+                **os.environ,
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_AUTHOR_NAME": "Synthetic",
+                "GIT_AUTHOR_EMAIL": "synthetic@example.invalid",
+                "GIT_COMMITTER_NAME": "Synthetic",
+                "GIT_COMMITTER_EMAIL": "synthetic@example.invalid",
+            },
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=10,
+        ).stdout
+
+    def child(self, operation="load", *, expected=None, source=None, poison=False):
+        code = """
+import json, runpy, sys
+from pathlib import Path
+from types import ModuleType
+runner, source, expected, operation, poison = sys.argv[1:]
+namespace = runpy.run_path(runner, run_name='interactive_offline_probe')
+if poison != 'no':
+    module = ModuleType('oc_box')
+    module.__file__ = str(Path(source) / 'src/oc_box/__init__.py'
+                          if poison == 'tracked' else Path(source).parent / 'foreign.py')
+    sys.modules['oc_box'] = module
+try:
+    if operation == 'load':
+        identity = namespace['load_source'](Path(source), expected)
+        print(json.dumps({'category': 'loaded', 'source': identity,
+                          'value': namespace['load_source'].__globals__['terminal_ui'].VALUE}))
+    elif operation == 'snapshot':
+        print(json.dumps({'category': 'snapshot', 'source': namespace['source_snapshot'](Path(source), expected)}))
+    elif operation == 'index-race':
+        globals_ = namespace['source_snapshot'].__globals__
+        helper = Path(source) / 'tools/test_global_vault_podman.py'
+        helper.write_bytes(helper.read_bytes() + b'# staged after status\\n')
+        globals_['subprocess'].run(['git', '-C', source, 'add', str(helper)], check=True)
+        original_git = globals_['git']
+        def stale_status(source, *arguments):
+            return b'' if arguments[0] == 'status' else original_git(source, *arguments)
+        globals_['git'] = stale_status
+        namespace['source_snapshot'](Path(source), expected)
+        print(json.dumps({'category': 'wrongly-accepted-index'}))
+    elif operation == 'changed-helper':
+        identity = namespace['load_source'](Path(source), expected)
+        helper = Path(source) / 'tools/test_global_vault_podman.py'
+        original = identity['sha256']['tools/test_global_vault_podman.py']
+        helper.write_bytes(helper.read_bytes() + b'# changed after load\\n')
+        try:
+            namespace['provenance_checkpoint'](identity, {})
+        except BaseException as error:
+            print(json.dumps({'category': str(error), 'initial': original,
+                              'retained': identity['sha256']['tools/test_global_vault_podman.py']}))
+    else:
+        print(json.dumps({'category': 'import-only'}))
+except BaseException as error:
+    print(json.dumps({'category': str(error), 'kind': type(error).__name__}))
+"""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                code,
+                str(self.source / "tools/test_interactive_podman.py"),
+                str(source or self.source),
+                self.commit if expected is None else expected,
+                operation,
+                "tracked" if poison == "tracked" else "yes" if poison else "no",
+            ],
+            env={
+                "PATH": os.defpath,
+                "INTERACTIVE_IMPORT_MARKER": str(self.marker),
+                "INTERACTIVE_ENGINE_MARKER": str(self.engine),
+            },
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(self.engine.exists(), "bootstrap must never invoke an engine")
+        return json.loads(result.stdout)
+
+    def test_import_only_has_no_candidate_initialization(self):
+        self.assertEqual(self.child("import-only")["category"], "import-only")
+        self.assertFalse(self.marker.exists())
+
+    def test_source_bootstrap_rejects_dirty_shallow_missing_expect_and_external_source(
+        self,
+    ):
+        for mutation in (
+            "dirty",
+            "shallow",
+            "missing-expect",
+            "wrong-expect",
+            "external",
+            "ignored-code",
+            "untracked",
+        ):
+            with self.subTest(mutation=mutation):
+                path = None
+                expected = self.commit
+                source = self.source
+                if mutation == "dirty":
+                    path = self.source / "src/oc_box/terminal_ui.py"
+                    original = path.read_bytes()
+                    path.write_bytes(original + b"# dirty\n")
+                elif mutation == "shallow":
+                    path = self.source / ".git/shallow"
+                    path.write_text(self.commit + "\n")
+                elif mutation == "missing-expect":
+                    expected = ""
+                elif mutation == "wrong-expect":
+                    expected = "f" * 40
+                elif mutation == "external":
+                    source = self.parent
+                elif mutation == "ignored-code":
+                    path = self.source / "tools/ignored.py"
+                    path.write_text("raise RuntimeError('ignored code')\n")
+                else:
+                    path = self.source / "extra.py"
+                    path.write_text("# untracked source\n")
+                try:
+                    result = self.child(expected=expected, source=source)
+                    self.assertEqual(result["category"], "clean-source-required")
+                    self.assertFalse(self.marker.exists())
+                finally:
+                    if mutation == "dirty":
+                        path.write_bytes(original)
+                    elif path is not None:
+                        path.unlink()
+
+    def test_poisoned_preloaded_module_is_refused_before_candidate_or_engine(self):
+        for poison in (True, "tracked"):
+            with self.subTest(origin=poison):
+                self.assertEqual(
+                    self.child(poison=poison)["category"], "source-shadowing"
+                )
+                self.assertFalse(self.marker.exists())
+
+    def test_helper_mutation_after_loading_cannot_repin_initial_manifest(self):
+        result = self.child("changed-helper")
+        self.assertEqual(result["category"], "source-changed")
+        self.assertEqual(result["initial"], result["retained"])
+
+    def test_snapshot_binds_expected_commit_blobs_not_a_newer_index(self):
+        self.assertEqual(self.child("index-race")["category"], "source-changed")
+        self.assertFalse(self.marker.exists())
+
+    def test_matching_mtime_size_stale_cache_is_never_read_even_with_B(self):
+        path = self.source / "src/oc_box/terminal_ui.py"
+        original, metadata = path.read_bytes(), path.stat()
+        poisoned = (
+            "from pathlib import Path\nPath("
+            + repr(str(self.stale))
+            + ").write_text('stale')\nVALUE = 'poisoned'\n"
+        ).encode()
+        path.write_bytes(poisoned + b"#" * (len(original) - len(poisoned)))
+        os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        py_compile.compile(str(path), cfile=cache_from_source(str(path)), doraise=True)
+        path.write_bytes(original)
+        os.utime(path, ns=(metadata.st_atime_ns, metadata.st_mtime_ns))
+        # Demonstrate the cache is genuinely accepted by Python with -B. The
+        # harmful effect is only a private test-owned marker, never a service.
+        control = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                "import sys; sys.path.insert(0, sys.argv[1]); "
+                "from oc_box import terminal_ui; print(terminal_ui.VALUE)",
+                str(self.source / "src"),
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual((control.returncode, control.stdout.strip()), (0, "poisoned"))
+        self.assertTrue(self.stale.exists())
+        self.stale.unlink()
+        result = self.child()
+        self.assertEqual(
+            (result["category"], result.get("value")), ("loaded", "tracked")
+        )
+        self.assertFalse(self.stale.exists())
+        self.assertIn("tools/acceptance_guards.py", result["source"]["sha256"])
+
+    def test_clean_snapshot_hashes_all_tracked_helpers_and_runtime(self):
+        result = self.child("snapshot")
+        self.assertEqual(result["category"], "snapshot")
+        identity = result["source"]
+        self.assertEqual(identity["commit"], self.commit)
+        self.assertFalse(identity["dirty"])
+        self.assertEqual(identity["commit_count"], 31)
+        self.assertTrue(
+            {
+                "tools/acceptance_guards.py",
+                "tools/test_interactive_podman.py",
+                "tools/test_global_vault_podman.py",
+                "tools/test_v2_podman.py",
+                "src/oc_box/terminal_ui.py",
+            }
+            <= identity["sha256"].keys()
+        )
 
 
 if __name__ == "__main__":

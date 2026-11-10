@@ -3,7 +3,7 @@
 
 Start a FRESH synthetic owner on an unprivileged host terminal:
   python3 -B tools/test_interactive_podman.py start --work-dir /path/to/fixtures \
-      --opencode-v2 /path/to/unmodified/opencode-2.2.6
+      --opencode-v2 /path/to/unmodified/opencode-2.2.6 --expect-commit FULL_COMMIT
 Use only the printed exact --fixture root for secondary tui/terminal/web/stop.
 No replay, resume, cleanup, real credentials or automatic manual-UI acceptance.
 """
@@ -11,12 +11,14 @@ No replay, resume, cleanup, real credentials or automatic manual-UI acceptance.
 import argparse
 import contextlib
 import hashlib
+import importlib
 import os
 from pathlib import Path
 import re
 import secrets
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,17 +26,44 @@ import threading
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(APP))
-sys.path.insert(0, str(APP / "src"))
-from oc_box import terminal_ui
-from tools import test_global_vault_podman as fixture
-
-box = fixture.box
+# No candidate imports, path installation or integration initialization here.
+# This bootstrap deliberately cannot use a candidate guard to prove its trust.
+fixture = box = terminal_ui = guards = None
+INITIAL_SOURCE = None
 FORMAT = "oc-box-interactive-only-host-observation"
 MODES = ("start", "tui", "terminal", "web", "stop")
-FIXTURE_PREFIXES = (fixture.PREFIX, "oc-box-live-v2-", "oc-box-live-backup-")
-FIXTURE_MARKERS = ("fixture.json", "interactive.json", "fixture-ids.json")
-MARKERS = frozenset((fixture.SHELL_MARKER, fixture.MCP_MARKER, fixture.TOOL_MARKER))
+DONORS = (
+    "tools/test_interactive_podman.py",
+    "tools/test_global_vault_podman.py",
+    "tools/test_v2_podman.py",
+    "tools/acceptance_guards.py",
+)
+FIXTURE_PREFIXES = ("oc-box-gv-host-", "oc-box-live-v2-", "oc-box-live-backup-")
+FIXTURE_MARKERS = (
+    "fixture.json",
+    "interactive.json",
+    "fixture-ids.json",
+    "edges.json",
+    "history-purpose.json",
+    "home-purpose.json",
+    "home-component.json",
+    "home-ready.json",
+    "home-created-*.json",
+    "home-run-*-report.json",
+    "home-cleanup-*-report.json",
+    "result.json",
+    "history-result.json",
+)
+EGG_INFO = frozenset(
+    (
+        b"PKG-INFO",
+        b"SOURCES.txt",
+        b"dependency_links.txt",
+        b"entry_points.txt",
+        b"requires.txt",
+        b"top_level.txt",
+    )
+)
 ERROR_CATEGORIES = frozenset(
     {
         "host-only",
@@ -43,6 +72,7 @@ ERROR_CATEGORIES = frozenset(
         "interactive-tty-required",
         "clean-source-required",
         "source-changed",
+        "source-shadowing",
         "fresh-parent-required",
         "interactive-format",
         "interactive-only",
@@ -76,6 +106,200 @@ ERROR_CATEGORIES = frozenset(
 )
 
 
+class BootstrapError(Exception):
+    """Fixed stdlib-preflight category, independent of candidate exceptions."""
+
+
+def require(value, category):
+    if not value:
+        raise BootstrapError(category)
+
+
+def host_guard():
+    require(
+        os.geteuid() != 0
+        and os.environ.get("OC_BOX_CONTAINER") != "1"
+        and not Path("/.dockerenv").exists()
+        and not Path("/run/.containerenv").exists(),
+        "host-only",
+    )
+
+
+def checked_source_path(path):
+    path = Path(path).expanduser().absolute()
+    require(
+        ".." not in path.parts and not any(c in str(path) for c in "\0\r\n"),
+        "clean-source-required",
+    )
+    for ancestor in (*reversed(path.parents), path):
+        mode = ancestor.lstat().st_mode
+        require(not stat.S_ISLNK(mode), "clean-source-required")
+        if ancestor != path:
+            require(stat.S_ISDIR(mode), "clean-source-required")
+    return path
+
+
+def git(source, *arguments):
+    executable = shutil.which("git", path=os.defpath)
+    require(executable is not None, "clean-source-required")
+    return subprocess.run(
+        [executable, "-C", str(source), *arguments],
+        env={
+            "PATH": os.defpath,
+            "LANG": "C.UTF-8",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+        },
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=True,
+        timeout=15,
+    ).stdout
+
+
+def source_snapshot(source, expected):
+    """Full clean self-hosted checkout and tracked bytes, BEFORE helper imports."""
+    source = checked_source_path(source)
+    require(
+        source == APP
+        and source.is_dir()
+        and re.fullmatch(r"[0-9a-f]{40}", expected or ""),
+        "clean-source-required",
+    )
+    require(
+        git(source, "rev-parse", "--show-toplevel").decode().strip() == str(source)
+        and git(source, "rev-parse", "HEAD").decode().strip() == expected
+        and git(source, "rev-parse", "--is-shallow-repository").strip() == b"false"
+        and not git(source, "status", "--porcelain", "--untracked-files=all"),
+        "clean-source-required",
+    )
+    count = int(git(source, "rev-list", "--count", "HEAD"))
+    require(count > 29, "clean-source-required")
+    ignored = git(
+        source,
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "-z",
+        "--",
+        "src",
+        "tools",
+    ).split(b"\0")
+    require(
+        all(
+            (name.endswith(b".pyc") and b"/__pycache__/" in b"/" + name)
+            or (
+                name.startswith(b"src/oc_box.egg-info/")
+                and name.rsplit(b"/", 1)[-1] in EGG_INFO
+            )
+            for name in ignored
+            if name
+        ),
+        "clean-source-required",
+    )
+    hashes = {}
+    # Bind immutable expected-commit blobs, not an index which could change
+    # after the clean-status observation and before candidate imports.
+    for record in filter(
+        None, git(source, "ls-tree", "-r", "-z", "--full-tree", expected).split(b"\0")
+    ):
+        header, name = record.split(b"\t", 1)
+        mode, kind, blob = header.split()
+        require(
+            mode in (b"100644", b"100755") and kind == b"blob", "clean-source-required"
+        )
+        relative = name.decode()
+        path = checked_source_path(source / relative)
+        require(path.is_relative_to(source) and path.is_file(), "clean-source-required")
+        content = path.read_bytes()
+        require(
+            hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content)
+            .hexdigest()
+            .encode()
+            == blob,
+            "source-changed",
+        )
+        hashes[relative] = hashlib.sha256(content).hexdigest()
+    require(
+        set(DONORS) <= hashes.keys() and "src/oc_box/terminal_ui.py" in hashes,
+        "clean-source-required",
+    )
+    return {
+        "checkout": str(source),
+        "commit": expected,
+        "commit_count": count,
+        "version": f"1.6.{count - 29}+g{expected[:7]}",
+        "dirty": False,
+        "sha256": hashes,
+    }
+
+
+def import_guard(source, tracked):
+    """Require loaded candidate origins AND their actual bytes to be tracked."""
+    for name, module in tuple(sys.modules.items()):
+        filename = getattr(module, "__file__", None)
+        if name in ("oc_box", "tools") or name.startswith(("oc_box.", "tools.")):
+            locations = (
+                [filename] if filename else list(getattr(module, "__path__", ()))
+            )
+            require(
+                locations
+                and all(
+                    Path(item).resolve().is_relative_to(source) for item in locations
+                ),
+                "source-shadowing",
+            )
+        if filename:
+            path = Path(filename).absolute()
+            if path.resolve().is_relative_to(source):
+                checked_source_path(path)
+                relative = path.relative_to(source).as_posix()
+                require(
+                    relative in tracked and file_hash(path) == tracked[relative],
+                    "source-shadowing",
+                )
+
+
+def isolate_bytecode():
+    # -B prevents WRITES only. A never-used private cache prefix prevents READS
+    # of matching-mtime/size poisoned pycs, including checked-hash pycs.
+    sys.dont_write_bytecode = True
+    sys.pycache_prefix = "/nonexistent-oc-box-bytecode-" + secrets.token_hex(16)
+    importlib.invalidate_caches()
+
+
+def load_source(source, expected):
+    global fixture, box, terminal_ui, guards, INITIAL_SOURCE
+    initial = source_snapshot(source, expected)
+    source = checked_source_path(source)
+    import_guard(source, initial["sha256"])
+    # Same-path modules may already have executed stale bytecode; __file__ and
+    # current source hashes do not attest an existing in-memory implementation.
+    # Load this entrypoint before candidate helpers/application modules.
+    require(
+        not any(
+            name == "oc_box"
+            or name.startswith("oc_box.")
+            or (name.startswith("tools.") and name != __name__)
+            for name in sys.modules
+        ),
+        "source-shadowing",
+    )
+    isolate_bytecode()
+    sys.path[:0] = [str(source / "src"), str(source)]
+    guards = importlib.import_module("tools.acceptance_guards")
+    terminal_ui = importlib.import_module("oc_box.terminal_ui")
+    fixture = importlib.import_module("tools.test_global_vault_podman")
+    box = fixture.box
+    import_guard(source, initial["sha256"])
+    require(box.PACKAGE.resolve() == source / "src/oc_box", "source-shadowing")
+    require(source_snapshot(source, expected) == initial, "source-changed")
+    INITIAL_SOURCE = initial
+    return initial
+
+
 class ArgumentParser(argparse.ArgumentParser):
     def error(self, message):
         self.exit(2, "interactive fixture: category=invalid-options\n")
@@ -84,6 +308,15 @@ class ArgumentParser(argparse.ArgumentParser):
 def parser():
     value = ArgumentParser(description=__doc__)
     value.add_argument("mode", choices=MODES)
+    value.add_argument(
+        "--source",
+        type=Path,
+        default=APP,
+        help="This entrypoint's checkout only (default: its checkout)",
+    )
+    value.add_argument(
+        "--expect-commit", help="Full expected clean commit; required for a fresh owner"
+    )
     value.add_argument(
         "--fixture",
         type=Path,
@@ -104,7 +337,6 @@ def parser():
     )
     value.add_argument(
         "--distro",
-        choices=tuple(box.DISTROS),
         help="Fresh owner only; default tumbleweed",
     )
     return value
@@ -138,26 +370,15 @@ def require_tty(mode):
 
 
 def source_identity():
-    """Record exact clean checkout identity, not an installed/fallback version."""
-    env = {
-        "PATH": os.defpath,
-        "LANG": "C.UTF-8",
-        "GIT_CONFIG_GLOBAL": "/dev/null",
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_OPTIONAL_LOCKS": "0",
-    }
-    with patch.dict(os.environ, env, clear=True):
-        info = fixture.get_version_info(APP)
-        status = subprocess.run(
-            ["git", "-C", str(APP), "status", "--porcelain", "--untracked-files=all"],
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            check=True,
-            timeout=10,
-        )
+    """Re-read against the ORIGINAL verified commit, never repin changed bytes."""
+    expected = (
+        INITIAL_SOURCE["commit"]
+        if INITIAL_SOURCE
+        else git(APP, "rev-parse", "HEAD").decode().strip()
+    )
+    info = source_snapshot(APP, expected)
     fixture.require(
-        not status.stdout
-        and info.get("dirty") is False
+        info.get("dirty") is False
         and isinstance(info.get("commit"), str)
         and re.fullmatch(r"[0-9a-f]{40}", info["commit"]) is not None
         and isinstance(info.get("commit_count"), int)
@@ -166,10 +387,7 @@ def source_identity():
         and info["version"].endswith("+g" + info["commit"][:7]),
         "clean-source-required",
     )
-    return {
-        "checkout": str(APP),
-        **{key: info[key] for key in ("version", "commit", "commit_count", "dirty")},
-    }
+    return info
 
 
 def file_hash(path):
@@ -184,48 +402,114 @@ def require_same_source(initial):
     """Never relabel a long-lived observation to a later/dirty checkout."""
     try:
         unchanged = source_identity() == initial
-    except (fixture.FixtureError, OSError, ValueError, subprocess.SubprocessError):
+    except (
+        BootstrapError,
+        fixture.FixtureError,
+        OSError,
+        ValueError,
+        subprocess.SubprocessError,
+    ):
         unchanged = False
     fixture.require(unchanged, "source-changed")
 
 
 def native_binary(path):
-    # npm's normal .bin entry is a symlink; pin and validate its final target.
-    path = fixture.no_symlinks(path.expanduser().resolve(strict=True))
-    fixture.require(path.is_file() and os.access(path, os.X_OK), "native-executable")
-    return path.resolve(strict=True)
+    # Discovery may resolve a final npm-entry symlink, never a symlink ancestor.
+    return guarded(
+        guards.native_identity, path, outside=(APP,), resolve_entry=True
+    ).path
+
+
+def guarded(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except guards.GuardError as error:
+        raise fixture.FixtureError(error.code) from None
 
 
 def fresh_parent(path):
-    parent = fixture.existing_directory(path)
-    # A completed (or unfinished/renamed) fixture is evidence, never a work or
-    # staging parent. The three host fixture families share these markers.
-    for ancestor in (parent, *parent.parents):
-        fixture.require(
-            not ancestor.name.startswith(FIXTURE_PREFIXES)
-            and not any(
-                (ancestor / name).exists() or (ancestor / name).is_symlink()
-                for name in FIXTURE_MARKERS
-            ),
-            "fresh-parent-required",
+    return guarded(
+        guards.fresh_parent, path, prefixes=FIXTURE_PREFIXES, markers=FIXTURE_MARKERS
+    )
+
+
+def native_identities(binary, podman):
+    return {
+        name: guarded(guards.native_identity, path, outside=(APP,), resolve_entry=True)
+        for name, path in (
+            ("opencode", binary),
+            ("podman", podman),
+            ("python", sys.executable),
         )
-    return parent
+    }
 
 
-def write_metadata(root, source, binary):
+def serialized_natives(natives):
+    return {
+        name: {"path": str(value.path), "sha256": value.sha256, "bytes": value.bytes}
+        for name, value in natives.items()
+    }
+
+
+def recorded_natives(root):
+    metadata = fixture.private_json(root, "interactive.json")
+    values = metadata.get("executables")
+    fixture.require(
+        isinstance(values, dict) and set(values) == {"opencode", "podman", "python"},
+        "native-selector",
+    )
+    result = {}
+    for name, value in values.items():
+        fixture.require(
+            isinstance(value, dict)
+            and set(value) == {"path", "sha256", "bytes"}
+            and isinstance(value["path"], str)
+            and Path(value["path"]).is_absolute()
+            and isinstance(value["sha256"], str)
+            and re.fullmatch(r"[0-9a-f]{64}", value["sha256"])
+            and type(value["bytes"]) is int
+            and value["bytes"] > 0,
+            "native-selector",
+        )
+        result[name] = guards.NativeIdentity(
+            Path(value["path"]), value["sha256"], value["bytes"]
+        )
+        fixture.require(not result[name].path.is_relative_to(root), "native-selector")
+    return result
+
+
+def provenance_checkpoint(source, natives):
+    try:
+        require(source_snapshot(APP, source["commit"]) == source, "source-changed")
+        import_guard(APP, source["sha256"])
+    except (BootstrapError, KeyError, OSError, ValueError, subprocess.SubprocessError):
+        raise fixture.FixtureError("source-changed") from None
+    for value in natives.values():
+        guarded(guards.check_native, value)
+    fixture.require(
+        Path(sys.executable).resolve(strict=True) == natives["python"].path,
+        "native-changed",
+    )
+
+
+def write_metadata(root, source, binary, natives=None):
+    if natives is None:
+        selector = fixture.private_json(root, "podman-executable.json")
+        natives = native_identities(binary, Path(selector["podman"]))
     fixture.write_json_new(
         root / "interactive.json",
         {
             "format": FORMAT,
-            "version": 1,
+            "version": 2,
             "projects": ["source-a"],
             "source": source,
             "native": {
                 "version": fixture.NATIVE_VERSION,
                 "path": str(binary),
-                "sha256": file_hash(binary),
+                "sha256": natives["opencode"].sha256,
                 "interpreter": sys.executable,
             },
+            "executables": serialized_natives(natives),
         },
     )
 
@@ -237,13 +521,16 @@ def validate_interactive(root, source):
     metadata = fixture.private_json(root, "interactive.json")
     fixture.require(
         isinstance(metadata, dict)
-        and set(metadata) == {"format", "version", "projects", "source", "native"}
+        and set(metadata)
+        == {"format", "version", "projects", "source", "native", "executables"}
         and metadata["format"] == FORMAT
-        and metadata["version"] == 1
+        and metadata["version"] == 2
         and metadata["projects"] == ["source-a"],
         "interactive-format",
     )
     fixture.require(metadata["source"] == source, "source-changed")
+    natives = recorded_natives(root)
+    provenance_checkpoint(source, natives)
     fixture.require(
         not (root / "result.json").exists()
         and not (root / "seed-baseline.json").exists(),
@@ -260,13 +547,23 @@ def validate_interactive(root, source):
         and Path(native["interpreter"]).is_absolute(),
         "native-selector",
     )
-    binary = native_binary(Path(native["path"]))
+    binary = natives["opencode"].path
     fixture.require(
-        not binary.is_relative_to(root) and file_hash(binary) == native["sha256"],
+        Path(native["path"]) == binary
+        and native["sha256"] == natives["opencode"].sha256,
         "native-changed",
     )
     fixture.require(
         fixture.private_json(root, "executables.json") == {"2": str(binary)},
+        "native-selector",
+    )
+    fixture.require(
+        fixture.private_json(root, "podman-executable.json")
+        == {
+            "podman": str(natives["podman"].path),
+            "interpreter": str(natives["python"].path),
+        }
+        and Path(native["interpreter"]).resolve(strict=True) == natives["python"].path,
         "native-selector",
     )
     wrapper = fixture.safe_path(root, "bin/opencode")
@@ -328,8 +625,11 @@ def provider_state():
 def provider(state):
     """The provider lives on the foreground owner stack, through lease draining."""
     server, worker = fixture.make_provider(state)
+    primary = None
     try:
         yield server.server_port
+    except BaseException as error:
+        primary = error
     finally:
         # Even an unexpectedly failed serve_forever must not leave the host
         # terminal waiting forever in BaseServer.shutdown. UI execution itself
@@ -342,27 +642,46 @@ def provider(state):
             except BaseException as error:
                 errors.append(error)
 
-        closer = threading.Thread(target=shutdown, daemon=True)
+        closer = None
         try:
+            closer = threading.Thread(target=shutdown, daemon=True)
             closer.start()
             closer.join(timeout=3)
-        finally:
-            try:
-                # The unchanged provider uses daemon request handlers with 10s
-                # socket limits, so server_close does not join those handlers.
-                server.server_close()
-            finally:
-                worker.join(timeout=3)
-        fixture.require(
-            not closer.is_alive() and not worker.is_alive(), "provider-cleanup-timeout"
-        )
+        except BaseException as error:
+            errors.append(error)
+        try:
+            # Daemon request handlers have 10s socket limits; this does not join
+            # those handlers. Try every mandatory finalizer independently.
+            server.server_close()
+        except BaseException as error:
+            errors.append(error)
+        try:
+            worker.join(timeout=3)
+        except BaseException as error:
+            errors.append(error)
+        try:
+            fixture.require(
+                (closer is None or not closer.is_alive()) and not worker.is_alive(),
+                "provider-cleanup-timeout",
+            )
+        except BaseException as error:
+            errors.append(error)
         if errors:
-            raise errors[0]
+            if primary is None:
+                primary = errors.pop(0)
+            state.setdefault("finalization_errors", []).extend(
+                error_outcome(error)[1] for error in errors
+            )
+    if primary is not None:
+        raise primary
 
 
-def report_value(mode, source, outcome, category, code, state=None, secondary=()):
+def report_value(
+    mode, source, outcome, category, code, state=None, secondary=(), natives=None
+):
     result = {
         "format": FORMAT,
+        "version": 2,
         "scope": "interactive-only",
         "mode": mode,
         "source": source,
@@ -372,22 +691,34 @@ def report_value(mode, source, outcome, category, code, state=None, secondary=()
         "manual_observations": "NOT_AUTOMATICALLY_PASSED",
         "secondary_errors": list(secondary),
     }
+    if natives is not None:
+        result["executables"] = serialized_natives(natives)
     if state is not None:
         result["provider"] = {
             "requests": state["requests"],
             "errors": state["errors"],
-            "markers": sorted(state["markers"] & MARKERS),
+            "markers": sorted(
+                state["markers"]
+                & {
+                    fixture.SHELL_MARKER,
+                    fixture.MCP_MARKER,
+                    fixture.TOOL_MARKER,
+                }
+            ),
         }
     return result
 
 
-def save_report(root, mode, source, outcome, category, code, state=None, secondary=()):
+def save_report(
+    root, mode, source, outcome, category, code, state=None, secondary=(), natives=None
+):
     path = root / ("interactive-" + mode + "-" + secrets.token_hex(8) + "-report.json")
     # Announcing a destination is not success evidence. Do it before the final
     # write, so an output failure cannot leave a successful terminal report.
     print("Interactive-only report: " + str(path), flush=True)
     fixture.write_json_new(
-        path, report_value(mode, source, outcome, category, code, state, secondary)
+        path,
+        report_value(mode, source, outcome, category, code, state, secondary, natives),
     )
 
 
@@ -436,24 +767,31 @@ class Failures:
         except BaseException as error:
             self.record(error)
 
-    def report(self, root, mode, source, state=None):
+    def report(self, root, mode, source, state=None, natives=None):
         try:
-            save_report(root, mode, source, *self.result, state, self.secondary)
+            print(
+                "interactive fixture: finalizing category="
+                + self.result[1]
+                + "; manual observations NOT automatically passed",
+                flush=True,
+            )
+        except BaseException as error:
+            self.record(error, category="reporting-error")
+        try:
+            save_report(
+                root, mode, source, *self.result, state, self.secondary, natives
+            )
         except BaseException as error:
             self.record(error, category="reporting-error")
             # Persistence may be unavailable. Only fixed categories escape;
             # never retry into the original evidence or print private errors.
-            print("interactive fixture: category=reporting-error", file=sys.stderr)
-        outcome, category, code = self.result
-        print(
-            "interactive fixture: outcome="
-            + outcome
-            + " category="
-            + category
-            + "; manual observations NOT automatically passed",
-            flush=True,
-        )
-        return code
+            try:
+                print("interactive fixture: category=reporting-error", file=sys.stderr)
+            except BaseException:
+                pass  # The failure is retained even if output is unavailable.
+        # A persisted terminal report is last: no mandatory output/cleanup work
+        # remains that could invalidate successful terminal evidence.
+        return self.result[2]
 
 
 def print_commands(root):
@@ -484,7 +822,9 @@ def own(args, source):
         "podman", path=box.maintenance_host_env().get("PATH", os.defpath)
     )
     fixture.require(discovered is not None, "native-podman")
-    podman = Path(discovered).resolve(strict=True)
+    natives = native_identities(binary, Path(discovered))
+    podman = natives["podman"].path
+    provenance_checkpoint(source, natives)
     root = Path(tempfile.mkdtemp(prefix=fixture.PREFIX + "interactive-", dir=parent))
     root.chmod(0o700)
     print_commands(root)
@@ -503,9 +843,12 @@ def own(args, source):
                         failures.enter(
                             stack, fixture.temporary_location(root, args.temp_dir)
                         )
+                        provenance_checkpoint(source, natives)
                         fixture.validate_store(root)
+                        provenance_checkpoint(source, natives)
                         fixture.prepare_native_cli(root, binary)
-                        write_metadata(root, source, binary)
+                        provenance_checkpoint(source, natives)
+                        write_metadata(root, source, binary, natives)
                         port = failures.enter(stack, provider(state))
                         fixture.write_json_new(
                             root / "config/opencode/opencode.json",
@@ -516,6 +859,7 @@ def own(args, source):
                     failures.record(error)
                 if failures.primary is None:
                     try:
+                        provenance_checkpoint(source, natives)
                         with patch.dict(os.environ, state["values"]):
                             code = box.main(
                                 [
@@ -531,6 +875,7 @@ def own(args, source):
                     # Preserve the first UI failure if journal/shutdown fails.
                     with fixture.private_output():
                         try:
+                            provenance_checkpoint(source, natives)
                             records = fixture.workspace_records(root)
                             fixture.require(
                                 set(records) == {"source-a"}, "workspace-allowlist"
@@ -541,15 +886,21 @@ def own(args, source):
                             fixture.record_ids(root)
                         except BaseException as error:
                             failures.record(error)
-                    if state["errors"]:
-                        failures.record(fixture.FixtureError("provider-contract"))
         # The real UI and owner lease drain, provider shutdown and resource
         # journal have finished. The report retains the original identity.
+    except BaseException as error:
+        failures.record(error)
+    if state["errors"]:
+        failures.record(fixture.FixtureError("provider-contract"))
+    for category in state.get("finalization_errors", ()):
+        failures.record(fixture.FixtureError(category), category=category)
+    try:
+        provenance_checkpoint(source, natives)
         if failures.primary is None:
             require_same_source(source)
     except BaseException as error:
         failures.record(error)
-    return failures.report(root, "start", source, state)
+    return failures.report(root, "start", source, state, natives)
 
 
 def attach(args, source):
@@ -557,6 +908,7 @@ def attach(args, source):
     # have populated fixture-ids.json yet; record only after full resource proof.
     with fixture.private_output():
         root, binary = validate_interactive(args.fixture, source)
+        natives = recorded_natives(root)
         fixture.require_runtime_boot(root)
     failures = Failures()
     try:
@@ -564,7 +916,9 @@ def attach(args, source):
             with contextlib.ExitStack() as stack, failures.capture():
                 failures.enter(stack, fixture.temporary_location(root))
                 with fixture.private_output():
+                    provenance_checkpoint(source, natives)
                     fixture.validate_store(root, allow_unrecorded=True)
+                    provenance_checkpoint(source, natives)
                     fixture.check_native_version(root, binary, "2")
                     records = fixture.workspace_records(root)
                     fixture.require(set(records) == {"source-a"}, "workspace-allowlist")
@@ -588,6 +942,7 @@ def attach(args, source):
                     stack, fixture.workspace_service.attach(box, path, data)
                 )
                 try:
+                    provenance_checkpoint(source, natives)
                     if args.mode == "tui":
                         command = fixture.workspace_service.client_command(
                             box,
@@ -637,6 +992,7 @@ def attach(args, source):
                             box, data, connection, web_args
                         )
                     else:  # stop: already verified the sole fixture-owned source.
+                        provenance_checkpoint(source, natives)
                         box.stop_container(data)
                         with fixture.private_output():
                             fixture.verify_owned_resources(root, data, stopped=True)
@@ -648,11 +1004,15 @@ def attach(args, source):
                     failures.returned(code, "client")
                 except BaseException as error:
                     failures.record(error)
+    except BaseException as error:
+        failures.record(error)
+    try:
+        provenance_checkpoint(source, natives)
         if failures.primary is None:
             require_same_source(source)
     except BaseException as error:
         failures.record(error)
-    return failures.report(root, args.mode, source)
+    return failures.report(root, args.mode, source, natives=natives)
 
 
 def error_outcome(error):
@@ -662,8 +1022,22 @@ def error_outcome(error):
     # deliberately never serialized, even when raised during preparation.
     category = (
         str(error)
-        if isinstance(error, fixture.FixtureError) and str(error) in ERROR_CATEGORIES
+        if (
+            isinstance(error, BootstrapError)
+            or (fixture is not None and isinstance(error, fixture.FixtureError))
+        )
+        and str(error) in ERROR_CATEGORIES
         else fixture.safe_error_class(error)
+        if fixture is not None
+        else (
+            "os-error"
+            if isinstance(error, OSError)
+            else "subprocess-exit"
+            if isinstance(error, subprocess.CalledProcessError)
+            else "subprocess-error"
+            if isinstance(error, subprocess.SubprocessError)
+            else "operation-failed"
+        )
     )
     return "failed", category, 1
 
@@ -672,10 +1046,22 @@ def main(argv=None):
     args = parser().parse_args(argv)
     old_umask = os.umask(0o077)
     try:
-        fixture.host_guard()  # BEFORE placement, Git/native probes or resources.
+        host_guard()  # stdlib-only, BEFORE imports, Git/native probes or resources.
+        require_tty_early = args.mode != "stop"
+        if require_tty_early:
+            require(
+                sys.stdin.isatty() and sys.stdout.isatty() and sys.stderr.isatty(),
+                "interactive-tty-required",
+            )
+        expected = args.expect_commit
+        if args.mode != "start" and expected is None:
+            expected = git(APP, "rev-parse", "HEAD").decode().strip()
+        source = load_source(args.source, expected)
         validate_options(args)
         require_tty(args.mode)
-        source = source_identity()
+        fixture.require(
+            args.distro is None or args.distro in box.DISTROS, "owner-options"
+        )
         return own(args, source) if args.mode == "start" else attach(args, source)
     except BaseException as error:
         outcome, category, code = error_outcome(error)
