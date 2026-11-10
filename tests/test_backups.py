@@ -75,6 +75,7 @@ class WorkspaceBackupTests(unittest.TestCase):
         self.running = False
         self.base_image = "b" * 64
         self.snapshot_image = "c" * 64
+        self.images = {}
         self.identity = self.root / "backup-identity.txt"
         self.identity.write_bytes(crypto.small(["age-keygen"]))
         self.identity.chmod(0o600)
@@ -171,6 +172,18 @@ class WorkspaceBackupTests(unittest.TestCase):
         if args[0] == "stop":
             self.running = False
         elif args[0] == "commit":
+            labels = {box.LABEL: self.data["id"]}
+            if "--change" in args:
+                key, value = (
+                    args[args.index("--change") + 1]
+                    .removeprefix("LABEL ")
+                    .split("=", 1)
+                )
+                labels[key] = value
+            self.images[args[-1]] = {
+                "Id": "sha256:" + self.snapshot_image,
+                "Config": {"Labels": labels},
+            }
             return subprocess.CompletedProcess(args, 0, self.snapshot_image, "")
         elif args[:2] == ("volume", "create"):
             name = args[-1]
@@ -178,12 +191,28 @@ class WorkspaceBackupTests(unittest.TestCase):
             target.mkdir()
             self.volumes[name] = target
             self.labels[name] = args[3].split("=", 1)[1]
+        elif args[:2] == ("image", "exists"):
+            return subprocess.CompletedProcess(
+                args, 0 if args[2] in self.images else 1, "", ""
+            )
         elif args[:2] == ("image", "inspect"):
             return subprocess.CompletedProcess(
-                args, 0, json.dumps([{"Id": "sha256:" + self.snapshot_image}]), ""
+                args,
+                0,
+                json.dumps(
+                    [self.images.get(args[2], {"Id": "sha256:" + self.snapshot_image})]
+                ),
+                "",
             )
+        elif args[:2] == ("image", "rm"):
+            self.images.pop(args[2], None)
         elif args[:2] == ("volume", "rm"):
-            shutil.rmtree(self.volumes[args[2]])
+            shutil.rmtree(self.volumes.pop(args[2]))
+            self.labels.pop(args[2])
+        elif args[:2] == ("container", "rm"):
+            self.created[:] = [
+                data for data in self.created if data["container"] != args[-1]
+            ]
         return subprocess.CompletedProcess(args, 0, "", "")
 
     def archive_command(self, box_arg, action, root, **kwargs):
@@ -626,6 +655,227 @@ class WorkspaceBackupTests(unittest.TestCase):
         self.assertEqual(box.workspace_paths(), [self.path])
         self.assertFalse((self.root / "incomplete").exists())
 
+    def test_uncertain_volume_creation_cleans_owned_or_retains_attempt_journal(self):
+        self.backup(portable=True)
+        for outcome in (
+            "timeout",
+            "nonzero",
+            "exists-error",
+            "inspect-error",
+            "malformed-inspect",
+            "foreign-label",
+        ):
+            with self.subTest(outcome=outcome):
+                destination = self.root / ("volume-" + outcome)
+                primary = crypto.BackupError("Synthetic volume creation failed.")
+                attempted = []
+                created = []
+
+                def commands(box_arg, *args, **kwargs):
+                    if args[:2] == ("volume", "create"):
+                        journal = next(
+                            path
+                            for path in box.workspace_paths()
+                            if box.read_json(path)["project"] == str(destination)
+                        )
+                        attempted.append(
+                            box.read_json(journal).get(
+                                "restore_attempted_resources", []
+                            )
+                        )
+                        result = self.podman(box_arg, *args, **kwargs)
+                        created.append(args[-1])
+                        if outcome == "foreign-label":
+                            self.labels[args[-1]] = "f" * 32
+                        raise primary
+                    if (
+                        created
+                        and args[:2] == ("volume", "exists")
+                        and outcome == "exists-error"
+                    ):
+                        return subprocess.CompletedProcess(
+                            args, 125, "", "PRIVATE_QUERY"
+                        )
+                    if created and args[:2] == ("volume", "inspect"):
+                        if outcome == "inspect-error":
+                            raise OSError("PRIVATE_QUERY")
+                        if outcome == "malformed-inspect":
+                            return subprocess.CompletedProcess(
+                                args, 0, "PRIVATE_JSON", ""
+                            )
+                    return self.podman(box_arg, *args, **kwargs)
+
+                self.operations.clear()
+                with (
+                    patch.object(backups, "command", side_effect=commands),
+                    self.assertRaises(crypto.BackupError) as error,
+                ):
+                    self.restore(destination)
+                self.assertIs(error.exception, primary)
+                self.assertEqual(attempted, [["volume"]])
+                journals = [
+                    path
+                    for path in box.workspace_paths()
+                    if box.read_json(path)["project"] == str(destination)
+                ]
+                if outcome in ("timeout", "nonzero"):
+                    self.assertNotIn(created[0], self.volumes)
+                    self.assertEqual(journals, [])
+                else:
+                    self.assertIn(created[0], self.volumes)
+                    self.assertEqual(len(journals), 1)
+                    record = box.read_json(journals[0])
+                    self.assertTrue(record["restore_incomplete"])
+                    self.assertEqual(record["home_volume"], created[0])
+                    self.assertFalse(
+                        any(args[:2] == ("volume", "rm") for args in self.operations)
+                    )
+                self.assertEqual(
+                    (self.home / ".local/share/opencode/opencode.db").read_bytes(),
+                    b"synthetic-private-database",
+                )
+
+    def test_uncertain_image_commit_cleans_exact_owned_tag_or_retains_capture_journal(
+        self,
+    ):
+        for outcome in (
+            "timeout",
+            "nonzero",
+            "malformed-id",
+            "exists-error",
+            "inspect-error",
+            "malformed-inspect",
+            "foreign-label",
+            "remove-error",
+        ):
+            with self.subTest(outcome=outcome):
+                self.archive = self.root / ("commit-" + outcome + ".ocbox")
+                primary = crypto.BackupError("Synthetic image creation failed.")
+                attempted = []
+                tags = []
+
+                def commands(box_arg, *args, **kwargs):
+                    if args[0] == "commit":
+                        tags.append(args[-1])
+                        journals = list(
+                            (self.path.parent / "backup-captures").glob("*.json")
+                        )
+                        attempted.append(
+                            any(
+                                box.read_json(path).get("tag") == args[-1]
+                                for path in journals
+                            )
+                        )
+                        self.podman(box_arg, *args, **kwargs)
+                        if outcome == "foreign-label":
+                            self.images[args[-1]]["Config"]["Labels"] = {}
+                        if outcome == "malformed-id":
+                            return subprocess.CompletedProcess(
+                                args, 0, "PRIVATE_INVALID_ID", ""
+                            )
+                        raise primary
+                    if (
+                        tags
+                        and args[:2] == ("image", "exists")
+                        and outcome == "exists-error"
+                    ):
+                        return subprocess.CompletedProcess(
+                            args, 125, "", "PRIVATE_QUERY"
+                        )
+                    if (
+                        tags
+                        and args[:2] == ("image", "inspect")
+                        and outcome == "inspect-error"
+                    ):
+                        raise OSError("PRIVATE_QUERY")
+                    if (
+                        tags
+                        and args[:2] == ("image", "inspect")
+                        and outcome == "malformed-inspect"
+                    ):
+                        return subprocess.CompletedProcess(args, 0, "PRIVATE_JSON", "")
+                    if args[:2] == ("image", "rm") and outcome == "remove-error":
+                        raise OSError("PRIVATE_REMOVE")
+                    return self.podman(box_arg, *args, **kwargs)
+
+                self.operations.clear()
+                with (
+                    patch.object(backups, "command", side_effect=commands),
+                    self.assertRaises(crypto.BackupError) as error,
+                ):
+                    self.backup()
+                if outcome != "malformed-id":
+                    self.assertIs(error.exception, primary)
+                self.assertNotIn("PRIVATE", str(error.exception))
+                self.assertEqual(attempted, [True])
+                journals = [
+                    path
+                    for path in (self.path.parent / "backup-captures").glob("*.json")
+                    if box.read_json(path).get("tag") == tags[0]
+                ]
+                if outcome in ("timeout", "nonzero", "malformed-id"):
+                    self.assertNotIn(tags[0], self.images)
+                    self.assertEqual(journals, [])
+                else:
+                    self.assertIn(tags[0], self.images)
+                    self.assertEqual(len(journals), 1)
+                    self.assertEqual(
+                        box.read_json(journals[0])["workspace_id"], self.data["id"]
+                    )
+                self.assertFalse(self.archive.exists())
+                self.assertTrue(self.project.exists())
+
+    def test_cleanup_failed_inspection_is_not_inferred_absent(self):
+        for kind in ("container", "volume"):
+            with self.subTest(kind=kind):
+                calls = []
+
+                def commands(box_arg, *args, **kwargs):
+                    calls.append(args)
+                    if args[1] == "exists":
+                        return subprocess.CompletedProcess(
+                            args, 0 if len(calls) == 1 else 1, "", ""
+                        )
+                    return subprocess.CompletedProcess(args, 125, "PRIVATE_QUERY", "")
+
+                with patch.object(backups, "command", side_effect=commands):
+                    self.assertFalse(
+                        backups.remove_restore_resource(box, kind, self.data)
+                    )
+                self.assertEqual([args[1] for args in calls], ["exists", "inspect"])
+
+    def test_failed_image_load_retains_attempted_shared_image_identity(self):
+        self.backup()
+        primary = crypto.BackupError("Synthetic image load failed.")
+        original = self.decrypt
+
+        def decrypt(path, private, consumer):
+            if path.name == "image.age":
+                record = box.read_json(
+                    next(path for path in box.workspace_paths() if path != self.path)
+                )
+                self.assertEqual(
+                    record["restore_attempted_resources"], ["volume", "image"]
+                )
+                self.assertTrue(record["restore_incomplete"])
+                raise primary
+            return original(path, private, consumer)
+
+        self.operations.clear()
+        with (
+            patch.object(crypto, "decrypt_stream", side_effect=decrypt),
+            self.assertRaises(crypto.BackupError) as error,
+        ):
+            self.restore(self.root / "failed-image-load")
+        self.assertIs(error.exception, primary)
+        record = box.read_json(
+            next(path for path in box.workspace_paths() if path != self.path)
+        )
+        self.assertEqual(record["image"], self.snapshot_image)
+        self.assertEqual(record["restore_attempted_resources"], ["volume", "image"])
+        self.assertTrue(record["restore_incomplete"])
+        self.assertFalse(any(args[:2] == ("image", "rm") for args in self.operations))
+
     def test_atomic_no_replace_activation_cannot_overwrite_empty_racing_directory(self):
         first = self.root / "staged"
         first.mkdir()
@@ -966,6 +1216,25 @@ class StagedMarkerTests(unittest.TestCase):
 
 
 class BackupCliTests(unittest.TestCase):
+    def test_backup_command_timeout_and_nonzero_never_expose_private_output(self):
+        for outcome in ("timeout", "nonzero"):
+            with self.subTest(outcome=outcome):
+
+                def run(arguments, **kwargs):
+                    kwargs["stderr"].write(b"PRIVATE_TOOL_STDERR")
+                    if outcome == "timeout":
+                        raise subprocess.TimeoutExpired(
+                            arguments, 1, stderr=b"PRIVATE_TOOL_STDERR"
+                        )
+                    return subprocess.CompletedProcess(arguments, 125)
+
+                with (
+                    patch.object(backups.subprocess, "run", side_effect=run),
+                    self.assertRaises(crypto.BackupError) as error,
+                ):
+                    backups.command(box, "volume", "create", "synthetic-only")
+                self.assertNotIn("PRIVATE", str(error.exception))
+
     def test_no_container_side_backup_or_silent_create(self):
         with (
             patch.dict(os.environ, {"OC_BOX_CONTAINER": "1"}),

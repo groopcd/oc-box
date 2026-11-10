@@ -32,6 +32,7 @@ else:
     from version_info import get_version_info
 
 BackupError = crypto.BackupError
+CAPTURE_LABEL = "io.oc-box.backup-capture"
 
 
 def command(box, *args, check=True, timeout=60):
@@ -104,20 +105,61 @@ def remove_restore_resource(box, kind, data):
         return True
     if exists.returncode:
         return False
-    if kind == "container":
-        owned_container(box, data)
-    else:
-        owned_volume(box, data)
+    inspected = command(box, kind, "inspect", name, check=False)
+    if inspected.returncode:
+        return False
+    info = json.loads(inspected.stdout)[0]
+    labels = (
+        info.get("Config", {}).get("Labels")
+        if kind == "container"
+        else info.get("Labels")
+    ) or {}
+    if labels.get(box.LABEL) != data["id"]:
+        raise BackupError(
+            "Container backup ownership mismatch."
+            if kind == "container"
+            else "Private home volume ownership/inspection mismatch."
+        )
+    removed = command(
+        box,
+        kind,
+        "rm",
+        *(["--force"] if kind == "container" else []),
+        name,
+        check=False,
+    )
     return (
-        command(
-            box,
-            kind,
-            "rm",
-            *(["--force"] if kind == "container" else []),
-            name,
-            check=False,
-        ).returncode
-        == 0
+        removed.returncode == 0
+        and command(box, kind, "exists", name, check=False).returncode == 1
+    )
+
+
+def remove_capture_image(box, capture):
+    """Remove only a fresh tag whose image carries this attempt's owner label."""
+    tag = capture["tag"]
+    exists = command(box, "image", "exists", tag, check=False)
+    if exists.returncode == 1:
+        return True
+    if exists.returncode:
+        return False
+    inspected = command(box, "image", "inspect", tag, check=False)
+    if inspected.returncode:
+        return False
+    image = json.loads(inspected.stdout)[0]
+    labels = image.get("Config", {}).get("Labels") or {}
+    if (
+        labels.get(CAPTURE_LABEL) != capture["token"]
+        or labels.get(box.LABEL) != capture["workspace_id"]
+    ):
+        return False
+    if capture.get("image_id") and image.get("Id", image.get("ID", "")).removeprefix(
+        "sha256:"
+    ) != capture["image_id"].removeprefix("sha256:"):
+        return False
+    removed = command(box, "image", "rm", tag, check=False)
+    return (
+        removed.returncode == 0
+        and command(box, "image", "exists", tag, check=False).returncode == 1
     )
 
 
@@ -339,7 +381,9 @@ def make_backup(box, args):
                 "Container did not stop; refusing a live database backup."
             )
         image_id = None
-        image_tag = None
+        capture = None
+        capture_journal = None
+        capture_attempted = False
         temporary_output = None
         try:
             with tempfile.TemporaryDirectory(
@@ -367,11 +411,34 @@ def make_backup(box, args):
                     parts[name] = crypto.digest(staging / name)
                 if not args.portable:
                     with box.loading_stage("Capturing and encrypting container OS"):
-                        image_tag = "localhost/oc-box-backup-" + uuid.uuid4().hex
+                        token = uuid.uuid4().hex
+                        image_tag = "localhost/oc-box-backup-" + token
+                        if (
+                            command(
+                                box, "image", "exists", image_tag, check=False
+                            ).returncode
+                            != 1
+                        ):
+                            raise BackupError(
+                                "Fresh backup image tag already exists or could not be checked."
+                            )
+                        capture = {
+                            "workspace_id": data["id"],
+                            "token": token,
+                            "tag": image_tag,
+                            "attempted": True,
+                        }
+                        capture_journal = (
+                            path.parent / "backup-captures" / (token + ".json")
+                        )
+                        box.atomic_json(capture_journal, capture)
+                        capture_attempted = True
                         image_id = command(
                             box,
                             "commit",
                             "--quiet",
+                            "--change",
+                            f"LABEL {CAPTURE_LABEL}={token}",
                             data["container"],
                             image_tag,
                             timeout=600,
@@ -380,6 +447,8 @@ def make_backup(box, args):
                             raise BackupError(
                                 "Unexpected committed image identity; backup was not finalized."
                             )
+                        capture["image_id"] = image_id
+                        box.atomic_json(capture_journal, capture)
                         crypto.encrypt_stream(
                             ["podman", "save", "--format", "oci-archive", image_id],
                             recipient,
@@ -440,12 +509,30 @@ def make_backup(box, args):
                     "The source container remains stopped. Its files, sessions, and host vault were not altered."
                 )
         finally:
+            primary_failed = sys.exc_info()[0] is not None
+            cleanup_ok = True
             if temporary_output is not None:
-                temporary_output.unlink(missing_ok=True)
-            if image_id is not None and re.fullmatch(
-                r"(?:sha256:)?[0-9a-f]{64}", image_id
-            ):
-                command(box, "image", "rm", image_tag, check=False)
+                try:
+                    temporary_output.unlink(missing_ok=True)
+                except OSError:
+                    cleanup_ok = False
+            if capture_attempted:
+                try:
+                    if remove_capture_image(box, capture):
+                        capture_journal.unlink()
+                    else:
+                        cleanup_ok = False
+                except Exception:
+                    cleanup_ok = False
+            if not cleanup_ok:
+                print(
+                    "Backup cleanup incomplete; fresh capture recovery metadata was retained. Private cleanup errors were not logged.",
+                    file=sys.stderr,
+                )
+                if not primary_failed:
+                    raise BackupError(
+                        "Backup cleanup incomplete; inspect retained capture recovery metadata."
+                    )
 
 
 def validate_manifest(box, value):
@@ -662,7 +749,8 @@ def restore_backup(box, args):
         }
         if config.get("opencode_version"):
             data["opencode_version"] = config["opencode_version"]
-        volume_created = False
+        volume_attempted = False
+        image_load_attempted = False
         registry_created = False
         container_created = False
         project_activated = False
@@ -710,6 +798,9 @@ def restore_backup(box, args):
                         raise BackupError(
                             "Fresh restore resource name already exists or could not be checked; refusing to reuse it."
                         )
+                data["restore_attempted_resources"] = ["volume"]
+                box.atomic_json(directory / "workspace.json", data)
+                volume_attempted = True
                 command(
                     box,
                     "volume",
@@ -718,7 +809,6 @@ def restore_backup(box, args):
                     f"{box.LABEL}={ident}",
                     volume_name,
                 )
-                volume_created = True
                 volume = owned_volume(box, data)
                 with box.loading_stage("Restoring private home and session database"):
                     crypto.decrypt_stream(
@@ -766,6 +856,9 @@ def restore_backup(box, args):
                 ):
                     raise BackupError("Recovered registry does not match manifest.")
                 if manifest["kind"] == "full":
+                    data["restore_attempted_resources"].append("image")
+                    box.atomic_json(directory / "workspace.json", data)
+                    image_load_attempted = True
                     with box.loading_stage("Loading backed-up container OS image"):
                         crypto.decrypt_stream(
                             encrypted / "image.age",
@@ -806,6 +899,8 @@ def restore_backup(box, args):
                 box.atomic_json(directory / "workspace.json", data)
                 # create_container adds only standard known limits/mounts and
                 # overrides the image entrypoint; it does not start image code.
+                data["restore_attempted_resources"].append("container")
+                box.atomic_json(directory / "workspace.json", data)
                 container_created = True
                 box.create_container(
                     directory / "workspace.json", data, environment=crypto.environment()
@@ -813,6 +908,7 @@ def restore_backup(box, args):
                 data["ready"] = manifest["kind"] == "full" and bool(config.get("ready"))
                 data.pop("restore_incomplete", None)
                 data.pop("restore_staging_project", None)
+                data.pop("restore_attempted_resources", None)
                 box.atomic_json(directory / "workspace.json", data)
                 success = True
             print(f"Restored stopped workspace {ident} at {destination}.")
@@ -821,36 +917,41 @@ def restore_backup(box, args):
                 "The host vault was not restored/unlocked. Recreate required vault/env values before a selected-mode launch. Portable restores reinstall baseline/OS dependencies on their first normal start."
             )
         finally:
+            primary_failed = sys.exc_info()[0] is not None
+            cleanup_ok = True
             if not success:
-                cleanup_ok = True
+                # Loaded images are shared cache: retain their attempted identity
+                # rather than delete an image that may predate this restoration.
+                cleanup_ok = not image_load_attempted
                 if container_created:
                     try:
-                        cleanup_ok = remove_restore_resource(box, "container", data)
-                    except BackupError:
+                        container_ok = remove_restore_resource(box, "container", data)
+                        cleanup_ok = cleanup_ok and container_ok
+                    except Exception:
                         cleanup_ok = False
-                if volume_created:
+                if volume_attempted:
                     try:
                         volume_ok = remove_restore_resource(box, "volume", data)
                         cleanup_ok = cleanup_ok and volume_ok
-                    except BackupError:
+                    except Exception:
                         cleanup_ok = False
                 if project_activated and cleanup_ok:
                     # Delete only the newly staged directory with our fresh ID;
                     # never touch an unrelated path that appeared at destination.
-                    marker = destination / box.MARKER
-                    if (
-                        destination.is_dir()
-                        and not destination.is_symlink()
-                        and marker.is_file()
-                        and not marker.is_symlink()
-                        and marker.read_text().strip() == ident
-                        and workspace_identity.same_project(data, destination)
-                    ):
-                        try:
+                    try:
+                        marker = destination / box.MARKER
+                        if (
+                            destination.is_dir()
+                            and not destination.is_symlink()
+                            and marker.is_file()
+                            and not marker.is_symlink()
+                            and marker.read_text().strip() == ident
+                            and workspace_identity.same_project(data, destination)
+                        ):
                             remove_staged_tree(destination)
-                        except (OSError, BackupError):
+                        else:
                             cleanup_ok = False
-                    else:
+                    except Exception:
                         cleanup_ok = False
                 # This directory was created with our random ID. Do not remove
                 # caller-supplied paths or a registry that predated this attempt.
@@ -860,16 +961,32 @@ def restore_backup(box, args):
                     and directory.is_dir()
                     and not directory.is_symlink()
                 ):
-                    remove_staged_tree(directory)
-                elif not cleanup_ok and registry_created:
+                    try:
+                        remove_staged_tree(directory)
+                    except Exception:
+                        cleanup_ok = False
+                if not cleanup_ok and registry_created:
                     data["restore_incomplete"] = True
-                    box.atomic_json(directory / "workspace.json", data)
+                    try:
+                        box.atomic_json(directory / "workspace.json", data)
+                    except Exception:
+                        # The prior blocked journal remains the recovery source;
+                        # never replace the primary error with private cleanup IO.
+                        pass
                     print(
                         f"Restore cleanup could not remove all new resources. Incomplete workspace {ident} retained for host inspection/purge; it cannot be started.",
                         file=sys.stderr,
                     )
-            if project_stage.exists():
-                remove_staged_tree(project_stage)
+            if project_stage.exists() and cleanup_ok:
+                try:
+                    remove_staged_tree(project_stage)
+                except Exception:
+                    print(
+                        "Restore staging cleanup incomplete; inspect the operation's private staging. Private cleanup errors were not logged.",
+                        file=sys.stderr,
+                    )
+                    if not primary_failed:
+                        raise BackupError("Restore staging cleanup incomplete.")
 
 
 def parser_for(action):
