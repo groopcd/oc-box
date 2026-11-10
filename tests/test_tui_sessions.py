@@ -685,7 +685,8 @@ class ArchiveAssociationTests(unittest.TestCase):
 class FavoriteStoreTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(
-            prefix="tui-favorites-", dir="/tmp/opencode"
+            prefix="tui-favorites-",
+            dir="/tmp/opencode" if Path("/tmp/opencode").is_dir() else None,
         )
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name) / "favorites"

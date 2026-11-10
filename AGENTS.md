@@ -285,6 +285,17 @@ pending session, unchanged prior archives/checkpoint and recovery. These run
 directly inside oc-box with private synthetic state, not nested Podman. Activity
 refusal in the export bridge applies to the superseded-assistant exception, not
 universally to every export; normal owners separately wait for activity.
+The later published stable v1.6.58 reports reviewed external-host acceptance on
+clean 3138a8727c3638983a8b9d19b1cb93a83d94a027 (count 87): focused history/readiness
+33 checks, global-vault 13 stages, and full V1/V2 lifecycle six stages including
+all nine superseded-history checks. Its public release notes record that evidence;
+the raw reports were not re-reviewed during the TUI release preparation. Earlier
+pending/failure statements above retain their historical source and scope.
+That acceptance does not cover the later Textual manager, journal or archived-root
+automatic-resume changes. Freeze their integrated candidate and repeat relevant
+host validation before the next stable release; do not infer acceptance from the
+v1.6.58 tag or a successful real-project terminal attachment alone.
+
 The global-vault fixture's initial host run failed during the first owning
 launch, not an accepted pass.
 Use --diagnose for validated read-only checkpoints; never print raw errors/env

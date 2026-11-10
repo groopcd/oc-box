@@ -66,7 +66,7 @@ jobs:
           "$RUNNER_TEMP/oc-box-build/bin/python" -m build
           "$RUNNER_TEMP/oc-box-build/bin/python" -m twine check dist/*
       - name: Verify isolated package installation and resources
-        run: python tools/check_package.py dist --with-vault
+        run: python tools/check_package.py dist --with-vault --with-tui
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: python-distributions
@@ -75,7 +75,10 @@ jobs:
           retention-days: 7
 
   publish:
-    if: github.event_name == 'release' || inputs.publish
+    # A GitHub preview must not publish the ordinary 1.6.N version to PyPI.
+    if: >-
+      (github.event_name == 'release' && !github.event.release.prerelease) ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish)
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
