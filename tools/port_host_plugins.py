@@ -6,24 +6,32 @@ No V1 SDK/bridge/profile launcher is installed. Default is a read-only audit;
 one private safety snapshot. It changes only plugin entries/dependencies and
 recognized source files; no auth/DB/env/service operation runs. Unknown plugins
 are left alone, not classified as safe to delete.
+
+Canonical personal V1 sources are not distributed with this utility. Before a
+local source can be replaced, review its full contents against the proposed
+native implementation and pass --reviewed-source RELATIVE_PATH=SHA256 for those
+exact bytes. This is explicit operator approval, not automatic compatibility
+certification. No source fingerprint is approved merely by its name or markers.
 """
 
 import argparse
-from datetime import datetime, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
+import re
 import secrets
 import shlex
 import stat
 import sys
 import tempfile
+from datetime import datetime, timezone
+from pathlib import Path
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
 sys.path.insert(0, str(APP / "src"))
-from oc_box import oc_box as box, plugin_compat
+from oc_box import oc_box as box
+from oc_box import plugin_compat
 
 KEEP = {
     "opencode-sandbox": "Keep: host shell isolation; native V2 port, existing policy retained.",
@@ -44,6 +52,8 @@ PREVIOUS_SANDBOX_HASHES = {
     "4659614bbc1048d385647937d617fa24bfaa1f7f0341a9a2041ef67eaa90bf7a",
     "60fc6c0d1f24abdf80ca03b0eecd01f7f6af3ade28e4a641a965828a6038ff62",
 }
+# Legacy hints retained for older synthetic harnesses, never authorization to
+# replace source code. Local replacements require explicit per-file review.
 MARKERS = {
     "opencode-sandbox": ("SandboxPlugin", "wrapWithSandbox", "resolveConfig"),
     "python-isolation": ("shell.env", "PIP_REQUIRE_VIRTUALENV"),
@@ -86,27 +96,165 @@ def spec(entry):
     raise ValueError("Unsupported plugin configuration entry")
 
 
-def name_for(value):
-    stem = Path(value.removeprefix("-").removeprefix("file://")).name
+def source_name(value):
+    """Classify an already-local file/directory, not an npm package basename."""
+    stem = Path(value).name
     for ending in (".oc-box-v1.mts", ".ts", ".js", ".mts", ".mjs"):
         if stem.endswith(ending):
             stem = stem[: -len(ending)]
             break
-    return (
-        stem
-        if stem in KEEP or stem in RETIRE
-        else "opencode-sandbox"
-        if plugin_compat.package_target(value.removeprefix("-"))
-        else None
+    return stem if stem in KEEP or stem in RETIRE else None
+
+
+def nonlocal_spec(plain):
+    return plain.startswith("@") or bool(
+        re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", plain)
+        and not plain.startswith("file://")
     )
 
 
-def audit(source):
+def configured_local_source(value, source):
+    """Do not reinterpret scoped packages or remote URIs as relative files."""
+    plain = value.removeprefix("-")
+    if nonlocal_spec(plain):
+        return None
+    return plugin_compat.local_source(plain, source)
+
+
+def name_for(value, source):
+    """Only the exact sandbox package or an actual/explicit local source."""
+    plain = value.removeprefix("-")
+    if plugin_compat.package_target(plain):
+        return "opencode-sandbox"
+    local = configured_local_source(plain, source)
+    if local:
+        return source_name(local.name)
+    if nonlocal_spec(plain):
+        return None
+    if plain.startswith(("/", "./", "../", "~/", "file:")) or (source / plain).is_dir():
+        # Retain missing/out-of-root source and existing-destination refusals.
+        # A scoped/URL package is never recognized just by its final component.
+        return source_name(Path(plain.removeprefix("file://")).name)
+    return None
+
+
+def validate_reviews(reviewed_sources):
+    if reviewed_sources is None:
+        return {}
+    if not isinstance(reviewed_sources, dict):
+        raise ValueError(
+            "Invalid source review approvals; expected relative paths and SHA-256 values"
+        )
+    result = {}
+    for value, digest in reviewed_sources.items():
+        if not isinstance(value, (str, Path)):
+            raise ValueError("Invalid source review approval path")
+        relative = Path(value)
+        if (
+            relative.is_absolute()
+            or not relative.parts
+            or ".." in relative.parts
+            or source_name(relative.name) is None
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None
+        ):
+            raise ValueError(
+                "Invalid source review approval; use a relative plugin source path and exact SHA-256"
+            )
+        if relative in result:
+            raise ValueError("Duplicate source review approval")
+        result[relative] = digest.lower()
+    return result
+
+
+def parse_reviews(arguments):
+    result = {}
+    for argument in arguments:
+        relative, separator, digest = argument.rpartition("=")
+        if not separator or relative in result:
+            raise ValueError(
+                "Invalid or duplicate --reviewed-source approval; use RELATIVE_PATH=SHA256 once per file"
+            )
+        result[relative] = digest
+    return validate_reviews(result)
+
+
+def require_empty_audit_overrides(content):
+    """Accept only a literal empty Map and direct read-only table uses.
+
+    This bounded check never evaluates JavaScript. Other table forms or uses
+    require a manual port; a source-hash approval cannot retire real overrides.
+    Strings/comments cannot stand in for the actual declaration.
+    """
+    tokens = re.findall(
+        r"""//[^\r\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|[A-Za-z_$][\w$]*|[^\s]""",
+        content.decode(),
+    )
+    tokens = [token for token in tokens if not token.startswith(("//", "/*"))]
+    references = [
+        index for index, token in enumerate(tokens) if token == "DESCRIPTION_OVERRIDES"
+    ]
+    declarations = [
+        index
+        for index in references
+        if index and tokens[index - 1] in ("const", "let", "var")
+    ]
+    valid = len(declarations) == 1
+    if valid:
+        declaration = declarations[0]
+        tail = tokens[declaration + 1 :]
+        # Typed Map initializers are ordinary V1 TypeScript, not evaluated data.
+        if tail[:3] == ["=", "new", "Map"]:
+            tail = tail[3:]
+            if tail[:5] == ["<", "string", ",", "string", ">"]:
+                tail = tail[5:]
+            if tail[:4] == ["(", "[", "]", ")"]:
+                tail = tail[4:]
+            elif tail[:2] == ["(", ")"]:
+                tail = tail[2:]
+            else:
+                valid = False
+            if tail and tail[0] not in (
+                ";",
+                "export",
+                "const",
+                "let",
+                "var",
+                "function",
+                "async",
+                "}",
+            ):
+                valid = False
+        else:
+            valid = False
+        for index in references:
+            if index == declaration:
+                continue
+            use = tokens[index + 1 : index + 4]
+            if (
+                use[:2] not in ([".", "get"], [".", "has"], [".", "size"])
+                or (use[1] != "size" and use[2:] != ["("])
+                or (use[1] == "size" and use[2:] in (["="], ["+"], ["-"]))
+            ):
+                valid = False
+        if any(
+            token.startswith("`") and "${" in token and "DESCRIPTION_OVERRIDES" in token
+            for token in tokens
+        ):
+            valid = False  # Do not guess at code inside template interpolation.
+    if not valid:
+        raise ValueError(
+            "Tool audit has active description overrides or a nonliteral override table; review before retiring it"
+        )
+
+
+def audit(source, *, reviewed_sources=None):
     safe_directory(source)
     if (source / "host-bridge.js").exists():
         raise ValueError(
             "This is the old alternate compatibility profile; use the original normal host config directory"
         )
+    reviews = validate_reviews(reviewed_sources)
     config, files, names, unknown = {}, {}, set(), []
     for filename in ("opencode.json", "opencode.jsonc", "config.json"):
         file = source / filename
@@ -121,7 +269,7 @@ def audit(source):
                     raise ValueError("Plugin configuration must be an array")
                 for entry in value.get(key, []):
                     target = spec(entry)
-                    name = name_for(target)
+                    name = name_for(target, source)
                     package = plugin_compat.package_target(target.removeprefix("-"))
                     if package and package[1] not in ("latest", "0.6.0"):
                         raise ValueError(
@@ -130,11 +278,11 @@ def audit(source):
                         )
                     if name and not target.startswith("-"):
                         names.add(name)
-                    local = plugin_compat.local_source(target, source)
+                    local = configured_local_source(target, source)
                     if local:
                         files[local.relative_to(source)] = read(local)
                         if (
-                            name_for(local.name) is None
+                            source_name(local.name) is None
                             and "@opencode-ai/plugin"
                             in files[local.relative_to(source)].decode()
                         ):
@@ -159,33 +307,29 @@ def audit(source):
             safe_directory(directory)
         for file in (source / folder).glob("*"):
             if file.is_file() and file.suffix in (".ts", ".js", ".mts", ".mjs"):
-                name = name_for(file.name)
+                name = source_name(file.name)
                 if name:
                     names.add(name)
                     files[file.relative_to(source)] = read(file)
                 elif "@opencode-ai/plugin" in read(file).decode():
                     unknown.append(str(file.relative_to(source)))
+    reviewed = set()
     for relative, content in files.items():
-        name = name_for(relative.name)
-        if name in MARKERS and not all(
-            marker in content.decode() for marker in MARKERS[name]
-        ):
+        name = source_name(relative.name)
+        if name == "tool-definition-audit":
+            require_empty_audit_overrides(content)
+        if name and reviews.get(relative) != hashlib.sha256(content).hexdigest():
             raise ValueError(
                 "Unrecognized or customized plugin implementation requires review before replacement: "
                 + str(relative)
+                + "; compare the full source with the native replacement, then pass --reviewed-source RELATIVE_PATH=SHA256 for the reviewed bytes"
             )
-        if name == "tool-definition-audit":
-            # Retiring an audit with real edits would remove functionality, not
-            # mere diagnostics. Refuse customized override tables for review.
-            text = content.decode()
-            table = text.split("DESCRIPTION_OVERRIDES", 1)[-1].split("])", 1)[0]
-            table = "\n".join(
-                line for line in table.splitlines() if not line.strip().startswith("//")
-            )
-            if '["' in table or "['" in table:
-                raise ValueError(
-                    "Tool audit has active description overrides; review before retiring it"
-                )
+        if name:
+            reviewed.add(relative)
+    if set(reviews) - reviewed:
+        raise ValueError(
+            "Source review approval does not match a recognized local source"
+        )
     return config, files, names, unknown
 
 
@@ -258,12 +402,12 @@ def update_sandbox(source, *, apply_change=False):
     return {"status": "updated", "path": str(installed), "backup": str(backup)}
 
 
-def apply(source):
+def apply(source, *, reviewed_sources=None):
     if (source / "native-plugin-migration.json").exists():
         raise ValueError(
             "Native migration receipt already exists; do not overwrite a completed migration"
         )
-    configs, files, names, unknown = audit(source)
+    configs, files, names, unknown = audit(source, reviewed_sources=reviewed_sources)
     if unknown:
         raise ValueError(
             "Unknown V1 sources require manual review before SDK removal: "
@@ -294,7 +438,9 @@ def apply(source):
         entry = {"package": str(source / "plugins" / name)}
         for _, document in configs.values():
             for item in document.get("plugins", document.get("plugin", [])):
-                if name_for(spec(item)) == name and not spec(item).startswith("-"):
+                if name_for(spec(item), source) == name and not spec(item).startswith(
+                    "-"
+                ):
                     if isinstance(item, list):
                         entry["options"] = item[1]
                     elif isinstance(item, dict) and item.get("options"):
@@ -317,12 +463,12 @@ def apply(source):
         remaining = [
             entry
             for entry in config.get("plugins", config.get("plugin", []))
-            if name_for(spec(entry)) is None
+            if name_for(spec(entry), source) is None
         ]
         disabled = [
-            "-" + str(source / "plugins" / name_for(spec(item)))
+            "-" + str(source / "plugins" / name_for(spec(item), source))
             for item in config.get("plugins", config.get("plugin", []))
-            if spec(item).startswith("-") and name_for(spec(item)) in kept
+            if spec(item).startswith("-") and name_for(spec(item), source) in kept
         ]
         config.pop("plugin", None)
         config["plugins"] = (
@@ -391,7 +537,7 @@ def apply(source):
         if original_manifest is not None and read(manifest) != original_manifest:
             raise ValueError("Dependencies changed during migration")
         for relative in files:
-            if name_for(relative.name):
+            if source_name(relative.name):
                 (source / relative).unlink()
         for relative, content in replacements.items():
             atomic(source / relative, content)
@@ -401,6 +547,11 @@ def apply(source):
             "safety_backup": str(backup),
             "version": "2.2.6",
             "no_v1_sdk_or_bridge": True,
+            "reviewed_source_sha256": {
+                str(relative): hashlib.sha256(content).hexdigest()
+                for relative, content in files.items()
+                if source_name(relative.name)
+            },
         }
         if "opencode-sandbox" in kept:
             receipt["sandbox_source_sha256"] = hashlib.sha256(
@@ -438,11 +589,26 @@ def main(argv=None):
         action="store_true",
         help="inspect/update only the recognized installed native sandbox lifecycle code; requires --apply to write",
     )
+    parser.add_argument(
+        "--reviewed-source",
+        action="append",
+        default=[],
+        metavar="RELATIVE_PATH=SHA256",
+        help="after reviewing the full local V1 source against its native replacement, approve one relative source path and exact SHA-256; repeat per file (never an automatic compatibility certification)",
+    )
     args = parser.parse_args(argv)
     if os.environ.get("OC_BOX_CONTAINER") == "1":
         parser.error(
             "Run this tool on the regular host, not the copied container profile"
         )
+    if args.update_sandbox and args.reviewed_source:
+        parser.error(
+            "--reviewed-source is only for the full source migration, not --update-sandbox"
+        )
+    try:
+        reviews = parse_reviews(args.reviewed_source)
+    except ValueError as error:
+        parser.error(str(error))
     source = args.config.expanduser().resolve(strict=True)
     if args.update_sandbox:
         result = update_sandbox(source, apply_change=args.apply)
@@ -457,7 +623,7 @@ def main(argv=None):
                 "Other plugins/config/dependencies are unchanged. Exit the old broken host service once and start a fresh V2 process, then retest /reload."
             )
         return 0
-    _, _, names, unknown = audit(source)
+    _, _, names, unknown = audit(source, reviewed_sources=reviews)
     print("Normal host profile: " + str(source))
     for name in KEEP:
         if name in names:
@@ -470,7 +636,7 @@ def main(argv=None):
     if not args.apply:
         print("Audit only; nothing changed. --apply performs the V2-only replacement.")
         return 0
-    result = apply(source)
+    result = apply(source, reviewed_sources=reviews)
     print("Native V2 plugins installed; safety snapshot: " + result["safety_backup"])
     print(
         "Refresh host dependencies: npm install --prefix "
