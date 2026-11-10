@@ -142,13 +142,16 @@ def _stamp(info):
 def _opened(path, code):
     """Walk with no-follow descriptors as well as the earlier lexical proof."""
     directory = descriptor = None
+    failed = False
     try:
         flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
         directory = os.open(path.anchor, flags)
         for component in path.parts[1:-1]:
             child = os.open(component, flags, dir_fd=directory)
-            os.close(directory)
-            directory = child
+            previous, directory = directory, child
+            # Transfer ownership first. A failed close may have taken effect;
+            # never retry its now-unowned number, which may have been reused.
+            os.close(previous)
         descriptor = os.open(
             path.name,
             os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
@@ -166,15 +169,34 @@ def _opened(path, code):
         )
         checked_path(path, kind="file")
         _require(_stamp(final) == _stamp(path.lstat()), code)
-    except (OSError, ValueError, TypeError) as error:
-        if isinstance(error, GuardError) and error.code != "unsafe-path":
-            raise
-        raise GuardError(code) from None
+    except BaseException as error:
+        failed = True  # This invocation, not a caller's already-handled error.
+        if isinstance(error, (OSError, ValueError, TypeError)):
+            if isinstance(error, GuardError) and error.code != "unsafe-path":
+                raise
+            raise GuardError(code) from None
+        raise
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
-        if directory is not None:
-            os.close(directory)
+        owned = (descriptor, directory)
+        # Seal every owned number before any fallible cleanup, then attempt
+        # each independently. An ambiguous failed close is never retried.
+        descriptor = directory = None
+        cleanup_error = None
+        for closing in owned:
+            if closing is not None:
+                try:
+                    os.close(closing)
+                except BaseException as error:
+                    if cleanup_error is None:
+                        cleanup_error = error
+        if not failed and cleanup_error is not None:
+            # A body failure wins; otherwise keep the first cancellation/fixed
+            # refusal, and classify ordinary cleanup errors without raw context.
+            if isinstance(cleanup_error, GuardError) or not isinstance(
+                cleanup_error, Exception
+            ):
+                raise cleanup_error
+            raise GuardError(code) from None
 
 
 def _private_bytes(

@@ -1,12 +1,14 @@
 """Synthetic, offline shared-guard contracts; no engine or host acceptance."""
 
 import copy
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError, asdict, replace
 import hashlib
 import json
 import os
 from pathlib import Path
 import tempfile
+import traceback
 import unittest
 from unittest.mock import patch
 
@@ -44,6 +46,76 @@ class AcceptanceGuardsTests(unittest.TestCase):
             max_bytes=kwargs.pop("max_bytes", 128),
             **kwargs,
         )
+
+    @contextmanager
+    def close_faults(self, failures, *, after):
+        """Finite real-FD faults; test cleanup owns ambiguous before-effect FDs."""
+        sentinel = self.file("close-sentinel", b"synthetic-only")
+        real_open, real_close = os.open, os.close
+        state = {name: [] for name in ("opened", "attempts", "failed", "unowned")}
+        state.update(live={}, reused=set(), fired=set(), leaf=False)
+
+        def opened(name, flags, *args, **kwargs):
+            descriptor = real_open(name, flags, *args, **kwargs)
+            role = "leaf" if name == "record.json" else "directory"
+            token = (len(state["opened"]), descriptor, role)
+            state["opened"].append(token)
+            state["live"][descriptor] = token
+            state["leaf"] |= role == "leaf"
+            return descriptor
+
+        def closed(descriptor):
+            token = state["live"].get(descriptor)
+            if token is None:
+                state["unowned"].append(descriptor)
+                real_close(descriptor)
+                state["reused"].discard(descriptor)
+                return
+            state["attempts"].append(token)
+            role = (
+                token[2]
+                if state["leaf"]
+                else ("parent" if token == state["opened"][0] else "walk-cleanup")
+            )
+            if role in failures and role not in state["fired"]:
+                state["fired"].add(role)
+                state["failed"].append(token)
+                if after:
+                    real_close(descriptor)
+                    del state["live"][descriptor]
+                    # The now-reused number belongs to an unrelated test FD.
+                    reused = real_open(sentinel, os.O_RDONLY | os.O_CLOEXEC)
+                    if reused != descriptor:
+                        os.dup2(reused, descriptor, inheritable=False)
+                        real_close(reused)
+                        reused = descriptor
+                    state["reused"].add(reused)
+                raise failures[role]
+            real_close(descriptor)
+            del state["live"][descriptor]
+
+        try:
+            with (
+                patch.object(guards.os, "open", side_effect=opened),
+                patch.object(guards.os, "close", side_effect=closed),
+            ):
+                yield state
+        finally:
+            # Only synthetic descriptors opened by this bounded test fixture.
+            for descriptor in set(state["live"]) | state["reused"]:
+                real_close(descriptor)
+
+    def assert_close_attempts(self, state, failures, *, after):
+        self.assertEqual(state["fired"], set(failures))
+        self.assertEqual(state["unowned"], [])
+        for token in state["opened"]:
+            self.assertEqual(state["attempts"].count(token), 1, token)
+        # A failed close is ambiguous, so before-effect FDs cannot be retried.
+        self.assertEqual(
+            set(state["live"].values()), set() if after else set(state["failed"])
+        )
+        for descriptor in state["reused"]:
+            os.fstat(descriptor)  # A blind retry must not close a reused number.
 
     def test_closed_errors_and_immutable_records(self):
         self.assertEqual(str(guards.GuardError("private payload")), "guard-error")
@@ -196,6 +268,125 @@ class AcceptanceGuardsTests(unittest.TestCase):
 
         with patch.object(guards.os, "read", side_effect=changing_read):
             self.refusal("private-file", self.read_json)
+
+    def test_parent_walk_close_fault_ownership_and_primary_matrix(self):
+        self.file("record.json")
+        for after in (False, True):
+            for primary in (
+                OSError("private-close-detail"),
+                guards.GuardError("private-file"),
+                KeyboardInterrupt(),
+            ):
+                for secondary in (False, True):
+                    with self.subTest(
+                        after=after, primary=type(primary).__name__, secondary=secondary
+                    ):
+                        failures = {"parent": primary}
+                        if secondary:
+                            failures["walk-cleanup"] = OSError(
+                                "private-secondary-close-detail"
+                            )
+                        with self.close_faults(failures, after=after) as state:
+                            with self.assertRaises(BaseException) as raised:
+                                self.read_json()
+                            if isinstance(primary, OSError):
+                                self.assertIsInstance(
+                                    raised.exception, guards.GuardError
+                                )
+                                self.assertEqual(raised.exception.code, "private-file")
+                            else:
+                                self.assertIs(raised.exception, primary)
+                            self.assert_close_attempts(state, failures, after=after)
+
+    def test_body_primary_survives_all_close_faults_matrix(self):
+        self.file("record.json")
+        for after in (False, True):
+            for primary in (guards.GuardError("exact-files"), KeyboardInterrupt()):
+                for roles in (("leaf",), ("directory",), ("leaf", "directory")):
+                    with self.subTest(
+                        after=after, primary=type(primary).__name__, roles=roles
+                    ):
+                        failures = {
+                            role: OSError("private-close-detail") for role in roles
+                        }
+                        with (
+                            self.close_faults(failures, after=after) as state,
+                            patch.object(guards.os, "read", side_effect=primary),
+                        ):
+                            with self.assertRaises(BaseException) as raised:
+                                self.read_json()
+                            self.assertIs(raised.exception, primary)
+                            self.assert_close_attempts(state, failures, after=after)
+
+    def test_successful_body_close_refusal_and_caller_except_matrix(self):
+        path = self.file("record.json")
+        operations = (
+            ("json", self.read_json, "private-file"),
+            (
+                "exact",
+                lambda: guards.exact_private_files(
+                    self.root, {"record.json": b"{}"}, uid=self.uid
+                ),
+                "private-file",
+            ),
+            ("hash", lambda: guards.sha256_file(path), "file-hash"),
+        )
+        for after in (False, True):
+            for ambient in (False, True):
+                for roles in (("leaf",), ("directory",), ("leaf", "directory")):
+                    for name, operation, code in operations:
+                        with self.subTest(
+                            after=after, ambient=ambient, roles=roles, operation=name
+                        ):
+                            failures = {
+                                role: OSError("private-close-detail") for role in roles
+                            }
+                            with self.close_faults(failures, after=after) as state:
+
+                                def invoke():
+                                    with self.assertRaises(guards.GuardError) as raised:
+                                        operation()
+                                    self.assertEqual(raised.exception.code, code)
+                                    rendered = "".join(
+                                        traceback.format_exception(raised.exception)
+                                    )
+                                    self.assertNotIn("private-close-detail", rendered)
+                                    self.assertNotIn("ambient-private-detail", rendered)
+                                    self.assertIsNone(raised.exception.__cause__)
+                                    if not ambient:
+                                        context = raised.exception.__context__
+                                        self.assertTrue(
+                                            context is None
+                                            or isinstance(context, guards.GuardError)
+                                        )
+
+                                if ambient:
+                                    try:
+                                        raise OSError("ambient-private-detail")
+                                    except OSError:
+                                        invoke()
+                                else:
+                                    invoke()
+                                self.assert_close_attempts(state, failures, after=after)
+        try:
+            raise OSError("ambient-private-detail")
+        except OSError:
+            self.assertEqual(self.read_json(), {})
+
+    def test_first_cleanup_cancellation_or_guard_identity_matrix(self):
+        self.file("record.json")
+        for after in (False, True):
+            for primary in (guards.GuardError("private-file"), KeyboardInterrupt()):
+                with self.subTest(after=after, primary=type(primary).__name__):
+                    failures = {
+                        "leaf": primary,
+                        "directory": OSError("private-secondary-close-detail"),
+                    }
+                    with self.close_faults(failures, after=after) as state:
+                        with self.assertRaises(BaseException) as raised:
+                            self.read_json()
+                        self.assertIs(raised.exception, primary)
+                        self.assert_close_attempts(state, failures, after=after)
 
     def test_exact_private_files_complete_bytes_matrix(self):
         raw = b"x" * (1024 * 1024) + b"END"
