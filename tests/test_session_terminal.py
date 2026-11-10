@@ -365,6 +365,101 @@ class SessionTerminalTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             peer.run(self)
 
+    def test_received_terminal_end_precedes_same_cycle_local_detach(self):
+        cases = [
+            (frame(struct.pack("!H", code) + b"private-reason", 8), None)
+            for code in (1002, 1008, 1011)
+        ] + [
+            (event("exited", exitCode=7) + frame(struct.pack("!H", 1000), 8), 7),
+            (event("exited", exitCode=7), 7),
+            (frame(b"same-cycle-output"), 0),
+        ]
+        real_select = terminal.select.select
+        for packet, expected in cases:
+            for stdin_eof in (False, True):
+                with self.subTest(packet=packet, stdin_eof=stdin_eof):
+                    delivered = threading.Event()
+                    co_ready = []
+
+                    def send_after_replay(fixture, sock):
+                        self.assertEqual(
+                            fixture.receive(sock), (2, struct.pack("!BHH", 0, 80, 24))
+                        )
+                        # The ending cannot enter the HTTP handshake buffer:
+                        # wait until run() has acknowledged completed replay.
+                        sock.sendall(packet)
+                        if not stdin_eof:
+                            os.write(fixture.master, b"prefix\x1dsuffix")
+                        delivered.set()
+                        fixture.drain(sock)
+
+                    def select_both(readers, *args):
+                        if sys.stdin not in readers:
+                            return real_select(readers, *args)
+                        self.assertTrue(
+                            delivered.wait(3), "Peer did not deliver ending."
+                        )
+                        result = real_select(readers, *args)
+                        self.assertIn(readers[0], result[0])
+                        self.assertIn(sys.stdin, result[0])
+                        self.assertEqual(
+                            readers[0].recv(len(packet), socket.MSG_PEEK), packet
+                        )
+                        co_ready.append(True)
+                        return result
+
+                    peer = TerminalPeer(READY, script=send_after_replay)
+                    with patch.object(terminal.select, "select", select_both):
+                        if expected is None:
+                            with self.assertRaisesRegex(
+                                ValueError,
+                                "^Persistent session terminal became unavailable\\.$",
+                            ):
+                                peer.run(self, stdin_eof=stdin_eof)
+                        else:
+                            self.assertEqual(
+                                peer.run(self, stdin_eof=stdin_eof), expected
+                            )
+                    self.assertEqual(co_ready, [True])
+                    inputs = [
+                        payload[5:]
+                        for opcode, payload in peer.frames
+                        if opcode == 2 and payload[0] == 1
+                    ]
+                    self.assertEqual(
+                        inputs, [b"prefix"] if expected == 0 and not stdin_eof else []
+                    )
+                    if expected == 0:
+                        self.assertEqual(peer.output, b"checkpointsame-cycle-output")
+
+    def test_known_exit_eof_requires_a_complete_websocket_message_boundary(self):
+        for truncated in (
+            b"\x88",  # incomplete short header
+            b"\x82\x7e\x00",  # incomplete extended header
+            b"\x88\x05\x03\xf0",  # policy-close payload cut short
+            b"\x82\x03x",  # incomplete binary payload
+            frame(b"private-fragment", final=False),
+            frame(b"", final=False),  # active, but empty fragment buffer
+        ):
+            with self.subTest(truncated=truncated):
+
+                def truncate_after_replay(fixture, sock):
+                    self.assertEqual(
+                        fixture.receive(sock), (2, struct.pack("!BHH", 0, 80, 24))
+                    )
+                    sock.sendall(truncated)
+                    sock.shutdown(socket.SHUT_WR)
+                    fixture.drain(sock)
+
+                peer = TerminalPeer(
+                    READY + event("exited", exitCode=0), script=truncate_after_replay
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "^Persistent session terminal connection ended unexpectedly\\.$",
+                ):
+                    peer.run(self)
+
     def test_unknown_exit_does_not_turn_bare_eof_into_success(self):
         def eof(fixture, sock):
             sock.shutdown(socket.SHUT_WR)

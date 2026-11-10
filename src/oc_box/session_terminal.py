@@ -6,7 +6,9 @@ server's environment). Ctrl-] detaches without removing the persistent terminal.
 
 A normal WebSocket 1000 close after attachment/replay ends the attachment, not
 necessarily the shell. A known shell exit retains its status. Bare EOF requires
-both completed replay and a known exit; protocol/error closes never mean success.
+completed replay, a known exit and a complete WebSocket message boundary.
+Received terminal ends/errors take priority over a same-cycle local detach;
+without a known terminal end, an explicit local detach remains successful.
 """
 
 import base64
@@ -275,9 +277,13 @@ def run(address, session, cwd):
             tty.setraw(sys.stdin.fileno())
         output(base64.b64decode(snapshot["checkpoint"]))
         deadline = time.monotonic() + 30
+        readable = []
         while True:
             if not ready and time.monotonic() >= deadline:
                 raise ValueError("Persistent session terminal replay timed out.")
+            # Parse the bounded batch from the preceding recv before handling
+            # co-ready stdin. Do not drain more socket data or await a future
+            # frame before honoring a local detach.
             for opcode, payload in websocket.frames():
                 if opcode == 8:
                     if len(payload) < 2 or struct.unpack("!H", payload[:2])[0] != 1000:
@@ -319,6 +325,17 @@ def run(address, session, cwd):
                     ):
                         raise ValueError("Invalid persistent terminal exit status.")
             cols, rows = terminal_size()
+            if sys.stdin in readable:
+                content = os.read(sys.stdin.fileno(), 4096)
+                prefix, detach, _ = content.partition(b"\x1d")
+                if (not content or detach) and code is not None:
+                    # A received shell exit must not be rewritten as detach 0.
+                    return code
+                if prefix:
+                    websocket.send(struct.pack("!BHH", 1, cols, rows) + prefix)
+                if not content or detach:
+                    # Detach, preserving the shell and its state in OpenCode.
+                    return 0
             if ready and controlling and resized:
                 websocket.send(struct.pack("!BHH", 0, cols, rows))
                 resized = False
@@ -327,20 +344,17 @@ def run(address, session, cwd):
             if websocket.socket in readable:
                 chunk = websocket.socket.recv(65536)
                 if not chunk:
-                    if ready and code is not None:
+                    if (
+                        ready
+                        and code is not None
+                        and not websocket.buffer
+                        and websocket.fragment_type is None
+                    ):
                         return code
                     raise ValueError(
                         "Persistent session terminal connection ended unexpectedly."
                     )
                 websocket.buffer.extend(chunk)
-            if sys.stdin in readable:
-                content = os.read(sys.stdin.fileno(), 4096)
-                prefix, detach, _ = content.partition(b"\x1d")
-                if prefix:
-                    websocket.send(struct.pack("!BHH", 1, cols, rows) + prefix)
-                if not content or detach:
-                    # Detach, preserving the shell and its state in OpenCode.
-                    return 0
     finally:
         try:
             websocket.close()
