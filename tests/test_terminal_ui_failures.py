@@ -21,6 +21,13 @@ from oc_box import terminal_ui as ui
 
 
 BANNER = re.compile(rb"\x1b7\x1b\[\d+;1H\x1b\[0m\x1b\[2K[^\x1b]*\x1b8")
+CLEANUP_FAILURE_CASES = (
+    ("stop", True),
+    ("stop", False),
+    ("tty", True),
+    ("handler", True),
+    ("fd", True),
+)
 RELAY = r"""
 import ctypes, json, os, signal, subprocess, sys, termios, time, traceback
 from pathlib import Path
@@ -47,6 +54,7 @@ original_popen = ui.subprocess.Popen
 original_waitid = os.waitid
 original_killpg = os.killpg
 observed_exit = False
+cancel_injected = False
 def tracked_popen(*args, **kwargs):
     global owned
     owned = original_popen(*args, **kwargs)
@@ -66,8 +74,11 @@ def tracked_popen(*args, **kwargs):
     owned.poll, owned.wait = poll, wait
     return owned
 def observe(kind, pid, flags):
-    global observed_exit
+    global observed_exit, cancel_injected
     events.append(["observe", flags])
+    if mode.startswith("primary_") and (root / "ready").exists() and not cancel_injected:
+        cancel_injected = True
+        raise cancellation from None
     if mode == "lost_anchor" or (mode == "lost_cleanup" and observed_exit):
         # Deterministic outside-reaper injection, not a probabilistic PID race.
         owned.wait(timeout=1)
@@ -88,22 +99,70 @@ if mode in ("cancel", "lost_cancel"):
             if mode == "lost_cancel":
                 (root / "reap_now").touch()
                 owned.wait(timeout=1)
-            raise cancellation
+            raise cancellation from None
         return original_select(*args)
     ui.select.select = cancel_when_ready
-result = {}
-try:
-    result["returncode"] = ui.run_tui(
+cleanup_failure = ui._TUIProcessError("TUI synthetic cleanup failure.")
+cleanup_events = []
+if mode.startswith(("ambient_", "primary_")):
+    stage = mode.split("_", 1)[1]
+    original_stop = ui._stop_group
+    original_terminal = termios.tcsetattr
+    original_signal = signal.signal
+    original_close = os.close
+    cleanup_active = False
+    def stop(*args):
+        global cleanup_active
+        cleanup_active = True
+        cleanup_events.append("stop")
+        original_stop(*args)
+        if stage == "stop":
+            raise cleanup_failure
+    def terminal(fd, when, attributes):
+        original_terminal(fd, when, attributes)
+        if cleanup_active and attributes == before:
+            cleanup_events.append("tty")
+            if stage == "tty":
+                raise cleanup_failure
+    def handler(signum, value):
+        result = original_signal(signum, value)
+        if cleanup_active and value is previous:
+            cleanup_events.append("handler:" + str(signum))
+            if stage == "handler" and signum == signal.SIGTERM:
+                raise cleanup_failure
+        return result
+    def close(fd):
+        original_close(fd)
+        if cleanup_active:
+            cleanup_events.append("fd")
+            if stage == "fd":
+                raise cleanup_failure
+    ui._stop_group = stop
+    termios.tcsetattr, signal.signal, os.close = terminal, handler, close
+def invoke():
+    return ui.run_tui(
         [sys.executable, "-B", "-c", sys.argv[3], str(root)],
         refresh=0.02, show_loading=sys.argv[4] == "loading")
+result = {}
+try:
+    if mode.startswith(("ambient_", "primary_")):
+        try:
+            raise RuntimeError("SYNTHETIC_PRIVATE_CALLER_DETAIL")
+        except RuntimeError:
+            result["returncode"] = invoke()
+    else:
+        result["returncode"] = invoke()
 except BaseException as exc:
     result["error"] = type(exc).__name__
     result["primary_preserved"] = exc is cancellation
+    result["cleanup_failure_preserved"] = exc is cleanup_failure
     result["safe_ownership_error"] = str(exc) == "TUI child ownership lost; process-group signaling refused."
-    result["private_error_leaked"] = "SYNTHETIC_PRIVATE_REAPER_DETAIL" in "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    formatted = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+    result["private_error_leaked"] = any(marker in formatted for marker in ("SYNTHETIC_PRIVATE_REAPER_DETAIL", "SYNTHETIC_PRIVATE_CALLER_DETAIL"))
 finally:
     signal.alarm(0)
     result["events"] = events
+    result["cleanup_events"] = cleanup_events
     result["anchor_loss_injected"] = mode in ("lost_anchor", "lost_cleanup", "lost_cancel")
     result["terminal_restored"] = before is None or termios.tcgetattr(0) == before
     result["handlers_restored"] = all(signal.getsignal(sig) is previous for sig in signals)
@@ -310,6 +369,42 @@ class TerminalUIFailures(unittest.TestCase):
         self.assertFalse(
             any(event[0] == "signal" for event in result["events"]), result
         )
+
+    def assert_cleanup_attempts(self, result, interactive):
+        expected = ["stop", f"handler:{signal.SIGTERM}", f"handler:{signal.SIGINT}"]
+        if interactive:
+            expected += ["tty", f"handler:{signal.SIGWINCH}", "fd"]
+        self.assertCountEqual(result["cleanup_events"], expected, result)
+
+    def test_successful_body_inside_caller_except_propagates_cleanup_failure(self):
+        for stage, interactive in CLEANUP_FAILURE_CASES:
+            with self.subTest(stage=stage, interactive=interactive):
+                root, process, fd, _ = self.launch(
+                    "import time; time.sleep(0.05)",
+                    interactive=interactive,
+                    mode="ambient_" + stage,
+                )
+                self.collect(process, fd)
+                result = self.assert_restored(root)
+                self.assertNotIn("returncode", result)
+                self.assertTrue(result["cleanup_failure_preserved"], result)
+                self.assertFalse(result["private_error_leaked"], result)
+                self.assert_cleanup_attempts(result, interactive)
+
+    def test_cleanup_failures_preserve_this_invocations_cancellation(self):
+        for stage, interactive in CLEANUP_FAILURE_CASES:
+            with self.subTest(stage=stage, interactive=interactive):
+                root, process, fd, _ = self.launch(
+                    self.child_fixture(ignoring=True),
+                    interactive=interactive,
+                    mode="primary_" + stage,
+                )
+                self.collect(process, fd)
+                result = self.assert_restored(root)
+                self.assertEqual(result.get("error"), "KeyboardInterrupt", result)
+                self.assertTrue(result["primary_preserved"], result)
+                self.assertFalse(result["private_error_leaked"], result)
+                self.assert_cleanup_attempts(result, interactive)
 
     def test_fragmented_first_output_keeps_controls_and_utf8_contiguous(self):
         cases = (

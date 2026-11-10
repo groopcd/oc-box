@@ -228,6 +228,7 @@ def run_tui(
     stop_deadline = None
     term_sent = False
     interrupt_pending = False
+    body_failed = False
 
     def request_stop(*_):
         nonlocal stop_deadline
@@ -378,25 +379,33 @@ def run_tui(
         if banner_drawn and stream.safe_to_draw():
             banner(clear=True)
         return wait_for_child()
+    except BaseException:
+        # Track only a failure escaping THIS invocation. sys.exc_info() inside
+        # finally can instead describe an already-handled caller exception.
+        body_failed = True
+        raise
     finally:
-        primary_error = sys.exc_info()[1]
-        try:
-            if group is not None:
-                _stop_group(group, stop_deadline, term_sent)
-        except BaseException:
-            # In particular, anchor-loss cleanup must not replace cancellation
-            # or another primary failure; terminal/handler/FD cleanup still runs.
-            if primary_error is None:
-                raise
-        finally:
+        cleanup_failure = None
+
+        def cleanup(action, *args):
+            nonlocal cleanup_failure
             try:
-                if old_terminal is not None:
-                    termios.tcsetattr(input_fd, termios.TCSANOW, old_terminal)
-            finally:
-                try:
-                    for sig, previous in handlers.items():
-                        signal.signal(sig, previous)
-                finally:
-                    for fd in (master, slave):
-                        if fd is not None:
-                            os.close(fd)
+                action(*args)
+            except BaseException as exc:
+                if cleanup_failure is None:
+                    cleanup_failure = exc
+
+        # Every restoration is attempted independently. Preserve a true body
+        # failure's identity; otherwise report the first cleanup failure, without
+        # chaining a possibly private exception handled by the caller.
+        if group is not None:
+            cleanup(_stop_group, group, stop_deadline, term_sent)
+        if old_terminal is not None:
+            cleanup(termios.tcsetattr, input_fd, termios.TCSANOW, old_terminal)
+        for sig, previous in handlers.items():
+            cleanup(signal.signal, sig, previous)
+        for fd in (master, slave):
+            if fd is not None:
+                cleanup(os.close, fd)
+        if not body_failed and cleanup_failure is not None:
+            raise cleanup_failure from None
