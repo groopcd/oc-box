@@ -221,6 +221,7 @@ class OpenCodeCompatibilityTests(unittest.TestCase):
         )
         (config / "node_modules").mkdir()
         (config / "node_modules/cached").touch()
+        sync_config.complete_config(self.root, payload.getvalue(), "2.2.6")
         self.assertTrue(sync_config.sync_config(self.root, payload.getvalue(), "2.2.6"))
         self.assertTrue((config / "node_modules/cached").exists())
 

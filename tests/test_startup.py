@@ -9,6 +9,7 @@ import tempfile
 import time
 import unittest
 from oc_box import oc_box as box, sync_config as sync, terminal_ui as ui
+from test_dependency_cache import installed_sdk
 
 APP = Path(__file__).resolve().parents[1]
 
@@ -62,17 +63,16 @@ class ConfigCacheTests(unittest.TestCase):
             root = Path(name)
             config = root / ".config/opencode"
             modules = config / "node_modules"
-            modules.mkdir(parents=True)
             manifest = json.dumps({"dependencies": {"@opencode-ai/plugin": "1.19.5"}})
-            (config / "package.json").write_text(manifest)
-            (modules / "cached").write_text("already installed")
-            (config / "stale-plugin.ts").write_text("do not load again")
-            sync.sync_config(
-                root,
-                archive(
-                    {"package.json": manifest, "plugins/current.ts": "current plugin"}
-                ),
+            payload = archive(
+                {"package.json": manifest, "plugins/current.ts": "current plugin"}
             )
+            self.assertFalse(sync.sync_config(root, payload))
+            modules.mkdir()
+            (modules / "cached").write_text("already installed")
+            sync.complete_config(root, payload)
+            (config / "stale-plugin.ts").write_text("do not load again")
+            self.assertTrue(sync.sync_config(root, payload))
             self.assertEqual((modules / "cached").read_text(), "already installed")
             self.assertFalse((config / "stale-plugin.ts").exists())
             self.assertTrue((config / "plugins/current.ts").is_file())
@@ -127,6 +127,8 @@ class ConfigCacheTests(unittest.TestCase):
                 modules = config / "node_modules"
                 modules.mkdir()
                 (modules / "cached").write_text("old")
+                if recorded:
+                    sync.complete_config(root, archive(before), runtime)
                 self.assertFalse(sync.sync_config(root, archive(after), replacement))
                 self.assertFalse(modules.exists())
 
@@ -162,6 +164,7 @@ class ConfigCacheTests(unittest.TestCase):
             (config / "package-lock.json").write_text(lock)
             (config / "node_modules").mkdir()
             (config / "node_modules/cached").write_text("already installed")
+            sync.complete_config(root, archive(host), "1.19.5")
             self.assertTrue(sync.sync_config(root, archive(host), "1.19.5"))
             self.assertEqual((config / "package.json").read_text(), runtime)
             self.assertEqual((config / "package-lock.json").read_text(), lock)
@@ -176,8 +179,7 @@ class ConfigCacheTests(unittest.TestCase):
             root = Path(name)
             config = root / ".config/opencode"
             plugin = config / "node_modules/@opencode-ai/plugin"
-            plugin.mkdir(parents=True)
-            (plugin / "package.json").write_text('{"version":"1.19.5"}')
+            installed_sdk(config)
             (config / "package.json").write_text(
                 '{"dependencies":{"@opencode-ai/plugin":"1.19.5"}}'
             )
@@ -199,8 +201,7 @@ class ConfigCacheTests(unittest.TestCase):
             root = Path(name)
             config = root / ".config/opencode"
             plugin = config / "node_modules/@opencode-ai/plugin"
-            plugin.mkdir(parents=True)
-            (plugin / "package.json").write_text('{"version":"1.19.5"}')
+            installed_sdk(config)
             (config / "package.json").write_text(
                 '{"dependencies":{"@opencode-ai/plugin":"1.19.5","custom":"1"}}'
             )

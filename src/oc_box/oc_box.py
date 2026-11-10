@@ -1656,6 +1656,36 @@ def ensure_opencode_version(data, version):
     print(f"oc-box: OpenCode {version} matches the host version.", flush=True)
 
 
+def sync_runtime_config(data, archive, version, *, complete=False):
+    unpack = (PACKAGE / "sync_config.py").read_text()
+    command = exec_command(
+        data, ["python3", "-c", unpack, version, *(["--complete"] if complete else [])]
+    )
+    try:
+        proc = subprocess.run(
+            command,
+            env=command.environment,
+            input=archive,
+            capture_output=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise BoxError("Copying configuration into the container timed out.") from exc
+    if proc.returncode:
+        raise BoxError(
+            "Cannot complete container dependency state."
+            if complete
+            else "Cannot copy OpenCode config into container: "
+            + credentials.redact(proc.stderr.decode(errors="replace"))
+        )
+    if not complete and proc.stdout:
+        print("oc-box: " + proc.stdout.decode(errors="replace").strip(), flush=True)
+    return (
+        proc.stdout.decode(errors="replace").strip()
+        == "Reusing container plugin dependencies."
+    )
+
+
 def prepare_runtime(path, data, version):
     # Install the unmodified upstream version currently installed on the host.
     # Node/npm/uv are also used by the user's ordinary MCP/LSP setup.
@@ -1671,30 +1701,7 @@ def prepare_runtime(path, data, version):
             timeout=120,
         )
     archive = config_archive(data)
-    unpack = (PACKAGE / "sync_config.py").read_text()
-    copy_command = exec_command(data, ["python3", "-c", unpack, version])
-    # binary input requires the binary subprocess mode here.
-    try:
-        proc = subprocess.run(
-            copy_command,
-            env=copy_command.environment,
-            input=archive,
-            capture_output=True,
-            timeout=60,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise BoxError("Copying configuration into the container timed out.") from exc
-    if proc.returncode:
-        raise BoxError(
-            "Cannot copy OpenCode config into container: "
-            + credentials.redact(proc.stderr.decode(errors="replace"))
-        )
-    if proc.stdout:
-        print("oc-box: " + proc.stdout.decode(errors="replace").strip(), flush=True)
-    reused = (
-        proc.stdout.decode(errors="replace").strip()
-        == "Reusing container plugin dependencies."
-    )
+    reused = sync_runtime_config(data, archive, version)
     if v2 and not reused:
         # V2 can supply its SDK to local plugins, but unlike V1 it does not
         # automatically install a copied config directory's custom manifest.
@@ -1713,6 +1720,7 @@ def prepare_runtime(path, data, version):
                 ),
                 timeout=600,
             )
+            sync_runtime_config(data, archive, version, complete=True)
     auth = (
         Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
         / "opencode/auth.json"
@@ -1791,6 +1799,7 @@ def prepare_runtime(path, data, version):
                 capture=True,
                 timeout=180,
             )
+            sync_runtime_config(data, archive, version, complete=True)
     if v2:
         # Resolve the public readiness boundary before inspecting plugin state;
         # early agent/plugin snapshots can legitimately precede activation.
