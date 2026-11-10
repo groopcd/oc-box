@@ -56,6 +56,57 @@ class VisibleOutput:
         return self.state == "text" and not self.decoder.getstate()[0]
 
 
+class _LoadingOutput:
+    """Keep banner controls outside application fragments, only during startup.
+
+    Retain at most 4 KiB of an incomplete control/UTF-8 fragment. Longer strings
+    stream through unchanged; drawing waits for their actual closing boundary.
+    This is not a terminal emulator, and even unfinished fragments flush at EOF.
+    """
+
+    def __init__(self):
+        self.detector = VisibleOutput()
+        self.pending = bytearray()
+        self.fragment_forwarded = False
+        self.visible = False
+
+    def safe_to_draw(self):
+        return not self.visible and self.detector.safe_to_draw()
+
+    def feed(self, output, forward, clear):
+        ready = bytearray()
+        for index, value in enumerate(output):
+            self.pending.append(value)
+            self.visible |= self.detector.feed(bytes((value,)))
+            if self.detector.safe_to_draw():
+                if self.visible:
+                    forward(ready)
+                    if self.fragment_forwarded:
+                        # Its prefix is already on the physical terminal. Finish
+                        # it before inserting any of our own control bytes.
+                        forward(self.pending)
+                        clear()
+                    else:
+                        clear()
+                        forward(self.pending)
+                    self.pending.clear()
+                    forward(output[index + 1 :])
+                    return True
+                ready.extend(self.pending)
+                self.pending.clear()
+                self.fragment_forwarded = False
+            elif len(self.pending) >= 4096:
+                ready.extend(self.pending)
+                self.pending.clear()
+                self.fragment_forwarded = True
+        forward(ready)
+        return False
+
+    def finish(self, forward):
+        forward(self.pending)
+        self.pending.clear()
+
+
 def write_all(fd, content):
     view = memoryview(content)
     while view:
@@ -117,7 +168,7 @@ def run_tui(
         if not interactive:
             return process.wait()
 
-        detector = VisibleOutput()
+        stream = _LoadingOutput()
         loading = show_loading
         banner_drawn = False
         started = time.monotonic()
@@ -144,9 +195,16 @@ def run_tui(
             )
             banner_drawn = not clear
 
+        def forward(content):
+            write_all(output_fd, content)
+
+        def clear_banner():
+            if banner_drawn:
+                banner(clear=True)
+
         while True:
             now = time.monotonic()
-            if loading and now >= next_update and detector.safe_to_draw():
+            if loading and now >= next_update and stream.safe_to_draw():
                 banner()
                 next_update = now + refresh
             readers = [master] + ([input_fd] if stdin_open else [])
@@ -160,11 +218,10 @@ def run_tui(
                     output = b""
                 if not output:
                     break
-                if loading and detector.feed(output):
-                    if banner_drawn:
-                        banner(clear=True)
-                    loading = False
-                write_all(output_fd, output)
+                if loading:
+                    loading = not stream.feed(output, forward, clear_banner)
+                else:
+                    forward(output)
             if input_fd in ready:
                 content = os.read(input_fd, 65536)
                 if content:
@@ -173,7 +230,8 @@ def run_tui(
                     stdin_open = False
             if process.poll() is not None and not ready:
                 break
-        if banner_drawn and detector.safe_to_draw():
+        stream.finish(forward)
+        if banner_drawn and stream.safe_to_draw():
             banner(clear=True)
         return process.wait()
     finally:
