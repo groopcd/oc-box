@@ -8,10 +8,20 @@ normal host service, paid inference, or interactive UI acceptance is provided.
 Offline tests of this runner do NOT constitute rootless Podman acceptance.
 """
 
+import sys
+
+# Direct entry must be isolated before argparse (or any other shadowable import).
+# Imported unit/library use is not direct startup and never bypasses main's guard.
+if __name__ == "__main__" and not (sys.flags.isolated and sys.dont_write_bytecode):
+    sys.stderr.write("session-history fixture: category=invalid-options\n")
+    raise SystemExit(2)
+
 import argparse
 import contextlib
 import hashlib
 import importlib
+import importlib.machinery
+import importlib.util
 import io
 import json
 import os
@@ -22,14 +32,13 @@ import shlex
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 import threading
 import time
 import traceback
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 FORMAT = "oc-box-session-sync-host-v1"
@@ -221,6 +230,7 @@ def git(source, *arguments):
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",
         },
         stdin=subprocess.DEVNULL,
         capture_output=True,
@@ -251,14 +261,12 @@ def source_snapshot(source, expected):
         "--ignored",
         "--exclude-standard",
         "-z",
-        "--",
-        "src",
-        "tools",
     ).split(b"\0")
     # Status omits ignored files. Bytecode caches are never read (see
     # isolate_bytecode) and editable-build metadata is data, not code; the import
     # guard additionally requires every loaded module under the source to be a
-    # hashed tracked file.
+    # hashed tracked file. The checkout root is also an import path: refuse its
+    # ignored Python/package/extension code, not just code below src and tools.
     require(
         all(
             (item.endswith(b".pyc") and b"/__pycache__/" in b"/" + item)
@@ -266,21 +274,33 @@ def source_snapshot(source, expected):
                 item.startswith(b"src/oc_box.egg-info/")
                 and item.rsplit(b"/", 1)[-1] in EGG_INFO
             )
+            or (
+                not item.startswith((b"src/", b"tools/"))
+                and not item.endswith((b".py", b".pyc", b".pyo", b".so", b".pyd"))
+            )
             for item in ignored
             if item
         ),
         "clean-source-required",
     )
     records = git(
-        source, "ls-files", "--stage", "-z", "--", "src/oc_box", *DONORS
+        source,
+        "ls-tree",
+        "-r",
+        "-z",
+        "--full-tree",
+        expected,
+        "--",
+        "src/oc_box",
+        *DONORS,
     ).split(b"\0")
     hashes = {}
     for record in filter(None, records):
         header, name = record.split(b"\t", 1)
-        mode, blob, stage = header.split()
+        mode, kind, blob = header.split()
         relative = name.decode()
         require(
-            mode in (b"100644", b"100755") and stage == b"0", "clean-source-required"
+            mode in (b"100644", b"100755") and kind == b"blob", "clean-source-required"
         )
         path = safe_path(source / relative)
         content = path.read_bytes()
@@ -346,19 +366,54 @@ def isolate_bytecode():
     sys.pycache_prefix = "/nonexistent-oc-box-bytecode-" + secrets.token_hex(16)
 
 
+def interactive_bootstrap(source, hashes):
+    """Execute only authenticated donor bytes in a pinned, code-free namespace."""
+    name = "tools.test_interactive_podman"
+    path = safe_path(source / "tools/test_interactive_podman.py")
+    content = path.read_bytes()
+    require(
+        hashlib.sha256(content).hexdigest()
+        == hashes["tools/test_interactive_podman.py"],
+        "source-changed",
+    )
+    package = ModuleType("tools")
+    package.__path__ = [str(safe_path(source / "tools"))]
+    package.__package__ = "tools"
+    package.__spec__ = importlib.machinery.ModuleSpec(
+        "tools", loader=None, is_package=True
+    )
+    package.__spec__.submodule_search_locations = package.__path__
+    sys.modules["tools"] = package
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    exec(compile(content, str(path), "exec"), module.__dict__)  # noqa: S102 -- authenticated commit bytes, never cached code
+    package.test_interactive_podman = module
+    return module
+
+
 def load_source(source, expected):
     identity = source_snapshot(source, expected)
     source = safe_path(source)
     require(not Path(__file__).resolve().is_relative_to(source), "runner-placement")
     import_guard(source)
+    # Current file bytes cannot attest prior same-path in-memory implementations.
+    require(
+        not any(
+            name in ("oc_box", "tools") or name.startswith(("oc_box.", "tools."))
+            for name in sys.modules
+        ),
+        "source-shadowing",
+    )
     isolate_bytecode()
+    # Neither a root tools.py/pyc nor a foreign regular tools package may execute
+    # before origin checks. The donor is a verified stdlib bootstrap, not proof
+    # of this external runner's own initial trust or outside-source placement.
+    interactive = interactive_bootstrap(source, identity["sha256"])
     sys.path[:0] = [str(source / "src"), str(source)]
-    # This candidate helper cannot participate in its own initial trust proof.
-    # The independent stdlib bootstrap above hashes it as an explicit donor;
-    # bytecode isolation, all loaded origins and the repeated snapshot bind it.
+    interactive.load_source(source, expected)
     guards = importlib.import_module("tools.acceptance_guards")
     fixture = importlib.import_module("tools.test_global_vault_podman")
-    interactive = importlib.import_module("tools.test_interactive_podman")
     import_guard(source, identity["sha256"])
     require(
         fixture.APP.resolve() == source

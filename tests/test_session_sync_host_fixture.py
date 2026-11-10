@@ -48,10 +48,11 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         self.stage = (
             b"\0".join(
                 b"100644 "
+                + b"blob "
                 + hashlib.sha1(b"blob " + str(len(value)).encode() + b"\0" + value)
                 .hexdigest()
                 .encode()
-                + b" 0\t"
+                + b"\t"
                 + name.encode()
                 for name, value in self.files.items()
             )
@@ -68,7 +69,11 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             ("rev-list", "--count", "HEAD"): b"80\n",
         }
         if args[0] == "ls-files":
-            return self.ignored if "--ignored" in args else self.stage
+            self.assertIn("--ignored", args)
+            return self.ignored
+        if args[0] == "ls-tree":
+            self.assertIn(self.commit, args)
+            return self.stage
         return responses[args]
 
     def test_host_guard_matrix(self):
@@ -129,6 +134,36 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                     )
             host.assert_not_called()
             source.assert_not_called()
+
+    def test_direct_startup_requires_isolation_before_sibling_stdlib_can_execute(self):
+        external = self.parent / "external"
+        external.mkdir()
+        script = external / SCRIPT.name
+        script.write_bytes(SCRIPT.read_bytes())
+        marker = self.parent / "untrusted-argparse-executed"
+        (external / "argparse.py").write_text(
+            "from pathlib import Path\nPath("
+            + repr(str(marker))
+            + ").write_text('executed')\nraise RuntimeError('untrusted sibling')\n"
+        )
+        for flags, code in (([], 2), (["-B"], 2), (["-I"], 2), (["-I", "-B"], 0)):
+            with self.subTest(flags=flags):
+                marker.unlink(missing_ok=True)
+                result = subprocess.run(
+                    [sys.executable, *flags, str(script), "--help"],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertFalse(marker.exists())
+                if code:
+                    self.assertEqual(
+                        result.stderr,
+                        "session-history fixture: category=invalid-options\n",
+                    )
 
     def test_source_snapshot_hashes_git_owned_runtime_and_donors(self):
         self.source_files()
@@ -215,6 +250,9 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             workspace_service=SimpleNamespace(),
         )
         helper = ModuleType("tools.acceptance_guards")
+        interactive = SimpleNamespace(
+            load_source=lambda *_: order.append("donor-proof")
+        )
 
         def snapshot(*_):
             order.append("proof")
@@ -233,7 +271,24 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 runner, "isolate_bytecode", side_effect=lambda: order.append("isolate")
             ),
             patch.object(runner.importlib, "import_module", side_effect=imported),
+            patch.object(
+                runner,
+                "interactive_bootstrap",
+                side_effect=lambda *_: (
+                    order.append("interactive-bootstrap") or interactive
+                ),
+            ),
             patch.object(sys, "path", list(sys.path)),
+            patch.object(
+                sys,
+                "modules",
+                {
+                    name: module
+                    for name, module in sys.modules.items()
+                    if name not in ("oc_box", "tools")
+                    and not name.startswith(("oc_box.", "tools."))
+                },
+            ),
         ):
             loaded = runner.load_source(self.source, self.commit)
         self.assertIs(loaded.guards, helper)
@@ -243,9 +298,10 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 "proof",
                 "origins",
                 "isolate",
+                "interactive-bootstrap",
+                "donor-proof",
                 "tools.acceptance_guards",
                 "tools.test_global_vault_podman",
-                "tools.test_interactive_podman",
                 "origins",
                 "proof",
             ],
@@ -257,7 +313,18 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             patch.object(runner, "import_guard"),
             patch.object(runner, "isolate_bytecode"),
             patch.object(runner.importlib, "import_module", side_effect=imported),
+            patch.object(runner, "interactive_bootstrap", return_value=interactive),
             patch.object(sys, "path", list(sys.path)),
+            patch.object(
+                sys,
+                "modules",
+                {
+                    name: module
+                    for name, module in sys.modules.items()
+                    if name not in ("oc_box", "tools")
+                    and not name.startswith(("oc_box.", "tools."))
+                },
+            ),
             self.assertRaisesRegex(runner.Refusal, "source-changed"),
         ):
             runner.load_source(self.source, self.commit)
@@ -312,6 +379,10 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             "from pathlib import Path\nfrom oc_box import oc_box as box\n"
             "APP = Path(__file__).parents[1]\nworkspace_service = object()\n"
         )
+        (self.source / "tools/test_interactive_podman.py").write_text(
+            "def load_source(source, expected):\n"
+            " from tools import acceptance_guards, test_global_vault_podman\n"
+        )
         (self.source / ".gitignore").write_text("__pycache__/\n")
         env = {
             "PATH": os.defpath,
@@ -351,6 +422,89 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             )
         git("update-ref", "HEAD", parent)
         return parent, helper
+
+    def test_expected_commit_tree_not_new_index_binds_initial_helper_bytes(self):
+        commit, helper = self.private_git_source()
+        original = runner.git
+        changed = False
+
+        def race(source, *arguments):
+            nonlocal changed
+            output = original(source, *arguments)
+            if arguments[0] == "status" and not changed:
+                changed = True
+                helper.write_text("VALUE = 'INDEX_RACE'\n")
+                subprocess.run(
+                    ["git", "-C", str(source), "add", "tools/acceptance_guards.py"],
+                    env={
+                        "PATH": os.defpath,
+                        "GIT_CONFIG_GLOBAL": "/dev/null",
+                        "GIT_CONFIG_NOSYSTEM": "1",
+                    },
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    check=True,
+                    timeout=15,
+                )
+            return output
+
+        with (
+            patch.object(runner, "git", side_effect=race),
+            patch.object(runner.importlib, "import_module") as imports,
+            self.assertRaisesRegex(runner.Refusal, "source-changed"),
+        ):
+            runner.source_snapshot(self.source, commit)
+        self.assertTrue(changed)
+        imports.assert_not_called()
+
+    def test_replacement_ref_cannot_relabel_other_commit_as_expected_source(self):
+        commit, helper = self.private_git_source()
+        env = {
+            "PATH": os.defpath,
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "Synthetic Fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Synthetic Fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+        }
+
+        def git(*args, value=None):
+            return (
+                subprocess.run(
+                    ["git", "-C", str(self.source), *args],
+                    env=env,
+                    input=value,
+                    capture_output=True,
+                    check=True,
+                    timeout=15,
+                )
+                .stdout.decode()
+                .strip()
+            )
+
+        helper.write_text("VALUE = 'REPLACEMENT_TREE'\n")
+        git("add", "tools/acceptance_guards.py")
+        replacement = git(
+            "-c",
+            "commit.gpgsign=false",
+            "commit-tree",
+            git("write-tree"),
+            "-p",
+            git("rev-parse", commit + "^"),
+            value=b"synthetic replacement\n",
+        )
+        git("replace", commit, replacement)
+        self.assertEqual(git("rev-parse", "HEAD"), commit)
+        self.assertEqual(git("status", "--porcelain"), "")
+        with (
+            patch.object(runner.importlib, "import_module") as imports,
+            self.assertRaisesRegex(
+                runner.Refusal, "clean-source-required|source-changed"
+            ),
+        ):
+            runner.source_snapshot(self.source, commit)
+        imports.assert_not_called()
 
     def test_real_candidate_helper_cache_shadow_and_byte_changes_fail_closed(self):
         commit, helper = self.private_git_source()
@@ -419,6 +573,180 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                         },
                     )
                 self.assertFalse(marker.exists(), "untrusted helper code executed")
+
+    def test_actual_combined_donor_loader_initializes_before_candidate_imports(self):
+        """Real committed donor/runtime bytes; only read-only Git may execute."""
+        checkout = SCRIPT.parents[1]
+        env = {
+            "PATH": os.defpath,
+            "LANG": "C.UTF-8",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+        }
+
+        def git(*args):
+            return (
+                subprocess.run(
+                    ["git", *args],
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    check=True,
+                    timeout=60,
+                )
+                .stdout.decode()
+                .strip()
+            )
+
+        commit = git("-C", str(checkout), "rev-parse", "HEAD")
+        git(
+            "clone",
+            "--local",
+            "--no-hardlinks",
+            "--single-branch",
+            "--no-tags",
+            "--no-checkout",
+            str(checkout),
+            str(self.source),
+        )
+        git("-C", str(self.source), "checkout", "--quiet", "--detach", commit)
+        (self.source / ".git/info/exclude").write_text("/tools.py\n/tools.pyc\n")
+        marker = self.parent / "untrusted-tools-executed"
+        script = """
+import importlib.util,importlib._bootstrap_external as bytecode,json,sys,types
+from pathlib import Path
+spec=importlib.util.spec_from_file_location('external_focused_runner',sys.argv[1])
+r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r)
+source=Path(sys.argv[2]);commit=sys.argv[3];mode=sys.argv[4];marker=Path(sys.argv[5])
+trap='from pathlib import Path\\nPath('+repr(str(marker))+').write_text("executed")\\nraise RuntimeError("untrusted tools")\\n'
+if mode=='root-py': (source/'tools.py').write_text(trap)
+if mode=='root-pyc':
+    code=compile(trap,str(source/'tools.pyc'),'exec')
+    (source/'tools.pyc').write_bytes(bytecode._code_to_timestamp_pyc(code,0,0))
+if mode=='bootstrap-pyc':
+    bootstrap=source/'tools/test_interactive_podman.py';info=bootstrap.stat()
+    cache=Path(importlib.util.cache_from_source(str(bootstrap)))
+    cache.parent.mkdir(parents=True,exist_ok=True)
+    cache.write_bytes(bytecode._code_to_timestamp_pyc(
+        compile(trap,str(bootstrap),'exec'),int(info.st_mtime),info.st_size))
+if mode=='foreign-regular':
+    foreign=marker.parent/'foreign'
+    (foreign/'tools').mkdir(parents=True)
+    (foreign/'tools/__init__.py').write_text(trap)
+    sys.path.insert(0,str(foreign))
+if mode in ('same-path-preload','same-app-preload'):
+    name='tools.acceptance_guards' if mode=='same-path-preload' else 'oc_box'
+    filename='tools/acceptance_guards.py' if mode=='same-path-preload' else 'src/oc_box/__init__.py'
+    module=types.ModuleType(name)
+    module.__file__=str(source/filename)
+    module.unattested_in_memory=True
+    sys.modules[module.__name__]=module
+counts={'git':0,'engine':0,'network':0}
+def audit(event,args):
+    if event in ('subprocess.Popen','os.posix_spawn'):
+        command=args[1]
+        if (Path(args[0]).name=='git' and command[1:3]==['-C',str(source)]
+                and command[3] in ('rev-parse','status','rev-list','ls-files','ls-tree')):
+            if event=='subprocess.Popen': counts['git']+=1
+        else:
+            counts['engine']+=1
+            raise AssertionError('non-Git subprocess refused')
+    if event.startswith('socket.'):
+        counts['network']+=1
+        raise AssertionError('network refused')
+    if event in ('os.system','os.exec','os.fork','os.forkpty'):
+        counts['engine']+=1
+        raise AssertionError('process boundary refused')
+sys.addaudithook(audit)
+try:
+    loaded=r.load_source(source,commit)
+    initial=loaded.interactive.INITIAL_SOURCE
+    late_refusal=None
+    if initial is None:
+        try: loaded.interactive.load_source(source,commit)
+        except loaded.interactive.BootstrapError as error: late_refusal=str(error)
+    print(json.dumps({
+        'initialized':initial is not None,
+        'same_fixture':loaded.fixture is loaded.interactive.fixture,
+        'same_guards':loaded.guards is loaded.interactive.guards,
+        'commit':initial['commit'] if initial else None,
+        'manifest_bound':initial is not None and all(
+            initial['sha256'].get(name)==digest
+            for name,digest in loaded.identity['sha256'].items()),
+        'external':not Path(r.__file__).is_relative_to(source),
+        'late_refusal':late_refusal,'counts':counts,
+    }))
+except BaseException as error:
+    if type(error).__name__ in ('Refusal','BootstrapError') and str(error) in (
+            'clean-source-required','source-shadowing'):
+        print(json.dumps({'refusal':str(error),'counts':counts,
+            'bootstrap_imported':'tools.test_interactive_podman' in sys.modules}))
+        raise SystemExit(0)
+    print(json.dumps({'error_type':type(error).__name__,'counts':counts}))
+    raise SystemExit(1)
+"""
+        for mode in (
+            "plain",
+            "root-py",
+            "root-pyc",
+            "bootstrap-pyc",
+            "foreign-regular",
+            "same-path-preload",
+            "same-app-preload",
+        ):
+            for name in ("tools.py", "tools.pyc"):
+                (self.source / name).unlink(missing_ok=True)
+            with self.subTest(mode=mode):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-B",
+                        "-c",
+                        script,
+                        str(SCRIPT),
+                        str(self.source),
+                        commit,
+                        mode,
+                        str(marker),
+                    ],
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(marker.exists(), "untrusted package executed")
+                observed = json.loads(result.stdout)
+                self.assertEqual(observed["counts"]["engine"], 0)
+                self.assertEqual(observed["counts"]["network"], 0)
+                self.assertGreater(observed["counts"]["git"], 0)
+                if mode in ("same-path-preload", "same-app-preload"):
+                    self.assertEqual(observed["refusal"], "source-shadowing")
+                    self.assertFalse(observed["bootstrap_imported"])
+                elif mode in ("root-py", "root-pyc"):
+                    self.assertEqual(observed["refusal"], "clean-source-required")
+                    self.assertFalse(observed["bootstrap_imported"])
+                else:
+                    self.assertEqual(
+                        {
+                            key: value
+                            for key, value in observed.items()
+                            if key != "counts"
+                        },
+                        {
+                            "initialized": True,
+                            "same_fixture": True,
+                            "same_guards": True,
+                            "commit": commit,
+                            "manifest_bound": True,
+                            "external": True,
+                            "late_refusal": None,
+                        },
+                    )
 
     def test_source_symlink_and_missing_manifest_refuse(self):
         self.source_files()
@@ -511,6 +839,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         self.assertNotIn("GIT_DIR", env)
         self.assertNotIn("GIT_CONFIG_COUNT", env)
         self.assertEqual(env["GIT_OPTIONAL_LOCKS"], "0")
+        self.assertEqual(env["GIT_NO_REPLACE_OBJECTS"], "1")
         self.assertEqual(command.call_args.kwargs["stdin"], subprocess.DEVNULL)
 
     def test_fresh_placement_rejects_all_retained_ancestors_and_symlinks(self):
@@ -1543,6 +1872,8 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         tolerated = (
             b"src/oc_box/__pycache__/oc_box.cpython-313.pyc\0"
             b"src/oc_box.egg-info/PKG-INFO\0"
+            b"__pycache__/root.cpython-313.pyc\0"
+            b"synthetic-notes.txt\0"
         )
         self.ignored = tolerated
         with patch.object(runner, "git", side_effect=self.git):
@@ -1554,6 +1885,10 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             b"src/oc_box.egg-info.py",
             b"src/oc_box.egg-info/injected.py",
             b"src/oc_box/x__pycache__/helper.pyc",
+            b"tools.py",
+            b"tools.pyc",
+            b"foreign_package/__init__.py",
+            b"root_native.cpython-313-x86_64-linux-gnu.so",
         ):
             self.ignored = tolerated + stray + b"\0"
             with (
@@ -1899,6 +2234,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             APP=self.source,
             box=SimpleNamespace(PACKAGE=self.source / "src/oc_box"),
             workspace_service=SimpleNamespace(),
+            load_source=lambda *_: order.append("donor-proof"),
         )
 
         def imported(name):
@@ -1912,11 +2248,27 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 runner, "isolate_bytecode", side_effect=lambda: order.append("isolate")
             ),
             patch.object(runner.importlib, "import_module", side_effect=imported),
+            patch.object(
+                runner,
+                "interactive_bootstrap",
+                side_effect=lambda *_: order.append("interactive-bootstrap") or fixture,
+            ),
             patch.object(sys, "path", list(sys.path)),
+            patch.object(
+                sys,
+                "modules",
+                {
+                    name: module
+                    for name, module in sys.modules.items()
+                    if name not in ("oc_box", "tools")
+                    and not name.startswith(("oc_box.", "tools."))
+                },
+            ),
         ):
             runner.load_source(self.source, self.commit)
         self.assertEqual(order[0], "isolate")
-        self.assertEqual(len(order), 4)
+        self.assertEqual(order[1:3], ["interactive-bootstrap", "donor-proof"])
+        self.assertEqual(len(order), 5)
 
     def test_failure_trace_reports_only_code_locations_never_messages(self):
         def inner():
