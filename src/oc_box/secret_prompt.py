@@ -33,6 +33,12 @@ KEYS = {
     b"\x1b[3~": "delete",
 }
 MAX_PASSPHRASE_BYTES = 1024
+UTF8_SECOND_BYTE_RANGES = {
+    0xE0: (0xA0, 0xBF),
+    0xED: (0x80, 0x9F),
+    0xF0: (0x90, 0xBF),
+    0xF4: (0x80, 0x8F),
+}
 
 
 def validate_minimum(length):
@@ -363,12 +369,20 @@ def read_secret(prompt, *, allow_reveal=False, maximum=1024):
                     if 240 <= char <= 244
                     else 0
                 )
-                if not length:
+                # Check every available continuation before waiting. Some
+                # incremental decoders defer even a known surrogate prefix.
+                continuation = pending[1:length]
+                lower, upper = UTF8_SECOND_BYTE_RANGES.get(char, (0x80, 0xBF))
+                if (
+                    not length
+                    or any(not 0x80 <= byte <= 0xBF for byte in continuation)
+                    or (continuation and not lower <= continuation[0] <= upper)
+                ):
                     raise ValueError(
                         "Secret input rejected: invalid UTF-8; re-enter the complete value."
                     )
                 if len(pending) < length:
-                    break
+                    break  # Only a genuinely valid incomplete prefix waits.
                 try:
                     text = bytes(pending[:length]).decode("utf-8")
                 except UnicodeError:

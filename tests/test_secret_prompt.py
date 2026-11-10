@@ -445,6 +445,44 @@ else:
         self.assertIn(b"\r\x1b[2KSecret value: [cancelled]", self.output[start:])
         self.assertNotIn(VALUE.encode(), self.output[start:])
 
+    def test_known_invalid_short_utf8_prefix_aborts_without_waiting_for_more_input(
+        self,
+    ):
+        for malformed in (
+            b"\xe2\n",
+            b"\xf0\x90\r",
+            b"\xe2\x03",
+            b"\xf0\x90\x04",
+            b"\xe0\x80",
+            b"\xed\xa0",
+            b"\xf0\x80",
+            b"\xf4\x90",
+        ):
+            with self.subTest(malformed=malformed):
+                self.begin()
+                self.send(VALUE)
+                self.wait_for(f"{len(VALUE)} chars")
+                self.send(malformed)
+                self.assertEqual(self.finish(), {"error": "ValueError"})
+                self.assertNotIn(b"[accepted]", self.output)
+                self.assertNotIn(VALUE.encode(), self.output)
+                self.assertIn(b"[cancelled]", self.output)
+                self.cleanup()
+
+    def test_valid_three_and_four_byte_prefixes_wait_for_remaining_bytes(self):
+        self.begin()
+        for char in ("€", "😀"):
+            encoded = char.encode()
+            for byte in encoded[:-1]:
+                self.send(bytes([byte]))
+                self.collect()
+                self.assertIsNone(self.process.poll())
+            self.send(encoded[-1:])
+        self.wait_for("2 chars")
+        self.send(b"\n")
+        self.assertEqual(self.finish(), {"values": ["€😀"]})
+        self.assertNotIn("€😀".encode(), self.output)
+
     def test_resize_redraw_hides_fields_within_new_width(self):
         self.begin()
         self.send(VALUE)
