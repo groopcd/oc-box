@@ -379,11 +379,30 @@ def decrypt_bytes(path, private):
         )
 
 
-def pipeline_error(processes, errors):
+def pipeline_codes(processes):
+    # Keep the session leaders waitable until the last group signal. Even an
+    # exited leader then pins its PID/PGID against reuse while descendants may
+    # still hold the pipe, key memfd or private output descriptors. Popen.poll()
+    # would reap it and lose that ownership anchor.
+    codes = []
+    for process in processes:
+        result = os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        codes.append(
+            None
+            if result is None
+            else (
+                result.si_status
+                if result.si_code == os.CLD_EXITED
+                else -result.si_status
+            )
+        )
+    return codes
+
+
+def pipeline_error(codes, errors):
     """Report only exit codes and fixed diagnostic categories, never tool text."""
     stages = []
-    for index, (process, stream) in enumerate(zip(processes, errors)):
-        code = process.poll()
+    for index, (code, stream) in enumerate(zip(codes, errors)):
         if code in (None, 0):
             continue
         name = "producer" if index == 0 else "consumer"
@@ -460,6 +479,55 @@ def pipeline_error(processes, errors):
     )
 
 
+def cleanup_pipeline(processes):
+    failed = False
+
+    def signal_groups(signum):
+        nonlocal failed
+        for process in processes:
+            try:
+                # Refuse to signal a numeric group if an outside reaper has
+                # already removed our leader/ownership anchor.
+                os.waitid(os.P_PID, process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except OSError:
+                failed = True
+                continue
+            try:
+                os.killpg(process.pid, signum)
+            except ProcessLookupError:
+                pass
+            except OSError:
+                failed = True
+
+    try:
+        signal_groups(signal.SIGTERM)
+        until = time.monotonic() + 3
+        while any(code is None for code in pipeline_codes(processes)):
+            if time.monotonic() >= until:
+                break
+            time.sleep(0.02)
+        # A completed leader is not evidence that its descendants exited.
+        # Give those descendants a short grace period too, without making
+        # every successful streaming operation wait the full leader deadline.
+        if processes:
+            time.sleep(0.1)
+    except OSError:
+        failed = True
+    finally:
+        # Escalate every owned group before reaping any leader, including the
+        # groups whose leaders exited before failure, timeout or cancellation.
+        signal_groups(signal.SIGKILL)
+        for process in processes:
+            try:
+                process.wait(timeout=3)
+            except (OSError, subprocess.SubprocessError):
+                failed = True
+    if failed:
+        raise BackupError(
+            "Backup pipeline cleanup failed; private tool output was not logged."
+        )
+
+
 def stream_pipeline(
     first, second, *, source=None, destination=None, first_fds=(), timeout=3600.0
 ):
@@ -491,7 +559,7 @@ def stream_pipeline(
             producer.stdout.close()
             until = time.monotonic() + timeout
             while True:
-                codes = [process.poll() for process in processes]
+                codes = pipeline_codes(processes)
                 if all(code is not None for code in codes):
                     break
                 if time.monotonic() >= until:
@@ -499,29 +567,25 @@ def stream_pipeline(
                         "Backup streaming operation timed out; partial data was not activated."
                     )
                 if any(code not in (None, 0) for code in codes):
-                    raise pipeline_error(processes, errors)
+                    raise pipeline_error(codes, errors)
                 time.sleep(0.02)
-            if any(process.returncode for process in processes):
-                raise pipeline_error(processes, errors)
+            if any(codes):
+                raise pipeline_error(codes, errors)
         except OSError as exc:
             raise BackupError(
                 "Cannot run backup tool; check age, Python, and Podman on the host."
             ) from exc
         finally:
-            if processes and processes[0].stdout is not None:
-                processes[0].stdout.close()
-            for process in processes:
-                if process.poll() is None:
-                    try:
-                        os.killpg(process.pid, signal.SIGTERM)
-                    except ProcessLookupError:
-                        pass
-            for process in processes:
+            primary_failure = sys.exc_info()[0] is not None
+            try:
+                if processes and processes[0].stdout is not None:
+                    processes[0].stdout.close()
+            finally:
                 try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    os.killpg(process.pid, signal.SIGKILL)
-                    process.wait()
+                    cleanup_pipeline(processes)
+                except BackupError:
+                    if not primary_failure:
+                        raise
 
 
 def encrypt_stream(producer, recipient, path):

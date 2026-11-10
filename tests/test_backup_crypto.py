@@ -1,8 +1,10 @@
+import ctypes
 import json
 import os
 from pathlib import Path
 import pty
 import select
+import signal
 import termios
 import time
 import shutil
@@ -362,6 +364,301 @@ class AgeEnvelopeTests(unittest.TestCase):
             process.wait(timeout=3)
             os.close(master)
             os.close(slave)
+
+
+class PipelineOwnershipTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(
+            prefix="oc-box-pipeline-owned-", dir="/tmp"
+        )
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        # Adopt our orphaned synthetic descendants so the test can reap
+        # them and assert disappearance, not merely ignore lingering zombies.
+        libc = ctypes.CDLL(None, use_errno=True)
+        previous = ctypes.c_int()
+        self.assertEqual(libc.prctl(37, ctypes.byref(previous), 0, 0, 0), 0)
+        self.assertEqual(libc.prctl(36, 1, 0, 0, 0), 0)
+
+        def restore_subreaper():
+            self.assertEqual(libc.prctl(36, previous.value, 0, 0, 0), 0)
+
+        self.addCleanup(restore_subreaper)
+        self.unrelated = subprocess.Popen(
+            [sys.executable, "-B", "-c", "import time; time.sleep(10)"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            cwd=self.root,
+        )
+
+        def stop_unrelated():
+            if self.unrelated.poll() is None:
+                self.unrelated.kill()
+            self.unrelated.wait(timeout=2)
+
+        self.addCleanup(stop_unrelated)
+
+    def owned_descendant_case(self, stage, outcome, resistant, cleanup_error=False):
+        ready = self.root / "ready.json"
+        ready.unlink(missing_ok=True)
+        # Each child has its own finite alarm, even when it ignores TERM. No
+        # real services, host engines or data participate in these pipelines.
+        leader_code = """
+import json, os, pathlib, signal, sys, time
+ready = pathlib.Path(sys.argv[1])
+child = os.fork()
+if child == 0:
+    signal.alarm(10)
+    if sys.argv[2] == 'resistant':
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    links = [os.readlink('/proc/self/fd/' + str(fd))
+             for fd in (0, 1, 2)]
+    try:
+        key_inherited = 'memfd:oc-box-backup-memory' in os.readlink('/proc/self/fd/' + sys.argv[3])
+    except OSError:
+        key_inherited = False
+    ready.write_text(json.dumps({
+        'pid': os.getpid(), 'leader': os.getppid(),
+        'group': os.getpgrp(), 'session': os.getsid(0),
+        'pipe': any(link.startswith('pipe:') for link in links),
+        'private_output': any('memfd:oc-box-backup-memory' in link for link in links),
+        'key_inherited': key_inherited,
+    }))
+    time.sleep(10)
+    os._exit(0)
+while not ready.exists():
+    time.sleep(0.005)
+os._exit(0)
+"""
+        other_code = """
+import json, pathlib, signal, sys, time
+signal.alarm(10)
+if sys.argv[2] == 'failure':
+    ready = pathlib.Path(sys.argv[1])
+    while True:
+        try:
+            leader = json.loads(ready.read_text())['leader']
+            try:
+                state = pathlib.Path('/proc/' + str(leader) + '/stat').read_text().split(') ')[1][0]
+            except FileNotFoundError:
+                state = 'Z'  # The unfixed pipeline already reaped its leader.
+            if state == 'Z':
+                break
+        except (FileNotFoundError, ValueError):
+            pass
+        time.sleep(0.005)
+    sys.stderr.write('synthetic-private-output: no space left on device /private/path')
+    sys.exit(23)
+elif sys.argv[2] == 'success':
+    sys.exit(0)
+time.sleep(10)
+"""
+        leader_command = [
+            sys.executable,
+            "-B",
+            "-c",
+            leader_code,
+            str(ready),
+            "resistant" if resistant else "cooperative",
+        ]
+        other_command = [sys.executable, "-B", "-c", other_code, str(ready), outcome]
+        first, second = (
+            (leader_command, other_command)
+            if stage == "producer"
+            else (other_command, leader_command)
+        )
+        children = []
+        real_popen, real_sleep, real_killpg = subprocess.Popen, time.sleep, os.killpg
+        seen_exited_leader = []
+        sent_groups = []
+        cancellation = KeyboardInterrupt()
+        cancelled = False
+
+        def spawned(*args, **kwargs):
+            process = real_popen(*args, cwd=self.root, **kwargs)
+            children.append(process)
+            return process
+
+        def pause(seconds):
+            nonlocal cancelled
+            try:
+                leader = json.loads(ready.read_text())["leader"]
+                try:
+                    state = Path(f"/proc/{leader}/stat").read_text().split(") ")[1][0]
+                except FileNotFoundError:
+                    state = (
+                        "Z"
+                        if any(
+                            child.pid == leader and child.returncode == 0
+                            for child in children
+                        )
+                        else "?"
+                    )
+                if state == "Z":
+                    seen_exited_leader.append(leader)
+                    if outcome == "cancel" and not cancelled:
+                        cancelled = True
+                        raise cancellation
+            except (FileNotFoundError, ValueError):
+                pass
+            real_sleep(seconds)
+
+        def signal_group(group, signum):
+            self.assertIn(group, [process.pid for process in children])
+            self.assertNotEqual(group, os.getpgrp())
+            # A waitable child pins this exact group ID even after its exit.
+            os.waitid(os.P_PID, group, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            sent_groups.append((group, signum))
+            if cleanup_error and signum == signal.SIGTERM:
+                raise PermissionError("synthetic-private-cleanup-error")
+            return real_killpg(group, signum)
+
+        descendant = None
+        started = time.monotonic()
+        try:
+            with (
+                crypto.memory_file(b"synthetic-private-key") as identity,
+                crypto.memory_file() as destination,
+                patch.object(crypto.subprocess, "Popen", side_effect=spawned),
+                patch.object(crypto.time, "sleep", side_effect=pause),
+                patch.object(crypto.os, "killpg", side_effect=signal_group),
+            ):
+                leader_command.append(str(identity.fileno()))
+                arguments = dict(
+                    first_fds=(identity.fileno(),), destination=destination, timeout=0.5
+                )
+                if outcome == "cancel":
+                    with self.assertRaises(KeyboardInterrupt) as error:
+                        crypto.stream_pipeline(first, second, **arguments)
+                    self.assertIs(error.exception, cancellation)
+                elif outcome == "success":
+                    if cleanup_error:
+                        with self.assertRaisesRegex(
+                            crypto.BackupError, "cleanup failed"
+                        ) as error:
+                            crypto.stream_pipeline(first, second, **arguments)
+                        self.assertNotIn(
+                            "synthetic-private-cleanup-error", str(error.exception)
+                        )
+                    else:
+                        crypto.stream_pipeline(first, second, **arguments)
+                else:
+                    with self.assertRaises(crypto.BackupError) as error:
+                        crypto.stream_pipeline(first, second, **arguments)
+                    message = str(error.exception)
+                    if outcome == "failure":
+                        failed = "consumer" if stage == "producer" else "producer"
+                        self.assertIn(f"{failed} exit 23", message)
+                        self.assertIn("space exhausted", message)
+                    else:
+                        self.assertIn("timed out", message)
+                    self.assertNotIn("synthetic-private-output", message)
+                    self.assertNotIn("/private/path", message)
+                    self.assertNotIn("synthetic-private-cleanup-error", message)
+            self.assertTrue(identity.closed)
+            self.assertTrue(destination.closed)
+            self.assertIsNone(self.unrelated.poll(), "unrelated group was signaled")
+            self.assertLess(time.monotonic() - started, 5)
+            data = json.loads(ready.read_text())
+            descendant = data["pid"]
+            leader = children[0 if stage == "producer" else 1]
+            self.assertEqual(data["leader"], leader.pid)
+            self.assertEqual(data["group"], leader.pid)
+            self.assertEqual(data["session"], leader.pid)
+            self.assertEqual(leader.returncode, 0)
+            self.assertTrue(data["pipe"])
+            self.assertTrue(data["private_output"])
+            self.assertEqual(data["key_inherited"], stage == "producer")
+            if outcome in ("timeout", "cancel"):
+                self.assertIn(leader.pid, seen_exited_leader)
+            deadline = time.monotonic() + 0.5
+            while time.monotonic() < deadline:
+                reaped, _ = os.waitpid(descendant, os.WNOHANG)
+                if reaped:
+                    break
+                real_sleep(0.01)
+            self.assertEqual(
+                reaped, descendant, "owned descendant survived pipeline cleanup"
+            )
+            self.assertFalse(Path(f"/proc/{descendant}").exists())
+            descendant = None
+            self.assertTrue(sent_groups)
+            self.assertEqual(
+                set(sent_groups),
+                {
+                    (process.pid, signum)
+                    for process in children
+                    for signum in (signal.SIGTERM, signal.SIGKILL)
+                },
+            )
+            self.assertTrue(all(process.returncode is not None for process in children))
+            self.assertTrue(children[0].stdout.closed)
+            self.assertEqual(list(self.root.iterdir()), [ready])
+        finally:
+            # Failure of the regression must not leave the demonstrated leak.
+            # The unreaped adopted child pins its PID until this exact wait.
+            for process in children:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=2)
+            if descendant is None and ready.exists():
+                descendant = json.loads(ready.read_text())["pid"]
+            if descendant is not None:
+                try:
+                    reaped, _ = os.waitpid(descendant, os.WNOHANG)
+                    if not reaped:
+                        os.kill(descendant, signal.SIGKILL)
+                        os.waitpid(descendant, 0)
+                except ChildProcessError:
+                    pass
+
+    def test_timeout_cleans_exited_stage_groups_and_term_resistant_descendants(self):
+        for stage in ("producer", "consumer"):
+            for resistant in (False, True):
+                with self.subTest(stage=stage, resistant=resistant):
+                    self.owned_descendant_case(stage, "timeout", resistant)
+
+    def test_failed_stage_preserves_category_and_cleans_other_exited_group(self):
+        for stage in ("producer", "consumer"):
+            with self.subTest(exited_stage=stage):
+                self.owned_descendant_case(stage, "failure", True)
+
+    def test_cancellation_cleans_exited_stage_groups_without_replacing_primary(self):
+        for stage in ("producer", "consumer"):
+            with self.subTest(stage=stage):
+                self.owned_descendant_case(stage, "cancel", True)
+
+    def test_completed_stages_do_not_leave_descriptor_holding_descendants(self):
+        for stage in ("producer", "consumer"):
+            with self.subTest(stage=stage):
+                self.owned_descendant_case(stage, "success", True)
+
+    def test_cleanup_signal_error_does_not_replace_primary_or_skip_other_groups(self):
+        for stage in ("producer", "consumer"):
+            with self.subTest(stage=stage):
+                self.owned_descendant_case(stage, "failure", True, cleanup_error=True)
+
+    def test_cleanup_signal_error_prevents_false_success_without_private_output(self):
+        self.owned_descendant_case("producer", "success", True, cleanup_error=True)
+
+    def test_cleanup_refuses_to_signal_after_ownership_anchor_was_reaped(self):
+        process = subprocess.Popen(
+            [sys.executable, "-B", "-c", "pass"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            cwd=self.root,
+        )
+        process.wait(timeout=2)
+        with (
+            patch.object(crypto.os, "killpg") as signal_group,
+            self.assertRaisesRegex(crypto.BackupError, "cleanup failed"),
+        ):
+            crypto.cleanup_pipeline([process])
+        signal_group.assert_not_called()
 
 
 class BackupEnvironmentTests(unittest.TestCase):
