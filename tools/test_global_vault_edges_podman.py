@@ -50,6 +50,33 @@ box, vault, credentials, service = (
 FORMAT = "oc-box-global-vault-edges-host-v2"
 SNAPSHOT_SCHEMA = 2
 HOME_MANIFEST_CONTRACT = "oc-box-home-topology-v2"
+# Purpose/results are caller policy, not private-store authorization. Preserve
+# evidence even after a fixture directory was renamed or its other files lost.
+FRESH_MARKERS = (
+    "fixture.json",
+    "fixture-ids.json",
+    "interactive.json",
+    "interactive-*-report.json",
+    "edges.json",
+    "edges-result.json",
+    "edges-*-report.json",
+    "edges-*-baseline.json",
+    "edges-*-after.json",
+    "history-purpose.json",
+    "history-result.json",
+    "home-component.json",
+    "home-ready.json",
+    "home-mapping.json",
+    "home-created-*.json",
+    "home-run-*-report.json",
+    "home-cleanup-*-report.json",
+    "cleanup-purpose.json",
+    "result.json",
+    "retry-result.json",
+    "full-restore-result.json",
+    "downgrade-result.json",
+    "seed-baseline.json",
+)
 # Native 2.2.6 appends this exact host-side file even for --version. Its content
 # digest is diagnostic, not protected state; every other native file still is.
 NATIVE_LOG = "opencode/log/opencode.log"
@@ -216,10 +243,7 @@ def fresh_parent(path):
     parent = interactive.fresh_parent(path)
     for ancestor in (parent, *parent.parents):
         require(
-            not any(
-                (ancestor / name).exists() or (ancestor / name).is_symlink()
-                for name in ("edges.json", "edges-result.json")
-            ),
+            not any(any(ancestor.glob(pattern)) for pattern in FRESH_MARKERS),
             "fresh-parent-required",
         )
     return parent

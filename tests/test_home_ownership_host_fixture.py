@@ -21,6 +21,7 @@ from tools import test_home_ownership_podman as probe
 
 fixture = probe.global_fixture
 REAL_PIPELINE = crypto.stream_pipeline
+REAL_SOURCE_SNAPSHOT = probe.source_snapshot
 
 
 class HomeOwnershipHostFixtureTests(unittest.TestCase):
@@ -334,6 +335,79 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
         marker.symlink_to(self.root / "original-purpose.json")
         with self.assertRaises(fixture.FixtureError):
             probe.validate_purpose(self.root, self.current)
+        self.box_run.assert_not_called()
+        self.command.assert_not_called()
+
+    def test_other_family_report_only_parents_refuse_both_flags_before_source(self):
+        for marker in (
+            "history-purpose.json",
+            "history-result.json",
+            "edges.json",
+            "edges-result.json",
+            "edges-corrupt-vault-start-baseline.json",
+            "edges-populated-first-owner-report.json",
+            "cleanup-purpose.json",
+            "full-restore-result.json",
+            "downgrade-result.json",
+            "retry-result.json",
+            "result.json",
+            "seed-baseline.json",
+            "interactive-start-original-report.json",
+            "home-mapping.json",
+        ):
+            retained = self.parent / ("renamed-" + marker)
+            retained.mkdir()
+            (retained / marker).write_bytes(b"UNCHANGED_SYNTHETIC_FAILED_EVIDENCE\n")
+            child = retained / "nested"
+            child.mkdir()
+            for path in (retained, child):
+                for flag in ("--work-dir", "--temp-dir"):
+                    argv = (
+                        [flag, str(path)]
+                        if flag == "--work-dir"
+                        else ["--work-dir", str(self.parent), flag, str(path)]
+                    )
+                    with (
+                        self.subTest(marker=marker, path=path.name, flag=flag),
+                        patch.object(fixture, "host_guard"),
+                        patch.object(probe.resource, "setrlimit"),
+                        patch.object(probe, "source_snapshot") as source,
+                        patch.object(probe.tempfile, "mkdtemp") as allocate,
+                    ):
+                        self.assertEqual(probe.main(argv), 1)
+                        source.assert_not_called()
+                        allocate.assert_not_called()
+                        self.assertEqual(
+                            (retained / marker).read_bytes(),
+                            b"UNCHANGED_SYNTHETIC_FAILED_EVIDENCE\n",
+                        )
+        self.box_run.assert_not_called()
+        self.command.assert_not_called()
+
+    def test_shared_guard_bytes_are_bound_in_home_source_snapshot(self):
+        current_hash = ["a" * 64]
+
+        def file_hash(path):
+            return current_hash[0] if path.name == "acceptance_guards.py" else "b" * 64
+
+        with (
+            patch.object(
+                probe.interactive,
+                "source_identity",
+                return_value=self.current["identity"],
+            ),
+            patch.object(probe.interactive, "file_hash", side_effect=file_hash),
+        ):
+            initial = REAL_SOURCE_SNAPSHOT()
+            self.assertEqual(
+                initial["audited_sha256"]["tools/acceptance_guards.py"], "a" * 64
+            )
+            current_hash[0] = "c" * 64
+            changed = REAL_SOURCE_SNAPSHOT()
+        self.assertNotEqual(initial, changed)
+        self.assertEqual(
+            initial["audited_sha256"]["tools/acceptance_guards.py"], "a" * 64
+        )
         self.box_run.assert_not_called()
         self.command.assert_not_called()
 

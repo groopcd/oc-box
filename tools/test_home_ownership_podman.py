@@ -40,9 +40,33 @@ HOME_MARKERS = (
     "home-ready.json",
     *("home-created-" + role + ".json" for role in ROLES),
 )
+FRESH_MARKERS = (
+    *HOME_MARKERS,
+    "fixture.json",
+    "fixture-ids.json",
+    "interactive.json",
+    "interactive-*-report.json",
+    "edges.json",
+    "edges-result.json",
+    "edges-*-report.json",
+    "edges-*-baseline.json",
+    "edges-*-after.json",
+    "history-purpose.json",
+    "history-result.json",
+    "home-mapping.json",
+    "home-run-*-report.json",
+    "home-cleanup-*-report.json",
+    "cleanup-purpose.json",
+    "result.json",
+    "retry-result.json",
+    "full-restore-result.json",
+    "downgrade-result.json",
+    "seed-baseline.json",
+)
 INVOCATION_SOURCE = ContextVar("home_component_invocation_source", default=None)
 LIMIT = 64 * 1024 * 1024
 AUDITED = (
+    "tools/acceptance_guards.py",
     "tools/test_home_ownership_podman.py",
     "tools/test_global_vault_podman.py",
     "tools/test_interactive_podman.py",
@@ -156,14 +180,7 @@ def fresh_parent(path):
     parent = interactive.fresh_parent(path)
     for ancestor in (parent, *parent.parents):
         require(
-            not any(
-                (ancestor / name).exists() or (ancestor / name).is_symlink()
-                for name in HOME_MARKERS
-            )
-            and not any(
-                any(ancestor.glob(pattern))
-                for pattern in ("home-run-*-report.json", "home-cleanup-*-report.json")
-            ),
+            not any(any(ancestor.glob(pattern)) for pattern in FRESH_MARKERS),
             "fresh-parent-required",
         )
     return parent

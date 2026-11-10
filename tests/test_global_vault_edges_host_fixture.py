@@ -446,6 +446,54 @@ class GlobalVaultEdgesHostFixtureTests(unittest.TestCase):
                 source.assert_not_called()
                 native.assert_not_called()
 
+    def test_all_family_renamed_report_only_parents_refuse_before_allocation(self):
+        # Literal family evidence names, independent of production marker tables.
+        markers = (
+            "history-purpose.json",
+            "history-result.json",
+            "home-component.json",
+            "home-ready.json",
+            "home-mapping.json",
+            "home-created-source.json",
+            "home-created-destination.json",
+            "home-run-original-report.json",
+            "home-cleanup-original-report.json",
+            "cleanup-purpose.json",
+            "full-restore-result.json",
+            "downgrade-result.json",
+            "retry-result.json",
+            "result.json",
+            "seed-baseline.json",
+            "interactive-start-original-report.json",
+            "edges-corrupt-vault-start-baseline.json",
+            "edges-populated-first-owner-report.json",
+        )
+        for marker in markers:
+            retained = self.parent / ("renamed-" + marker)
+            retained.mkdir()
+            (retained / marker).write_bytes(b"UNCHANGED_SYNTHETIC_FAILED_EVIDENCE\n")
+            child = retained / "nested"
+            child.mkdir()
+            for path in (retained, child):
+                for option in ("work-dir", "temp-dir"):
+                    with (
+                        self.subTest(marker=marker, path=path.name, option=option),
+                        patch.object(fixture, "host_guard"),
+                        patch.object(edge.interactive, "source_identity") as source,
+                        patch.object(edge.interactive, "native_binary") as native,
+                        patch.object(edge.tempfile, "mkdtemp") as allocate,
+                        patch("sys.stdout", new_callable=io.StringIO),
+                    ):
+                        self.assertEqual(edge.main(self.args(**{option: path})), 1)
+                        source.assert_not_called()
+                        native.assert_not_called()
+                        allocate.assert_not_called()
+                        self.assertEqual(
+                            (retained / marker).read_bytes(),
+                            b"UNCHANGED_SYNTHETIC_FAILED_EVIDENCE\n",
+                        )
+        self.engine.assert_not_called()
+
     def test_no_retained_selectors_and_explicit_native_required(self):
         for extra in (
             ("--resume",),
