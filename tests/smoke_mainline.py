@@ -215,12 +215,22 @@ def warm_start_regression(root, env, project):
         ]
         == version
     )
-    # Simulate the config directory produced after first mainline SDK install.
+    # Seed a coherent local SDK fixture, not version-only metadata. This plugin
+    # does not import the SDK; no registry/package-code execution is needed.
     package = config / "node_modules" / plugin_package
     package.mkdir(parents=True)
     (package / "package.json").write_text(
-        json.dumps({"name": plugin_package, "version": version, "type": "module"})
+        json.dumps(
+            {
+                "name": plugin_package,
+                "version": version,
+                "type": "module",
+                "exports": {".": {"import": "./index.js", "types": "./index.d.ts"}},
+            }
+        )
     )
+    (package / "index.js").write_text("export {};\n")
+    (package / "index.d.ts").write_text("export {};\n")
     manifest = {"dependencies": {plugin_package: version}}
     (config / "package.json").write_text(json.dumps(manifest))
     (config / "package-lock.json").write_text(
@@ -250,6 +260,16 @@ def warm_start_regression(root, env, project):
     marker = root / "warm-plugin-loaded"
     warm_env["OC_BOX_WARM_MARKER"] = str(marker)
     try:
+        # Observe the real successful native initializer before acknowledging
+        # dependency completion. A copied input plus node_modules is not proof.
+        bounded(
+            ["opencode", "debug", "agent", "build"],
+            env=warm_env,
+            cwd=project,
+            timeout=20,
+        )
+        assert marker.is_file(), "The cold native initializer did not load the plugin"
+        sync.complete_config(home, payload, version)
         durations = []
         for _ in range(2):
             assert sync.sync_config(home, payload, version), (
@@ -266,13 +286,40 @@ def warm_start_regression(root, env, project):
             durations.append(time.monotonic() - started)
             assert marker.is_file(), "The enabled external plugin did not initialize"
             assert json.loads((config / "package.json").read_text()) == manifest
+        # An older input-only marker is not a custom-install receipt. The narrow
+        # SDK-only legacy path must independently inspect a complete package tree
+        # and retain the generated manifest/lock before a real native reopen.
+        state_file = config.parent / ".oc-box-dependencies.json"
+        state = json.loads(state_file.read_text())
+        state_file.write_text(
+            json.dumps(
+                {"source_hash": state["source_hash"], "runtime_version": version}
+            )
+        )
+        generated = {
+            name: (config / name).read_bytes()
+            for name in ("package.json", "package-lock.json")
+        }
+        assert sync.sync_config(home, payload, version), "Legacy SDK adoption was cold"
+        assert json.loads(state_file.read_text())["proof"] == "sdk-only"
+        assert all(
+            (config / name).read_bytes() == value for name, value in generated.items()
+        )
+        marker.unlink()
+        bounded(
+            ["opencode", "debug", "agent", "build"],
+            env=warm_env,
+            cwd=project,
+            timeout=20,
+        )
+        assert marker.is_file(), "The legacy adopted plugin did not initialize"
         assert not requests, (
             f"Warm mainline startup unexpectedly contacted npm: {requests}"
         )
         print(
             "PASS: two warm native plugin startups with an older source SDK and zero npm requests ("
             + ", ".join(f"{seconds:.2f}s" for seconds in durations)
-            + ")."
+            + "), plus native legacy SDK adoption."
         )
     finally:
         server.shutdown()

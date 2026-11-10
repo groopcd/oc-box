@@ -429,6 +429,7 @@ export const Fixture = async () => ({
             project,
             timeout=120,
         )
+        sync_config.complete_config(env["HOME"], payload, release)
         env["XDG_CONFIG_HOME"] = str(config.parent)
         env["OPENCODE_CONFIG"] = str(config / "oc-box-profile.json")
         env["OPENCODE_DISABLE_SANDBOX"] = "1"
