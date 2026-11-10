@@ -447,6 +447,116 @@ class WorkspaceBackupTests(unittest.TestCase):
             self.backup()
         self.assertFalse(self.archive.exists())
 
+    def test_required_mounts_must_match_before_stop_or_capture(self):
+        def source_snapshot():
+            return {
+                path: (path.read_bytes(), path.stat().st_mode)
+                for path in (
+                    self.path,
+                    box.session_file(self.path),
+                    *self.project.rglob("*"),
+                    *self.home.rglob("*"),
+                )
+                if path.is_file()
+            }
+
+        before = source_snapshot()
+        for index, role in enumerate(("project", "private-home")):
+            expected = self.info()["Mounts"][index]
+            cases = {
+                "missing": [],
+                "wrong-source": [
+                    {**expected, "Source": str(self.root / "other-source")}
+                ],
+                "wrong-destination": [
+                    {**expected, "Destination": expected["Destination"] + "-other"}
+                ],
+                "wrong-type": [
+                    {**expected, "Type": "volume" if role == "project" else "bind"}
+                ],
+                "tmpfs-instead-of-managed-mount": [
+                    {**expected, "Type": "tmpfs", "Source": ""}
+                ],
+                "missing-type": [
+                    {key: value for key, value in expected.items() if key != "Type"}
+                ],
+                "duplicate-expected": [expected, dict(expected)],
+                "overridden-by-other-source": [
+                    expected,
+                    {**expected, "Source": str(self.root / "other-source")},
+                ],
+                "overridden-by-tmpfs": [
+                    expected,
+                    {**expected, "Type": "tmpfs", "Source": ""},
+                ],
+            }
+            for portable in (False, True):
+                for name, mounts in cases.items():
+                    info = self.info()
+                    info["Mounts"][index : index + 1] = mounts
+                    self.running = True
+                    self.operations.clear()
+                    with self.subTest(mount=role, case=name, portable=portable):
+                        with (
+                            patch.object(
+                                self,
+                                "info",
+                                side_effect=lambda: {
+                                    **info,
+                                    "State": {"Running": self.running},
+                                },
+                            ),
+                            patch.object(
+                                crypto,
+                                "generate_key",
+                                side_effect=AssertionError(
+                                    "capture started before mount refusal"
+                                ),
+                            ) as generate,
+                            patch.object(crypto, "encrypt_stream") as encrypt,
+                        ):
+                            with self.assertRaises(crypto.BackupError):
+                                self.backup(portable=portable)
+                            generate.assert_not_called()
+                            encrypt.assert_not_called()
+                        self.assertEqual(
+                            self.operations,
+                            [
+                                ("container", "inspect", self.data["container"]),
+                                ("volume", "inspect", self.data["home_volume"]),
+                            ],
+                        )
+                        self.assertTrue(self.running)
+                        self.assertEqual(self.created, [])
+                        self.assertEqual(
+                            self.volumes, {self.data["home_volume"]: self.home}
+                        )
+                        self.assertEqual(
+                            self.labels, {self.data["home_volume"]: self.data["id"]}
+                        )
+                        self.assertEqual(source_snapshot(), before)
+                        self.assertFalse(self.archive.exists())
+                        self.assertFalse(
+                            list(self.root.glob("oc-box-backup-ciphertext-*"))
+                        )
+                        self.assertFalse(list(self.root.glob(".oc-box-backup-*")))
+
+    def test_backup_accepts_home_mount_with_restored_internal_project_path(self):
+        self.data["container_project"] = str(self.root / "original-project")
+        box.atomic_json(self.path, self.data)
+        for portable in (False, True):
+            with self.subTest(portable=portable):
+                self.archive = self.root / f"internal-path-{portable}.ocbox"
+                self.backup(portable=portable)
+                with crypto.opened(self.archive, [self.identity]) as (manifest, _, _):
+                    self.assertEqual(manifest["project"], str(self.project))
+                    self.assertEqual(
+                        manifest["container_project"], self.data["container_project"]
+                    )
+                    self.assertEqual(
+                        manifest["configuration"]["home"], self.data["home"]
+                    )
+
     def test_wrong_identity_or_corrupt_archive_never_creates_workspace_resources(self):
         self.backup(portable=True)
         wrong = self.root / "wrong.txt"

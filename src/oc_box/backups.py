@@ -239,11 +239,31 @@ def make_backup(box, args):
         volume = owned_volume(box, data)
         if output.is_relative_to(Path(volume["Mountpoint"]).resolve()):
             raise BackupError("Backup output cannot be inside the private home volume.")
+        # A labeled volume can exist without being the container's actual home.
+        # Require one exact mount at each managed destination, rather than
+        # archiving stale data underneath an ambiguous/overriding mount.
+        expected_mounts = (
+            ("project", data["project"], box.container_project(data), "bind"),
+            ("private home", volume["Mountpoint"], data["home"], "volume"),
+        )
+        for description, source, destination, kind in expected_mounts:
+            mounts = [
+                mount
+                for mount in info.get("Mounts", [])
+                if mount.get("Destination") == destination
+            ]
+            if (
+                len(mounts) != 1
+                or mounts[0].get("Source") != source
+                or mounts[0].get("Type") != kind
+            ):
+                raise BackupError(
+                    f"Container {description} mount does not match the selected registry."
+                )
         # External mounts and volumes are never silently captured. A full backup
         # records their requirements but is not claimed to preserve their data.
         approved = {
-            (data["project"], box.container_project(data)),
-            (volume["Mountpoint"], data["home"]),
+            (source, destination) for _, source, destination, _ in expected_mounts
         }
         additional = [
             m
@@ -251,19 +271,6 @@ def make_backup(box, args):
             if (m.get("Source"), m.get("Destination")) not in approved
             and m.get("Type") in ("bind", "volume")
         ]
-        project_mount = next(
-            (
-                mount
-                for mount in info.get("Mounts", [])
-                if (mount.get("Source"), mount.get("Destination"))
-                == (data["project"], box.container_project(data))
-            ),
-            None,
-        )
-        if project_mount is None:
-            raise BackupError(
-                "Container project mount does not match the selected registry."
-            )
         if additional:
             raise BackupError(
                 "This container has additional bind mounts/volumes. Back up those separately and remove them from a dedicated backup fixture first; implicit capture of outside host data is refused."
