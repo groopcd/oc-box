@@ -86,6 +86,85 @@ with socket.create_connection(('127.0.0.1',int(sys.argv[1])),timeout=10) as s, s
 """
 
 
+class _OwnedChild:
+    """Keep a direct session leader waitable through the last group signal.
+
+    A zombie still pins its PID/PGID. poll()/wait() observations would consume
+    that anchor. All internal observers, signalers and the final reaper share
+    this lock; stale Gateway snapshots become no-ops after sealing, never new
+    signals against a reusable numeric group. An outside reaper fails closed.
+    """
+
+    def __init__(self, process=None):
+        self.process = process
+        self.lock = threading.Lock()
+        self.sealed = False
+        self.reaped = False
+        self.lost = False
+
+    def _status(self):
+        if self.reaped:
+            return self.process.returncode
+        if self.lost or self.process.returncode is not None:
+            self.lost = self.sealed = True
+            raise ChildProcessError("Private child ownership anchor unavailable.")
+        try:
+            result = os.waitid(
+                os.P_PID, self.process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+            )
+        except (OSError, AttributeError):
+            self.lost = self.sealed = True
+            raise ChildProcessError(
+                "Private child ownership anchor unavailable."
+            ) from None
+        if result is None:
+            return None
+        return (
+            result.si_status if result.si_code == os.CLD_EXITED else -result.si_status
+        )
+
+    def status(self):
+        with self.lock:
+            return self._status()
+
+    def wait(self, timeout):
+        deadline = time.monotonic() + timeout
+        while True:
+            code = self.status()
+            if code is not None:
+                return code
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired("private workspace child", timeout)
+            time.sleep(min(0.02, remaining))
+
+    def signal(self, sig, *, final=False):
+        with self.lock:
+            if self.lost:
+                raise ChildProcessError("Private child ownership anchor unavailable.")
+            if self.sealed:
+                return
+            try:
+                self._status()  # Running or exited, but still our waitable child.
+                try:
+                    os.killpg(self.process.pid, sig)
+                except ProcessLookupError:
+                    pass
+            finally:
+                if final:
+                    self.sealed = True
+
+    def reap(self, timeout):
+        with self.lock:
+            if not self.sealed:
+                raise RuntimeError("Private child group was not sealed before reap.")
+            if not self.reaped:
+                # Even a failed/partially consuming wait cannot authorize another
+                # signal: sealing is irreversible and holds across this call.
+                self.process.wait(timeout=timeout)
+                self.reaped = True
+
+
 def socket_path(box, data):
     root = Path(os.environ.get("XDG_RUNTIME_DIR", tempfile.gettempdir())) / (
         "oc-box-live-" + str(os.getuid())
@@ -341,6 +420,7 @@ class Owner:
         self.closing = False
         self.session = None
         self.child = None
+        self.child_owner = None
         self.listener = None
         self.bound = False
         self.bound_identity = None
@@ -380,6 +460,7 @@ class Owner:
             self.errors = box.captured_output(private=True)
             self.error_file = self.errors.__enter__()
             self.errors_entered = True
+            self.child_owner = _OwnedChild()
             self.child = subprocess.Popen(
                 command,
                 env=command.environment,
@@ -388,11 +469,12 @@ class Owner:
                 stderr=self.error_file,
                 start_new_session=True,
             )
+            self.child_owner.process = self.child
             assert self.child.stdout is not None
             output = bytearray()
             deadline = time.monotonic() + 180
             while b"\n" not in output:
-                if self.child.poll() is not None or time.monotonic() > deadline:
+                if self.child_owner.status() is not None or time.monotonic() > deadline:
                     raise box.BoxError(
                         "Private workspace service failed to start; private output was not logged."
                     )
@@ -456,7 +538,8 @@ class Owner:
 
     def handle(self, stream):
         child = self.child
-        if child is None:
+        owned = self.child_owner
+        if child is None or owned is None:
             stream.close()
             with self.condition:
                 self.streams.discard(stream)
@@ -500,7 +583,7 @@ class Owner:
                 )
                 if held:
                     stream.settimeout(0.5)
-                    while not self.closing and child.poll() is None:
+                    while not self.closing and owned.status() is None:
                         try:
                             if not stream.recv(1):
                                 break
@@ -517,13 +600,14 @@ class Owner:
 
     def wait_clients(self):
         assert self.child is not None
+        assert self.child_owner is not None
         with self.condition:
             if self.clients:
                 print(
                     "oc-box: Attached web/terminal clients are still active; waiting before history sync and container stop. Close those clients or use 'oc-box stop'.",
                     flush=True,
                 )
-            while self.clients and self.child.poll() is None:
+            while self.clients and self.child_owner.status() is None:
                 self.condition.wait(timeout=0.2)
             self.closing = True
 
@@ -596,30 +680,32 @@ class Owner:
             attempt("socket-remove", remove_socket)
         child = self.child
         if child is not None:
+            owned = self.child_owner
             input_closed = True
             if child.stdin is not None:
                 input_closed = attempt("child-input", child.stdin.close)
             try:
-                child.wait(timeout=10 if input_closed else 0)
+                if owned is None:
+                    raise ChildProcessError(
+                        "Private child ownership anchor unavailable."
+                    )
+                owned.wait(timeout=10 if input_closed else 0)
             except subprocess.TimeoutExpired:
                 pass
             except BaseException:
                 failures.append("child-wait")
 
-            def kill_group():
-                try:
-                    # The group may outlive its leader. This is only the private
-                    # child session created by this Owner, never a shared service.
-                    os.killpg(child.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-
-            attempt("child-stop", kill_group)
-            reaped = attempt("child-reap", lambda: child.wait(timeout=5))
+            if owned is not None:
+                attempt("child-stop", lambda: owned.signal(signal.SIGKILL, final=True))
+                reaped = attempt("child-reap", lambda: owned.reap(timeout=5))
+            else:
+                # No authority to signal. Only release/reap this direct child.
+                reaped = attempt("child-reap", lambda: child.wait(timeout=5))
             if child.stdout is not None:
                 attempt("child-output", child.stdout.close)
             if reaped:
                 self.child = None
+                self.child_owner = None
         if self.token is not None:
             if attempt("connection-reset", lambda: CONNECTION.reset(self.token)):
                 self.token = None
@@ -767,6 +853,7 @@ class Gateway:
 
     def forward(self, stream):
         child = None
+        owned = None
         with stream:
             try:
                 # Read only bounded request headers before creating a relay.
@@ -784,6 +871,7 @@ class Gateway:
                     return
                 port = urlparse(self.connection["url"]).port
                 command = relay_command(self.box, self.data, port)
+                owned = _OwnedChild()
                 child = subprocess.Popen(
                     command,
                     env=command.environment,
@@ -793,27 +881,29 @@ class Gateway:
                     start_new_session=True,
                     bufsize=0,
                 )
+                owned.process = child
                 assert child.stdin is not None and child.stdout is not None
                 with self.lock:
-                    self.children.add(child)
-                self.pump(stream, child, headers)
+                    self.children.add(owned)
+                self.pump(stream, owned, headers)
             except (OSError, ValueError):
                 pass
             finally:
-                if child:
-                    self.finish_child(child)
+                if child is not None:
+                    self.finish_child(owned)
                 with self.lock:
-                    self.children.discard(child)
+                    self.children.discard(owned)
                     self.streams.discard(stream)
                     self.capacity.release()
 
-    def pump(self, stream, child, headers):
+    def pump(self, stream, owned, headers):
         """Two 64-KiB queues, independent EOF, and no blocking directional write.
 
         Pairing alone stages at most 64 KiB of response headers/body before the
         delimiter; the rewritten header adds only the validated session route.
         Staged bytes drain before more backend reads. Bodies are never rewritten.
         """
+        child = owned.process
         assert child.stdin is not None and child.stdout is not None
         stream.setblocking(False)
         os.set_blocking(child.stdin.fileno(), False)
@@ -845,7 +935,7 @@ class Gateway:
                     # into a half-closed backend. Do not terminate that proxy
                     # while the final upload is still in flight. Cancellation
                     # remains active and owns the same bounded cleanup path.
-                    if child.poll() is not None:
+                    if owned.status() is not None:
                         return
                     self.closed.wait(0.05)
                     continue
@@ -923,28 +1013,25 @@ class Gateway:
                         child.stdin.close()
                         write_closed = True
 
-    def signal_child(self, child, sig):
-        # Every relay was started in its own session. Signal its owned group even
-        # if the leader exited, so an inherited pipe cannot keep a helper alive.
+    def signal_child(self, owned, sig, *, final=False):
         try:
-            os.killpg(child.pid, sig)
-        except ProcessLookupError:
-            pass
+            owned.signal(sig, final=final)
         except OSError:
             self.cleanup_failed = True
 
-    def finish_child(self, child):
+    def finish_child(self, owned):
+        child = owned.process
         deadline = self.stop_deadline or time.monotonic() + RELAY_STOP_TIMEOUT
-        self.signal_child(child, signal.SIGTERM)
+        self.signal_child(owned, signal.SIGTERM)
         try:
-            child.wait(timeout=min(1, max(0, deadline - time.monotonic())))
+            owned.wait(timeout=min(1, max(0, deadline - time.monotonic())))
         except subprocess.TimeoutExpired:
             pass
         except OSError:
             self.cleanup_failed = True
-        self.signal_child(child, signal.SIGKILL)
+        self.signal_child(owned, signal.SIGKILL, final=True)
         try:
-            child.wait(timeout=max(0, deadline - time.monotonic()))
+            owned.reap(timeout=max(0, deadline - time.monotonic()))
         except (OSError, subprocess.TimeoutExpired):
             self.cleanup_failed = True
         for pipe in (child.stdin, child.stdout):
@@ -985,7 +1072,7 @@ class Gateway:
             remaining = self.stop_deadline - time.monotonic()
             if remaining <= 0:
                 for child in children:
-                    self.signal_child(child, signal.SIGKILL)
+                    self.signal_child(child, signal.SIGKILL, final=True)
                 self.cleanup_failed = True
                 break
             for worker in workers:

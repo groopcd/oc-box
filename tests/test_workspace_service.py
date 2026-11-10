@@ -1,4 +1,5 @@
 import contextlib
+import ctypes
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
@@ -18,6 +19,102 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from oc_box import oc_box as box, workspace_service as service, vault
+
+
+def waitable_exit(child, timeout=2):
+    """Observe an owned test child without consuming its group identity anchor."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if child.returncode is not None:
+            return child.returncode
+        result = os.waitid(os.P_PID, child.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+        if result is not None:
+            return (
+                result.si_status
+                if result.si_code == os.CLD_EXITED
+                else -result.si_status
+            )
+        if time.monotonic() >= deadline:
+            raise subprocess.TimeoutExpired("synthetic waitable child", timeout)
+        time.sleep(0.01)
+
+
+def descendant_prefix(ready):
+    """Finite synthetic child retaining its leader's inherited descriptors."""
+    return (
+        """import json,os,signal,sys,time
+signal.alarm(10)
+signal.signal(signal.SIGTERM,lambda *_:sys.exit(0))
+read,write=os.pipe()
+descendant=os.fork()
+if descendant==0:
+    os.close(read)
+    signal.signal(signal.SIGTERM,signal.SIG_IGN)
+    signal.alarm(10)
+    os.write(write,b'1'); os.close(write)
+    time.sleep(10); os._exit(0)
+os.close(write); os.read(read,1); os.close(read)
+with open("""
+        + repr(str(ready))
+        + """,'x') as output:
+    os.fchmod(output.fileno(),0o600)
+    json.dump({'pid':descendant,'leader':os.getpid(),'group':os.getpgrp(),
+               'stdout':os.readlink('/proc/self/fd/1'),
+               'stderr':os.readlink('/proc/self/fd/2')},output)
+"""
+    )
+
+
+def reap_descendant(pid, timeout=2):
+    deadline = time.monotonic() + timeout
+    while True:
+        result, status = os.waitpid(pid, os.WNOHANG)
+        if result == pid:
+            return status
+        if time.monotonic() >= deadline:
+            raise AssertionError("owned synthetic descendant did not exit")
+        time.sleep(0.01)
+
+
+@contextlib.contextmanager
+def adopted_descendants():
+    # Test-process-only Linux subreaper state; restore it after exact-PID cleanup.
+    libc = ctypes.CDLL(None, use_errno=True)
+    previous = ctypes.c_int()
+    if libc.prctl(37, ctypes.byref(previous), 0, 0, 0) != 0:
+        raise OSError("synthetic subreaper query failed")
+    if libc.prctl(36, 1, 0, 0, 0) != 0:
+        raise OSError("synthetic subreaper setup failed")
+    owned = []
+    try:
+        yield owned
+    finally:
+        try:
+            for leader, pid in owned:
+                try:
+                    os.waitid(
+                        os.P_PID, leader.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+                    )
+                except ChildProcessError:
+                    pass
+                else:
+                    try:
+                        os.killpg(leader.pid, service.signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                leader.wait(timeout=2)
+                try:
+                    result = os.waitid(
+                        os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+                    )
+                except ChildProcessError:
+                    continue  # Already reaped by the test: never reuse its PID.
+                if result is None:
+                    os.kill(pid, service.signal.SIGKILL)
+                reap_descendant(pid)
+        finally:
+            if libc.prctl(36, previous.value, 0, 0, 0) != 0:
+                raise OSError("synthetic subreaper restoration failed")
 
 
 class GatewayRelayTests(unittest.TestCase):
@@ -165,7 +262,7 @@ class GatewayRelayTests(unittest.TestCase):
             self.assertEqual(transport.errors, [])
             self.assertTrue(transport.children)
             for child in transport.children:
-                self.assertEqual(child.wait(timeout=2), 0)
+                self.assertEqual(waitable_exit(child), 0)
 
     def test_real_proxy_eight_mib_bidirectional_and_slow_reader_are_lossless(self):
         upload = bytes(range(256)) * 32768
@@ -226,7 +323,7 @@ class GatewayRelayTests(unittest.TestCase):
                         )
                         self.assertEqual(transport.errors, [])
                         for child in transport.children:
-                            self.assertEqual(child.wait(timeout=2), 0)
+                            self.assertEqual(waitable_exit(child), 0)
                     finally:
                         if sender.is_alive():
                             client.shutdown(socket.SHUT_RDWR)
@@ -422,6 +519,161 @@ class GatewayRelayTests(unittest.TestCase):
             while chunk := client.recv(65536):
                 actual.extend(chunk)
             self.assertEqual(actual, response)
+
+    def test_concurrent_shutdown_never_signals_after_worker_reaps_its_anchor(self):
+        requested, reaped, release, attempted, stopped = [
+            threading.Event() for _ in range(5)
+        ]
+        proposals, failures, children = [], [], []
+        real_killpg = os.killpg
+
+        def handler(stream):
+            self.headers(stream)
+            requested.set()
+            stream.sendall(b"HTTP/1.1 200 OK\r\n\r\nhello")
+            stream.recv(1)
+
+        def launching(child):
+            children.append(child)
+            wait = child.wait
+
+            def wait_then_pause(*args, **kwargs):
+                result = wait(*args, **kwargs)
+                if not reaped.is_set():
+                    reaped.set()
+                    if not release.wait(timeout=3):
+                        raise OSError("synthetic reap gate timed out")
+                return result
+
+            child.wait = wait_then_pause
+
+        def guarded_signal(pid, sig):
+            try:
+                os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except ChildProcessError:
+                proposals.append((sig, False))
+                return  # Never actually signal an unowned/reusable group.
+            proposals.append((sig, True))
+            real_killpg(pid, sig)
+
+        with (
+            patch.object(service.os, "killpg", side_effect=guarded_signal),
+            self.transport(handler, launch_hook=launching) as transport,
+        ):
+            client = transport.connect()
+            client.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            self.assertTrue(requested.wait(timeout=2))
+            original_signal = transport.gateway.signal_child
+            closer = None
+
+            def signal_child(*args, **kwargs):
+                if reaped.is_set() and threading.current_thread() is closer:
+                    attempted.set()
+                return original_signal(*args, **kwargs)
+
+            def shutdown():
+                try:
+                    transport.gateway.__exit__(None, None, None)
+                except Exception as error:
+                    failures.append(type(error).__name__)
+                finally:
+                    stopped.set()
+
+            with patch.object(
+                transport.gateway, "signal_child", side_effect=signal_child
+            ):
+                closer = threading.Thread(target=shutdown, daemon=True)
+                closer.start()
+                try:
+                    self.assertTrue(reaped.wait(timeout=2))
+                    self.assertTrue(attempted.wait(timeout=2))
+                    self.assertFalse(stopped.is_set())
+                finally:
+                    release.set()
+                    closer.join(timeout=3)
+            self.assertFalse(closer.is_alive())
+            self.assertEqual(failures, [])
+            self.assertTrue(proposals)
+            self.assertTrue(all(owned for _, owned in proposals), proposals)
+            self.assertTrue(all(child.returncode is not None for child in children))
+
+    def test_lost_gateway_anchor_refuses_group_signals_and_finishes_other_cleanup(self):
+        for cached in (True, False):
+            with self.subTest(popen_cached_reap=cached):
+                stolen = threading.Event()
+
+                def handler(stream):
+                    stream.recv(1)
+
+                def steal(child):
+                    child.stdin.close()
+                    if cached:
+                        child.wait(timeout=2)
+                    else:
+                        waitable_exit(child)
+                        os.waitpid(child.pid, 0)  # ECHILD without a Popen cache.
+                    stolen.set()
+
+                with patch.object(service.os, "killpg") as kill:
+                    with self.assertRaisesRegex(box.BoxError, "cleanup failed"):
+                        with self.transport(handler, launch_hook=steal) as transport:
+                            client = transport.connect()
+                            client.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                            self.assertTrue(stolen.wait(timeout=2))
+                    kill.assert_not_called()
+                self.assertTrue(
+                    all(child.stdout.closed for child in transport.children)
+                )
+
+    def test_gateway_retains_exited_and_graceful_leaders_until_descendants_stop(self):
+        for exited in (False, True):
+            with (
+                self.subTest(already_exited=exited),
+                tempfile.TemporaryDirectory(prefix="oc-box-relay-anchor-") as name,
+                adopted_descendants() as owned,
+            ):
+                ready = Path(name) / "descendant.json"
+                proposals = []
+                real_killpg = os.killpg
+
+                def handler(stream):
+                    self.headers(stream)
+                    stream.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    stream.recv(1)
+
+                def guarded_signal(pid, sig):
+                    try:
+                        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                    except ChildProcessError:
+                        proposals.append(False)
+                        return
+                    proposals.append(True)
+                    real_killpg(pid, sig)
+
+                with (
+                    patch.object(service.os, "killpg", side_effect=guarded_signal),
+                    self.transport(
+                        handler, proxy_prefix=descendant_prefix(ready)
+                    ) as transport,
+                ):
+                    client = transport.connect()
+                    client.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    self.headers(client)
+                    evidence = json.loads(ready.read_text())
+                    leader = transport.children[-1]
+                    owned.append((leader, evidence["pid"]))
+                    self.assertEqual(evidence["leader"], leader.pid)
+                    self.assertEqual(evidence["group"], leader.pid)
+                    self.assertTrue(evidence["stdout"].startswith("pipe:"))
+                    if exited:
+                        client.shutdown(socket.SHUT_WR)
+                        self.assertEqual(waitable_exit(leader), 0)
+                    transport.gateway.__exit__(None, None, None)
+                    status = reap_descendant(evidence["pid"])
+                    self.assertTrue(os.WIFSIGNALED(status))
+                    self.assertEqual(os.WTERMSIG(status), service.signal.SIGKILL)
+                    self.assertTrue(proposals)
+                    self.assertTrue(all(proposals))
 
 
 class OwnerCleanupTests(unittest.TestCase):
@@ -736,9 +988,164 @@ class OwnerCleanupTests(unittest.TestCase):
     def test_group_disappearing_during_cleanup_is_not_a_private_failure(self):
         owner = self.owner().__enter__()
         child = self.children[-1]
-        with patch.object(service.os, "killpg", side_effect=ProcessLookupError) as kill:
+
+        def disappeared(pid, _sig):
+            # ESRCH is tolerable only while the direct child still pins the PGID.
+            result = os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            self.assertIsNotNone(result)
+            raise ProcessLookupError
+
+        with patch.object(service.os, "killpg", side_effect=disappeared) as kill:
             owner.shutdown()
         kill.assert_called_once_with(child.pid, service.signal.SIGKILL)
+        self.assert_released(owner)
+
+    def test_lost_owner_anchor_refuses_group_signals_but_releases_private_state(self):
+        for cached in (True, False):
+            with self.subTest(popen_cached_reap=cached):
+                owner = self.owner().__enter__()
+                child = self.children[-1]
+                child.stdin.close()
+                if cached:
+                    child.wait(timeout=2)
+                else:
+                    waitable_exit(child)
+                    os.waitpid(child.pid, 0)
+                with patch.object(service.os, "killpg") as kill:
+                    with self.assertRaisesRegex(
+                        box.BoxError, "cleanup failed"
+                    ) as raised:
+                        owner.shutdown()
+                    kill.assert_not_called()
+                self.assertNotIn("private-cleanup-sentinel", str(raised.exception))
+                self.assert_released(owner)
+
+    def test_readiness_lease_and_shutdown_observations_do_not_reap_before_signals(self):
+        events = []
+        launching, real_killpg = service.subprocess.Popen, os.killpg
+
+        def instrument(*args, **kwargs):
+            child = launching(*args, **kwargs)
+            poll, wait = child.poll, child.wait
+
+            def observed_poll():
+                events.append("poll")
+                return poll()
+
+            def observed_wait(*args, **kwargs):
+                events.append("reap")
+                return wait(*args, **kwargs)
+
+            child.poll, child.wait = observed_poll, observed_wait
+            self.addCleanup(setattr, child, "poll", poll)
+            self.addCleanup(setattr, child, "wait", wait)
+            return child
+
+        def signal_group(pid, sig):
+            try:
+                os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+            except ChildProcessError:
+                events.append("unowned-signal")
+                return
+            events.append("signal")
+            real_killpg(pid, sig)
+
+        self.box.valid_session_id = box.valid_session_id
+        with (
+            patch.object(service.subprocess, "Popen", side_effect=instrument),
+            patch.object(service.os, "killpg", side_effect=signal_group),
+        ):
+            owner = self.owner().__enter__()
+            owner.data["opencode_version"] = "2.2.6"
+            owner.publish("ses_synthetic")
+            with socket.socket(socket.AF_UNIX) as stream:
+                stream.settimeout(2)
+                stream.connect(str(owner.address))
+                stream.sendall(
+                    (
+                        json.dumps({"action": "attach", "workspace": owner.data["id"]})
+                        + "\n"
+                    ).encode()
+                )
+                self.assertEqual(
+                    service.read_control(stream)["session"], "ses_synthetic"
+                )
+                self.children[-1].stdin.close()
+                with contextlib.redirect_stdout(io.StringIO()):
+                    owner.wait_clients()
+                owner.shutdown()
+        self.assertNotIn("poll", events)
+        self.assertNotIn("unowned-signal", events)
+        self.assertIn("signal", events)
+        self.assertLess(events.index("signal"), events.index("reap"))
+        self.assert_released(owner)
+
+    def test_owner_retains_exited_and_graceful_leaders_until_descendants_stop(self):
+        plain = self.program
+        for exited in (False, True):
+            with self.subTest(already_exited=exited), adopted_descendants() as owned:
+                ready = self.root / ("descendant-" + str(exited) + ".json")
+                self.program = descendant_prefix(ready) + plain
+                proposals = []
+                real_killpg = os.killpg
+
+                def guarded_signal(pid, sig):
+                    try:
+                        os.waitid(os.P_PID, pid, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+                    except ChildProcessError:
+                        proposals.append(False)
+                        return
+                    proposals.append(True)
+                    real_killpg(pid, sig)
+
+                with patch.object(service.os, "killpg", side_effect=guarded_signal):
+                    owner = self.owner().__enter__()
+                    evidence = json.loads(ready.read_text())
+                    leader = self.children[-1]
+                    owned.append((leader, evidence["pid"]))
+                    self.assertEqual(evidence["group"], leader.pid)
+                    self.assertIn("memfd:oc-box-private-output", evidence["stderr"])
+                    if exited:
+                        leader.stdin.close()
+                        self.assertEqual(waitable_exit(leader), 0)
+                    owner.shutdown()
+                    status = reap_descendant(evidence["pid"])
+                    self.assertTrue(os.WIFSIGNALED(status))
+                    self.assertEqual(os.WTERMSIG(status), service.signal.SIGKILL)
+                    self.assertTrue(proposals)
+                    self.assertTrue(all(proposals))
+                    self.assert_released(owner)
+
+    def test_consuming_wait_failure_cannot_reopen_group_signal_authority(self):
+        owner = self.owner().__enter__()
+        child, owned = self.children[-1], owner.child_owner
+        wait, killpg = child.wait, os.killpg
+
+        def partial_wait(*args, **kwargs):
+            wait(*args, **kwargs)
+            raise OSError("private-cleanup-sentinel")
+
+        with (
+            patch.object(child, "wait", side_effect=partial_wait),
+            patch.object(service.os, "killpg", wraps=killpg) as kill,
+        ):
+            with self.assertRaisesRegex(box.BoxError, "child-reap"):
+                owner.shutdown()
+            count = kill.call_count
+            self.assertGreater(count, 0)
+            owned.signal(service.signal.SIGTERM)
+            owned.signal(service.signal.SIGKILL, final=True)
+            self.assertEqual(kill.call_count, count)
+        self.assertIsNotNone(child.returncode)
+        self.assertTrue(child.stdout.closed)
+        self.assertTrue(all(output.closed for output in self.outputs))
+        self.assertIsNone(service.live_connection())
+        # A retry may reap, but must retain the lost-anchor failure rather than
+        # silently reacquire group authority from the cached numeric PID.
+        with patch.object(service.os, "killpg") as kill:
+            with self.assertRaisesRegex(box.BoxError, "cleanup failed"):
+                owner.shutdown()
+            kill.assert_not_called()
         self.assert_released(owner)
 
     def test_body_failure_identity_survives_a_secondary_cleanup_failure(self):
