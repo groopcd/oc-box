@@ -175,7 +175,7 @@ from oc_box.secret_prompt import read_secret
 from pathlib import Path
 try:
     values=[read_secret('Secret value: ',allow_reveal=sys.argv[3]=='yes',maximum=int(sys.argv[4])) for _ in range(int(sys.argv[5]))]
-except (KeyboardInterrupt,EOFError,OSError) as exc:
+except (KeyboardInterrupt,EOFError,OSError,ValueError) as exc:
     Path(sys.argv[2]).write_text(json.dumps({'error':type(exc).__name__}))
 else:
     Path(sys.argv[2]).write_text(json.dumps({'values':values}))
@@ -412,6 +412,38 @@ else:
         self.wait_for("2 chars")
         self.send("\n")
         self.assertEqual(self.finish(), {"values": ["aé"]})
+
+    def test_malformed_unbracketed_utf8_aborts_instead_of_accepting_valid_suffix(self):
+        for prefix, malformed in (
+            (b"", b"\xffsuffix\n"),
+            (b"", b"\xc2Xsuffix\n"),
+            (b"\xe2", b"\x82Xsuffix\n"),
+        ):
+            with self.subTest(prefix=prefix, malformed=malformed):
+                self.begin()
+                self.send(VALUE)
+                self.wait_for(f"{len(VALUE)} chars")
+                if prefix:
+                    self.send(prefix)
+                    self.collect()
+                self.send(malformed)
+                self.assertEqual(self.finish(), {"error": "ValueError"})
+                self.assertNotIn(b"[accepted]", self.output)
+                self.assertNotIn(VALUE.encode(), self.output)
+                self.assertIn(b"[cancelled]", self.output)
+                self.cleanup()
+
+    def test_malformed_utf8_after_reveal_erases_field_and_restores_terminal(self):
+        self.begin()
+        self.send(VALUE)
+        self.wait_for(f"{len(VALUE)} chars")
+        self.send(b"\x12")
+        self.wait_for(VALUE)
+        start = len(self.output)
+        self.send(b"\xffsuffix\n")
+        self.assertEqual(self.finish(), {"error": "ValueError"})
+        self.assertIn(b"\r\x1b[2KSecret value: [cancelled]", self.output[start:])
+        self.assertNotIn(VALUE.encode(), self.output[start:])
 
     def test_resize_redraw_hides_fields_within_new_width(self):
         self.begin()

@@ -364,15 +364,17 @@ def read_secret(prompt, *, allow_reveal=False, maximum=1024):
                     else 0
                 )
                 if not length:
-                    del pending[0]
-                    editor.notice = "Input rejected: invalid UTF-8"
-                    continue
+                    raise ValueError(
+                        "Secret input rejected: invalid UTF-8; re-enter the complete value."
+                    )
                 if len(pending) < length:
                     break
                 try:
                     text = bytes(pending[:length]).decode("utf-8")
                 except UnicodeError:
-                    editor.notice = "Input rejected: invalid UTF-8"
+                    raise ValueError(
+                        "Secret input rejected: invalid UTF-8; re-enter the complete value."
+                    ) from None
                 else:
                     editor.insert(text)
                 del pending[:length]
