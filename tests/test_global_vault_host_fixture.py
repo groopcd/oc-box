@@ -1,8 +1,11 @@
 """Offline safety contracts only: never execute the host Podman acceptance run."""
 
 import copy
+import contextlib
+import hashlib
 import importlib.util
 import io
+from itertools import product
 import json
 import os
 from pathlib import Path
@@ -14,13 +17,12 @@ import unittest
 from unittest.mock import Mock, patch
 
 from oc_box import oc_box as box, backup_crypto as crypto, backups, vault
+from tools import test_global_vault_podman as fixture
+
+fixture.load_runtime()  # Explicit trusted library setup; production bootstrap is separate.
 
 APP = Path(__file__).resolve().parents[1]
 SCRIPT = APP / "tools/test_global_vault_podman.py"
-spec = importlib.util.spec_from_file_location("global_vault_host_fixture", SCRIPT)
-assert spec is not None and spec.loader is not None
-fixture = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(fixture)
 
 
 class GlobalVaultHostFixtureTests(unittest.TestCase):
@@ -31,6 +33,8 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
             dir=preferred if preferred.is_dir() else None,
         )
         self.addCleanup(temporary.cleanup)
+        cached_temporary = tempfile.tempdir
+        self.addCleanup(setattr, tempfile, "tempdir", cached_temporary)
         self.parent = Path(temporary.name)
         self.root = self.parent / (fixture.PREFIX + "unit")
         self.root.mkdir(mode=0o700)
@@ -415,7 +419,10 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
             fixture.validate_store(self.root)
         self.assertEqual(run.call_count, 3)
         for call in run.call_args_list:
-            self.assertEqual(call.args[0], ["podman", "info", "--format", "json"])
+            self.assertEqual(
+                call.args[0],
+                [str(Path(sys.executable).resolve()), "info", "--format", "json"],
+            )
             self.assertTrue(call.kwargs["private"])
             self.assertEqual(call.kwargs["env"]["TMPDIR"], str(selected_tmp))
             self.assertEqual(call.kwargs["env"]["XDG_RUNTIME_DIR"], str(self.runtime))
@@ -532,6 +539,178 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
         )
         self.assertIsNone(fixture.state_error_category(""))
         self.assertIsNone(fixture.state_error_category(None))
+
+    def test_diagnostic_selected_session_is_bounded_and_never_renders_invalid_data(
+        self,
+    ):
+        self.complete_fixture_metadata()
+        path, data = self.record("source-a", "a" * 32)
+        fixture.record_ids(self.root)
+        for selected in (
+            None,
+            "ses_fixture",
+            "private-sentinel",
+            {"private-sentinel": 1},
+            "ses_" + "x" * 1000,
+        ):
+            with self.subTest(
+                kind=type(selected).__name__, valid=selected == "ses_fixture"
+            ):
+                box.atomic_json(box.session_file(path), {"last": selected})
+                with (
+                    patch.object(fixture, "host_guard"),
+                    patch.object(fixture, "validate_store"),
+                    patch.object(backups, "owned_container", return_value=None),
+                    patch.object(
+                        box,
+                        "podman",
+                        return_value=subprocess.CompletedProcess([], 1, "", ""),
+                    ),
+                ):
+                    result = fixture.diagnose(self.root)["workspaces"]["source-a"]
+                self.assertEqual(
+                    result["selected_session"],
+                    "ses_fixture" if selected == "ses_fixture" else None,
+                )
+                self.assertEqual(
+                    result["selected_session_validity"],
+                    "valid"
+                    if selected == "ses_fixture"
+                    else "absent"
+                    if selected is None
+                    else "invalid",
+                )
+                self.assertNotIn("private-sentinel", json.dumps(result))
+
+    def test_scoped_environment_checks_insertion_mutation_and_cache_before_restoration(
+        self,
+    ):
+        baseline = dict(os.environ)
+        for phase in ("second-owner", "opt-out", "retry", "restored-owner"):
+            for mutation in ("insert", "change", "cache"):
+                for failing in (False, True):
+                    with self.subTest(phase=phase, mutation=mutation, failing=failing):
+                        primary = (
+                            box.BoxError("private-primary-sentinel")
+                            if failing
+                            else None
+                        )
+                        cache = False
+                        with patch.object(
+                            fixture.credentials,
+                            "has_unlocked_values",
+                            side_effect=lambda: cache,
+                        ):
+                            with self.assertRaises(
+                                (box.BoxError, fixture.FixtureError)
+                            ) as raised:
+                                with fixture.scoped_host_environment(
+                                    {fixture.PASS_ENV: "synthetic-control"}
+                                ):
+                                    if mutation == "insert":
+                                        os.environ[fixture.SIDE] = (
+                                            "private-value-sentinel"
+                                        )
+                                    elif mutation == "change":
+                                        os.environ[fixture.PASS_ENV] = (
+                                            "private-value-sentinel"
+                                        )
+                                    else:
+                                        cache = True
+                                    if primary is not None:
+                                        raise primary
+                            if primary is not None:
+                                self.assertIs(raised.exception, primary)
+                                self.assertTrue(raised.exception.fixture_secondary)
+                            else:
+                                self.assertIsInstance(
+                                    raised.exception, fixture.FixtureError
+                                )
+                            self.assertNotIn(
+                                "private-value-sentinel", str(raised.exception)
+                            )
+                        self.assertEqual(dict(os.environ), baseline)
+
+    def test_provider_finalization_attempts_every_step_and_checks_join(self):
+        for failure in ("shutdown", "close", "join", "alive"):
+            for body_failure in (False, True):
+                with self.subTest(failure=failure, body_failure=body_failure):
+                    calls = []
+                    primary = (
+                        fixture.FirstLaunchFailure(
+                            {
+                                "stage": "selected-session",
+                                "error_class": "invalid-data",
+                            },
+                            True,
+                            None,
+                        )
+                        if body_failure
+                        else None
+                    )
+
+                    def action(name):
+                        calls.append(name)
+                        if name == failure:
+                            raise OSError("private-finalizer-sentinel")
+
+                    server = SimpleNamespace(
+                        shutdown=lambda: action("shutdown"),
+                        server_close=lambda: action("close"),
+                    )
+                    worker = SimpleNamespace(
+                        join=lambda **kw: action("join"),
+                        is_alive=lambda: failure == "alive",
+                    )
+                    if primary is None:
+                        with self.assertRaises((OSError, fixture.FixtureError)):
+                            fixture.finish_provider(server, worker, primary=None)
+                    else:
+                        fixture.finish_provider(server, worker, primary=primary)
+                        self.assertTrue(primary.shutdown_errors)
+                        self.assertNotIn(
+                            "private-finalizer-sentinel",
+                            json.dumps(primary.shutdown_errors),
+                        )
+                    self.assertEqual(calls, ["shutdown", "close", "join"])
+
+    def test_provider_partial_start_closes_owned_listener_without_joining_or_shutdown(
+        self,
+    ):
+        primary = RuntimeError("private-provider-start")
+        server = Mock()
+        worker = Mock()
+        worker.start.side_effect = primary
+        with (
+            patch.object(fixture, "ThreadingHTTPServer", return_value=server),
+            patch.object(fixture.threading, "Thread", return_value=worker),
+            self.assertRaises(RuntimeError) as raised,
+        ):
+            fixture.make_provider({})
+        self.assertIs(raised.exception, primary)
+        server.server_close.assert_called_once()
+        server.shutdown.assert_not_called()
+        worker.join.assert_not_called()
+
+    def test_reconciliation_failure_preserves_first_launch_object_and_diagnostic(self):
+        diagnostic = {"stage": "config-reload", "error_class": "invalid-data"}
+        primary = fixture.FirstLaunchFailure(diagnostic, True, None)
+        with (
+            patch.object(fixture, "run", side_effect=primary),
+            patch.object(
+                fixture, "record_ids", side_effect=OSError("private-journal-sentinel")
+            ),
+            self.assertRaises(fixture.FirstLaunchFailure) as raised,
+        ):
+            fixture.run_and_journal(
+                self.root, self.root / "native", "tumbleweed", lambda name: None
+            )
+        self.assertIs(raised.exception, primary)
+        self.assertIs(raised.exception.diagnostic, diagnostic)
+        self.assertEqual(
+            primary.shutdown_errors,
+            [{"stage": "journal-reconciliation", "error_class": "os-error"}],
+        )
 
     def test_engine_categories_are_fixed_including_errors_without_old_keywords(self):
         secret = "synthetic-sensitive-engine-message"
@@ -680,8 +859,11 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
         self.retained_source()
         program = """import importlib.util,sys
 from unittest.mock import patch
-spec=importlib.util.spec_from_file_location('fixture',sys.argv[1])
-fixture=importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+from pathlib import Path
+root=Path(sys.argv[1]).resolve().parents[1]
+sys.path[:0]=[str(root/'src'),str(root)]
+from tools import test_global_vault_podman as fixture
+fixture.load_runtime()
 result={'status':sys.argv[3], 'engine_probes':[]}
 with patch.object(fixture,'host_guard'), patch.object(fixture,'diagnose',return_value=result):
     sys.exit(fixture.main(['--diagnose',sys.argv[2]]))
@@ -908,7 +1090,9 @@ with patch.object(fixture,'host_guard'), patch.object(fixture,'diagnose',return_
             shutdown=shutdown,
             server_close=lambda: cleanup.append("close"),
         )
-        worker = SimpleNamespace(join=lambda **kwargs: cleanup.append("join"))
+        worker = SimpleNamespace(
+            join=lambda **kwargs: cleanup.append("join"), is_alive=lambda: False
+        )
 
         def launch(arguments):
             self.assertIn("--import-session", arguments)
@@ -971,14 +1155,17 @@ with patch.object(fixture,'host_guard'), patch.object(fixture,'diagnose',return_
         secret = "synthetic-private-first-launch-cli-error"
         program = """import importlib.util,sys
 from unittest.mock import patch
-spec=importlib.util.spec_from_file_location('fixture',sys.argv[1])
-fixture=importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+from pathlib import Path
+root=Path(sys.argv[1]).resolve().parents[1]
+sys.path[:0]=[str(root/'src'),str(root)]
+from tools import test_global_vault_podman as fixture
+fixture.load_runtime()
 def fail(root,*args):
     with fixture.first_launch_trace(root) as trace:
         with trace.checkpoint('config-reload'):
             raise KeyError(sys.argv[3])
-with patch.object(fixture,'host_guard'), patch.object(fixture.shutil,'which',return_value=sys.executable), patch.object(fixture,'run',side_effect=fail):
-    sys.exit(fixture.main(['--work-dir',sys.argv[2],'--opencode-v2',sys.executable]))
+with patch.object(fixture,'host_guard'), patch.object(fixture.shutil,'which',return_value=str(fixture.Path(sys.executable).resolve())), patch.object(fixture,'capture_binding',return_value={'source':{'commit':'a'*40},'native':{}}), patch.object(fixture,'verify_binding'), patch.object(fixture,'run',side_effect=fail):
+    sys.exit(fixture.main(['--work-dir',sys.argv[2],'--opencode-v2',sys.executable,'--expect-commit','a'*40]))
 """
         result = subprocess.run(
             [
@@ -1009,7 +1196,7 @@ with patch.object(fixture,'host_guard'), patch.object(fixture.shutil,'which',ret
         server = SimpleNamespace(
             server_port=12345, shutdown=lambda: None, server_close=lambda: None
         )
-        worker = SimpleNamespace(join=lambda **kwargs: None)
+        worker = SimpleNamespace(join=lambda **kwargs: None, is_alive=lambda: False)
         checked = []
         original_check = fixture.assert_host_clean
         original_vault_check = fixture.assert_host_vault_clean
@@ -1305,6 +1492,22 @@ with patch.object(fixture,'host_guard'), patch.object(fixture.shutil,'which',ret
         self.assertEqual(trace.failure["exit_code"], 17)
         owner.child.poll.assert_not_called()
 
+    def test_owner_observer_uses_explicit_primary_not_an_unrelated_caught_exception(
+        self,
+    ):
+        owner_class, owner, calls = self.trace_owner(code=0)
+        trace = fixture.SourceRetryTrace()
+        with (
+            patch.object(fixture.workspace_service, "Owner", owner_class),
+            trace.installed(),
+        ):
+            try:
+                raise ValueError("private-unrelated-caught-error")
+            except ValueError:
+                owner.shutdown(primary=None)
+        self.assertIsNone(trace.failure)
+        self.assertEqual(calls, [((), {"primary": None})])
+
     def test_owner_trace_forwards_arguments_and_preserves_actual_cleanup_error(self):
         primary, extra = ValueError("synthetic primary"), object()
         cleanup = OSError("private-cleanup-sentinel")
@@ -1512,6 +1715,1015 @@ with patch.object(fixture,'host_guard'), patch.object(fixture.shutil,'which',ret
                 fixture.validate_selected_source_session(
                     changed, "ses_other_recorded", data
                 )
+
+    @contextlib.contextmanager
+    def full_driver(
+        self, *, changed_phase=None, failing=False, finalizer=None, mutation="change"
+    ):
+        """Real orchestration; synthetic native and engine boundaries only."""
+        with tempfile.TemporaryDirectory(
+            prefix="gv-driver-", dir=self.parent
+        ) as parent:
+            root = Path(parent) / (fixture.PREFIX + "driver")
+            root.mkdir(mode=0o700)
+            fixture.prepare_root(root, "tumbleweed")
+            fixture.prepare_podman_cli(root, Path(sys.executable).resolve())
+            (root / "podman-tmp/alive").write_bytes(self.boot)
+            records, events = {}, []
+            cache = [False]
+            baseline = {
+                "info": {
+                    "id": "ses_fixture",
+                    "location": {"directory": str(root / "source-a")},
+                    "permissions": fixture.ASK_RULES,
+                },
+                "messages": [
+                    {
+                        "id": "msg_fixture",
+                        "type": "user",
+                        "text": fixture.SEED_TEXT,
+                        "time": {"created": 1},
+                    }
+                ],
+            }
+            primary = box.BoxError("private-launch-sentinel")
+
+            def create(name, origin=None):
+                path, data = box.create_workspace(root / name, "tumbleweed")
+                data.update(opencode_version="2.2.6", ready=True)
+                if origin is not None:
+                    data.update(
+                        container_project=str(root / "source-a"),
+                        restored_from={"kind": "full", "workspace_id": origin},
+                        credentials={"mode": "vault", "env": [], "vault": []},
+                    )
+                box.atomic_json(path, data)
+                box.atomic_json(
+                    box.session_file(path),
+                    {"sessions": ["ses_fixture"], "last": "ses_fixture"},
+                )
+                records[name] = (path, data)
+
+            current = ["source-a"]
+
+            def launch(arguments):
+                name = (
+                    "source-b"
+                    if "--no-vault" in arguments or str(root / "source-b") in arguments
+                    else "source-a"
+                )
+                current[0] = name
+                if name not in records:
+                    create(name)
+                phase = (
+                    "opt-out"
+                    if "--no-vault" in arguments
+                    else "second-owner"
+                    if name == "source-b"
+                    else "first-owner"
+                )
+                if phase != "opt-out":
+                    vault.hidden()
+                box.run_tui(["native", "--session", "ses_fixture"])
+                if phase == changed_phase:
+                    if mutation == "cache":
+                        cache[0] = True
+                    else:
+                        os.environ[
+                            fixture.SIDE if mutation == "insert" else fixture.PASS_ENV
+                        ] = "private-environment-sentinel"
+                    if failing:
+                        raise primary
+                return 0
+
+            def restored(*args):
+                (root / "restored-full").mkdir()
+                create("restored-full", records["source-a"][1]["id"])
+
+            def action(stage):
+                events.append(stage)
+                if stage == finalizer:
+                    raise OSError("private-finalizer-sentinel")
+
+            server = SimpleNamespace(
+                server_port=12345,
+                shutdown=lambda: action("shutdown"),
+                server_close=lambda: action("close"),
+            )
+            worker = SimpleNamespace(
+                join=lambda **kw: action("join"), is_alive=lambda: finalizer == "alive"
+            )
+
+            def request(*args):
+                return {
+                    "data": {
+                        "id": "ses_fixture",
+                        "location": {"directory": str(root / current[0])},
+                    }
+                }
+
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(
+                    patch.dict(os.environ, fixture.isolated_env(root), clear=True)
+                )
+                for target, name, value in (
+                    (fixture.credentials, "has_unlocked_values", lambda: cache[0]),
+                    (box, "exec_command", lambda data, command: command),
+                    (fixture, "host_guard", lambda: None),
+                    (fixture, "validate_store", lambda *a, **k: None),
+                    (box, "check_backend", lambda **kw: None),
+                    (crypto, "tools", lambda: None),
+                    (vault, "crypto", lambda: None),
+                    (fixture, "prepare_native_cli", lambda *a: None),
+                    (fixture, "seed_native_history", lambda *a: baseline),
+                    (fixture, "write_vault", lambda *a: None),
+                    (fixture, "make_provider", lambda *a: (server, worker)),
+                    (fixture, "launcher", launch),
+                    (fixture, "verify_owned_resources", lambda *a, **kw: {}),
+                    (
+                        fixture.workspace_service,
+                        "live_connection",
+                        lambda: {"url": "http://127.0.0.1:12345"},
+                    ),
+                    (box, "export_container_session", lambda *a: baseline),
+                    (fixture, "run_native", lambda *a, **kw: baseline),
+                    (fixture, "permission_matrix", lambda *a, **kw: None),
+                    (fixture, "default_plan_fallback", lambda *a: None),
+                    (fixture, "request_for", lambda *a: request),
+                    (
+                        fixture.workspace_service,
+                        "attach",
+                        lambda *a: contextlib.nullcontext({"session": "ses_fixture"}),
+                    ),
+                    (fixture.workspace_service, "api", lambda *a: {}),
+                    (box, "run", lambda *a, **kw: None),
+                    (fixture, "create_session", lambda *a, **kw: {"id": "ses_fixture"}),
+                    (crypto, "digest", lambda *a: "a" * 64),
+                    (fixture, "full_backup_restore", restored),
+                ):
+                    stack.enter_context(patch.object(target, name, value))
+                yield root, events, primary
+
+    def test_actual_later_owner_scopes_detect_mutation_after_callback_and_on_failure(
+        self,
+    ):
+        for phase, mutation in product(
+            ("second-owner", "opt-out"), ("insert", "change", "cache")
+        ):
+            for failing in (False, True):
+                with self.subTest(phase=phase, mutation=mutation, failing=failing):
+                    with self.full_driver(
+                        changed_phase=phase, failing=failing, mutation=mutation
+                    ) as (
+                        root,
+                        events,
+                        primary,
+                    ):
+                        baseline = dict(os.environ)
+                        with self.assertRaises(
+                            (box.BoxError, fixture.FixtureError)
+                        ) as raised:
+                            fixture.run(
+                                root, Path(sys.executable).resolve(), "tumbleweed"
+                            )
+                        if failing:
+                            self.assertIs(raised.exception, primary)
+                            self.assertTrue(primary.fixture_secondary)
+                        else:
+                            self.assertEqual(
+                                str(raised.exception),
+                                "host-value-retention"
+                                if mutation == "cache"
+                                else "host-environment-changed",
+                            )
+                        self.assertEqual(dict(os.environ), baseline)
+                        self.assertEqual(events, ["shutdown", "close", "join"])
+                        self.assertFalse((root / "result.json").exists())
+
+    def test_actual_success_body_does_not_publish_pass_before_provider_finalization(
+        self,
+    ):
+        for finalizer in (None, "shutdown", "close", "join", "alive"):
+            with self.subTest(finalizer=finalizer):
+                with self.full_driver(finalizer=finalizer) as (root, events, _):
+                    if finalizer is None:
+                        result = fixture.run(
+                            root, Path(sys.executable).resolve(), "tumbleweed"
+                        )
+                        self.assertEqual(result["status"], "passed")
+                    else:
+                        with self.assertRaises((OSError, fixture.FixtureError)):
+                            fixture.run(
+                                root, Path(sys.executable).resolve(), "tumbleweed"
+                            )
+                    self.assertFalse((root / "result.json").exists())
+                    self.assertEqual(events, ["shutdown", "close", "join"])
+
+    def test_cli_terminal_verdict_agrees_with_finalizer_and_journal_failures(self):
+        for failure in (None, "shutdown", "close", "join", "alive", "journal"):
+            with self.subTest(failure=failure):
+                before = set(self.parent.glob(fixture.PREFIX + "*"))
+                calls = []
+
+                def action(stage):
+                    calls.append(stage)
+                    if stage == failure:
+                        raise OSError("private-finalizer-sentinel")
+
+                def body(*args):
+                    server = SimpleNamespace(
+                        shutdown=lambda: action("shutdown"),
+                        server_close=lambda: action("close"),
+                    )
+                    worker = SimpleNamespace(
+                        join=lambda **kw: action("join"),
+                        is_alive=lambda: failure == "alive",
+                    )
+                    fixture.finish_provider(server, worker, primary=None)
+                    return {"checks": [], "status": "passed"}
+
+                actual_journal = fixture.record_ids
+
+                def journal(root):
+                    action("journal")
+                    return actual_journal(root)
+
+                with (
+                    patch.object(fixture, "host_guard"),
+                    patch.object(
+                        fixture,
+                        "capture_binding",
+                        return_value={"source": {"commit": "a" * 40}, "native": {}},
+                    ),
+                    patch.object(fixture, "verify_binding"),
+                    patch.object(
+                        fixture.shutil,
+                        "which",
+                        return_value=str(Path(sys.executable).resolve()),
+                    ),
+                    patch.object(fixture, "run", side_effect=body),
+                    patch.object(fixture, "record_ids", side_effect=journal),
+                    patch("sys.stdout", new_callable=io.StringIO),
+                ):
+                    code = fixture.main(
+                        [
+                            "--work-dir",
+                            str(self.parent),
+                            "--opencode-v2",
+                            sys.executable,
+                            "--expect-commit",
+                            "a" * 40,
+                        ]
+                    )
+                created = set(self.parent.glob(fixture.PREFIX + "*")) - before
+                self.assertEqual(len(created), 1)
+                result = fixture.private_json(created.pop(), "result.json")
+                self.assertEqual(code, int(failure is not None))
+                self.assertEqual(result["status"], "failed" if failure else "passed")
+                if failure is not None:
+                    self.assertEqual(
+                        result["error"]["stage"],
+                        "journal-reconciliation"
+                        if failure == "journal"
+                        else "provider-join"
+                        if failure == "alive"
+                        else "provider-" + failure,
+                    )
+                self.assertEqual(calls, ["shutdown", "close", "join", "journal"])
+                self.assertNotIn("private-finalizer-sentinel", json.dumps(result))
+
+    def test_fresh_placement_rejects_retained_families_and_renamed_markers_before_binding(
+        self,
+    ):
+        for marker in fixture.RETAINED_MARKERS:
+            for option in ("--work-dir", "--temp-dir"):
+                with self.subTest(marker=marker, option=option):
+                    with tempfile.TemporaryDirectory(
+                        prefix="retained-", dir=self.parent
+                    ) as parent:
+                        retained = Path(parent)
+                        (retained / marker).write_text("private-retained-evidence")
+                        child = retained / "nested"
+                        child.mkdir()
+                        arguments = [
+                            "--work-dir",
+                            str(child if option == "--work-dir" else self.parent),
+                            "--opencode-v2",
+                            sys.executable,
+                            "--expect-commit",
+                            "a" * 40,
+                        ]
+                        if option == "--temp-dir":
+                            arguments.extend([option, str(child)])
+                        with (
+                            patch.object(fixture, "host_guard"),
+                            patch.object(fixture, "capture_binding") as capture,
+                            patch.object(fixture.tempfile, "mkdtemp") as allocate,
+                            patch("sys.stdout", new_callable=io.StringIO),
+                        ):
+                            self.assertEqual(fixture.main(arguments), 1)
+                        capture.assert_not_called()
+                        allocate.assert_not_called()
+                        self.assertEqual(
+                            (retained / marker).read_text(), "private-retained-evidence"
+                        )
+        for prefix in fixture.RETAINED_PREFIXES:
+            root = self.parent / (prefix + "retained")
+            root.mkdir()
+            with self.assertRaisesRegex(fixture.FixtureError, "fresh-parent-required"):
+                fixture.fresh_parent(root)
+
+    def test_missing_expected_source_and_foreign_source_refuse_before_allocation(self):
+        for extra in (
+            [],
+            ["--source", "/private-source-sentinel", "--expect-commit", "a" * 40],
+        ):
+            with self.subTest(extra=bool(extra)):
+                with (
+                    patch.object(fixture, "host_guard"),
+                    patch.object(fixture, "capture_binding") as capture,
+                    patch.object(fixture.tempfile, "mkdtemp") as allocate,
+                    patch("sys.stdout", new_callable=io.StringIO) as output,
+                ):
+                    self.assertEqual(
+                        fixture.main(
+                            [
+                                "--work-dir",
+                                str(self.parent),
+                                "--opencode-v2",
+                                sys.executable,
+                                *extra,
+                            ]
+                        ),
+                        1,
+                    )
+                capture.assert_not_called()
+                allocate.assert_not_called()
+                self.assertNotIn("private-source-sentinel", output.getvalue())
+
+    def test_cli_host_refusal_and_help_never_import_candidate_runtime(self):
+        program = """import runpy,sys
+def guard(event,args):
+    if event=='import' and (args[0]=='oc_box' or args[0].startswith(('oc_box.','tools.'))):
+        raise AssertionError('candidate imported before host/source verification')
+sys.addaudithook(guard)
+sys.argv=[sys.argv[1],*sys.argv[2:]]
+runpy.run_path(sys.argv[0],run_name='__main__')
+"""
+        for arguments, expected in (
+            (["--help"], 0),
+            (["--work-dir", str(self.parent)], 1),
+        ):
+            with self.subTest(arguments=arguments):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-B",
+                        "-c",
+                        program,
+                        str(SCRIPT),
+                        *arguments,
+                    ],
+                    env={"PATH": os.defpath, "OC_BOX_CONTAINER": "1"},
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertNotIn("candidate imported", result.stdout + result.stderr)
+                self.assertNotIn("Traceback", result.stdout + result.stderr)
+
+    def test_binding_refuses_changed_source_and_native_without_repinning(self):
+        binary = self.parent / "native"
+        binary.write_bytes(Path(sys.executable).resolve().read_bytes())
+        binary.chmod(0o700)
+        original = hashlib.sha256(binary.read_bytes()).hexdigest()
+        identity = {
+            "commit": "a" * 40,
+            "commit_count": 140,
+            "dirty": False,
+            "sha256": {"tools/test_global_vault_podman.py": "b" * 64},
+        }
+        binding = {
+            "source": identity,
+            "native": {
+                "opencode": {
+                    "path": str(binary),
+                    "sha256": original,
+                    "bytes": binary.stat().st_size,
+                }
+            },
+        }
+        with (
+            patch.object(fixture, "source_snapshot", return_value=identity),
+            patch.object(fixture, "import_origins"),
+        ):
+            fixture.verify_binding(binding)
+            with binary.open("ab") as stream:
+                stream.write(b"synthetic changed bytes")
+            with self.assertRaisesRegex(fixture.FixtureError, "native-changed"):
+                fixture.verify_binding(binding)
+        self.assertEqual(binding["native"]["opencode"]["sha256"], original)
+        with patch.object(
+            fixture, "source_snapshot", return_value={**identity, "commit": "c" * 40}
+        ):
+            with self.assertRaisesRegex(fixture.FixtureError, "source-changed"):
+                fixture.verify_binding(binding)
+
+    def test_retry_scope_checks_mutation_before_restoring_attempt_configuration(self):
+        path, data, baseline = self.retained_source()
+        for failing, mutation in product((False, True), ("insert", "change", "cache")):
+            with self.subTest(failing=failing, mutation=mutation):
+                primary = box.BoxError("private-retry-primary")
+                environment = dict(os.environ)
+                cache = [False]
+
+                def launch(arguments):
+                    vault.hidden()
+                    box.run_tui(["native", "--session", "ses_fixture"])
+                    if mutation == "cache":
+                        cache[0] = True
+                    else:
+                        os.environ[
+                            fixture.SIDE if mutation == "insert" else "XDG_CONFIG_HOME"
+                        ] = "private-retry-value"
+                    if failing:
+                        raise primary
+                    return 0
+
+                request = lambda *a: {
+                    "data": {
+                        "id": "ses_fixture",
+                        "location": {"directory": data["project"]},
+                    }
+                }
+                server = SimpleNamespace(
+                    server_port=12345, shutdown=lambda: None, server_close=lambda: None
+                )
+                worker = SimpleNamespace(join=lambda **kw: None, is_alive=lambda: False)
+                with (
+                    patch.object(
+                        fixture.credentials,
+                        "has_unlocked_values",
+                        side_effect=lambda: cache[0],
+                    ),
+                    patch.object(fixture, "host_guard"),
+                    patch.object(fixture, "validate_store"),
+                    patch.object(fixture, "check_native_version"),
+                    patch.object(fixture, "verify_stopped_source"),
+                    patch.object(box, "check_backend"),
+                    patch.object(
+                        fixture, "make_provider", return_value=(server, worker)
+                    ),
+                    patch.object(fixture, "launcher", side_effect=launch),
+                    patch.object(fixture, "verify_owned_resources"),
+                    patch.object(
+                        fixture.workspace_service,
+                        "live_connection",
+                        return_value={"url": "http://127.0.0.1:12345"},
+                    ),
+                    patch.object(fixture, "request_for", return_value=request),
+                    patch.object(
+                        box, "export_container_session", return_value=baseline
+                    ),
+                    patch.object(fixture, "run_native"),
+                    patch.object(fixture, "permission_matrix"),
+                ):
+                    report_path, result = fixture.retry_source(self.root)
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(dict(os.environ), environment)
+                self.assertNotIn("private-retry-value", report_path.read_text())
+                self.assertNotIn("private-retry-primary", report_path.read_text())
+                self.assertTrue(result["evidence_unchanged"])
+                if failing:
+                    self.assertTrue(
+                        any(
+                            item.get("category")
+                            in ("host-environment-changed", "host-value-retention")
+                            for item in result["cleanup_errors"]
+                        )
+                    )
+
+    def test_capture_isolates_poisoned_bytecode_after_initial_snapshot_before_import(
+        self,
+    ):
+        program = r"""import hashlib,importlib,json,os,py_compile,sys,tempfile
+from pathlib import Path
+from unittest.mock import patch
+sys.path[:0]=[sys.argv[1]+'/src',sys.argv[1]]
+from tools import test_global_vault_podman as fixture
+real=fixture.APP
+with tempfile.TemporaryDirectory(prefix='gv-bootstrap-',dir=sys.argv[2]) as temporary:
+    root=Path(temporary); (root/'tools').mkdir(); (root/'src').mkdir()
+    (root/'src/oc_box').mkdir()
+    init=root/'src/oc_box/__init__.py'; init.write_text('')
+    foreign=root/'foreign'; (foreign/'tools').mkdir(parents=True)
+    (foreign/'tools/__init__.py').write_text("raise RuntimeError('foreign candidate executed')\n")
+    if sys.argv[3]=='root': (root/'tools.py').write_text("raise RuntimeError('root candidate executed')\n")
+    if sys.argv[3]=='sourceless':
+        evil=root/'compile-only.py'; evil.write_text("raise RuntimeError('sourceless candidate executed')\n")
+        py_compile.compile(str(evil),cfile=str(root/'tools.pyc'),doraise=True); evil.unlink()
+    source=root/'tools/probe.py'; source.write_text("VALUE='evil'\n")
+    stamp=source.stat().st_mtime
+    py_compile.compile(str(source),doraise=True)
+    source.write_text("VALUE='safe'\n"); os.utime(source,(stamp,stamp))
+    identity={'commit':'a'*40,'sha256':{str(p.relative_to(root)):hashlib.sha256(p.read_bytes()).hexdigest() for p in (init,source)}}
+    for name in tuple(sys.modules):
+        if name in ('oc_box','tools') or name.startswith(('oc_box.','tools.')): del sys.modules[name]
+    sys.path[:]=[p for p in sys.path if not Path(p or '.').resolve().is_relative_to(real)]
+    fixture.APP=root; order=[]; result=[]
+    def snapshot(*args): order.append('verified'); return identity
+    def load():
+        assert order==['verified']
+        sys.path[:0]=[str(root/'src'),str(root),str(foreign)]
+        result.append(importlib.import_module('tools.probe').VALUE)
+        order.append('imported')
+    with patch.object(fixture,'source_snapshot',side_effect=snapshot),patch.object(fixture,'load_runtime',side_effect=load):
+        if sys.argv[3]=='preloaded-alias':
+            spec=importlib.util.spec_from_file_location('preloaded_candidate',source)
+            loaded=importlib.util.module_from_spec(spec); sys.modules[spec.name]=loaded
+            spec.loader.exec_module(loaded)
+            assert loaded.VALUE=='evil'
+            try: fixture.capture_binding(root,'a'*40)
+            except fixture.FixtureError as error: assert str(error)=='source-shadowing'
+            else: raise AssertionError('preloaded bytecode was retroactively attested')
+            assert order==['verified']
+            print(json.dumps({'refused':True}))
+            raise SystemExit(0)
+        binding=fixture.capture_binding(root,'a'*40)
+    assert result==['safe'] and order==['verified','imported','verified']
+    assert binding['source']==identity and sys.dont_write_bytecode
+    print(json.dumps({'source_only':True,'ordered':True}))
+"""
+        for mode in ("root", "foreign", "sourceless", "preloaded-alias"):
+            with self.subTest(mode=mode):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-B",
+                        "-c",
+                        program,
+                        str(APP),
+                        str(self.parent),
+                        mode,
+                    ],
+                    env={"PATH": os.defpath},
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    json.loads(result.stdout),
+                    {"refused": True}
+                    if mode == "preloaded-alias"
+                    else {"source_only": True, "ordered": True},
+                )
+
+    def test_final_source_refusal_keeps_initial_identity_and_failed_terminal_status(
+        self,
+    ):
+        before = set(self.parent.glob(fixture.PREFIX + "*"))
+        binding = {
+            "source": {
+                "commit": "a" * 40,
+                "sha256": {"tools/acceptance_guards.py": "b" * 64},
+            },
+            "native": {},
+        }
+        changed = []
+
+        def verify(current):
+            self.assertIs(current, binding)
+            if changed:
+                raise fixture.FixtureError("source-changed")
+
+        def body(*args):
+            changed.append(True)
+            return {"status": "passed", "source_identity": {"commit": "c" * 40}}
+
+        with (
+            patch.object(fixture, "host_guard"),
+            patch.object(fixture, "capture_binding", return_value=binding),
+            patch.object(fixture, "verify_binding", side_effect=verify),
+            patch.object(
+                fixture.shutil,
+                "which",
+                return_value=str(Path(sys.executable).resolve()),
+            ),
+            patch.object(fixture, "run", side_effect=body),
+        ):
+            self.assertEqual(
+                fixture.main(
+                    [
+                        "--work-dir",
+                        str(self.parent),
+                        "--opencode-v2",
+                        sys.executable,
+                        "--expect-commit",
+                        "a" * 40,
+                    ]
+                ),
+                1,
+            )
+        created = set(self.parent.glob(fixture.PREFIX + "*")) - before
+        self.assertEqual(len(created), 1)
+        report = fixture.private_json(created.pop(), "result.json")
+        self.assertEqual(report["status"], "failed")
+        self.assertEqual(report["source_identity"]["commit"], "a" * 40)
+        self.assertEqual(report["executing_binding"]["source"], binding["source"])
+
+    def test_scoped_cache_guard_detects_empty_values_and_effective_policy_authority(
+        self,
+    ):
+        for variable, value in (
+            (fixture.credentials._UNLOCKED, ("synthetic", {})),
+            (fixture.credentials._EFFECTIVE_POLICY, ("synthetic", {"mode": "vault"})),
+        ):
+            with self.subTest(variable=variable.name):
+                token = None
+                try:
+                    with self.assertRaisesRegex(
+                        fixture.FixtureError, "host-value-retention"
+                    ):
+                        with fixture.scoped_host_environment():
+                            token = variable.set(value)
+                finally:
+                    if token is not None:
+                        variable.reset(token)
+
+    def test_new_failed_terminal_report_and_original_binding_remain_retry_evidence(
+        self,
+    ):
+        path, data, baseline = self.retained_source()
+        native = {
+            "path": str(Path(sys.executable).resolve()),
+            "sha256": "b" * 64,
+            "bytes": 1,
+        }
+        identity = {
+            "commit": "a" * 40,
+            "commit_count": 140,
+            "version": "1.6.111+g" + "a" * 7,
+            "dirty": False,
+            "sha256": {"tools/acceptance_guards.py": "b" * 64},
+        }
+        captured = {
+            "format": fixture.FORMAT + "-binding-v1",
+            "root": str(self.root),
+            "source_identity": identity,
+            "native": {
+                role: dict(native) for role in ("opencode", "podman", "interpreter")
+            },
+        }
+        fixture.write_json_new(self.root / "source-binding.json", captured)
+        fixture.terminal_report(
+            self.root,
+            [],
+            primary=fixture.FirstLaunchFailure(
+                {"stage": "selected-session"}, True, None
+            ),
+            identity={"source": identity, "native": captured["native"]},
+        )
+        before = fixture.source_evidence_digests(self.root, path)
+        self.assertIn("source-binding.json", before)
+        self.assertIn("result.json", before)
+        self.assertEqual(
+            fixture.validate_source_retry(self.root)[:4],
+            (self.root, path, data, baseline),
+        )
+        self.assertEqual(fixture.source_evidence_digests(self.root, path), before)
+        original = (self.root / "result.json").read_bytes()
+        with self.assertRaises(FileExistsError):
+            fixture.terminal_report(self.root, [], result={"status": "passed"})
+        self.assertEqual((self.root / "result.json").read_bytes(), original)
+        captured["source_identity"]["dirty"] = True
+        (self.root / "source-binding.json").write_text(json.dumps(captured))
+        with self.assertRaisesRegex(fixture.FixtureError, "retry-original-provenance"):
+            fixture.validate_source_retry(self.root)
+
+    def test_restored_owner_checks_scoped_environment_and_cache_on_success_and_failure(
+        self,
+    ):
+        for mutation, failing in product(("insert", "change", "cache"), (False, True)):
+            with self.subTest(mutation=mutation, failing=failing):
+                root = self.parent / (fixture.PREFIX + mutation + str(failing))
+                root.mkdir(mode=0o700)
+                for relative in (
+                    "host-home",
+                    "registry/workspaces",
+                    "data/containers/storage/volumes",
+                    "config/containers",
+                    "podman-run",
+                    "temporary",
+                ):
+                    (root / relative).mkdir(parents=True, mode=0o700, exist_ok=True)
+                (root / "config/containers/storage.conf").write_text(
+                    fixture.expected_storage(root)
+                )
+                with (
+                    patch.object(self, "root", root),
+                    patch.dict(os.environ, fixture.isolated_env(root), clear=True),
+                ):
+                    path, data, baseline = self.retained_source()
+                    cache = [False]
+                    primary = box.BoxError("private-restored-primary")
+                    manifest = {
+                        "kind": "full",
+                        "source_workspace_id": data["id"],
+                        "project": data["project"],
+                        "container_project": data["project"],
+                        "configuration": {
+                            "credentials": {"mode": "vault", "env": [], "vault": []}
+                        },
+                        "sessions": {"last": baseline["info"]["id"]},
+                        "components": dict.fromkeys(
+                            ("project.age", "home.age", "registry.age", "image.age")
+                        ),
+                    }
+
+                    def launch(arguments):
+                        if arguments[0] == "restore":
+                            destination = root / "restored-full"
+                            destination.mkdir()
+                            (destination / "unfinished.txt").write_text(
+                                "PROJECT_RETAINED\n"
+                            )
+                            restored_path, restored = box.create_workspace(
+                                destination, "tumbleweed"
+                            )
+                            restored.update(
+                                opencode_version="2.2.6",
+                                container_project=data["project"],
+                                restored_from={
+                                    "kind": "full",
+                                    "workspace_id": data["id"],
+                                },
+                                credentials={"mode": "vault", "env": [], "vault": []},
+                            )
+                            box.atomic_json(restored_path, restored)
+                            box.atomic_json(
+                                box.session_file(restored_path),
+                                {
+                                    "sessions": [baseline["info"]["id"]],
+                                    "last": baseline["info"]["id"],
+                                },
+                            )
+                        elif arguments[0] == "start":
+                            vault.hidden()
+                            box.run_tui(["native", "--session", baseline["info"]["id"]])
+                            if mutation == "cache":
+                                cache[0] = True
+                            else:
+                                os.environ[
+                                    fixture.SIDE if mutation == "insert" else "PATH"
+                                ] = "private-restored-value"
+                            if failing:
+                                raise primary
+
+                    original = dict(os.environ)
+                    with contextlib.ExitStack() as stack:
+                        for target, name, options in (
+                            (
+                                fixture.credentials,
+                                "has_unlocked_values",
+                                {"side_effect": lambda: cache[0]},
+                            ),
+                            (
+                                fixture,
+                                "snapshot_source",
+                                {
+                                    "return_value": {
+                                        "home": {"db": "a" * 64},
+                                        "registry": {},
+                                    }
+                                },
+                            ),
+                            (crypto, "digest", {"return_value": "a" * 64}),
+                            (
+                                crypto,
+                                "small",
+                                {"return_value": b"synthetic-age-fixture"},
+                            ),
+                            (crypto, "validate_recipients", {}),
+                            (
+                                crypto,
+                                "opened",
+                                {
+                                    "return_value": contextlib.nullcontext(
+                                        (manifest, None, None)
+                                    )
+                                },
+                            ),
+                            (backups, "validate_manifest", {}),
+                            (fixture, "launcher", {"side_effect": launch}),
+                            (fixture, "verify_owned_resources", {}),
+                            (fixture, "digest_home", {"return_value": "a" * 64}),
+                            (fixture, "tree_digest", {"return_value": {}}),
+                            (fixture, "os_sentinel", {}),
+                            (
+                                fixture.workspace_service,
+                                "live_connection",
+                                {"return_value": {"url": "http://127.0.0.1:12345"}},
+                            ),
+                            (
+                                box,
+                                "export_container_session",
+                                {"return_value": baseline},
+                            ),
+                            (fixture, "run_native", {}),
+                            (fixture, "permission_matrix", {}),
+                        ):
+                            stack.enter_context(patch.object(target, name, **options))
+                        with self.assertRaises(
+                            (box.BoxError, fixture.FixtureError)
+                        ) as raised:
+                            fixture.full_backup_restore(
+                                root,
+                                baseline,
+                                {},
+                                {},
+                                12345,
+                                "synthetic-password",
+                                lambda name: None,
+                            )
+                    if failing:
+                        self.assertIs(raised.exception, primary)
+                        self.assertTrue(primary.fixture_secondary)
+                    else:
+                        self.assertEqual(
+                            str(raised.exception),
+                            "host-value-retention"
+                            if mutation == "cache"
+                            else "host-environment-changed",
+                        )
+                    self.assertEqual(dict(os.environ), original)
+
+    def test_initial_binding_rejects_preloaded_application_before_runtime_loading(self):
+        previous = sys.pycache_prefix
+        with (
+            patch.object(fixture, "source_snapshot", return_value={"commit": "a" * 40}),
+            patch.object(fixture, "load_runtime") as load,
+        ):
+            with self.assertRaisesRegex(fixture.FixtureError, "source-shadowing"):
+                fixture.capture_binding(APP, "a" * 40)
+        load.assert_not_called()
+        self.assertEqual(sys.pycache_prefix, previous)
+
+    def test_isolated_entry_guard_precedes_shadowable_stdlib_imports(self):
+        root = self.parent / "entry-guard"
+        root.mkdir()
+        script = root / "fixture.py"
+        script.write_bytes(SCRIPT.read_bytes())
+        marker = root / "shadow-executed"
+        (root / "argparse.py").write_text(
+            "from pathlib import Path\nPath("
+            + repr(str(marker))
+            + ").write_text('executed')\nraise RuntimeError('private shadow')\n"
+        )
+        for flags, expected in ((("-B",), 2), (("-I",), 2), (("-I", "-B"), 0)):
+            with self.subTest(flags=flags):
+                result = subprocess.run(
+                    [sys.executable, *flags, str(script), "--help"],
+                    env={"PATH": os.defpath},
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
+                self.assertFalse(marker.exists())
+                self.assertNotIn("Traceback", result.stderr)
+
+    def test_ignored_root_import_code_refuses_before_loading_candidate_packages(self):
+        root = self.parent / "source-proof"
+        root.mkdir()
+        environment = {
+            "PATH": os.defpath,
+            "HOME": str(root),
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+
+        def git(*args):
+            return subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "-c",
+                    "user.name=Synthetic Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    *args,
+                ],
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=True,
+                text=True,
+                timeout=15,
+            ).stdout.strip()
+
+        git("init", "-q")
+        for relative in (*fixture.SOURCE_DONORS, "src/oc_box/oc_box.py"):
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("# synthetic tracked source, never executed\n")
+        git("add", "tools", "src")
+        for number in range(30):
+            git("commit", "-q", "--allow-empty", "-m", "synthetic " + str(number))
+        expected = git("rev-parse", "HEAD")
+        (root / ".git/info/exclude").write_text("tools.py\n")
+        shim = root / "tools.py"
+        shim.write_text(
+            "raise RuntimeError('private ignored source must not execute')\n"
+        )
+        with (
+            patch.object(fixture, "APP", root),
+            patch.object(fixture, "load_runtime") as load,
+        ):
+            with self.assertRaisesRegex(fixture.FixtureError, "clean-source-required"):
+                fixture.capture_binding(root, expected)
+            load.assert_not_called()
+            shim.unlink()
+            snapshot = fixture.source_snapshot(root, expected)
+        self.assertEqual(snapshot["commit"], expected)
+        self.assertEqual(snapshot["commit_count"], 30)
+        # Switch index/worktree only AFTER a genuine clean status was read.
+        actual_run = subprocess.run
+        switched = []
+
+        def interleaved(argv, **kwargs):
+            result = actual_run(argv, **kwargs)
+            if "status" in argv and not switched:
+                switched.append(True)
+                changed = root / "tools/test_v2_podman.py"
+                changed.write_text("# staged after clean status; never executed\n")
+                git("add", "tools/test_v2_podman.py")
+            return result
+
+        with (
+            patch.object(fixture, "APP", root),
+            patch.object(subprocess, "run", side_effect=interleaved),
+        ):
+            with self.assertRaisesRegex(fixture.FixtureError, "source-changed"):
+                fixture.source_snapshot(root, expected)
+        self.assertEqual(switched, [True])
+        # A replacement with the same parent preserves count and a clean status,
+        # while making literal A appear to contain the staged B tree.
+        tree = git("write-tree")
+        parent = git("rev-parse", expected + "^")
+        substitute = git(
+            "commit-tree", tree, "-p", parent, "-m", "synthetic replacement"
+        )
+        git("replace", expected, substitute)
+        self.assertEqual(git("status", "--porcelain"), "")
+        self.assertEqual(git("rev-parse", "HEAD"), expected)
+        with patch.object(fixture, "APP", root):
+            with self.assertRaisesRegex(fixture.FixtureError, "clean-source-required"):
+                fixture.source_snapshot(root, expected)
+
+    def test_module_definitions_are_lazy_and_verified_callers_reuse_runtime_exports(
+        self,
+    ):
+        program = r"""import importlib.util,json,sys
+from pathlib import Path
+from unittest.mock import patch
+script=Path(sys.argv[1]); root=script.parents[1]
+spec=importlib.util.spec_from_file_location('late_fixture',script)
+fixture=importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+assert not any(n=='oc_box' or n.startswith('oc_box.') for n in sys.modules)
+# This is the explicitly trusted-library seam, not a second initial bootstrap.
+sys.path[:0]=[str(root/'src'),str(root)]
+from oc_box import oc_box as box
+from tools import acceptance_guards as guards
+with patch.object(fixture,'capture_binding',side_effect=AssertionError('second bootstrap')):
+    assert fixture.box is box and fixture.guards is guards
+    assert fixture.vault is box.vault and fixture.credentials is box.credentials
+    assert fixture.workspace_service is box.workspace_service
+    assert fixture.crypto.__name__=='oc_box.backup_crypto'
+    assert fixture.backups.__name__=='oc_box.backups'
+    fixture.load_runtime()
+print(json.dumps({'lazy':True,'exports':True}))
+"""
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", program, str(SCRIPT)],
+            env={"PATH": os.defpath},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"lazy": True, "exports": True})
 
 
 if __name__ == "__main__":
