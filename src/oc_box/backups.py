@@ -39,6 +39,13 @@ class DurabilityError(BackupError):
     pass
 
 
+class RestoreRecovery:
+    """Sticky attempt state, independent of the escaping primary exception."""
+
+    def __init__(self):
+        self.must_retain = False
+
+
 def sync_descriptor(descriptor):
     try:
         os.fsync(descriptor)
@@ -120,7 +127,7 @@ def durable_json(box, path, value):
             pass
 
 
-def publish_completed_restore(box, directory, data):
+def publish_completed_restore(box, directory, data, *, recovery):
     """Keep a separately synchronized blocked record until completion commits."""
     record = directory / "workspace.json"
     blocked = directory / "restore-blocked.json"
@@ -143,11 +150,15 @@ def publish_completed_restore(box, directory, data):
         try:
             os.replace(blocked, record)
             sync_path(directory, directory=True)
-        except (OSError, DurabilityError):
-            print(
-                "Restore completion rollback could not establish durability; inspect retained blocked recovery metadata before any launch.",
-                file=sys.stderr,
-            )
+        except BaseException:
+            recovery.must_retain = True
+            try:
+                print(
+                    "Restore completion rollback could not establish durability; inspect retained blocked recovery metadata before any launch.",
+                    file=sys.stderr,
+                )
+            except OSError:
+                pass
         raise
     # Retain the blocked snapshot as private evidence; it is not the active record.
 
@@ -529,6 +540,7 @@ def make_backup(box, args):
         capture_journal = None
         capture_attempted = False
         temporary_output = None
+        primary_failed = False
         try:
             with tempfile.TemporaryDirectory(
                 prefix="oc-box-backup-ciphertext-", dir=output.parent
@@ -652,8 +664,10 @@ def make_backup(box, args):
                 print(
                     "The source container remains stopped. Its files, sessions, and host vault were not altered."
                 )
+        except BaseException:
+            primary_failed = True
+            raise
         finally:
-            primary_failed = sys.exc_info()[0] is not None
             cleanup_ok = True
             if temporary_output is not None:
                 try:
@@ -900,6 +914,8 @@ def restore_backup(box, args):
         container_created = False
         project_activated = False
         success = False
+        primary_failed = False
+        recovery = RestoreRecovery()
 
         def restore_component(name, root, *, private_scope=False):
             # This status is outside every archived tree, private, fixed-name and
@@ -1082,28 +1098,31 @@ def restore_backup(box, args):
                 )
                 data["ready"] = manifest["kind"] == "full" and bool(config.get("ready"))
                 durable_json(box, directory / "workspace.json", data)
-                publish_completed_restore(box, directory, data)
+                publish_completed_restore(box, directory, data, recovery=recovery)
                 success = True
             print(f"Restored stopped workspace {ident} at {destination}.")
             print(f"Resume with: oc-box --workspace {ident}")
             print(
                 "The host vault was not restored/unlocked. Recreate required vault/env values before a selected-mode launch. Portable restores reinstall baseline/OS dependencies on their first normal start."
             )
+        except BaseException as exc:
+            primary_failed = True
+            if isinstance(exc, DurabilityError):
+                recovery.must_retain = True
+            raise
         finally:
-            primary_failed = sys.exc_info()[0] is not None
-            durability_failed = isinstance(sys.exc_info()[1], DurabilityError)
             cleanup_ok = True
             if not success:
                 # Loaded images are shared cache: retain their attempted identity
                 # rather than delete an image that may predate this restoration.
-                cleanup_ok = not image_load_attempted and not durability_failed
-                if container_created and not durability_failed:
+                cleanup_ok = not image_load_attempted and not recovery.must_retain
+                if container_created and not recovery.must_retain:
                     try:
                         container_ok = remove_restore_resource(box, "container", data)
                         cleanup_ok = cleanup_ok and container_ok
                     except Exception:
                         cleanup_ok = False
-                if volume_attempted and not durability_failed:
+                if volume_attempted and not recovery.must_retain:
                     try:
                         volume_ok = remove_restore_resource(box, "volume", data)
                         cleanup_ok = cleanup_ok and volume_ok

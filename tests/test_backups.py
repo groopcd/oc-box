@@ -1071,6 +1071,138 @@ class WorkspaceBackupTests(unittest.TestCase):
                 )
                 self.assertEqual(record["restore_attempted_resources"][0], "volume")
 
+    def test_completion_cancellation_retains_recovery_when_rollback_is_uncertain(self):
+        self.backup(portable=True)
+        replace = os.replace
+        sync_path = backups.sync_path
+        source_before = {
+            path: path.read_bytes()
+            for path in (
+                self.path,
+                box.session_file(self.path),
+                self.project / box.MARKER,
+            )
+        }
+        for rollback in ("verified", "rename-failure", "barrier-failure"):
+            with self.subTest(rollback=rollback):
+                destination = self.root / ("cancel-" + rollback)
+                cancellation = KeyboardInterrupt("Synthetic completion cancellation")
+                state = {
+                    "cancelled": False,
+                    "rolled_back": False,
+                    "rollback_failed": False,
+                }
+                published = []
+
+                def replacing(source, target, **kwargs):
+                    source_path, target_path = Path(source), Path(target)
+                    rolling_back = (
+                        state["cancelled"]
+                        and source_path.name == "restore-blocked.json"
+                    )
+                    if rolling_back and rollback == "rename-failure":
+                        state["rollback_failed"] = True
+                        raise OSError("PRIVATE_ROLLBACK_RENAME")
+                    result = replace(source, target, **kwargs)
+                    if rolling_back:
+                        state["rolled_back"] = True
+                    if (
+                        target_path.name == "workspace.json"
+                        and target_path.is_file()
+                        and not state["cancelled"]
+                    ):
+                        record = box.read_json(target_path)
+                        if (
+                            record.get("project") == str(destination)
+                            and "restore_incomplete" not in record
+                        ):
+                            state["cancelled"] = True
+                            published.append((target_path, record))
+                            raise cancellation
+                    return result
+
+                def syncing(path, *, directory=False):
+                    if (
+                        rollback == "barrier-failure"
+                        and state["rolled_back"]
+                        and not state["rollback_failed"]
+                        and directory
+                        and Path(path) == published[0][0].parent
+                    ):
+                        state["rollback_failed"] = True
+                        raise backups.DurabilityError(
+                            "Synthetic rollback durability refusal"
+                        )
+                    return sync_path(path, directory=directory)
+
+                self.operations.clear()
+                with (
+                    patch.object(backups.os, "replace", side_effect=replacing),
+                    patch.object(backups, "sync_path", side_effect=syncing),
+                    self.assertRaises(KeyboardInterrupt) as error,
+                ):
+                    self.restore(destination)
+                self.assertIs(error.exception, cancellation)
+                self.assertEqual(len(published), 1)
+                record_path, created = published[0]
+                if rollback == "verified":
+                    self.assertFalse(destination.exists())
+                    self.assertFalse(record_path.exists())
+                    self.assertNotIn(created["home_volume"], self.volumes)
+                    self.assertFalse(
+                        any(
+                            data["container"] == created["container"]
+                            for data in self.created
+                        )
+                    )
+                else:
+                    self.assertTrue(state["rollback_failed"])
+                    self.assertFalse(
+                        any(
+                            args[:2] in (("container", "rm"), ("volume", "rm"))
+                            for args in self.operations
+                        )
+                    )
+                    self.assertTrue(destination.is_dir())
+                    self.assertEqual(
+                        (destination / "unfinished.txt").read_text(),
+                        "uncommitted source edits",
+                    )
+                    self.assertEqual(
+                        (destination / box.MARKER).read_text().strip(), created["id"]
+                    )
+                    home = self.volumes[created["home_volume"]]
+                    self.assertEqual(
+                        (home / ".local/share/opencode/opencode.db").read_bytes(),
+                        b"synthetic-private-database",
+                    )
+                    self.assertTrue(
+                        any(
+                            data["container"] == created["container"]
+                            for data in self.created
+                        )
+                    )
+                    retained = box.read_json(record_path)
+                    self.assertTrue(retained["restore_incomplete"])
+                    self.assertEqual(
+                        retained["restore_attempted_resources"], ["volume", "container"]
+                    )
+                for path, content in source_before.items():
+                    self.assertEqual(path.read_bytes(), content)
+
+    def test_backup_cleanup_failure_is_not_hidden_by_callers_handled_exception(self):
+        ambient = RuntimeError("Synthetic already-handled caller failure")
+        with patch.object(backups, "remove_capture_image", return_value=False):
+            try:
+                raise ambient
+            except RuntimeError as handled:
+                with self.assertRaises(crypto.BackupError) as error:
+                    self.backup()
+                self.assertIs(handled, ambient)
+        self.assertIn("cleanup incomplete", str(error.exception).lower())
+        self.assertTrue(self.archive.is_file())
+        self.assertTrue(list((self.path.parent / "backup-captures").glob("*.json")))
+
     def test_each_payload_barrier_failure_retains_its_blocked_journal(self):
         self.backup(portable=True)
         original = self.decrypt
