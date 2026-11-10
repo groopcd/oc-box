@@ -22,7 +22,7 @@ from oc_box import terminal_ui as ui
 
 BANNER = re.compile(rb"\x1b7\x1b\[\d+;1H\x1b\[0m\x1b\[2K[^\x1b]*\x1b8")
 RELAY = r"""
-import ctypes, json, os, signal, subprocess, sys, termios, time
+import ctypes, json, os, signal, subprocess, sys, termios, time, traceback
 from pathlib import Path
 from oc_box import terminal_ui as ui
 root = Path(sys.argv[1])
@@ -40,11 +40,55 @@ def expired(*_):
     raise TimeoutError("synthetic relay watchdog")
 signal.signal(signal.SIGALRM, expired)
 signal.alarm(3)
-if sys.argv[2] == "cancel":
+mode = sys.argv[2]
+events = []
+owned = None
+original_popen = ui.subprocess.Popen
+original_waitid = os.waitid
+original_killpg = os.killpg
+observed_exit = False
+def tracked_popen(*args, **kwargs):
+    global owned
+    owned = original_popen(*args, **kwargs)
+    original_poll, original_wait = owned.poll, owned.wait
+    def poll(*args, **kwargs):
+        events.append(["poll"])
+        return original_poll(*args, **kwargs)
+    def wait(*args, **kwargs):
+        events.append(["reap"])
+        code = original_wait(*args, **kwargs)
+        if mode == "reap_race":
+            # Deliver both handlers after wait has reaped, but before it returns
+            # to the relay. Neither may signal a potentially reused group.
+            signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+            signal.getsignal(signal.SIGTERM)(signal.SIGTERM, None)
+        return code
+    owned.poll, owned.wait = poll, wait
+    return owned
+def observe(kind, pid, flags):
+    global observed_exit
+    events.append(["observe", flags])
+    if mode == "lost_anchor" or (mode == "lost_cleanup" and observed_exit):
+        # Deterministic outside-reaper injection, not a probabilistic PID race.
+        owned.wait(timeout=1)
+        raise ChildProcessError("SYNTHETIC_PRIVATE_REAPER_DETAIL")
+    result = original_waitid(kind, pid, flags)
+    observed_exit = observed_exit or result is not None
+    return result
+def signal_group(pid, signum):
+    events.append(["signal", signum])
+    return original_killpg(pid, signum)
+ui.subprocess.Popen = tracked_popen
+os.waitid, os.killpg = observe, signal_group
+cancellation = KeyboardInterrupt()
+if mode in ("cancel", "lost_cancel"):
     original_select = ui.select.select
     def cancel_when_ready(*args):
         if (root / "ready").exists():
-            raise KeyboardInterrupt
+            if mode == "lost_cancel":
+                (root / "reap_now").touch()
+                owned.wait(timeout=1)
+            raise cancellation
         return original_select(*args)
     ui.select.select = cancel_when_ready
 result = {}
@@ -54,8 +98,13 @@ try:
         refresh=0.02, show_loading=sys.argv[4] == "loading")
 except BaseException as exc:
     result["error"] = type(exc).__name__
+    result["primary_preserved"] = exc is cancellation
+    result["safe_ownership_error"] = str(exc) == "TUI child ownership lost; process-group signaling refused."
+    result["private_error_leaked"] = "SYNTHETIC_PRIVATE_REAPER_DETAIL" in "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
 finally:
     signal.alarm(0)
+    result["events"] = events
+    result["anchor_loss_injected"] = mode in ("lost_anchor", "lost_cleanup", "lost_cancel")
     result["terminal_restored"] = before is None or termios.tcgetattr(0) == before
     result["handlers_restored"] = all(signal.getsignal(sig) is previous for sig in signals)
     result["fds_restored"] = set(os.listdir("/proc/self/fd")) == before_fds
@@ -92,7 +141,9 @@ finally:
 
 @unittest.skipUnless(sys.platform == "linux", "Linux PTY/process-group integration")
 class TerminalUIFailures(unittest.TestCase):
-    def launch(self, fixture, *, interactive=True, cancel=False, loading=True):
+    def launch(
+        self, fixture, *, interactive=True, cancel=False, loading=True, mode=None
+    ):
         temporary = tempfile.TemporaryDirectory(
             prefix="tui-failure-", dir="/tmp/opencode"
         )
@@ -111,7 +162,7 @@ class TerminalUIFailures(unittest.TestCase):
                 "-c",
                 RELAY,
                 str(root),
-                "cancel" if cancel else "normal",
+                mode or ("cancel" if cancel else "normal"),
                 fixture,
                 "loading" if loading else "plain",
             ],
@@ -184,12 +235,81 @@ class TerminalUIFailures(unittest.TestCase):
         self.assertTrue(result["fds_restored"], result)
         self.assertTrue(result["unrelated_alive"], result)
         self.assertTrue(result["no_children"], result)
+        if not result["anchor_loss_injected"]:
+            self.assert_signals_before_reap(result)
         ownership = root / "ownership.json"
         if ownership.exists():
             pid, group, session, parent_group = json.loads(ownership.read_text())
             self.assertEqual((pid, group, session), (pid, pid, pid))
             self.assertNotEqual(group, parent_group)
         return result
+
+    def assert_signals_before_reap(self, result):
+        events = result["events"]
+        self.assertNotIn(
+            ["poll"], events, "poll() must not reap a future signal anchor"
+        )
+        reap = events.index(["reap"])
+        self.assertEqual(events.count(["reap"]), 1, events)
+        self.assertFalse(any(event[0] == "signal" for event in events[reap:]), events)
+        self.assertIn(["signal", signal.SIGKILL], events[:reap])
+        for index, event in enumerate(events):
+            if event[0] == "signal":
+                self.assertGreater(index, 0, events)
+                self.assertEqual(
+                    events[index - 1],
+                    ["observe", os.WEXITED | os.WNOHANG | os.WNOWAIT],
+                    events,
+                )
+        observations = [event[1] for event in events if event[0] == "observe"]
+        self.assertTrue(observations, events)
+        for flags in observations:
+            self.assertEqual(flags, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+
+    def test_numeric_group_signals_finish_before_reap_in_both_modes(self):
+        for interactive in (True, False):
+            with self.subTest(interactive=interactive):
+                root, process, fd, _ = self.launch(
+                    "import time; time.sleep(0.05)",
+                    interactive=interactive,
+                    mode="reap_race",
+                )
+                self.collect(process, fd)
+                result = self.assert_restored(root)
+                self.assertEqual(result.get("returncode"), 0, result)
+                self.assert_signals_before_reap(result)
+
+    def test_lost_anchor_refuses_all_numeric_signals_and_restores_both_modes(self):
+        for interactive in (True, False):
+            for mode in ("lost_anchor", "lost_cleanup"):
+                with self.subTest(interactive=interactive, mode=mode):
+                    root, process, fd, _ = self.launch(
+                        "import time; time.sleep(0.05)",
+                        interactive=interactive,
+                        mode=mode,
+                    )
+                    self.collect(process, fd)
+                    result = self.assert_restored(root)
+                    self.assertTrue(result.get("safe_ownership_error"), result)
+                    self.assertFalse(result["private_error_leaked"], result)
+                    self.assertFalse(
+                        any(event[0] == "signal" for event in result["events"]), result
+                    )
+
+    def test_lost_anchor_during_cancel_preserves_primary_and_restores_resources(self):
+        fixture = (
+            "import sys,time; from pathlib import Path; "
+            "root=Path(sys.argv[1]); (root/'ready').touch(); deadline=time.monotonic()+1; "
+            "\nwhile not (root/'reap_now').exists() and time.monotonic()<deadline: time.sleep(0.01)"
+        )
+        root, process, fd, _ = self.launch(fixture, mode="lost_cancel")
+        self.collect(process, fd)
+        result = self.assert_restored(root)
+        self.assertEqual(result.get("error"), "KeyboardInterrupt", result)
+        self.assertTrue(result["primary_preserved"], result)
+        self.assertFalse(
+            any(event[0] == "signal" for event in result["events"]), result
+        )
 
     def test_fragmented_first_output_keeps_controls_and_utf8_contiguous(self):
         cases = (

@@ -121,30 +121,92 @@ _STOP_GRACE = 1.0
 _POLL_INTERVAL = 0.05
 
 
-def _signal_group(process, sig):
-    # Every child below starts a new session before exec. Never target a shared
-    # foreground group, process name, or service, even after its leader exits.
-    try:
-        os.killpg(process.pid, sig)
-    except ProcessLookupError:
-        pass
+class _TUIProcessError(RuntimeError):
+    pass
 
 
-def _stop_group(process, deadline, term_sent):
-    deadline = time.monotonic() + _STOP_GRACE if deadline is None else deadline
-    if not term_sent:
-        _signal_group(process, signal.SIGTERM)
-    while time.monotonic() < deadline:
-        process.poll()
+class _ChildGroup:
+    """The relay alone waits for this private child; its PID pins the group.
+
+    An exited but unreaped session leader prevents numeric PID/PGID reuse. Never
+    poll/reap while future group signals are possible. Outside reaping invalidates
+    that anchor: refuse further numeric signals, not merely a failed killpg(0).
+    """
+
+    def __init__(self, process):
+        self.process = process
+        self.lost = False
+        self.closed = False
+
+    def observe(self):
+        if self.lost or self.closed or self.process.returncode is not None:
+            self.lost = True
+        else:
+            try:
+                result = os.waitid(
+                    os.P_PID, self.process.pid, os.WEXITED | os.WNOHANG | os.WNOWAIT
+                )
+            except OSError:
+                self.lost = True
+            else:
+                if result is None:
+                    return None
+                if result.si_pid == self.process.pid:
+                    return (
+                        result.si_status
+                        if result.si_code == os.CLD_EXITED
+                        else -result.si_status
+                    )
+                self.lost = True
+        raise _TUIProcessError(
+            "TUI child ownership lost; process-group signaling refused."
+        ) from None
+
+    def signal(self, sig):
+        # Verify the retained anchor immediately before each numeric group use.
+        self.observe()
         try:
-            os.killpg(process.pid, 0)
+            os.killpg(self.process.pid, sig)
         except ProcessLookupError:
-            break
-        time.sleep(min(_POLL_INTERVAL, max(0, deadline - time.monotonic())))
-    # Leader liveness is not group liveness: descendants can still hold a PTY or
-    # pipe. Escalate that same owned group even when wait() already reaped it.
-    _signal_group(process, signal.SIGKILL)
-    process.wait(timeout=_STOP_GRACE)
+            pass
+        except OSError:
+            raise _TUIProcessError("TUI child process cleanup failed.") from None
+
+    def reap(self):
+        try:
+            self.observe()
+        finally:
+            # Close signaling BEFORE wait(), including signal-handler reentry.
+            self.closed = True
+        try:
+            self.process.wait(timeout=_STOP_GRACE)
+        except (OSError, subprocess.SubprocessError):
+            raise _TUIProcessError("TUI child process cleanup failed.") from None
+
+
+def _stop_group(group, deadline, term_sent):
+    deadline = time.monotonic() + _STOP_GRACE if deadline is None else deadline
+    failure = None
+    try:
+        if not term_sent:
+            group.signal(signal.SIGTERM)
+        while time.monotonic() < deadline:
+            # A zombie leader remains our ownership anchor, not evidence that
+            # every descendant has exited. Retain the bounded TERM grace.
+            group.observe()
+            time.sleep(min(_POLL_INTERVAL, max(0, deadline - time.monotonic())))
+    except BaseException as exc:
+        failure = exc
+    # Finish ALL group signaling before the one reaping stage. Still attempt
+    # independent cleanup after a failure, but a lost anchor stays refused.
+    for action in (lambda: group.signal(signal.SIGKILL), group.reap):
+        try:
+            action()
+        except BaseException as exc:
+            if failure is None:
+                failure = exc
+    if failure is not None:
+        raise failure
 
 
 def run_tui(
@@ -160,10 +222,12 @@ def run_tui(
     interactive = os.isatty(input_fd) and os.isatty(output_fd)
     master = slave = None
     process = None
+    group = None
     old_terminal = None
     handlers = {}
     stop_deadline = None
     term_sent = False
+    interrupt_pending = False
 
     def request_stop(*_):
         nonlocal stop_deadline
@@ -171,31 +235,39 @@ def run_tui(
             stop_deadline = time.monotonic() + _STOP_GRACE
 
     def interrupt(*_):
+        nonlocal interrupt_pending
         # Interactive Ctrl-C travels as a raw input byte to the child PTY. In
         # pipe mode preserve foreground SIGINT delivery despite the owned group.
-        if not interactive and process is not None:
-            _signal_group(process, signal.SIGINT)
+        # Handlers only record intent: none may signal during/after final reap.
+        if not interactive:
+            interrupt_pending = True
 
     def advance_stop():
-        nonlocal term_sent
+        nonlocal term_sent, interrupt_pending
+        if interrupt_pending:
+            interrupt_pending = False
+            group.signal(signal.SIGINT)
         if stop_deadline is None:
             return False
         if not term_sent:
-            _signal_group(process, signal.SIGTERM)
+            group.signal(signal.SIGTERM)
             term_sent = True
         if time.monotonic() >= stop_deadline:
-            _signal_group(process, signal.SIGKILL)
+            group.signal(signal.SIGKILL)
             return True
         return False
 
     def wait_for_child():
+        exit_deadline = None
         while True:
-            if advance_stop():
-                return process.wait(timeout=_STOP_GRACE)
-            try:
-                return process.wait(timeout=_POLL_INTERVAL)
-            except subprocess.TimeoutExpired:
-                pass
+            if advance_stop() and exit_deadline is None:
+                exit_deadline = time.monotonic() + _STOP_GRACE
+            code = group.observe()
+            if code is not None:
+                return code
+            if exit_deadline is not None and time.monotonic() >= exit_deadline:
+                raise _TUIProcessError("TUI child termination timed out.")
+            time.sleep(_POLL_INTERVAL)
 
     try:
         # Install before spawning or entering raw mode, closing the setup window
@@ -224,6 +296,7 @@ def run_tui(
                 env=env,
                 start_new_session=True,
             )
+            group = _ChildGroup(process)
             os.close(slave)
             slave = None
             old_terminal = termios.tcgetattr(input_fd)
@@ -231,6 +304,7 @@ def run_tui(
             handlers[signal.SIGWINCH] = signal.signal(signal.SIGWINCH, resize)
         else:
             process = subprocess.Popen(command, env=env, start_new_session=True)
+            group = _ChildGroup(process)
         if not interactive:
             return wait_for_child()
 
@@ -269,7 +343,7 @@ def run_tui(
                 banner(clear=True)
 
         while True:
-            if process.poll() is not None:
+            if group.observe() is not None:
                 request_stop()
             if advance_stop():
                 break
@@ -298,16 +372,22 @@ def run_tui(
                     write_all(master, content)
                 else:
                     stdin_open = False
-            if process.poll() is not None and not ready:
+            if group.observe() is not None and not ready:
                 break
         stream.finish(forward)
         if banner_drawn and stream.safe_to_draw():
             banner(clear=True)
         return wait_for_child()
     finally:
+        primary_error = sys.exc_info()[1]
         try:
-            if process is not None:
-                _stop_group(process, stop_deadline, term_sent)
+            if group is not None:
+                _stop_group(group, stop_deadline, term_sent)
+        except BaseException:
+            # In particular, anchor-loss cleanup must not replace cancellation
+            # or another primary failure; terminal/handler/FD cleanup still runs.
+            if primary_error is None:
+                raise
         finally:
             try:
                 if old_terminal is not None:
