@@ -308,17 +308,41 @@ services, actual registry/log access or host/workspace actions.
 
 The five tabs are Status, Settings, Sessions, Terminals and Logs. `1`–`5` select
 them; `r` refreshes and `q` quits outside a focused embedded terminal. The
-always-visible case-insensitive literal log search remains usable while follow
-is paused; `Ctrl+L` opens Logs and focuses search. A focused terminal receives
-shell input; `Ctrl-]` detaches its client without ending the native shell.
+compact one-line header ellipsizes long labels and keeps case-insensitive literal
+log search available from every tab, including while follow is paused; `Ctrl+L`
+opens Logs and focuses search. `s` or `F2` opens all dashboard settings outside
+focused text inputs or the native shell. A focused terminal keeps its keys,
+including `s`, `F2` and `Ctrl+L`; use `Ctrl-]` to detach its client without ending
+the native shell before using dashboard shortcuts.
 
-Status batches cheap metrics every five seconds by default, including host
-CPU/RAM/history, workspace readings, filesystems and mounts. Expensive allocated
-storage scans require a separate manual action. Settings shows saved/effective
-limits and dashboard refresh controls, not resource editing. All live CPU/RAM/
-storage changes, quotas, resizes and graphroot/runroot moves are deferred to a
-separate project. Existing explicit CLI `reset` remains outside the manager;
-there is no `podman update` action or resource-editing service extension.
+Status has compact gold Full diagnostics (workspace) and green System
+(OS-reported) panels with aligned single-line RAM, CPU and Home FS meters and
+short fixed 0–100% CPU/RAM histories, not auto-scaled sparklines. Workspace CPU
+numbers retain 100% = one core; the meter uses observed CPU quota when known.
+Unknown/unlimited capacity and unavailable readings are not shown as fake zeros.
+Raw report data and totals are unchanged. Full details/mounts remain in an
+expandable section, initially collapsed. System readings and monitoring settings
+remain available with no current workspace.
+
+Status and followed logs share an adjustable **1, 2, 5, 10, 30 or 60 second**
+refresh interval, default **1 second**, and an auto-refresh control. Cheap metrics
+are batched; slow queries never overlap or queue refreshes, so cadence is
+best-effort rather than an exact timing guarantee. Expensive allocated storage
+scans remain a separate manual action for the selected workspace. Native session
+inventories still require manual Connect/refresh.
+
+The Settings tab keeps quick monitoring controls and an Open all settings button.
+The categorized modal window covers Monitoring (auto-refresh/interval), Display
+(built-in Textual theme/details), Sessions (scope/text filter only, no automatic
+connection), Logs (follow/source/search), read-only Resources (saved/observed),
+and read-only Safety/terminals (CLI-selected mode). Esc/Cancel discards edits;
+Apply changes only allowlisted dashboard preferences **for this session**, with
+no persistence or logging. Search text is never persisted. The window cannot
+weaken `--read-only`, modify OpenCode `cli.json` or host settings, or change
+workspace resources or credentials. All live CPU/RAM/storage changes, quotas,
+resizes and graphroot/runroot moves are deferred to a separate project. Existing
+explicit CLI `reset` remains outside the manager; there is no `podman update`
+action, resource-control RPC or resource-editing service extension.
 
 The Sessions tab uses manual Connect/refresh. Host global discovery consumes the
 complete paginated native V2 API across projects, children and archived sessions. Host

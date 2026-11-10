@@ -106,14 +106,20 @@ not gain a container-mode bypass from the existence of demo mode.
 | --- | --- |
 | `1`–`5` | Status, Settings, Sessions, Terminals, Logs |
 | `r` | Refresh the current view |
+| `s` or `F2` | Open all dashboard settings outside focused text inputs or the native shell |
 | `Ctrl+L` | Open Logs and focus the log search |
 | `q` | Quit outside a focused embedded terminal |
 | `Ctrl-]` | Detach the focused session-terminal client |
 
 When terminal input is focused, ordinary keystrokes belong to the shell rather
-than dashboard shortcuts, including the shell's `Ctrl+L`. The always-visible log
-search can still be clicked without ending the shell. Detach with `Ctrl-]` first
-to use `Ctrl+L` and ordinary dashboard keyboard navigation again.
+than dashboard shortcuts, including `s`, `F2` and the shell's `Ctrl+L`. The
+always-visible header log search can still be clicked without ending the shell.
+Detach with `Ctrl-]` first to use settings shortcuts, `Ctrl+L` and ordinary
+dashboard keyboard navigation again. Settings shortcuts also leave focused text
+inputs alone, and background refresh does not take focus from the native terminal.
+The compact global header stays on one line and ellipsizes long
+labels rather than crowding out controls on small terminals; log search remains
+available from every tab.
 Closing the dashboard disconnects only its clients and releases their leases;
 it does not directly stop the workspace owner or end its native persistent shell.
 If the owner was already waiting to exit, releasing its final client lease lets
@@ -123,13 +129,33 @@ normal sync/stop proceed; the shell does not survive a container stop.
 
 ### 1. Status
 
-Status shows host CPU/RAM, short in-memory resource histories, workspace state,
-saved/effective limits, filesystem capacity and mount information. Cheap
-workspace metrics are batched and refresh every five seconds by default.
-Unavailable readings are shown as unavailable, not as zero.
+Status presents two compact, bounded panels: gold **Full diagnostics** for the
+selected workspace and green **System (OS-reported)** for system readings. Aligned
+RAM, CPU and Home FS rows use single-line meters. Short in-memory CPU/RAM
+histories use a fixed 0–100% scale, not an auto-scaled sparkline that exaggerates
+small changes. Full workspace details and mount information remain available in
+an expandable section, initially collapsed; the Settings display controls can
+change its visibility.
 
-Allocated project/home/container storage scans are a separate explicit action,
-not part of every refresh. They can be expensive and remain estimates:
+Workspace CPU's numeric percentage keeps the convention **100% = one CPU core**
+and can exceed 100%. Its meter uses the observed CPU quota as capacity when that
+quota is known; normalized meter/history values do not replace the numeric
+reading. Unavailable or unlimited capacity is identified as such, never invented
+as zero. Other unavailable readings are also shown as unavailable. System values
+are what the OS reports, not a promise of exclusive resources or physical host
+capacity. Presentation does not change underlying totals or the raw report data.
+
+Cheap metrics are batched. Status and followed logs share an adjustable refresh
+interval of **1, 2, 5, 10, 30 or 60 seconds**, default **1 second**, with an
+auto-refresh control. Cadence is best-effort: a slow query does not overlap or
+queue another refresh, so the selected interval is not an exact timing guarantee.
+Native session inventories still require explicit Connect and manual refresh.
+With no current workspace, System readings and monitoring settings remain
+available; missing workspace data does not become a zero-valued workspace.
+
+Allocated project/home/container storage scans are a separate explicit action
+for the selected workspace, not part of every refresh. They can be expensive and
+remain estimates:
 reflinks, compression, shared image layers and filesystem accounting do not
 establish exclusive physical consumption or quota headroom. Reading a mount or
 filesystem capacity does not authorize changing it. See the
@@ -137,11 +163,29 @@ filesystem capacity does not authorize changing it. See the
 
 ### 2. Settings
 
-Settings compares saved workspace limits with observed effective values and
-offers runtime dashboard refresh controls. Resource settings are informational;
-there are no Apply buttons for CPU/RAM/storage changes, implicit resets, or
-storage migrations. Adjusting UI refresh does not change the workspace's
-resources or credential snapshot.
+The Settings tab retains quick monitoring controls and an **Open all settings**
+button. It compares saved workspace limits with observed effective values;
+resource settings are informational, not editable limits.
+
+Use the button, `s` or `F2` to open a categorized modal settings window. Keyboard
+shortcuts apply only outside focused text inputs and the native shell. The
+window is also usable without a current workspace:
+
+| Topic | Controls and boundaries |
+| --- | --- |
+| Monitoring | Auto-refresh and the shared Status/followed-log interval: 1, 2, 5, 10, 30 or 60 seconds; default 1. |
+| Display | Built-in Textual theme and expanded/collapsed diagnostics details. |
+| Sessions | Scope and text filter only; changing them never connects or refreshes a native inventory automatically. |
+| Logs | Follow, source and literal search; searches stay in memory and are never persisted or journaled. External sources retain their explicit opt-in and ownership guards. |
+| Resources | Read-only saved limits and observed values. |
+| Safety/terminals | Read-only information about the CLI-selected mode and terminal safety; the `--read-only` fence cannot be weakened here. |
+
+**Esc** or **Cancel** discards pending window edits. **Apply** accepts only the
+allowlisted dashboard preferences, for **this dashboard session only**. Changes
+are neither persisted nor logged; they do not modify OpenCode `cli.json`, host
+settings, workspace resources or credential snapshots. There are no CPU/RAM/
+storage edit controls, resource-control RPCs, implicit resets or storage
+migrations. A settings Apply is not a resource Apply or native service reload.
 
 If you deliberately need different create-time limits, exit the relevant
 clients/owner and use the existing CLI workflow outside the manager:
@@ -244,7 +288,9 @@ The case-insensitive **literal** log search stays visible across all five tabs.
 `Ctrl+L` opens Logs and focuses it. Search applies to retained entries and can be
 changed at any time, including while follow is paused. Source filtering and
 follow/pause controls never disable search; it is not a regular-expression or
-shell-command field.
+shell-command field. Follow uses the same best-effort refresh interval as Status
+(default one second); pausing follow leaves retained entries searchable. Search
+text and settings changes are never saved or written to the activity journal.
 
 The default oc-box activity source is the private rotating JSON-lines journal
 `log/activity.jsonl` under the configured oc-box state root:

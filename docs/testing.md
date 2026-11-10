@@ -59,16 +59,46 @@ redaction. Tests of known patterns are not proof that arbitrary secrets are
 removed. This stage has no native OpenCode logfile reader.
 
 **Optional headless UI layer.** Exercise all five tabs and `1`–`5`, `r`, `q`,
-`Ctrl+L` and focused-terminal routing with Textual's headless behavior tools.
-Log search must stay visible and case-insensitive/literal across tabs, source
+`Ctrl+L`, `s`/`F2` and focused-terminal routing with Textual's headless behavior
+tools. Check compact one-line header ellipsis at small widths without hiding log
+search. Search must stay visible and case-insensitive/literal across tabs, source
 changes, follow and pause. Check global retention of at most 2000 entries and
-the 1000-generated-entry display bound per refresh. Verify five-second cheap
-batched refresh, host CPU/RAM/history/filesystem/mount presentation, unavailable
-readings, manual-only expensive storage scans and informational saved/effective
-resource values. Settings may change runtime UI refresh, never workspace limits.
+the 1000-generated-entry display bound per refresh.
+
+Verify bounded gold Full diagnostics and green System (OS-reported) panels,
+aligned single-line RAM/CPU/Home FS meters and short fixed 0–100% CPU/RAM
+histories, not auto-scaled sparklines. Use synthetic readings, including
+workspace CPU above 100% (100% = one core), observed quota normalization, unknown/
+unlimited capacity, unavailable readings and unchanged raw totals/data. Check
+that full details/mounts remain expandable and initially collapsed. Include no
+current workspace: System and monitoring settings must remain usable without
+fabricating workspace readings.
+
+Check cheap batched Status and followed-log refresh at the shared 1, 2, 5, 10, 30
+and 60 second choices, default 1 second, and auto-refresh on/off. Use controlled
+slow queries to verify no overlapping or queued refreshes; cadence is best-effort,
+not an exact wall-clock guarantee. Native session inventories remain manual
+Connect/refresh, and expensive allocated storage scans remain manual and bound
+to the selected workspace. Settings may change dashboard refresh, never workspace
+limits.
+
+Exercise quick monitoring controls, Open all settings and `s`/`F2`, categorized
+Monitoring, Display, Sessions, Logs, Resources and Safety/terminals topics, built-in
+Textual themes and details visibility. Esc/Cancel must discard pending edits;
+Apply must accept only allowlisted session-only preferences without persistence
+or journal writes. Session scope/filter changes must not connect or refresh
+native inventories; log source changes must preserve explicit opt-in guards.
+Log search must never persist or enter the journal. Resources and CLI-mode safety
+information stay read-only, and no preference may weaken `--read-only` or change
+OpenCode `cli.json`/host settings. Settings shortcuts must not steal focused text
+input or native-shell keys, including `s` and `F2`; detach with `Ctrl-]` before
+dashboard shortcuts. Keep log search available from every tab without stealing
+native terminal focus on refresh.
+
 Demo must use synthetic data without real services/registry/log reads or actions;
 instrument those boundaries to fail if touched. There must be no implicit
-start/reset/sync/unlock, `podman update`, storage resize/quota or store move.
+start/reset/sync/unlock, `podman update`, resource-control RPC, CPU/RAM/storage edit,
+storage resize/quota or store move.
 
 Exercise the optional pyte view with bounded synthetic PTY bytes, resize/input
 routing, explicit create/takeover confirmation, session membership checks,
@@ -120,9 +150,16 @@ store outside containers/sandboxes. Do not run these probes inside oc-box, use
 real workspaces, or change the candidate while its tests run. Required manual
 observations include:
 
-- Five-tab navigation, visible log search while following/paused, responsive
-  cheap refresh and explicit bounded storage/log reads; Settings has no resource
-  mutation path.
+- Five-tab navigation, compact header and bounded diagnostics/System panels on
+  small terminals, readable fixed-scale histories and expandable full details/
+  mounts. Log search remains available while following/paused on every tab.
+  Observe default one-second and selectable shared Status/followed-log refresh,
+  best-effort slow-query behavior, and explicit bounded storage/log reads.
+- Quick monitoring controls and categorized settings via the button and `s`/`F2`,
+  including with no workspace selected. Check Esc/Cancel discard, session-only
+  Apply, theme/details display, no automatic session connection, unchanged host/
+  OpenCode settings and no settings/search journal entries. Read-only mode cannot
+  be weakened; there is no resource mutation path.
 - No default service start; explicit native host Connect with its start warning;
   verified host-project archive mapping and unchanged workspace source copies
   after actions on synthetic host copies.
@@ -133,7 +170,9 @@ observations include:
 - Actual embedded native shell rendering/input/resize, explicit create/takeover,
   foreign-source refusal, Ctrl-] detach/reattach with retained shell state, and
   dashboard closure leaving the native PTY/other clients intact. Terminal focus
-  must not turn ordinary shell keys into global dashboard actions.
+  must not turn ordinary shell keys, `s`, `F2` or `Ctrl+L` into global dashboard
+  actions; detach before using dashboard shortcuts. Refresh must preserve native
+  terminal focus, and settings shortcuts must leave focused text inputs alone.
 - Guarded native V2 session archive/unarchive and recursive-delete refusal/
   confirmation on disposable sessions only; preserve process-local race warnings
   instead of claiming cross-process exclusivity.
