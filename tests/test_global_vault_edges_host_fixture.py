@@ -105,7 +105,7 @@ try:
 except BaseException as error:
     category=str(error) if str(error) in ('clean-source-required','source-changed','source-shadowing','unsafe-path','authenticated-probe-only') else 'unfixed'
     if sys.argv[4]=='preload' and 'sentinel' in locals(): preserved=sys.modules.get('oc_box') is sentinel
-print(json.dumps({'category':category,'candidate':(root/'candidate-imported').exists(),'bootstrap':(root/'authenticated-bootstrap-ran').exists(),'poison':(root/'poisoned-bootstrap-ran').exists(),'namespace_poison':(root/'namespace-poisoned').exists(),'namespace_probe':(root/'namespace-probe').exists(),'preloaded_preserved':preserved}))
+print(json.dumps({'category':category,'candidate':(root/'candidate-imported').exists(),'bootstrap':(root/'authenticated-bootstrap-ran').exists(),'replacement':(root/'replacement-bootstrap-ran').exists(),'poison':(root/'poisoned-bootstrap-ran').exists(),'namespace_poison':(root/'namespace-poisoned').exists(),'namespace_probe':(root/'namespace-probe').exists(),'preloaded_preserved':preserved}))
 """
         result = subprocess.run(
             [
@@ -246,6 +246,76 @@ print(json.dumps({'category':category,'candidate':(root/'candidate-imported').ex
                 result = self.child(entry, root, commit)
                 self.assertTrue(result["bootstrap"])
                 self.assertFalse(result["poison"])
+                self.assertFalse(result["candidate"])
+
+    def test_caller_authentication_rejects_replaced_expected_git_object(self):
+        for name in (
+            "test_global_vault_edges_podman.py",
+            "test_home_ownership_podman.py",
+        ):
+            with self.subTest(entry=name):
+                root, entry, bootstrap, expected = self.repository(name)
+                original = bootstrap.read_bytes()
+                replacement = (
+                    b"from pathlib import Path\n(Path(__file__).parents[1]/'replacement-bootstrap-ran').write_text('must-not-execute')\n"
+                    + original
+                )
+                bootstrap.write_bytes(replacement)
+                env = {
+                    "PATH": os.defpath,
+                    "GIT_CONFIG_GLOBAL": "/dev/null",
+                    "GIT_CONFIG_NOSYSTEM": "1",
+                }
+
+                def git(*args, literal=False):
+                    return subprocess.run(
+                        ["git", "-C", str(root), *args],
+                        env={
+                            **env,
+                            **({"GIT_NO_REPLACE_OBJECTS": "1"} if literal else {}),
+                        },
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        check=True,
+                        timeout=10,
+                    ).stdout
+
+                git("add", str(bootstrap))
+                tree = git("write-tree").decode().strip()
+                # An unrelated second root commit avoids any replacement-parent
+                # cycle while preserving expected HEAD A and index/worktree B.
+                substitute = (
+                    git(
+                        "-c",
+                        "user.name=Synthetic",
+                        "-c",
+                        "user.email=synthetic@example.invalid",
+                        "commit-tree",
+                        tree,
+                        "-m",
+                        "synthetic replacement",
+                    )
+                    .decode()
+                    .strip()
+                )
+                git("replace", expected, substitute)
+                self.assertEqual(git("rev-parse", "HEAD").decode().strip(), expected)
+                self.assertEqual(
+                    git("status", "--porcelain", "--untracked-files=all"), b""
+                )
+                selector = expected + ":tools/test_interactive_podman.py"
+                self.assertEqual(git("cat-file", "blob", selector), replacement)
+                self.assertEqual(
+                    git("cat-file", "blob", selector, literal=True), original
+                )
+                result = self.child(entry, root, expected)
+                self.assertIn(
+                    result["category"],
+                    ("source-changed", "clean-source-required"),
+                    json.dumps(result, sort_keys=True),
+                )
+                self.assertFalse(result["bootstrap"])
+                self.assertFalse(result["replacement"])
                 self.assertFalse(result["candidate"])
 
     def test_nonisolated_entry_refuses_before_sibling_stdlib_shadow(self):
