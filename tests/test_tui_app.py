@@ -13,7 +13,17 @@ from oc_box.tui_logs import LogEntry
 AVAILABLE = all(importlib.util.find_spec(name) for name in ("textual", "pyte"))
 if AVAILABLE:
     from oc_box.tui_app import DashboardApp
-    from textual.widgets import Button, DataTable, Input, Switch, TabbedContent
+    from textual.widgets import (
+        Button,
+        Collapsible,
+        DataTable,
+        Input,
+        Select,
+        Switch,
+        TabbedContent,
+    )
+    from oc_box.tui_settings import SettingsScreen
+    from oc_box.tui_status import MonitorPanel
 
 
 class SessionDemo(DemoBackend):
@@ -419,6 +429,121 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(widget.state, "connected")
             widget.disconnect()
             callback.assert_called_once()
+
+    async def test_settings_shortcuts_open_topics_and_apply_without_backend_actions(
+        self,
+    ):
+        backend = SessionDemo()
+        app = DashboardApp(backend, read_only=True, demo=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.settle(app, pilot)
+            self.assertEqual(app.query_one("#refresh-interval", Select).value, 1)
+            await pilot.press("s")
+            self.assertIsInstance(app.screen, SettingsScreen)
+            self.assertEqual(len(app.screen.query(".settings-topic")), 6)
+            self.assertEqual(app.screen.query_one("#pref-interval", Select).value, 1)
+            app.screen.query_one("#pref-interval", Select).value = 10
+            app.screen.query_one("#pref-auto-refresh", Switch).value = False
+            app.screen.query_one("#pref-log-follow", Switch).value = False
+            app.screen.query_one("#pref-details", Switch).value = True
+            app.screen.query_one("#pref-log-query", Input).value = "ready"
+            app.screen.query_one("#pref-session-filter", Input).value = "example"
+            await pilot.click("#preferences-apply")
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, SettingsScreen)
+            self.assertEqual(app.query_one("#refresh-interval", Select).value, 10)
+            self.assertFalse(app.query_one("#auto-refresh", Switch).value)
+            self.assertFalse(app.query_one("#log-follow", Switch).value)
+            self.assertFalse(app.query_one("#workspace-details", Collapsible).collapsed)
+            self.assertEqual(app.log_query, "ready")
+            self.assertEqual(app.query_one("#session-search", Input).value, "example")
+            self.assertTrue(app.read_only)
+            self.assertEqual(backend.calls, [])
+            await pilot.press("f2")
+            self.assertIsInstance(app.screen, SettingsScreen)
+            app.screen.query_one("#pref-interval", Select).value = 60
+            await pilot.press("escape")
+            self.assertEqual(app.query_one("#refresh-interval", Select).value, 10)
+
+    async def test_all_refresh_increments_and_invalid_settings_are_whitelisted(self):
+        app = DashboardApp(DemoBackend(), read_only=True, demo=True)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.settle(app, pilot)
+            app.action_settings()
+            await pilot.pause()
+            values = dict(app.screen.values)
+            await pilot.press("escape")
+            for interval in (1, 2, 5, 10, 30, 60):
+                app.apply_settings({**values, "interval": interval})
+                self.assertEqual(
+                    app.query_one("#refresh-interval", Select).value, interval
+                )
+            for interval in (0, -1, True, 1.5, 999):
+                app.apply_settings(
+                    {**values, "interval": interval, "auto_refresh": False}
+                )
+                self.assertEqual(app.query_one("#refresh-interval", Select).value, 60)
+                self.assertTrue(app.query_one("#auto-refresh", Switch).value)
+
+    async def test_diagnostics_and_controls_stay_aligned_across_screen_sizes(self):
+        app = DashboardApp(DemoBackend(), read_only=True, demo=True)
+        async with app.run_test(size=(140, 45)) as pilot:
+            await self.settle(app, pilot)
+            app.query_one("#auto-refresh", Switch).value = False
+            for dimensions in ((80, 24), (100, 30), (140, 45), (220, 70)):
+                with self.subTest(dimensions=dimensions):
+                    await pilot.resize_terminal(*dimensions)
+                    app.action_tab("status")
+                    await pilot.pause()
+                    full = app.query_one("#full-diagnostics", MonitorPanel)
+                    system = app.query_one("#system-report", MonitorPanel)
+                    self.assertEqual(full.region.x, system.region.x)
+                    self.assertEqual(full.region.width, system.region.width)
+                    self.assertLessEqual(full.region.bottom, system.region.y)
+                    self.assertLessEqual(full.region.height, 7)
+                    self.assertLessEqual(system.region.height, 8)
+                    for panel in (full, system):
+                        self.assertTrue(
+                            all(
+                                row.cell_length <= panel.content_size.width
+                                for row in panel.render().split("\n")
+                            )
+                        )
+                    header = app.query_one("#host-summary")
+                    region = app.screen.find_widget(header)
+                    self.assertEqual(
+                        region.region.intersection(region.clip), region.region
+                    )
+                    self.assertEqual(header.content_size.height, 1)
+                    app.action_tab("settings")
+                    await pilot.pause()
+                    self.assertEqual(
+                        app.query_one("#auto-refresh").region.x,
+                        app.query_one("#refresh-interval").region.x,
+                    )
+                    app.action_tab("sessions")
+                    await pilot.pause()
+                    for scope in ("global", "project", "workspace"):
+                        app.query_one("#session-scope", Select).value = scope
+                        await pilot.pause()
+                        self.assertEqual(
+                            app.query_one("#session-scope").region.height, 3
+                        )
+                    button = app.query_one("#disconnect-sessions", Button)
+                    button.scroll_visible(animate=False, force=True)
+                    await pilot.pause()
+                    self.assertEqual(app.query_one("#body").scroll_offset, (0, 0))
+                    self.assertEqual(app.query_one("#content").scroll_offset, (0, 0))
+                    for tab in ("status", "settings", "sessions", "terminals", "logs"):
+                        app.action_tab(tab)
+                        app.action_logs()
+                        await pilot.pause()
+                        search = app.query_one("#log-search", Input)
+                        region = app.screen.find_widget(search)
+                        self.assertEqual(
+                            region.region.intersection(region.clip), region.region
+                        )
+                        self.assertTrue(search.has_focus)
 
 
 if __name__ == "__main__":

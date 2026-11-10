@@ -49,6 +49,11 @@ their checkout ownership distinct from unrelated source and flat installations.
   CPU/RAM/storage edits are deferred; do not introduce resource-control RPCs.
   Host session Connect may use normal native host discovery; workspace sources
   must use an existing private owner, with explicit visible client leases.
+- `tui_status.py` / `tui_settings.py`: cell-bounded diagnostics and session-only
+  categorized preferences. Keep meter columns aligned and scales fixed; unknown
+  is not zero, and container CPU bars use observed quotas. Requested refresh
+  defaults to one second with no overlapping queries. Settings must not weaken
+  CLI read-only mode, connect sessions, persist search values, or edit resources.
 - `tui_sessions.py`: paginated metadata-only catalogs and private UI favorites.
   Preserve source/store identity, verified controller-archive provenance, native
   child cascades and process-local activity limits. Archive/delete are explicit,

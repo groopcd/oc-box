@@ -9,18 +9,19 @@ from pathlib import Path
 from rich.text import Text
 from textual import work
 from textual.app import App, ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
 from textual.widgets import (
     Button,
+    Collapsible,
     DataTable,
     Footer,
     Input,
     Label,
     RichLog,
     Select,
-    Sparkline,
     Static,
     Switch,
     TabbedContent,
@@ -33,12 +34,16 @@ if __package__:
     from .tui_logs import LogBuffer, LogEntry
     from .tui_sessions import FavoriteStore, SessionCatalog
     from .tui_terminal import NativeTerminal
+    from .tui_status import MonitorPanel, percentage
+    from .tui_settings import SettingsScreen, REFRESH_INTERVALS
 else:
     import status_report
     from tui_backend import plain
     from tui_logs import LogBuffer, LogEntry
     from tui_sessions import FavoriteStore, SessionCatalog
     from tui_terminal import NativeTerminal
+    from tui_status import MonitorPanel, percentage
+    from tui_settings import SettingsScreen, REFRESH_INTERVALS
 
 
 def text(value):
@@ -89,7 +94,8 @@ class DashboardApp(App):
     AUTO_FOCUS = "#workspaces"
     CSS = """
     Screen { layout: vertical; }
-    #host-summary { height: 3; border: round $accent; padding: 0 1; }
+    #host-summary { height: 1; padding: 0 1; text-style: bold;
+      text-wrap: nowrap; text-overflow: ellipsis; }
     #log-tools { height: 3; }
     #log-search { width: 1fr; }
     #log-hits { width: 20; padding: 1 1; }
@@ -97,17 +103,23 @@ class DashboardApp(App):
     #sidebar { width: 24; border: round $primary; }
     #workspaces { height: 1fr; }
     #content { width: 1fr; }
+    #content, #content > ContentSwitcher, TabPane { height: 1fr; min-height: 0; }
     #status-summary, #settings-info, #terminal-info { height: auto; padding: 1; }
-    #cpu-history { height: 3; }
+    MonitorPanel { height: auto; width: 1fr; padding: 0 1;
+      text-wrap: nowrap; text-overflow: clip; }
+    #full-diagnostics { border: round $warning; }
+    #system-report { border: round $success; }
     #session-table { height: 1fr; min-height: 5; }
     #session-details { height: auto; max-height: 7; }
     #log-output { height: 1fr; }
     #notice { height: auto; max-height: 3; color: $warning; }
     .toolbar { height: auto; min-height: 3; overflow-x: auto; }
     .toolbar Button { min-width: 10; margin-right: 1; }
+    .toolbar Button:last-child { margin-right: 0; }
     .toolbar Select { width: 24; }
     .toolbar Label { width: auto; padding: 1; }
-    .setting-label { width: 28; padding: 1; }
+    .toolbar .setting-label { width: 28; padding: 1; }
+    .toolbar SelectCurrent > #label { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
     NativeTerminal { height: 1fr; min-height: 5; border: round $secondary; }
     TabPane { padding: 0 1; overflow-y: auto; }
     """
@@ -115,6 +127,8 @@ class DashboardApp(App):
         ("q", "quit", "Quit"),
         ("r", "refresh", "Refresh"),
         ("ctrl+l", "logs", "Search logs"),
+        ("s", "settings", "Settings"),
+        Binding("f2", "settings", show=False),
         ("1", "tab('status')", "Status"),
         ("2", "tab('settings')", "Settings"),
         ("3", "tab('sessions')", "Sessions"),
@@ -147,6 +161,7 @@ class DashboardApp(App):
         self._last_report = self._last_logs = 0
         self._catalog_generation = 0
         self.cpu_history = []
+        self.ram_history = []
         self._terminal_widget = None
         self._terminal_target = None
         self._status_lock = threading.Lock()
@@ -176,17 +191,21 @@ class DashboardApp(App):
                 yield Button("Refresh", id="refresh")
             with TabbedContent(id="content", initial="status"):
                 with TabPane("Status", id="status"):
-                    with VerticalScroll():
-                        yield Static(
-                            "Select a workspace", id="status-summary", markup=False
-                        )
-                        yield Label("Host CPU history · 0–100%")
-                        yield Sparkline(
-                            [], id="cpu-history", min_color="green", max_color="red"
-                        )
+                    with VerticalScroll(id="status-dashboard"):
+                        yield MonitorPanel("workspace", id="full-diagnostics")
+                        yield MonitorPanel("system", id="system-report")
+                        with Collapsible(
+                            title="Workspace details and mounts",
+                            collapsed=True,
+                            id="workspace-details",
+                        ):
+                            yield Static(
+                                "Select a workspace", id="status-summary", markup=False
+                            )
                         yield Button("Scan storage sizes", id="scan-storage")
                 with TabPane("Settings", id="settings"):
                     with VerticalScroll():
+                        yield Button("All settings… (s / F2)", id="show-settings")
                         yield Static(id="settings-info", markup=False)
                         with Horizontal(classes="toolbar"):
                             yield Label(
@@ -196,8 +215,11 @@ class DashboardApp(App):
                         with Horizontal(classes="toolbar"):
                             yield Label("Refresh interval", classes="setting-label")
                             yield Select(
-                                [(f"{n} seconds", n) for n in (2, 5, 10, 30)],
-                                value=5,
+                                [
+                                    (f"{n} second{'s' if n != 1 else ''}", n)
+                                    for n in REFRESH_INTERVALS
+                                ],
+                                value=1,
                                 allow_blank=False,
                                 id="refresh-interval",
                             )
@@ -312,7 +334,7 @@ class DashboardApp(App):
         self.query_one("#session-table", DataTable).add_columns(
             "★", "ID", "Title", "Kind", "Native directory"
         )
-        self._poll_timer = self.set_interval(1, self._tick)
+        self._poll_timer = self.set_interval(0.25, self._tick)
         self.action_refresh()
 
     def _message(self, value):
@@ -346,6 +368,79 @@ class DashboardApp(App):
         self.action_tab("logs")
         self.query_one("#log-search", Input).focus()
 
+    def action_settings(self):
+        if isinstance(self.screen, ModalScreen):
+            return
+        values = {
+            "auto_refresh": self.query_one("#auto-refresh", Switch).value,
+            "interval": self.query_one("#refresh-interval", Select).value,
+            "theme": self.theme,
+            "details": not self.query_one("#workspace-details", Collapsible).collapsed,
+            "session_scope": self.query_one("#session-scope", Select).value,
+            "session_filter": self.query_one("#session-search", Input).value,
+            "log_follow": self.query_one("#log-follow", Switch).value,
+            "log_source": self.query_one("#log-source", Select).value,
+            "log_query": self.query_one("#log-search", Input).value,
+        }
+        item = self._workspace()
+        resources = "No workspace selected."
+        if item:
+            saved, observed = (
+                item.get("configured_limits") or {},
+                item.get("effective_limits") or {},
+            )
+            resources = (
+                f"Project: {plain(item['project'])}\n"
+                f"Saved CPU {saved.get('cpu_cores')} · RAM {status_report.byte_size(saved.get('memory_bytes'))} · PID {saved.get('pids')}\n"
+                f"Observed CPU {observed.get('cpu_cores')} · RAM {status_report.byte_size(observed.get('memory_bytes'))} · PID {observed.get('pids')}"
+            )
+        self.push_screen(
+            SettingsScreen(
+                values,
+                sorted(self.available_themes),
+                read_only=self.read_only,
+                resources=resources,
+            ),
+            self.apply_settings,
+        )
+
+    def apply_settings(self, values):
+        if values is None:
+            return
+        valid = (
+            isinstance(values, dict)
+            and type(values.get("interval")) is int
+            and values["interval"] in REFRESH_INTERVALS
+            and values.get("theme") in self.available_themes
+            and values.get("session_scope") in ("global", "project", "workspace")
+            and values.get("log_source") in ("all", "oc-box", "podman")
+            and all(
+                type(values.get(key)) is bool
+                for key in ("auto_refresh", "details", "log_follow")
+            )
+            and all(
+                isinstance(values.get(key), str)
+                for key in ("session_filter", "log_query")
+            )
+        )
+        if not valid:
+            self._message("Unsupported dashboard setting; no changes applied.")
+            return
+        self.theme = values["theme"]
+        self.query_one("#auto-refresh", Switch).value = values["auto_refresh"]
+        self.query_one("#refresh-interval", Select).value = values["interval"]
+        self.query_one("#workspace-details", Collapsible).collapsed = not values[
+            "details"
+        ]
+        self.query_one("#session-scope", Select).value = values["session_scope"]
+        self.query_one("#session-search", Input).value = values["session_filter"]
+        self.query_one("#log-follow", Switch).value = values["log_follow"]
+        self.query_one("#log-source", Select).value = values["log_source"]
+        self.query_one("#log-search", Input).value = values["log_query"]
+        self._message(
+            "Dashboard settings applied for this session. Workspace limits and OpenCode configuration are unchanged."
+        )
+
     def _tick(self):
         if not self.is_running or not self.is_mounted:
             return
@@ -357,9 +452,17 @@ class DashboardApp(App):
             # A timer callback can already be queued while child widgets are
             # unmounting. Shutdown must not turn it into a UI failure.
             return
-        if auto and time.monotonic() - self._last_report >= interval:
+        if (
+            auto
+            and not self._status_lock.locked()
+            and time.monotonic() - self._last_report >= interval
+        ):
             self.refresh_report()
-        if follow and time.monotonic() - self._last_logs >= 2:
+        if (
+            follow
+            and not self._log_lock.locked()
+            and time.monotonic() - self._last_logs >= interval
+        ):
             self.refresh_logs()
 
     def action_refresh(self):
@@ -371,6 +474,7 @@ class DashboardApp(App):
         if not self._status_lock.acquire(blocking=False):
             return
         self._refreshing = True
+        self._last_report = time.monotonic()
         try:
             report = self.backend.collect(scan_storage=scan_storage)
             if self.is_running:
@@ -382,7 +486,6 @@ class DashboardApp(App):
                     "Status refresh unavailable; previous readings are stale. No recovery was attempted.",
                 )
         finally:
-            self._last_report = time.monotonic()
             self._refreshing = False
             self._status_lock.release()
 
@@ -419,11 +522,9 @@ class DashboardApp(App):
         cpu = host.get("cpu_percent")
         cpu_label = "n/a" if cpu is None else f"{cpu:.1f}%"
         size = status_report.byte_size
-        fs = host.get("filesystem") or {}
         self.query_one("#host-summary", Static).update(
             f"oc-box {'DEMO · ' if self.demo else ''}{'READ ONLY · ' if self.read_only else ''}"
             f"CPU {cpu_label}  RAM {size(host.get('memory_bytes'))}/{size(host.get('memory_total_bytes'))}  "
-            f"Swap {size(host.get('swap_bytes'))}  Filesystem free {size(fs.get('free_bytes'))}  "
             f"Workspaces {len(workspaces)}"
             + (
                 f" · {report['inventory_skipped']} invalid registrations skipped"
@@ -431,9 +532,14 @@ class DashboardApp(App):
                 else ""
             )
         )
-        if cpu is not None:
-            self.cpu_history = (self.cpu_history + [cpu])[-60:]
-            self.query_one("#cpu-history", Sparkline).data = self.cpu_history
+        self.cpu_history = (self.cpu_history + [cpu])[-60:]
+        self.ram_history = (
+            self.ram_history
+            + [percentage(host.get("memory_bytes"), host.get("memory_total_bytes"))]
+        )[-60:]
+        self.query_one("#system-report", MonitorPanel).update_snapshot(
+            host, self.cpu_history, self.ram_history
+        )
         self._render_workspace()
 
     def _workspace(self):
@@ -448,6 +554,7 @@ class DashboardApp(App):
 
     def _render_workspace(self):
         item = self._workspace()
+        self.query_one("#full-diagnostics", MonitorPanel).update_snapshot(item)
         if not item:
             self.query_one("#status-summary", Static).update(
                 "No registered workspaces. Host monitoring and logs remain available."
@@ -558,6 +665,8 @@ class DashboardApp(App):
             self.action_refresh()
         elif action == "show-logs":
             self.action_logs()
+        elif action == "show-settings":
+            self.action_settings()
         elif action == "scan-storage":
             self.scan_storage(self.selected)
         elif action == "connect-sessions":
@@ -642,6 +751,7 @@ class DashboardApp(App):
         if not self._log_lock.acquire(blocking=False):
             return
         self._logging = True
+        self._last_logs = time.monotonic()
         workspace = self.podman_workspace
         try:
             entries = self.backend.logs(workspace)
@@ -654,7 +764,6 @@ class DashboardApp(App):
                     "Log source unavailable; retained entries remain searchable.",
                 )
         finally:
-            self._last_logs = time.monotonic()
             self._logging = False
             self._log_lock.release()
 
