@@ -234,7 +234,7 @@ class UpdateTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()),
         ):
             self.assertIsNone(updater.upgrade(APP))
-        self.assertEqual(len(reads), 2)
+        self.assertEqual(len(reads), 3)
         installer.assert_not_called()
 
     def test_download_without_publication_protocol_is_refused_not_guessed(self):

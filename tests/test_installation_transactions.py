@@ -96,7 +96,7 @@ class InstallationTransactionTests(unittest.TestCase):
                 result[path] = ("absent",)
         return result
 
-    def assert_old_coherent(self):
+    def assert_old_coherent(self, *, retained_candidate=False):
         self.assertEqual(self.snapshot(), self.before)
         self.assertEqual((self.target / "current").resolve(), self.first)
         self.assertEqual(updater.current_install(APP), self.old)
@@ -111,7 +111,20 @@ class InstallationTransactionTests(unittest.TestCase):
         )
         self.assertEqual(self.sentinel.read_bytes(), b"synthetic workspace state")
         self.assertFalse((self.target / ".activation-pending.json").exists())
-        self.assertEqual(list((self.target / "releases").iterdir()), [self.first])
+        releases = list((self.target / "releases").iterdir())
+        if retained_candidate:
+            self.assertEqual(len(releases), 2)
+            self.assertIn(self.first, releases)
+            candidate = next(path for path in releases if path != self.first)
+            self.assertEqual(get_version_info(candidate), self.new)
+            for name in (
+                *installation.PROGRAM_FILES,
+                *("docs/" + name for name in installation.MANUAL_FILES),
+                installation.COMPLETION_FILE,
+            ):
+                self.assertTrue((candidate / name).is_file(), name)
+        else:
+            self.assertEqual(releases, [self.first])
 
     def test_every_late_publication_failure_restores_old_activation(self):
         replace = os.replace
@@ -140,7 +153,7 @@ class InstallationTransactionTests(unittest.TestCase):
                     ):
                         self.install(self.new)
                     self.assertTrue(failed)
-                    self.assert_old_coherent()
+                    self.assert_old_coherent(retained_candidate=True)
 
     def test_failed_rollback_retains_explicit_recovery_and_never_claims_current(self):
         replace = os.replace
@@ -306,7 +319,7 @@ installation.install(Path(sys.argv[2]),home)
                 ):
                     self.install(self.new)
                 self.assertTrue(failed)
-                self.assert_old_coherent()
+                self.assert_old_coherent(retained_candidate=True)
 
     def test_first_install_late_failure_leaves_no_active_launcher_or_metadata(self):
         self.home = self.root / "fresh"
@@ -328,7 +341,9 @@ installation.install(Path(sys.argv[2]),home)
         self.assertFalse((self.target / "build-info.json").exists())
         self.assertFalse((self.target / "current").exists())
         self.assertFalse(list(self.target.glob(".activation-*")))
-        self.assertEqual(list((self.target / "releases").iterdir()), [])
+        releases = list((self.target / "releases").iterdir())
+        self.assertEqual(len(releases), 1)
+        self.assertEqual(get_version_info(releases[0]), self.new)
         self.assertIsNone(installation.active_release(self.home))
 
     def test_legacy_flat_files_and_manual_directory_survive_late_failure(self):
@@ -398,6 +413,131 @@ installation.install(Path(sys.argv[2]),home)
         with self.assertRaisesRegex(updater.UpdateError, "recovery"):
             updater.current_install(APP)
         self.assertEqual(self.sentinel.read_bytes(), b"synthetic workspace state")
+
+    def assert_new_committed(self):
+        current = (self.target / "current").resolve(strict=True)
+        self.assertTrue(current.is_dir())
+        self.assertEqual(get_version_info(current), self.new)
+        self.assertEqual(get_version_info(self.target), self.new)
+        self.assertEqual(updater.current_install(APP), self.new)
+        self.assertIn(
+            str(current / "oc_box.py"), (self.home / ".local/bin/oc-box").read_text()
+        )
+        self.assertFalse(list(self.target.glob(".activation-*")))
+        self.assertEqual(
+            {
+                path.relative_to(self.first): path.read_bytes()
+                for path in self.first.rglob("*")
+                if path.is_file()
+            },
+            self.first_files,
+        )
+        self.assertEqual(self.sentinel.read_bytes(), b"synthetic workspace state")
+
+    def test_after_effect_recovery_cleanup_error_keeps_committed_release(self):
+        remove = installation.shutil.rmtree
+
+        def fault(path, *args, **kwargs):
+            result = remove(path, *args, **kwargs)
+            path = Path(path)
+            if path.parent == self.target and path.name.startswith(".activation-"):
+                raise OSError("synthetic cleanup completed then failed")
+            return result
+
+        with (
+            patch.object(installation.shutil, "rmtree", side_effect=fault),
+            self.assertRaisesRegex(OSError, "cleanup completed then failed"),
+        ):
+            self.install(self.new)
+        self.assert_new_committed()
+
+    def test_interrupt_after_publication_returns_keeps_committed_release(self):
+        publish = installation.publish_release
+
+        def interrupt(*args, **kwargs):
+            publish(*args, **kwargs)
+            raise KeyboardInterrupt
+
+        with (
+            patch.object(installation, "publish_release", side_effect=interrupt),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.install(self.new)
+        self.assert_new_committed()
+
+    def test_matching_initial_remote_cannot_hide_a_manual_install_during_query(self):
+        for check in (False, True):
+            self.reset_home(self.root / f"query-manual-{check}")
+            calls = []
+
+            def transport(arguments, temporary, calls=calls, **kwargs):
+                calls.append(arguments)
+                if arguments[0] == "ls-remote":
+                    self.install(self.new)
+                    return self.old["commit"] + "\trefs/heads/master"
+                if "rev-parse" in arguments:
+                    return self.old["commit"]
+                if "rev-list" in arguments:
+                    return str(self.old["commit_count"])
+                return ""
+
+            with self.subTest(check=check):
+                with (
+                    patch.object(updater.os, "geteuid", return_value=1000),
+                    patch.object(updater, "git", side_effect=transport),
+                    patch.object(updater.subprocess, "run") as installer,
+                    contextlib.redirect_stdout(io.StringIO()) as output,
+                ):
+                    self.assertIsNone(updater.upgrade(APP, check=check))
+                self.assertNotIn("up to date", output.getvalue())
+                self.assertIn(
+                    "check only" if check else "ahead of the published branch",
+                    output.getvalue(),
+                )
+                self.assertEqual(len(calls), 1 if check else 6)
+                installer.assert_not_called()
+                self.assert_new_committed()
+
+    def test_matching_initial_remote_cannot_hide_unsettled_or_dangling_activation(self):
+        for check in (False, True):
+            for kind in ("pending-marker", "recovery-directory", "dangling-current"):
+                self.reset_home(self.root / f"query-{kind}-{check}")
+                calls = []
+
+                def transport(arguments, temporary, kind=kind, calls=calls, **kwargs):
+                    calls.append(arguments)
+                    self.assertEqual(arguments[0], "ls-remote")
+                    if kind == "pending-marker":
+                        (self.target / ".activation-pending.json").write_text(
+                            '{"format":1}\n'
+                        )
+                    elif kind == "recovery-directory":
+                        (self.target / ".activation-retained").mkdir()
+                    else:
+                        current = self.target / "current"
+                        current.unlink()
+                        current.symlink_to(
+                            "releases/missing-synthetic-release",
+                            target_is_directory=True,
+                        )
+                    return self.old["commit"] + "\trefs/heads/master"
+
+                with self.subTest(check=check, state=kind):
+                    with (
+                        patch.object(updater.os, "geteuid", return_value=1000),
+                        patch.object(updater, "git", side_effect=transport),
+                        patch.object(updater.subprocess, "run") as installer,
+                        contextlib.redirect_stdout(io.StringIO()) as output,
+                        self.assertRaisesRegex(updater.UpdateError, "recovery"),
+                    ):
+                        updater.upgrade(APP, check=check)
+                    self.assertNotIn("up to date", output.getvalue())
+                    self.assertEqual(len(calls), 1)
+                    installer.assert_not_called()
+                    self.assertTrue(self.first.is_dir())
+                    self.assertEqual(
+                        self.sentinel.read_bytes(), b"synthetic workspace state"
+                    )
 
 
 if __name__ == "__main__":

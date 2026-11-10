@@ -214,9 +214,13 @@ def _upgrade(root, *, check=False):
                 "Unexpected GitHub branch response; existing installation retained."
             )
         commit = match[1]
-        if current.get("commit") == commit and not current.get("dirty"):
-            print("oc-box is up to date.")
-            return None
+        # Even a matching remote result must not use the pre-network snapshot:
+        # a manual publisher may have changed or interrupted activation meanwhile.
+        with install_lock():
+            current = current_install(root)
+            if current.get("commit") == commit and not current.get("dirty"):
+                print("oc-box is up to date.")
+                return None
         print(
             "GitHub has a different version at "
             + commit[:12]

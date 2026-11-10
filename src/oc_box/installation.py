@@ -440,7 +440,7 @@ def install(source, home=None, *, with_vault=False):
                 prefix=(build.get("commit") or "local")[:12] + "-", dir=releases
             )
         )
-        activated = False
+        publication_attempted = False
         try:
             for name in PROGRAM_FILES:
                 shutil.copyfile(source_file(source, name), release / name)
@@ -466,12 +466,15 @@ def install(source, home=None, *, with_vault=False):
                 atomic_file(
                     release / "vault-support.json", b'{"optional_crypto": true}\n'
                 )
+            # From this point even an exception may follow a completed commit
+            # and removal of all recovery evidence. Keep the complete immutable
+            # release rather than infer that it is unreferenced from that absence.
+            publication_attempted = True
             man, info, completion, binary = publish_release(
                 home, target, release, build
             )
-            activated = True
         finally:
-            if not activated and not any(target.glob(".activation-*")):
+            if not publication_attempted:
                 shutil.rmtree(release)
     utility = shutil.which("install-info") or shutil.which(
         "install-info", path="/usr/sbin:/sbin"
