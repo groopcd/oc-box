@@ -2162,6 +2162,14 @@ runpy.run_path(sys.argv[0],run_name='__main__')
                     server_port=12345, shutdown=lambda: None, server_close=lambda: None
                 )
                 worker = SimpleNamespace(join=lambda **kw: None, is_alive=lambda: False)
+                if failing and mutation == "insert":
+
+                    def refused_cleanup(*args, **kwargs):
+                        raise OSError("private-retry-cleanup")
+
+                    server.shutdown = server.server_close = worker.join = (
+                        refused_cleanup
+                    )
                 with (
                     patch.object(
                         fixture.credentials,
@@ -2195,7 +2203,13 @@ runpy.run_path(sys.argv[0],run_name='__main__')
                 self.assertEqual(dict(os.environ), environment)
                 self.assertNotIn("private-retry-value", report_path.read_text())
                 self.assertNotIn("private-retry-primary", report_path.read_text())
+                self.assertNotIn("private-retry-cleanup", report_path.read_text())
                 self.assertTrue(result["evidence_unchanged"])
+                if failing and mutation == "insert":
+                    self.assertTrue(
+                        {"provider-shutdown", "provider-close", "provider-join"}
+                        <= {item["stage"] for item in result["cleanup_errors"]}
+                    )
                 if failing:
                     self.assertTrue(
                         any(

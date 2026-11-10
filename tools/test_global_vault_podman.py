@@ -3894,6 +3894,7 @@ def retry_source(root, temp_parent=None):
                 trace.completed()
             except BaseException as error:
                 trace.fail(error)
+                trace.cleanup_errors.extend(getattr(error, "fixture_secondary", ()))
         try:
             trace("evidence-preservation")
             after = source_evidence_digests(root, path)
