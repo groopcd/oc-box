@@ -14,6 +14,17 @@ import sys
 import tarfile
 
 
+class ArchiveDurabilityError(Exception):
+    pass
+
+
+def sync_descriptor(descriptor):
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise ArchiveDurabilityError("Archive durability barrier failed.") from exc
+
+
 class BoundedTarInfo(tarfile.TarInfo):
     def _proc_pax(self, archive):
         if self.size > 1024 * 1024:
@@ -178,10 +189,12 @@ def extract(root, limit, owners=False, *, stream=None):
     root = Path(root)
     if root.is_symlink() or not root.is_dir() or any(root.iterdir()):
         raise ValueError("Extraction destination must be an empty real directory")
+    os.chmod(root, 0o700)
     seen = set()
     regular = set()
-    hardlinks = set()
     directories = []
+    directory_paths = {root}
+    regular_metadata = []
     total = 0
 
     def safe_name(name):
@@ -204,6 +217,7 @@ def extract(root, limit, owners=False, *, stream=None):
             if current.is_symlink() or (current.exists() and not current.is_dir()):
                 raise ValueError("Archive would traverse a symlink/non-directory")
             current.mkdir(mode=0o700, exist_ok=True)
+            directory_paths.add(current)
         return root / str(path)
 
     with tarfile.open(
@@ -234,6 +248,7 @@ def extract(root, limit, owners=False, *, stream=None):
                 if path.is_symlink() or (path.exists() and not path.is_dir()):
                     raise ValueError("Directory collides with existing entry")
                 path.mkdir(mode=0o700, exist_ok=True)
+                directory_paths.add(path)
                 directories.append((path, member))
             elif member.isreg():
                 fd = os.open(
@@ -253,6 +268,7 @@ def extract(root, limit, owners=False, *, stream=None):
                         output.write(chunk)
                         remaining -= len(chunk)
                 regular.add(name)
+                regular_metadata.append((path, member))
             elif member.issym():
                 if "\0" in member.linkname:
                     raise ValueError("Invalid link target")
@@ -263,24 +279,45 @@ def extract(root, limit, owners=False, *, stream=None):
                     raise ValueError("Hardlink must name a prior regular archive entry")
                 os.link(root / target, path, follow_symlinks=False)
                 regular.add(name)
-                hardlinks.add(name)
             else:
                 raise ValueError("Device nodes, sockets, and FIFOs are not restored")
-            if not member.isdir() and name not in hardlinks:
+            if member.issym():
                 apply_metadata(path, member, owners)
     # Consume padding/trailing bytes so age verifies its final auth chunk.
     source = stream or sys.stdin.buffer
     while source.read(1024 * 1024):
         pass
-    for path, member in reversed(directories):
-        if path == root:
-            # Keep staging roots private even when an archived root had mode
-            # 0777/0000. Content modes are kept, but other local users must not
-            # be able to modify staging before activation or block cleanup.
-            os.chmod(root, 0o700)
-            os.utime(root, (member.mtime, member.mtime), follow_symlinks=False)
-        else:
+    # Keep ordinary files readable and directories traversable until every link
+    # has been created. Open before applying restrictive modes/mapped ownership,
+    # then sync final metadata through that descriptor in this same namespace.
+    for path, member in regular_metadata:
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        )
+        try:
             apply_metadata(path, member, owners)
+            sync_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+    metadata = dict(directories)
+    for path in sorted(
+        directory_paths, key=lambda value: len(value.parts), reverse=True
+    ):
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
+        try:
+            member = metadata.get(path)
+            if path == root:
+                # Never make a staging root public, including during extraction.
+                os.chmod(root, 0o700)
+                if member is not None:
+                    os.utime(root, (member.mtime, member.mtime), follow_symlinks=False)
+            elif member is not None:
+                apply_metadata(path, member, owners)
+            sync_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
 
 
 def apply_metadata(path, member, owners):
@@ -291,16 +328,69 @@ def apply_metadata(path, member, owners):
         os.utime(path, (member.mtime, member.mtime), follow_symlinks=False)
 
 
-if __name__ == "__main__":
+def write_status(path, value, *, durable=True):
+    if path is None:
+        return
+    try:
+        descriptor = os.open(
+            path, os.O_WRONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        )
+        try:
+            info = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077
+                or info.st_size > 16
+            ):
+                raise OSError("Invalid extraction status file")
+            os.ftruncate(descriptor, 0)
+            data = memoryview((value + "\n").encode("ascii"))
+            while data:
+                count = os.write(descriptor, data)
+                if not count:
+                    raise OSError("Cannot write extraction status")
+                data = data[count:]
+            if durable:
+                sync_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise ArchiveDurabilityError(
+            "Archive durability status could not be recorded."
+        ) from exc
+
+
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("action", choices=("create", "extract"))
     parser.add_argument("root", type=Path)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--owners", action="store_true")
-    args = parser.parse_args()
+    parser.add_argument("--durability-status", type=Path)
+    args = parser.parse_args(argv)
     if args.action == "create":
         create(args.root)
     else:
         if args.limit < 1:
             raise ValueError("A positive extraction bound is required")
-        extract(args.root, args.limit, args.owners)
+        try:
+            write_status(args.durability_status, "started")
+            extract(args.root, args.limit, args.owners)
+            write_status(args.durability_status, "complete")
+        except ArchiveDurabilityError:
+            try:
+                write_status(args.durability_status, "failed", durable=False)
+            except ArchiveDurabilityError:
+                pass
+            print(
+                "Archive durability barrier failed; extraction is incomplete.",
+                file=sys.stderr,
+            )
+            return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

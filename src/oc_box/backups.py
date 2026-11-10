@@ -35,6 +35,123 @@ BackupError = crypto.BackupError
 CAPTURE_LABEL = "io.oc-box.backup-capture"
 
 
+class DurabilityError(BackupError):
+    pass
+
+
+def sync_descriptor(descriptor):
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise DurabilityError(
+            "Backup/restore durability barrier failed; blocked recovery state must be inspected."
+        ) from exc
+
+
+def sync_path(path, *, directory=False):
+    try:
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | os.O_NOFOLLOW
+            | os.O_CLOEXEC
+            | (os.O_DIRECTORY if directory else os.O_NONBLOCK),
+        )
+        try:
+            mode = os.fstat(descriptor).st_mode
+            if not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
+                raise OSError("Unexpected durability target type")
+            sync_descriptor(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise DurabilityError(
+            "Backup/restore durability target could not be synchronized."
+        ) from exc
+
+
+def read_durability_status(path):
+    try:
+        descriptor = os.open(
+            path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+        )
+        with os.fdopen(descriptor, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or info.st_uid != os.getuid()
+                or info.st_mode & 0o077
+                or info.st_size > 16
+            ):
+                raise OSError("Invalid extraction status")
+            return stream.read(17)
+    except OSError as exc:
+        raise DurabilityError(
+            "Restore payload durability status could not be verified."
+        ) from exc
+
+
+def durable_json(box, path, value):
+    """Sync new control bytes before replacement, then the changed directory."""
+    path = Path(path)
+    missing = []
+    parent = path.parent
+    while not parent.exists():
+        missing.append(parent.parent)
+        parent = parent.parent
+    temporary = path.with_name(".oc-box-durable-" + uuid.uuid4().hex + ".json")
+    try:
+        box.atomic_json(temporary, value)
+        sync_path(temporary)
+        os.replace(temporary, path)
+        sync_path(path.parent, directory=True)
+        for parent in missing:
+            sync_path(parent, directory=True)
+    except OSError as exc:
+        raise DurabilityError(
+            "Backup/restore durable control metadata could not be published."
+        ) from exc
+    finally:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            # Private control staging is evidence; never mask the primary IO.
+            pass
+
+
+def publish_completed_restore(box, directory, data):
+    """Keep a separately synchronized blocked record until completion commits."""
+    record = directory / "workspace.json"
+    blocked = directory / "restore-blocked.json"
+    durable_json(box, blocked, data)
+    complete = {
+        key: value
+        for key, value in data.items()
+        if key
+        not in (
+            "restore_incomplete",
+            "restore_staging_project",
+            "restore_attempted_resources",
+        )
+    }
+    try:
+        durable_json(box, record, complete)
+    except BaseException:
+        # A parent barrier can fail after replacement. Restore the already-synced
+        # blocked inode before reporting failure; keep both records if IO refuses.
+        try:
+            os.replace(blocked, record)
+            sync_path(directory, directory=True)
+        except (OSError, DurabilityError):
+            print(
+                "Restore completion rollback could not establish durability; inspect retained blocked recovery metadata before any launch.",
+                file=sys.stderr,
+            )
+        raise
+    # Retain the blocked snapshot as private evidence; it is not the active record.
+
+
 def command(box, *args, check=True, timeout=60):
     with crypto.memory_file() as output, crypto.memory_file() as errors:
         try:
@@ -77,7 +194,7 @@ def owned_container(box, data):
     return info
 
 
-def archive_command(box, action, root, *, private=False, limit=None):
+def archive_command(box, action, root, *, private=False, limit=None, status=None):
     result = [sys.executable, str(box.PACKAGE / "backup_archive.py"), action, str(root)]
     if private:
         result = ["podman", "unshare", *result]
@@ -85,6 +202,8 @@ def archive_command(box, action, root, *, private=False, limit=None):
         result.extend(["--limit", str(limit)])
     if private and action == "extract":
         result.append("--owners")
+    if status is not None:
+        result.extend(["--durability-status", str(status)])
     return result
 
 
@@ -108,7 +227,14 @@ def remove_restore_resource(box, kind, data):
     inspected = command(box, kind, "inspect", name, check=False)
     if inspected.returncode:
         return False
-    info = json.loads(inspected.stdout)[0]
+    inventory = json.loads(inspected.stdout)
+    if (
+        not isinstance(inventory, list)
+        or len(inventory) != 1
+        or not isinstance(inventory[0], dict)
+    ):
+        return False
+    info = inventory[0]
     labels = (
         info.get("Config", {}).get("Labels")
         if kind == "container"
@@ -145,7 +271,14 @@ def remove_capture_image(box, capture):
     inspected = command(box, "image", "inspect", tag, check=False)
     if inspected.returncode:
         return False
-    image = json.loads(inspected.stdout)[0]
+    inventory = json.loads(inspected.stdout)
+    if (
+        not isinstance(inventory, list)
+        or len(inventory) != 1
+        or not isinstance(inventory[0], dict)
+    ):
+        return False
+    image = inventory[0]
     labels = image.get("Config", {}).get("Labels") or {}
     if (
         labels.get(CAPTURE_LABEL) != capture["token"]
@@ -244,11 +377,12 @@ def activate_project(staging, destination):
 
 def replace_project_marker(root, name, source_id, ident):
     """Replace only a verified staged control file, never write its old inode."""
-    directory = os.open(
-        root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    )
+    directory = None
     temporary = None
     try:
+        directory = os.open(
+            root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        )
         descriptor = os.open(
             name,
             os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
@@ -275,6 +409,8 @@ def replace_project_marker(root, name, source_id, ident):
         temporary = candidate
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             stream.write(ident + "\n")
+            stream.flush()
+            sync_descriptor(stream.fileno())
         current = os.stat(name, dir_fd=directory, follow_symlinks=False)
         if (current.st_dev, current.st_ino, current.st_ctime_ns) != (
             metadata.st_dev,
@@ -284,14 +420,22 @@ def replace_project_marker(root, name, source_id, ident):
             raise BackupError("Project backup marker changed during restoration.")
         os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
         temporary = None
+        sync_descriptor(directory)
     except (OSError, UnicodeError) as exc:
         raise BackupError(
             "Cannot verify/replace the staged project marker; no source files were changed."
         ) from exc
     finally:
         if temporary is not None:
-            os.unlink(temporary, dir_fd=directory)
-        os.close(directory)
+            try:
+                os.unlink(temporary, dir_fd=directory)
+            except OSError:
+                print(
+                    "Staged marker cleanup incomplete; private recovery staging was retained.",
+                    file=sys.stderr,
+                )
+        if directory is not None:
+            os.close(directory)
 
 
 def make_backup(box, args):
@@ -431,7 +575,7 @@ def make_backup(box, args):
                         capture_journal = (
                             path.parent / "backup-captures" / (token + ".json")
                         )
-                        box.atomic_json(capture_journal, capture)
+                        durable_json(box, capture_journal, capture)
                         capture_attempted = True
                         image_id = command(
                             box,
@@ -448,7 +592,7 @@ def make_backup(box, args):
                                 "Unexpected committed image identity; backup was not finalized."
                             )
                         capture["image_id"] = image_id
-                        box.atomic_json(capture_journal, capture)
+                        durable_json(box, capture_journal, capture)
                         crypto.encrypt_stream(
                             ["podman", "save", "--format", "oci-archive", image_id],
                             recipient,
@@ -520,6 +664,7 @@ def make_backup(box, args):
                 try:
                     if remove_capture_image(box, capture):
                         capture_journal.unlink()
+                        sync_path(capture_journal.parent, directory=True)
                     else:
                         cleanup_ok = False
                 except Exception:
@@ -755,6 +900,48 @@ def restore_backup(box, args):
         container_created = False
         project_activated = False
         success = False
+
+        def restore_component(name, root, *, private_scope=False):
+            # This status is outside every archived tree, private, fixed-name and
+            # count/category-only. It is not an authentication/permission grant.
+            status = directory / "controller" / (name + ".status")
+            try:
+                with status.open("x", encoding="ascii") as stream:
+                    os.fchmod(stream.fileno(), 0o600)
+                    stream.write("pending\n")
+                    stream.flush()
+                    sync_descriptor(stream.fileno())
+                sync_path(status.parent, directory=True)
+            except OSError as exc:
+                raise DurabilityError(
+                    "Restore durability status could not be initialized."
+                ) from exc
+            consumer = archive_command(
+                box,
+                "extract",
+                root,
+                private=private_scope,
+                limit=manifest["expanded_byte_limit"],
+                status=status,
+            )
+            try:
+                crypto.decrypt_stream(encrypted / name, private, consumer)
+            except BaseException as exc:
+                try:
+                    state = read_durability_status(status)
+                except DurabilityError:
+                    state = b"unreadable"
+                if state not in (b"pending\n", b"complete\n"):
+                    raise DurabilityError(
+                        "Restore payload durability was not established; blocked recovery state was retained."
+                    ) from exc
+                raise
+            state = read_durability_status(status)
+            if state != b"complete\n":
+                raise DurabilityError(
+                    "Restore payload durability completion was not verified."
+                )
+
         try:
             # Validate the new location without putting an active marker there.
             box.validate_project(project_stage)
@@ -764,28 +951,29 @@ def restore_backup(box, args):
                 raise BackupError(
                     "Restore destination cannot be inside private host state/vault storage."
                 )
+            created_parents = []
+            parent = directory
+            while not parent.exists():
+                created_parents.append(parent.parent)
+                parent = parent.parent
             directory.mkdir(parents=True, mode=0o700, exist_ok=False)
             registry_created = True
             (directory / "controller").mkdir(mode=0o700)
             with box.workspace_lock(directory / "workspace.json"):
                 # Journal our fresh resource IDs before any large restoration.
-                # A hard host/process crash must leave an identifiable, blocked
-                # registry entry rather than an anonymous private-home volume.
+                # Check the control-file and directory barriers before payload or
+                # resource creation. This orders recovery, not faulty hardware.
                 workspace_identity.record(
                     data, *workspace_identity.snapshot(project_stage)
                 )
-                box.atomic_json(directory / "workspace.json", data)
+                durable_json(box, directory / "workspace.json", data)
+                sync_path(directory / "controller", directory=True)
+                for parent in created_parents:
+                    sync_path(parent, directory=True)
+                sync_path(project_stage, directory=True)
+                sync_path(project_stage.parent, directory=True)
                 with box.loading_stage("Restoring project into private staging"):
-                    crypto.decrypt_stream(
-                        encrypted / "project.age",
-                        private,
-                        archive_command(
-                            box,
-                            "extract",
-                            project_stage,
-                            limit=manifest["expanded_byte_limit"],
-                        ),
-                    )
+                    restore_component("project.age", project_stage)
                 replace_project_marker(
                     project_stage, box.MARKER, manifest["source_workspace_id"], ident
                 )
@@ -799,7 +987,7 @@ def restore_backup(box, args):
                             "Fresh restore resource name already exists or could not be checked; refusing to reuse it."
                         )
                 data["restore_attempted_resources"] = ["volume"]
-                box.atomic_json(directory / "workspace.json", data)
+                durable_json(box, directory / "workspace.json", data)
                 volume_attempted = True
                 command(
                     box,
@@ -811,32 +999,16 @@ def restore_backup(box, args):
                 )
                 volume = owned_volume(box, data)
                 with box.loading_stage("Restoring private home and session database"):
-                    crypto.decrypt_stream(
-                        encrypted / "home.age",
-                        private,
-                        archive_command(
-                            box,
-                            "extract",
-                            volume["Mountpoint"],
-                            private=True,
-                            limit=manifest["expanded_byte_limit"],
-                        ),
+                    restore_component(
+                        "home.age", volume["Mountpoint"], private_scope=True
                     )
                 # Only registry JSON/control metadata used by oc-box is needed
                 # for resume; old absolute imports/host-archive associations are
                 # evidence below, not active control data for this new ID.
                 registry_stage = directory / "recovered-registry"
                 registry_stage.mkdir(mode=0o700)
-                crypto.decrypt_stream(
-                    encrypted / "registry.age",
-                    private,
-                    archive_command(
-                        box,
-                        "extract",
-                        registry_stage,
-                        limit=manifest["expanded_byte_limit"],
-                    ),
-                )
+                restore_component("registry.age", registry_stage)
+                sync_path(directory, directory=True)
                 # Retain registry bytes as evidence only, never activate archived
                 # paths, permissions, hooks, archive associations or lock files.
                 original_record = registry_stage / "workspace.json"
@@ -857,7 +1029,7 @@ def restore_backup(box, args):
                     raise BackupError("Recovered registry does not match manifest.")
                 if manifest["kind"] == "full":
                     data["restore_attempted_resources"].append("image")
-                    box.atomic_json(directory / "workspace.json", data)
+                    durable_json(box, directory / "workspace.json", data)
                     image_load_attempted = True
                     with box.loading_stage("Loading backed-up container OS image"):
                         crypto.decrypt_stream(
@@ -891,25 +1063,26 @@ def restore_backup(box, args):
                 workspace_identity.record(
                     data, *workspace_identity.snapshot(destination)
                 )
+                sync_path(destination, directory=True)
+                sync_path(destination.parent, directory=True)
                 saved = manifest["sessions"]
-                box.atomic_json(
+                durable_json(
+                    box,
                     box.session_file(directory / "workspace.json"),
                     {"sessions": saved.get("sessions", []), "last": saved.get("last")},
                 )
-                box.atomic_json(directory / "workspace.json", data)
+                durable_json(box, directory / "workspace.json", data)
                 # create_container adds only standard known limits/mounts and
                 # overrides the image entrypoint; it does not start image code.
                 data["restore_attempted_resources"].append("container")
-                box.atomic_json(directory / "workspace.json", data)
+                durable_json(box, directory / "workspace.json", data)
                 container_created = True
                 box.create_container(
                     directory / "workspace.json", data, environment=crypto.environment()
                 )
                 data["ready"] = manifest["kind"] == "full" and bool(config.get("ready"))
-                data.pop("restore_incomplete", None)
-                data.pop("restore_staging_project", None)
-                data.pop("restore_attempted_resources", None)
-                box.atomic_json(directory / "workspace.json", data)
+                durable_json(box, directory / "workspace.json", data)
+                publish_completed_restore(box, directory, data)
                 success = True
             print(f"Restored stopped workspace {ident} at {destination}.")
             print(f"Resume with: oc-box --workspace {ident}")
@@ -918,18 +1091,19 @@ def restore_backup(box, args):
             )
         finally:
             primary_failed = sys.exc_info()[0] is not None
+            durability_failed = isinstance(sys.exc_info()[1], DurabilityError)
             cleanup_ok = True
             if not success:
                 # Loaded images are shared cache: retain their attempted identity
                 # rather than delete an image that may predate this restoration.
-                cleanup_ok = not image_load_attempted
-                if container_created:
+                cleanup_ok = not image_load_attempted and not durability_failed
+                if container_created and not durability_failed:
                     try:
                         container_ok = remove_restore_resource(box, "container", data)
                         cleanup_ok = cleanup_ok and container_ok
                     except Exception:
                         cleanup_ok = False
-                if volume_attempted:
+                if volume_attempted and not durability_failed:
                     try:
                         volume_ok = remove_restore_resource(box, "volume", data)
                         cleanup_ok = cleanup_ok and volume_ok
@@ -968,13 +1142,19 @@ def restore_backup(box, args):
                 if not cleanup_ok and registry_created:
                     data["restore_incomplete"] = True
                     try:
-                        box.atomic_json(directory / "workspace.json", data)
+                        durable_json(box, directory / "workspace.json", data)
                     except Exception:
-                        # The prior blocked journal remains the recovery source;
-                        # never replace the primary error with private cleanup IO.
-                        pass
+                        # Visibility-only fallback after failed/unsupported sync:
+                        # never claim it established durability, or mask primary IO.
+                        try:
+                            box.atomic_json(directory / "workspace.json", data)
+                        except Exception:
+                            print(
+                                "Blocked restore recovery metadata could not be refreshed; inspect retained control files before any launch.",
+                                file=sys.stderr,
+                            )
                     print(
-                        f"Restore cleanup could not remove all new resources. Incomplete workspace {ident} retained for host inspection/purge; it cannot be started.",
+                        f"Restore recovery state for workspace {ident} retained for host inspection/purge; verify its blocked registry before any launch.",
                         file=sys.stderr,
                     )
             if project_stage.exists() and cleanup_ok:

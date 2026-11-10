@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -663,6 +664,7 @@ class WorkspaceBackupTests(unittest.TestCase):
             "exists-error",
             "inspect-error",
             "malformed-inspect",
+            "ambiguous-inspect",
             "foreign-label",
         ):
             with self.subTest(outcome=outcome):
@@ -702,6 +704,14 @@ class WorkspaceBackupTests(unittest.TestCase):
                         if outcome == "malformed-inspect":
                             return subprocess.CompletedProcess(
                                 args, 0, "PRIVATE_JSON", ""
+                            )
+                        if outcome == "ambiguous-inspect":
+                            result = self.podman(box_arg, *args, **kwargs)
+                            return subprocess.CompletedProcess(
+                                args,
+                                0,
+                                json.dumps([*json.loads(result.stdout), {}]),
+                                "",
                             )
                     return self.podman(box_arg, *args, **kwargs)
 
@@ -745,6 +755,7 @@ class WorkspaceBackupTests(unittest.TestCase):
             "exists-error",
             "inspect-error",
             "malformed-inspect",
+            "ambiguous-inspect",
             "foreign-label",
             "remove-error",
         ):
@@ -794,6 +805,15 @@ class WorkspaceBackupTests(unittest.TestCase):
                         and outcome == "malformed-inspect"
                     ):
                         return subprocess.CompletedProcess(args, 0, "PRIVATE_JSON", "")
+                    if (
+                        tags
+                        and args[:2] == ("image", "inspect")
+                        and outcome == "ambiguous-inspect"
+                    ):
+                        result = self.podman(box_arg, *args, **kwargs)
+                        return subprocess.CompletedProcess(
+                            args, 0, json.dumps([*json.loads(result.stdout), {}]), ""
+                        )
                     if args[:2] == ("image", "rm") and outcome == "remove-error":
                         raise OSError("PRIVATE_REMOVE")
                     return self.podman(box_arg, *args, **kwargs)
@@ -942,6 +962,148 @@ class WorkspaceBackupTests(unittest.TestCase):
         self.assertNotIn("restore_incomplete", restored)
         self.assertNotIn("restore_staging_project", restored)
         self.assertTrue(restored_path.exists())
+
+    def test_initial_journal_barrier_failure_retains_blocked_recovery_before_resources(
+        self,
+    ):
+        self.backup(portable=True)
+        original = os.fsync
+        for kind in ("file", "directory"):
+            with self.subTest(kind=kind):
+                destination = self.root / ("journal-sync-" + kind)
+                self.operations.clear()
+
+                def sync(descriptor):
+                    is_directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+                    if is_directory == (kind == "directory"):
+                        raise OSError("PRIVATE_SYNC_ERROR")
+                    original(descriptor)
+
+                with (
+                    patch.object(backups.os, "fsync", side_effect=sync),
+                    self.assertRaises(crypto.BackupError) as error,
+                ):
+                    self.restore(destination)
+                self.assertIn("durability", str(error.exception).lower())
+                self.assertNotIn("PRIVATE", str(error.exception))
+                records = [
+                    box.read_json(path)
+                    for path in box.workspace_paths()
+                    if box.read_json(path)["project"] == str(destination)
+                ]
+                self.assertEqual(len(records), 1)
+                self.assertTrue(records[0]["restore_incomplete"])
+                self.assertTrue(Path(records[0]["restore_staging_project"]).is_dir())
+                self.assertFalse(destination.exists())
+                self.assertFalse(
+                    any(args[:2] == ("volume", "create") for args in self.operations)
+                )
+
+    def test_activation_and_completion_barrier_failures_keep_blocked_state(self):
+        self.backup(portable=True)
+        original = os.fsync
+        for barrier in (
+            "activation-parent",
+            "session-file",
+            "completion-file",
+            "completion-parent",
+        ):
+            with self.subTest(barrier=barrier):
+                destination = self.root / barrier
+                failed = []
+
+                def sync(descriptor):
+                    info = os.fstat(descriptor)
+                    location = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+                    hit = (
+                        barrier == "activation-parent"
+                        and stat.S_ISDIR(info.st_mode)
+                        and location == self.root
+                        and destination.exists()
+                    )
+                    if barrier in ("session-file", "completion-file") and stat.S_ISREG(
+                        info.st_mode
+                    ):
+                        try:
+                            value = json.loads(
+                                os.pread(descriptor, crypto.MAX_SMALL, 0)
+                            )
+                        except (ValueError, OSError):
+                            value = {}
+                        if not isinstance(value, dict):
+                            value = {}
+                        hit = (
+                            set(value) == {"sessions", "last"}
+                            if barrier == "session-file"
+                            else value.get("project") == str(destination)
+                            and "restore_incomplete" not in value
+                        )
+                    if barrier == "completion-parent" and stat.S_ISDIR(info.st_mode):
+                        workspace = location / "workspace.json"
+                        if workspace.is_file():
+                            value = box.read_json(workspace)
+                            hit = (
+                                value.get("project") == str(destination)
+                                and "restore_incomplete" not in value
+                            )
+                    if hit and not failed:
+                        failed.append(True)
+                        raise OSError("PRIVATE_SYNC_ERROR")
+                    original(descriptor)
+
+                with (
+                    patch.object(backups.os, "fsync", side_effect=sync),
+                    self.assertRaises(crypto.BackupError) as error,
+                ):
+                    self.restore(destination)
+                self.assertEqual(failed, [True])
+                self.assertIn("durability", str(error.exception).lower())
+                self.assertNotIn("PRIVATE", str(error.exception))
+                record = next(
+                    box.read_json(path)
+                    for path in box.workspace_paths()
+                    if box.read_json(path)["project"] == str(destination)
+                )
+                self.assertTrue(record["restore_incomplete"])
+                self.assertTrue(destination.is_dir())
+                self.assertEqual(
+                    (destination / box.MARKER).read_text().strip(), record["id"]
+                )
+                self.assertEqual(record["restore_attempted_resources"][0], "volume")
+
+    def test_each_payload_barrier_failure_retains_its_blocked_journal(self):
+        self.backup(portable=True)
+        original = self.decrypt
+        for component in ("project.age", "home.age", "registry.age"):
+            with self.subTest(component=component):
+                destination = self.root / ("payload-" + component)
+
+                def decrypt(path, private, consumer):
+                    if path.name == component:
+                        status = Path(
+                            consumer[consumer.index("--durability-status") + 1]
+                        )
+                        self.assertEqual(status.read_text(), "pending\n")
+                        status.write_text("failed\n")
+                        raise crypto.BackupError(
+                            "Synthetic consumer durability refusal."
+                        )
+                    return original(path, private, consumer)
+
+                with (
+                    patch.object(crypto, "decrypt_stream", side_effect=decrypt),
+                    self.assertRaises(crypto.BackupError) as error,
+                ):
+                    self.restore(destination)
+                self.assertIn("durability", str(error.exception).lower())
+                record = next(
+                    box.read_json(path)
+                    for path in box.workspace_paths()
+                    if box.read_json(path)["project"] == str(destination)
+                )
+                self.assertTrue(record["restore_incomplete"])
+                self.assertTrue(Path(record["restore_staging_project"]).is_dir())
+                self.assertFalse(destination.exists())
 
     def test_invalid_mount_paths_limits_and_architecture_fail_before_restore(self):
         self.backup(portable=True)
@@ -1131,6 +1293,71 @@ class WorkspaceBackupTests(unittest.TestCase):
                 for command in self.operations
             )
         )
+
+
+class DurableBackupStateTests(unittest.TestCase):
+    def test_durability_status_refuses_links_public_modes_and_oversized_input(self):
+        for kind in ("symlink", "hardlink", "public", "oversized"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                outside = root / "outside"
+                outside.write_bytes(b"PRIVATE_STATUS_VALUE")
+                status = root / "status"
+                if kind == "symlink":
+                    status.symlink_to(outside)
+                elif kind == "hardlink":
+                    os.link(outside, status)
+                else:
+                    status.write_bytes(b"pending\n" if kind == "public" else b"x" * 32)
+                    status.chmod(0o644 if kind == "public" else 0o600)
+                with self.assertRaises(crypto.BackupError) as error:
+                    backups.read_durability_status(status)
+                self.assertNotIn("PRIVATE", str(error.exception))
+                self.assertEqual(outside.read_bytes(), b"PRIVATE_STATUS_VALUE")
+
+    def test_durable_json_syncs_new_file_before_publication_then_parent(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "workspace.json"
+            events = []
+            replace = os.replace
+            fsync = os.fsync
+
+            def replacing(source, destination, **kwargs):
+                if Path(destination) == target:
+                    events.append("publish")
+                return replace(source, destination, **kwargs)
+
+            def syncing(descriptor):
+                events.append(
+                    "directory"
+                    if stat.S_ISDIR(os.fstat(descriptor).st_mode)
+                    else "file"
+                )
+                fsync(descriptor)
+
+            with (
+                patch.object(backups.os, "replace", side_effect=replacing),
+                patch.object(backups.os, "fsync", side_effect=syncing),
+            ):
+                backups.durable_json(box, target, {"restore_incomplete": True})
+            self.assertLess(events.index("file"), events.index("publish"))
+            self.assertEqual(events[-1], "directory")
+            self.assertEqual(box.read_json(target), {"restore_incomplete": True})
+
+    def test_failed_json_file_barrier_never_replaces_prior_blocked_record(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary) / "workspace.json"
+            box.atomic_json(target, {"restore_incomplete": True})
+            before = target.read_bytes()
+            with (
+                patch.object(
+                    backups.os, "fsync", side_effect=OSError("PRIVATE_SYNC_ERROR")
+                ),
+                self.assertRaises(crypto.BackupError) as error,
+            ):
+                backups.durable_json(box, target, {"complete": True})
+            self.assertNotIn("PRIVATE", str(error.exception))
+            self.assertEqual(target.read_bytes(), before)
 
 
 class StagedMarkerTests(unittest.TestCase):

@@ -1,10 +1,13 @@
+import contextlib
 import io
 import os
 from pathlib import Path
 import subprocess
+import stat
 import sys
 import tarfile
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -198,6 +201,145 @@ class BackupArchiveTests(unittest.TestCase):
                 )
                 with self.assertRaisesRegex(ValueError, "prior regular"):
                     backup_archive.extract(Path(destination), 100, stream=data)
+
+    def test_extraction_syncs_final_metadata_hardlinks_and_implicit_directories(self):
+        data = archive(
+            [
+                ("implicit/nested/file", tarfile.REGTYPE, "value"),
+                ("hard", tarfile.LNKTYPE, "implicit/nested/file"),
+                ("link", tarfile.SYMTYPE, "/unavailable/outside"),
+            ]
+        )
+        synced = []
+        original = os.fsync
+
+        def sync(descriptor):
+            info = os.fstat(descriptor)
+            synced.append((Path(os.readlink(f"/proc/self/fd/{descriptor}")), info))
+            original(descriptor)
+
+        with patch.object(backup_archive.os, "fsync", side_effect=sync):
+            backup_archive.extract(self.destination, 100, stream=data)
+        paths = [path for path, _ in synced]
+        self.assertIn(self.destination / "implicit/nested/file", paths)
+        file_info = next(
+            info
+            for path, info in synced
+            if path == self.destination / "implicit/nested/file"
+        )
+        self.assertEqual(file_info.st_nlink, 2)
+        self.assertEqual(file_info.st_mode & 0o7777, 0o755)
+        for directory in (
+            self.destination / "implicit/nested",
+            self.destination / "implicit",
+            self.destination,
+        ):
+            self.assertIn(directory, paths)
+        self.assertLess(
+            paths.index(self.destination / "implicit/nested"),
+            paths.index(self.destination / "implicit"),
+        )
+        self.assertLess(
+            paths.index(self.destination / "implicit"), paths.index(self.destination)
+        )
+        self.assertNotIn(Path("/unavailable/outside"), paths)
+        self.assertEqual(self.destination.stat().st_mode & 0o777, 0o700)
+
+    def test_extraction_file_and_directory_barrier_failures_are_fixed_refusals(self):
+        for kind in ("file", "directory"):
+            with (
+                self.subTest(kind=kind),
+                tempfile.TemporaryDirectory(dir=self.root) as destination,
+            ):
+                original = os.fsync
+
+                def sync(descriptor):
+                    is_directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+                    if is_directory == (kind == "directory"):
+                        raise OSError("PRIVATE_SYNC_ERROR")
+                    original(descriptor)
+
+                with (
+                    patch.object(backup_archive.os, "fsync", side_effect=sync),
+                    self.assertRaisesRegex(Exception, "durability") as error,
+                ):
+                    backup_archive.extract(
+                        Path(destination),
+                        100,
+                        stream=archive([("file", tarfile.REGTYPE, "value")]),
+                    )
+                self.assertNotIn("PRIVATE", str(error.exception))
+
+    def test_extract_cli_marks_barrier_failure_without_private_error_text(self):
+        status = self.root / "extract.status"
+        status.write_text("pending\n")
+        status.chmod(0o600)
+        errors = io.StringIO()
+        with (
+            patch.object(
+                backup_archive.os, "fsync", side_effect=OSError("PRIVATE_SYNC_ERROR")
+            ),
+            patch.object(
+                backup_archive.sys,
+                "stdin",
+                SimpleNamespace(buffer=archive([("file", tarfile.REGTYPE, "value")])),
+            ),
+            contextlib.redirect_stderr(errors),
+        ):
+            self.assertEqual(
+                backup_archive.main(
+                    [
+                        "extract",
+                        str(self.destination),
+                        "--limit",
+                        "100",
+                        "--durability-status",
+                        str(status),
+                    ]
+                ),
+                1,
+            )
+        self.assertEqual(status.read_text(), "failed\n")
+        self.assertNotIn("PRIVATE", errors.getvalue())
+
+    def test_restrictive_metadata_syncs_in_an_unprivileged_child(self):
+        uid, gid = (65534, 65534) if os.geteuid() == 0 else (os.getuid(), os.getgid())
+        if os.geteuid() == 0:
+            os.chown(self.destination, uid, gid)
+        stream = io.BytesIO()
+        with tarfile.open(fileobj=stream, mode="w") as output:
+            entry = tarfile.TarInfo("locked")
+            entry.type, entry.mode = tarfile.DIRTYPE, 0
+            output.addfile(entry)
+            entry = tarfile.TarInfo("locked/file")
+            entry.mode, entry.size = 0, 5
+            output.addfile(entry, io.BytesIO(b"value"))
+        code = (
+            "import os,sys; from pathlib import Path; from oc_box import backup_archive as a; "
+            "os.chdir(sys.argv[1]); uid,gid=map(int,sys.argv[2:4]); "
+            "os.setgroups([]) if os.geteuid()==0 else None; "
+            "os.setgid(gid) if os.geteuid()==0 else None; "
+            "os.setuid(uid) if os.geteuid()==0 else None; assert os.geteuid()!=0; "
+            "a.extract(Path('.'),100); assert Path('locked').stat().st_mode & 0o777==0; "
+            "Path('locked').chmod(0o700); assert Path('locked/file').stat().st_mode & 0o777==0; "
+            "Path('locked/file').chmod(0o600); assert Path('locked/file').read_bytes()==b'value'"
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                code,
+                str(self.destination),
+                str(uid),
+                str(gid),
+            ],
+            input=stream.getvalue(),
+            capture_output=True,
+            timeout=10,
+            env={"PATH": os.defpath, "LANG": "C.UTF-8", "PYTHONPATH": str(APP / "src")},
+        )
+        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
 
 
 if __name__ == "__main__":
