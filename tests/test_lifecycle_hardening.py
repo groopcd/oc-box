@@ -78,6 +78,14 @@ class LifecycleHardeningTests(unittest.TestCase):
                     with self.assertRaises(box.BoxError):
                         box.validate_project(trusted.parent)
             self.assertEqual(box.validate_project(self.project), self.project)
+            for ordinary in (
+                self.home / "devel/ordinary-project",
+                self.root / "config/ordinary-project",
+                self.root / "data/ordinary-project",
+            ):
+                with self.subTest(allowed=ordinary.relative_to(self.root)):
+                    ordinary.mkdir(parents=True)
+                    self.assertEqual(box.validate_project(ordinary), ordinary)
 
     def test_trusted_descendant_refuses_launch_before_registration(self):
         selected = self.root / "config/opencode/plugins"
@@ -93,6 +101,28 @@ class LifecycleHardeningTests(unittest.TestCase):
         create.assert_not_called()
         launch.assert_not_called()
         self.assertFalse((selected / box.MARKER).exists())
+
+    def test_rejected_new_project_does_not_create_nested_state_root(self):
+        project = self.root / "fresh-project"
+        project.mkdir()
+        source = project / "work.txt"
+        source.write_text("unfinished work")
+        nested_state = project / "private-state"
+        with (
+            patch.dict(os.environ, {"OC_BOX_STATE_HOME": str(nested_state)}),
+            patch.object(box, "check_backend"),
+            patch.object(box, "podman") as podman,
+            patch.object(box, "create_workspace") as create,
+            patch.object(box, "launch") as launch,
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(box.BoxError),
+        ):
+            box.main(["start", "--project", str(project)])
+        for operation in (podman, create, launch):
+            operation.assert_not_called()
+        self.assertFalse(nested_state.exists())
+        self.assertEqual(list(project.iterdir()), [source])
+        self.assertEqual(source.read_text(), "unfinished work")
 
     def intervening_update(self, update):
         """Complete another writer under the real lock, before the next reader locks."""

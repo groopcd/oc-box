@@ -472,6 +472,7 @@ def find_workspace(project=None, workspace_id=None, *, allow_identity_change=Fal
 
 def create_workspace(project, distro):
     ident = uuid.uuid4().hex
+    state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
     folder = state_root() / "workspaces" / ident
     folder.mkdir(parents=True, mode=0o700)
     (folder / "controller").mkdir(mode=0o700)
@@ -3622,7 +3623,6 @@ def main(argv=None):
                 else {}
             ),
         )
-    state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
     path, data = find_workspace(
         args.project, args.workspace, allow_identity_change=args.command == "repair"
     )
