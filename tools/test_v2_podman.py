@@ -1065,7 +1065,11 @@ def cleanup_resources(root, records, binary, guards):
             ("network", "oc-box-" + data["id"], ("network", "ls", "-q")),
         ):
             tokens = cleanup_command(
-                root, binary, *listing, "--filter", box.LABEL + "=" + data["id"]
+                root,
+                binary,
+                *listing,
+                "--filter",
+                "label=" + box.LABEL + "=" + data["id"],
             ).stdout.split()
             cleanup_require(len(tokens) <= 1, "resource-inventory")
             exists = cleanup_command(

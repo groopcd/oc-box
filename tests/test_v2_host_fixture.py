@@ -885,7 +885,19 @@ class V2HostFixtureTests(unittest.TestCase):
                 return subprocess.CompletedProcess(argv, 0, json.dumps(info), "")
             if args[0] == "ps" or args[1] == "ls":
                 kind = "container" if args[0] == "ps" else args[0]
-                ident = args[-1].split("=", 2)[-1]
+                listing = {
+                    "container": ["ps", "-aq"],
+                    "volume": ["volume", "ls", "-q"],
+                    "network": ["network", "ls", "-q"],
+                }[kind]
+                self.assertIn(
+                    args[-1],
+                    {"label=io.oc-box.workspace=" + data["id"] for _, data in records},
+                )
+                ident = args[-1].removeprefix("label=io.oc-box.workspace=")
+                self.assertEqual(
+                    args, [*listing, "--filter", "label=io.oc-box.workspace=" + ident]
+                )
                 tokens = [
                     token
                     for (item_kind, token), value in resources.items()
@@ -1102,6 +1114,46 @@ class V2HostFixtureTests(unittest.TestCase):
                 box.atomic_json(path, data)
                 self.assert_cleanup_refuses(
                     root, records, resources, info, file_only=True
+                )
+
+    def test_cleanup_inventory_uses_exact_native_label_filter_for_each_kind(self):
+        ident = "a" * 32
+        data = {
+            "id": ident,
+            "container": "oc-box-" + ident,
+            "home_volume": "oc-box-home-" + ident,
+        }
+        commands = []
+
+        def absent_resources(root, binary, *arguments, **options):
+            commands.append(arguments)
+            return subprocess.CompletedProcess(
+                [binary, *arguments], 1 if arguments[1] == "exists" else 0, "", ""
+            )
+
+        with (
+            tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary,
+            patch.object(fixture, "cleanup_command", side_effect=absent_resources),
+        ):
+            root = Path(temporary)
+            self.assertEqual(
+                fixture.cleanup_resources(
+                    root,
+                    {ident: (root / "workspace.json", data)},
+                    "/synthetic/podman",
+                    cleanup_guards,
+                ),
+                [],
+            )
+        for kind, listing in (
+            ("container", ("ps", "-aq")),
+            ("volume", ("volume", "ls", "-q")),
+            ("network", ("network", "ls", "-q")),
+        ):
+            with self.subTest(kind=kind):
+                self.assertIn(
+                    (*listing, "--filter", "label=io.oc-box.workspace=" + ident),
+                    commands,
                 )
 
     def test_cleanup_actual_store_refusals_precede_all_resource_queries(self):
