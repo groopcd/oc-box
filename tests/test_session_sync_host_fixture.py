@@ -20,6 +20,8 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock, patch
 
+from tools import acceptance_guards as guards
+
 SCRIPT = Path(__file__).resolve().parents[1] / "tools/test_session_sync_podman.py"
 spec = importlib.util.spec_from_file_location("session_history_host_runner", SCRIPT)
 runner = importlib.util.module_from_spec(spec)
@@ -184,6 +186,240 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         ):
             runner.source_snapshot(self.source, self.commit)
 
+    def test_shared_guard_is_required_in_manifest_and_byte_bound(self):
+        helper = "tools/acceptance_guards.py"
+        self.assertIn(helper, runner.DONORS)
+        self.source_files()
+        with patch.object(runner, "git", side_effect=self.git):
+            identity = runner.source_snapshot(self.source, self.commit)
+            self.assertEqual(
+                identity["sha256"][helper],
+                hashlib.sha256(self.files[helper]).hexdigest(),
+            )
+            (self.source / helper).write_bytes(b"# changed helper\n")
+            with (
+                patch.object(runner.importlib, "import_module") as imports,
+                patch.object(runner.subprocess, "run") as command,
+                self.assertRaisesRegex(runner.Refusal, "source-changed"),
+            ):
+                runner.load_source(self.source, self.commit)
+        imports.assert_not_called()
+        command.assert_not_called()
+
+    def test_shared_guard_import_follows_independent_proof_and_bytecode_isolation(self):
+        order = []
+        identity = {"sha256": {"tools/acceptance_guards.py": "a" * 64}}
+        fixture = SimpleNamespace(
+            APP=self.source,
+            box=SimpleNamespace(PACKAGE=self.source / "src/oc_box"),
+            workspace_service=SimpleNamespace(),
+        )
+        helper = ModuleType("tools.acceptance_guards")
+
+        def snapshot(*_):
+            order.append("proof")
+            return identity
+
+        def imported(name):
+            order.append(name)
+            return helper if name == "tools.acceptance_guards" else fixture
+
+        with (
+            patch.object(runner, "source_snapshot", side_effect=snapshot),
+            patch.object(
+                runner, "import_guard", side_effect=lambda *_: order.append("origins")
+            ),
+            patch.object(
+                runner, "isolate_bytecode", side_effect=lambda: order.append("isolate")
+            ),
+            patch.object(runner.importlib, "import_module", side_effect=imported),
+            patch.object(sys, "path", list(sys.path)),
+        ):
+            loaded = runner.load_source(self.source, self.commit)
+        self.assertIs(loaded.guards, helper)
+        self.assertEqual(
+            order,
+            [
+                "proof",
+                "origins",
+                "isolate",
+                "tools.acceptance_guards",
+                "tools.test_global_vault_podman",
+                "tools.test_interactive_podman",
+                "origins",
+                "proof",
+            ],
+        )
+        with (
+            patch.object(
+                runner, "source_snapshot", side_effect=[identity, {"sha256": {}}]
+            ),
+            patch.object(runner, "import_guard"),
+            patch.object(runner, "isolate_bytecode"),
+            patch.object(runner.importlib, "import_module", side_effect=imported),
+            patch.object(sys, "path", list(sys.path)),
+            self.assertRaisesRegex(runner.Refusal, "source-changed"),
+        ):
+            runner.load_source(self.source, self.commit)
+
+    def test_shared_guard_missing_manifest_refuses_before_import(self):
+        self.source_files()
+        self.stage = b"\0".join(
+            item
+            for item in self.stage.split(b"\0")
+            if not item.endswith(b"\ttools/acceptance_guards.py")
+        )
+        with (
+            patch.object(runner, "git", side_effect=self.git),
+            patch.object(runner.importlib, "import_module") as imports,
+            patch.object(runner.subprocess, "run") as command,
+            self.assertRaisesRegex(runner.Refusal, "clean-source-required"),
+        ):
+            runner.load_source(self.source, self.commit)
+        imports.assert_not_called()
+        command.assert_not_called()
+
+    def test_import_guard_checks_helper_bytes_and_declared_origin(self):
+        self.source_files()
+        helper = self.source / "tools/acceptance_guards.py"
+        helper.write_bytes(b"# reviewed helper\n")
+        tracked = {"tools/acceptance_guards.py": runner.file_hash(helper)}
+        module = ModuleType("tools.acceptance_guards")
+        module.__file__ = str(helper)
+        module.__spec__ = importlib.util.spec_from_file_location(
+            module.__name__, helper
+        )
+        with patch.object(sys, "modules", {module.__name__: module}):
+            runner.import_guard(self.source, tracked)
+            module.__spec__.origin = str(self.parent / "foreign.py")
+            with self.assertRaisesRegex(runner.Refusal, "source-shadowing"):
+                runner.import_guard(self.source, tracked)
+            module.__spec__.origin = str(helper)
+            helper.write_bytes(b"# replaced helper\n")
+            with self.assertRaisesRegex(runner.Refusal, "source-changed"):
+                runner.import_guard(self.source, tracked)
+
+    def private_git_source(self):
+        """Finite private Git history and inert donors; never native/engine code."""
+        self.source_files()
+        helper = self.source / "tools/acceptance_guards.py"
+        helper.write_text("VALUE = 'SOURCE'\n")
+        (self.source / "src/oc_box/oc_box.py").write_text(
+            "from pathlib import Path\nPACKAGE = Path(__file__).parent\n"
+        )
+        (self.source / "src/oc_box/__init__.py").write_text("# synthetic package\n")
+        (self.source / "tools/test_global_vault_podman.py").write_text(
+            "from pathlib import Path\nfrom oc_box import oc_box as box\n"
+            "APP = Path(__file__).parents[1]\nworkspace_service = object()\n"
+        )
+        (self.source / ".gitignore").write_text("__pycache__/\n")
+        env = {
+            "PATH": os.defpath,
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_AUTHOR_NAME": "Synthetic Fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Synthetic Fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+        }
+
+        def git(*args, value=None):
+            return (
+                subprocess.run(
+                    ["git", "-C", str(self.source), *args],
+                    env=env,
+                    input=value,
+                    capture_output=True,
+                    check=True,
+                    timeout=15,
+                )
+                .stdout.strip()
+                .decode()
+            )
+
+        git("init", "--quiet")
+        git("add", ".")
+        tree, parent = git("write-tree"), None
+        for _ in range(31):
+            parent = git(
+                "-c",
+                "commit.gpgsign=false",
+                "commit-tree",
+                tree,
+                *(["-p", parent] if parent else []),
+                value=b"synthetic\n",
+            )
+        git("update-ref", "HEAD", parent)
+        return parent, helper
+
+    def test_real_candidate_helper_cache_shadow_and_byte_changes_fail_closed(self):
+        commit, helper = self.private_git_source()
+        marker = self.parent / "executed-untrusted-helper"
+        script = (
+            "import importlib.util,importlib._bootstrap_external as b,json,os,sys,types\n"
+            "from pathlib import Path\n"
+            "spec=importlib.util.spec_from_file_location('r',sys.argv[1])\n"
+            "r=importlib.util.module_from_spec(spec);spec.loader.exec_module(r)\n"
+            "source,commit,helper,marker,mode=sys.argv[2:]\n"
+            "if mode=='poisoned':\n"
+            " info=os.stat(helper);cache=importlib.util.cache_from_source(helper)\n"
+            " os.makedirs(os.path.dirname(cache),exist_ok=True)\n"
+            " code=compile('from pathlib import Path\\nPath('+repr(marker)+').write_text(\\'poison\\')\\nVALUE=\\'POISON\\'\\n',helper,'exec')\n"
+            " Path(cache).write_bytes(b._code_to_timestamp_pyc(code,int(info.st_mtime),info.st_size))\n"
+            "if mode=='shadow':\n"
+            " m=types.ModuleType('tools.acceptance_guards');m.__file__=str(Path(marker).with_suffix('.py'))\n"
+            " sys.modules[m.__name__]=m\n"
+            "try:\n"
+            " loaded=r.load_source(Path(source),'a'*40 if mode=='wrong-commit' else commit)\n"
+            " print(json.dumps({'value':loaded.guards.VALUE,'hash':loaded.identity['sha256']['tools/acceptance_guards.py']}))\n"
+            "except r.Refusal as e: print(json.dumps({'refusal':str(e)}))\n"
+        )
+        for mode, refusal in (
+            ("poisoned", None),
+            ("shadow", "source-shadowing"),
+            ("wrong-commit", "clean-source-required"),
+            ("changed", "clean-source-required"),
+        ):
+            if mode == "changed":
+                helper.write_text(
+                    "from pathlib import Path\nPath("
+                    + repr(str(marker))
+                    + ").write_text('untrusted')\nVALUE = 'CHANGED'\n"
+                )
+            with self.subTest(mode=mode):
+                process = subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-B",
+                        "-c",
+                        script,
+                        str(SCRIPT),
+                        str(self.source),
+                        commit,
+                        str(helper),
+                        str(marker),
+                        mode,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=60,
+                    check=False,
+                )
+                self.assertEqual(process.returncode, 0, process.stderr)
+                observed = json.loads(process.stdout)
+                if refusal:
+                    self.assertEqual(observed, {"refusal": refusal})
+                else:
+                    self.assertEqual(
+                        observed,
+                        {
+                            "value": "SOURCE",
+                            "hash": runner.file_hash(helper),
+                        },
+                    )
+                self.assertFalse(marker.exists(), "untrusted helper code executed")
+
     def test_source_symlink_and_missing_manifest_refuse(self):
         self.source_files()
         self.stage = b""
@@ -202,6 +438,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             "oc_box",
             "oc_box.workspace_service",
             "tools",
+            "tools.acceptance_guards",
             "tools.test_global_vault_podman",
         ):
             for namespace in (False, True):
@@ -220,11 +457,16 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
     def test_import_guard_accepts_only_source_locations(self):
         package = ModuleType("oc_box")
         package.__file__ = str(self.source / "src/oc_box/__init__.py")
+        package.__path__ = [str(self.source / "src/oc_box")]
         tools = ModuleType("tools")
         tools.__path__ = [str(self.source / "tools")]
         with patch.object(sys, "modules", {"oc_box": package, "tools": tools}):
             runner.import_guard(self.source)
             tools.__path__.append(str(self.parent / "foreign"))
+            with self.assertRaisesRegex(runner.Refusal, "source-shadowing"):
+                runner.import_guard(self.source)
+            tools.__path__.pop()
+            package.__path__.append(str(self.parent / "foreign"))
             with self.assertRaisesRegex(runner.Refusal, "source-shadowing"):
                 runner.import_guard(self.source)
 
@@ -300,6 +542,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
 
     def harness(self):
         loaded = SimpleNamespace(
+            guards=guards,
             fixture=SimpleNamespace(NATIVE_VERSION="2.2.6"),
             box=SimpleNamespace(),
             service=SimpleNamespace(),
@@ -307,7 +550,8 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             identity={"commit": self.commit, "sha256": {}},
         )
         native = self.parent / "native"
-        native.write_bytes(b"synthetic-native")
+        native.write_bytes(b"\x7fELFsynthetic-native")
+        native.chmod(0o700)
         harness = runner.Harness(loaded, self.parent, native, runner.file_hash(SCRIPT))
         harness.validate_native_config = Mock()
         return harness
@@ -377,6 +621,47 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             harness.runner = "wrong"
             with self.assertRaisesRegex(runner.Refusal, "source-changed"):
                 harness.same_identity()
+
+    def test_native_byte_or_path_change_refuses_before_fixture_and_engine_guards(self):
+        harness = self.harness()
+        before = harness.native_identity
+        content = harness.binary.read_bytes()
+        for defect in ("bytes", "elf", "mode", "symlink"):
+            harness.binary.write_bytes(content)
+            harness.binary.chmod(0o700)
+            if defect == "bytes":
+                harness.binary.write_bytes(content + b"replacement")
+            elif defect == "elf":
+                harness.binary.write_bytes(b"not-an-executable")
+            elif defect == "mode":
+                harness.binary.chmod(0o600)
+            else:
+                target = self.parent / "native-target"
+                target.write_bytes(content)
+                target.chmod(0o700)
+                harness.binary.unlink()
+                harness.binary.symlink_to(target)
+            harness.f.validate_fixture = Mock()
+            harness.f.validate_store = Mock()
+            harness.f.verify_owned_resources = Mock()
+            with (
+                self.subTest(defect=defect),
+                patch.object(
+                    runner, "source_snapshot", return_value=harness.loaded.identity
+                ),
+                patch.object(runner, "import_guard"),
+                patch.object(runner.subprocess, "run") as command,
+                self.assertRaisesRegex(runner.Refusal, "native-changed"),
+            ):
+                harness.validate(initial=True)
+            self.assertIs(harness.native_identity, before)
+            self.assertEqual(harness.native["sha256"], before.sha256)
+            harness.f.validate_fixture.assert_not_called()
+            harness.f.validate_store.assert_not_called()
+            harness.f.verify_owned_resources.assert_not_called()
+            command.assert_not_called()
+            if harness.binary.is_symlink():
+                harness.binary.unlink()
 
     def test_reports_require_every_named_true_check_and_safe_categories(self):
         identity = {
@@ -1280,7 +1565,10 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
 
     def test_loaded_source_modules_must_be_hashed_tracked_files(self):
         self.source_files()
-        tracked = {name: "0" * 64 for name in self.files}
+        tracked = {
+            name: hashlib.sha256(value).hexdigest()
+            for name, value in self.files.items()
+        }
         module = ModuleType("tools.helper")
         module.__file__ = str(self.source / "tools/test_global_vault_podman.py")
         with patch.object(sys, "modules", {"tools.helper": module}):
@@ -1338,6 +1626,12 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 source.assert_not_called()
                 allocate.assert_not_called()
         loaded = SimpleNamespace(
+            guards=SimpleNamespace(
+                native_identity=lambda *_args, **_kwargs: SimpleNamespace(
+                    path=self.source / "node_modules/.bin/opencode"
+                ),
+                GuardError=guards.GuardError,
+            ),
             fixture=SimpleNamespace(host_guard=Mock()),
             box=SimpleNamespace(DISTROS={"tumbleweed": None}),
             interactive=SimpleNamespace(
@@ -1353,6 +1647,40 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("FAIL category=placement", console)
         allocate.assert_not_called()
+
+    def test_native_discovery_refusal_precedes_engine_lookup_and_allocation(self):
+        loaded = SimpleNamespace(
+            guards=guards,
+            fixture=SimpleNamespace(host_guard=Mock()),
+            box=SimpleNamespace(DISTROS={"tumbleweed": None}),
+            source=self.source,
+        )
+        for kind in ("missing", "non-ELF"):
+            binary = self.parent / kind
+            if kind == "non-ELF":
+                binary.write_text("#!/bin/sh\nexit 0\n")
+                binary.chmod(0o700)
+            with (
+                self.subTest(kind=kind),
+                patch.object(runner.shutil, "which") as engine,
+            ):
+                code, console, allocate = self.run_main(
+                    [
+                        "--source",
+                        str(self.source),
+                        "--expect-commit",
+                        self.commit,
+                        "--work-dir",
+                        str(self.parent),
+                        "--opencode-v2",
+                        str(binary),
+                    ],
+                    load_source=Mock(return_value=loaded),
+                )
+            self.assertEqual(code, 1)
+            self.assertIn("FAIL category=fixture-refusal", console)
+            engine.assert_not_called()
+            allocate.assert_not_called()
 
     def test_stale_bytecode_is_never_executed_in_the_isolated_runner(self):
         # Real interpreter semantics: a matching-mtime/size __pycache__ entry
@@ -1588,7 +1916,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         ):
             runner.load_source(self.source, self.commit)
         self.assertEqual(order[0], "isolate")
-        self.assertEqual(len(order), 3)
+        self.assertEqual(len(order), 4)
 
     def test_failure_trace_reports_only_code_locations_never_messages(self):
         def inner():

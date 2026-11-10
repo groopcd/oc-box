@@ -36,6 +36,7 @@ FORMAT = "oc-box-session-sync-host-v1"
 MARKER = "history-purpose.json"
 REPORT = "history-result.json"
 DONORS = (
+    "tools/acceptance_guards.py",
     "tools/test_global_vault_podman.py",
     "tools/test_v2_podman.py",
     "tools/test_interactive_podman.py",
@@ -309,8 +310,8 @@ def import_guard(source, tracked=None):
     for name, module in tuple(sys.modules.items()):
         filename = getattr(module, "__file__", None)
         if name in ("oc_box", "tools") or name.startswith(("oc_box.", "tools.")):
-            locations = (
-                [filename] if filename else list(getattr(module, "__path__", ()))
+            locations = ([filename] if filename else []) + list(
+                getattr(module, "__path__", ())
             )
             require(
                 locations
@@ -322,9 +323,16 @@ def import_guard(source, tracked=None):
         if tracked is not None and filename:
             resolved = Path(filename).resolve()
             if resolved.is_relative_to(source):
+                origin = getattr(getattr(module, "__spec__", None), "origin", None)
                 require(
-                    resolved.relative_to(source).as_posix() in tracked,
+                    resolved.relative_to(source).as_posix() in tracked
+                    and (origin is None or Path(origin).resolve() == resolved),
                     "source-shadowing",
+                )
+                require(
+                    file_hash(safe_path(filename))
+                    == tracked[resolved.relative_to(source).as_posix()],
+                    "source-changed",
                 )
 
 
@@ -345,6 +353,10 @@ def load_source(source, expected):
     import_guard(source)
     isolate_bytecode()
     sys.path[:0] = [str(source / "src"), str(source)]
+    # This candidate helper cannot participate in its own initial trust proof.
+    # The independent stdlib bootstrap above hashes it as an explicit donor;
+    # bytecode isolation, all loaded origins and the repeated snapshot bind it.
+    guards = importlib.import_module("tools.acceptance_guards")
     fixture = importlib.import_module("tools.test_global_vault_podman")
     interactive = importlib.import_module("tools.test_interactive_podman")
     import_guard(source, identity["sha256"])
@@ -355,6 +367,7 @@ def load_source(source, expected):
     )
     require(source_snapshot(source, expected) == identity, "source-changed")
     return SimpleNamespace(
+        guards=guards,
         fixture=fixture,
         interactive=interactive,
         box=fixture.box,
@@ -833,7 +846,16 @@ class Harness:
         self.loaded, self.f = loaded, loaded.fixture
         self.box, self.service = loaded.box, loaded.service
         self.root, self.binary, self.runner = root, binary, runner
-        self.native = {"version": self.f.NATIVE_VERSION, "sha256": file_hash(binary)}
+        try:
+            self.native_identity = loaded.guards.native_identity(
+                binary, outside=(loaded.source,)
+            )
+        except loaded.guards.GuardError as error:
+            raise Refusal("fixture-refusal") from error
+        self.native = {
+            "version": self.f.NATIVE_VERSION,
+            "sha256": self.native_identity.sha256,
+        }
         self.checks, self.exits, self.secondary = {}, [], []
         self.stage = "preparation"
         self.progress = lambda _name: None
@@ -854,7 +876,10 @@ class Harness:
         )
         import_guard(self.loaded.source, self.loaded.identity["sha256"])
         require(file_hash(__file__) == self.runner, "source-changed")
-        require(file_hash(self.binary) == self.native["sha256"], "native-changed")
+        try:
+            self.loaded.guards.check_native(self.native_identity)
+        except self.loaded.guards.GuardError as error:
+            raise Refusal("native-changed") from error
 
     def purpose(self):
         return {
@@ -908,10 +933,19 @@ class Harness:
                 == {"2": str(self.binary)},
                 "native-changed",
             )
-            wrapper = self.f.safe_path(self.root, "bin/opencode")
+            try:
+                wrapper = self.loaded.guards.checked_path(
+                    "bin/opencode", root=self.root, kind="file"
+                )
+                self.loaded.guards.exact_private_files(
+                    self.root,
+                    {"bin/opencode": self.f.native_wrapper_source().encode()},
+                    uid=os.getuid(),
+                )
+            except self.loaded.guards.GuardError as error:
+                raise Refusal("native-changed") from error
             require(
-                wrapper.read_text() == self.f.native_wrapper_source()
-                and os.access(wrapper, os.X_OK),
+                os.access(wrapper, os.X_OK),
                 "native-changed",
             )
 
@@ -1850,7 +1884,12 @@ def main(argv=None):
         f = loaded.fixture
         f.host_guard()
         require(args.distro in loaded.box.DISTROS, "invalid-options")
-        binary = loaded.interactive.native_binary(args.opencode_v2)
+        try:
+            binary = loaded.guards.native_identity(
+                args.opencode_v2.expanduser(), outside=(), resolve_entry=True
+            ).path
+        except loaded.guards.GuardError as error:
+            raise Refusal("fixture-refusal") from error
         require(not binary.is_relative_to(loaded.source), "placement")
         native_podman = shutil.which(
             "podman", path=loaded.box.maintenance_host_env().get("PATH", os.defpath)
