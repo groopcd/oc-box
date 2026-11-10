@@ -213,6 +213,7 @@ def bounded(command, env, cwd, timeout=60):
         command,
         env=env,
         cwd=cwd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,

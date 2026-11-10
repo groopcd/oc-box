@@ -43,6 +43,7 @@ def bounded(command, *, env, cwd, timeout=45):
         command,
         env={**env, "PWD": str(cwd)},
         cwd=cwd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
