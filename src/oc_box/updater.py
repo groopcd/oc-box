@@ -1,5 +1,6 @@
 """Public HTTPS/Git updates without forwarding provider/publishing credentials."""
 
+import ast
 import fcntl
 from importlib import metadata
 import json
@@ -13,11 +14,11 @@ from urllib.parse import unquote, urlparse
 
 if __package__:
     from . import dependencies
-    from .installation import atomic_file
+    from .installation import active_release, atomic_file, install_lock, source_file
     from .version_info import get_version_info
 else:
     import dependencies
-    from installation import atomic_file
+    from installation import active_release, atomic_file, install_lock, source_file
     from version_info import get_version_info
 
 UPSTREAM = "https://github.com/groopcd/oc-box.git"
@@ -139,7 +140,38 @@ def git(arguments, temporary, *, timeout=30):
 
 def current_install(root):
     target = Path.home() / ".local/share/oc-box"
+    try:
+        active_release()
+    except (OSError, ValueError) as exc:
+        raise UpdateError(
+            "Installed launcher requires explicit recovery; inspect retained installation evidence before updating."
+        ) from exc
     return get_version_info(target if (target / "build-info.json").is_file() else root)
+
+
+def coordinated_installer(source):
+    """Published source must opt into the guard; never infer it from a comment.
+
+    This checks a trusted, pinned download's declared protocol, not arbitrary
+    code's semantics. The installer remains responsible for enforcing its guard.
+    """
+    try:
+        path = source_file(source, "installation.py")
+        if not path.is_file() or path.is_symlink():
+            return False
+        tree = ast.parse(path.read_text())
+    except (OSError, ValueError, SyntaxError):
+        return False
+    return any(
+        isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id == "UPGRADE_PROTOCOL"
+        and isinstance(node.value, ast.Constant)
+        and type(node.value.value) is int
+        and node.value.value == 1
+        for node in tree.body
+    )
 
 
 def upgrade(root, *, check=False):
@@ -149,7 +181,21 @@ def upgrade(root, *, check=False):
         raise UpdateError(
             "Run oc-box upgrade on the host as your regular user, without sudo."
         )
-    current = current_install(root)
+    target = Path.home() / ".local/share/oc-box"
+    target.mkdir(parents=True, exist_ok=True)
+    with (target / ".upgrade.lock").open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _upgrade(root, check=check)
+
+
+def _upgrade(root, *, check=False):
+    """The caller owns .upgrade.lock; publication itself owns .install.lock."""
+    if os.geteuid() == 0:
+        raise UpdateError(
+            "Run oc-box upgrade on the host as your regular user, without sudo."
+        )
+    with install_lock():
+        current = current_install(root)
     try:
         dependencies.require("github-upgrade")
     except dependencies.DependencyError as exc:
@@ -213,11 +259,25 @@ def upgrade(root, *, check=False):
             raise UpdateError(
                 "Downloaded source identity could not be verified; existing installation retained."
             )
-        if current.get("commit_count") is not None and current["commit_count"] > count:
-            print(
-                "Installed build is ahead of the published branch; leaving it installed."
+        # A manual installer may have advanced the active release while Git was
+        # downloading. Read under its publication lock, not the initial snapshot.
+        with install_lock():
+            current = current_install(root)
+            if (
+                current.get("commit_count") is not None
+                and current["commit_count"] > count
+            ):
+                print(
+                    "Installed build is ahead of the published branch; leaving it installed."
+                )
+                return None
+            if current.get("commit") == commit and not current.get("dirty"):
+                print("oc-box is up to date.")
+                return None
+        if not coordinated_installer(source):
+            raise UpdateError(
+                "Downloaded installer does not declare the coordinated update protocol; existing installation retained. Review and install that source manually if intended."
             )
-            return None
         # Version series/baselines belong to the downloaded release, not to
         # this older updater. Its installer embeds the exact source identity.
         print("Installing verified source " + commit[:12], flush=True)
@@ -226,6 +286,10 @@ def upgrade(root, *, check=False):
         # Git credential/config overrides, or inherited provider credentials.
         environment = public_git_env(work)
         environment["HOME"] = str(Path.home())
+        # The downloaded installer repeats the ordering check while holding its
+        # own publication lock, closing the check-to-subprocess race. No CLI
+        # protocol change: old released updater callers still invoke install.py.
+        environment["OC_BOX_UPGRADE_EXPECTED_COMMIT"] = commit
         current_root = (Path.home() / ".local/share/oc-box/current").resolve()
         extra = (
             ["--with-vault"] if (current_root / "vault-support.json").is_file() else []
@@ -243,11 +307,24 @@ def upgrade(root, *, check=False):
                 "Installing the downloaded version failed; check the retained installation before retrying."
             ) from exc
         target = Path.home() / ".local/share/oc-box"
-        actual = get_version_info(target)
+        try:
+            with install_lock():
+                published_release = active_release()
+                actual = get_version_info(target)
+        except (OSError, ValueError) as exc:
+            raise UpdateError(
+                "Installed launcher requires explicit recovery after the update operation."
+            ) from exc
+        if actual.get("commit_count") is not None and actual["commit_count"] > count:
+            print(
+                "Installed build advanced while downloading; leaving it installed.",
+                flush=True,
+            )
+            return None
         if actual.get("commit") != commit or actual.get("dirty"):
             raise UpdateError("Installed version does not match the downloaded commit.")
         print("Installed oc-box: " + actual["version"], flush=True)
-        return (target / "current").resolve(strict=True)
+        return published_release or (target / "current").resolve(strict=True)
 
 
 def update_settings(enabled):
@@ -274,6 +351,7 @@ def automatic_upgrade(root):
         package_managed(root)
         or os.environ.get("OC_BOX_UPDATE_CHECKED") == "1"
         or (Path(root) / ".git").exists()
+        or (Path(root) / ".git").is_symlink()
     ):
         return None
     base = Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
@@ -292,4 +370,4 @@ def automatic_upgrade(root):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return None
-        return upgrade(root)
+        return _upgrade(root)

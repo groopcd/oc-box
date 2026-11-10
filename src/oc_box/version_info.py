@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import re
 import subprocess
 
 if __package__:
@@ -24,9 +25,40 @@ def public_version(build):
     return build["version"].split("+", 1)[0]
 
 
+def unknown_version():
+    return {
+        "version": f"{VERSION_SERIES}.0+unknown",
+        "commit": None,
+        "commit_count": None,
+        "dirty": False,
+    }
+
+
+def valid_embedded_identity(value):
+    """Validate provenance types without rewriting older series or extra fields."""
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("version"), str)
+        and re.fullmatch(
+            r"\d+\.\d+\.\d+(?:\+[A-Za-z0-9]+(?:[.-][A-Za-z0-9]+)*)?", value["version"]
+        )
+        is not None
+        and isinstance(value.get("commit"), str)
+        and re.fullmatch(r"[0-9a-f]{40}", value["commit"]) is not None
+        and type(value.get("commit_count")) is int
+        and value["commit_count"] > 0
+        and type(value.get("dirty")) is bool
+        and (
+            "distribution_version" not in value
+            or isinstance(value["distribution_version"], str)
+        )
+    )
+
+
 def get_version_info(root):
     root = source_root(root)
-    if (root / ".git").exists():
+    marker = root / ".git"
+    if marker.exists() or marker.is_symlink():
 
         def git(*args):
             return subprocess.run(
@@ -45,6 +77,8 @@ def get_version_info(root):
             if patch < 0:
                 raise ValueError("History predates this version series")
             commit = git("rev-parse", "HEAD")
+            if re.fullmatch(r"[0-9a-f]{40}", commit) is None:
+                raise ValueError("Invalid source commit")
             dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
             return {
                 "version": f"{VERSION_SERIES}.{patch}+g{commit[:7]}"
@@ -54,19 +88,16 @@ def get_version_info(root):
                 "dirty": dirty,
             }
         except (OSError, ValueError, subprocess.SubprocessError):
-            pass
+            # Embedded metadata belongs to installed/sdist copies, not a way to
+            # turn an unverifiable checkout into an older clean source identity.
+            return unknown_version()
     try:
         value = json.loads((root / "build-info.json").read_text())
-        if isinstance(value, dict) and isinstance(value.get("version"), str):
+        if valid_embedded_identity(value):
             return value
     except (OSError, ValueError):
         pass
-    return {
-        "version": f"{VERSION_SERIES}.0+unknown",
-        "commit": None,
-        "commit_count": None,
-        "dirty": False,
-    }
+    return unknown_version()
 
 
 def about_text(root):

@@ -4,11 +4,13 @@ import io
 import json
 import os
 from pathlib import Path
+import runpy
 import subprocess
 import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import ModuleType
 
 from oc_box import installation
 
@@ -108,6 +110,128 @@ class VersionTests(unittest.TestCase):
         (self.root / "build-info.json").write_text(json.dumps(legacy))
         self.assertEqual(version.get_version_info(self.root), legacy)
         self.assertEqual(version.public_version(legacy), "1.5.39")
+
+    def test_unverifiable_git_never_adopts_embedded_clean_metadata(self):
+        embedded = {
+            "version": "1.5.39+gfixture",
+            "commit": "a" * 40,
+            "commit_count": 68,
+            "dirty": False,
+        }
+        (self.root / "build-info.json").write_text(json.dumps(embedded))
+        marker = self.root / ".git"
+        for kind in ("directory", "worktree-file", "broken-link"):
+            if kind == "directory":
+                marker.mkdir()
+            elif kind == "worktree-file":
+                marker.write_text("gitdir: missing-private-fixture\n")
+            else:
+                marker.symlink_to(self.root / "missing-git-directory")
+            for name, response in (
+                ("shallow", subprocess.CompletedProcess([], 0, "true\n", "")),
+                ("missing-git", FileNotFoundError()),
+                ("timeout", subprocess.TimeoutExpired([], 5)),
+                ("failed-inspection", subprocess.CalledProcessError(1, [])),
+            ):
+                with self.subTest(marker=kind, failure=name):
+                    with patch.object(
+                        version.subprocess,
+                        "run",
+                        **(
+                            {"side_effect": response}
+                            if isinstance(response, Exception)
+                            else {"return_value": response}
+                        ),
+                    ):
+                        actual = version.get_version_info(self.root)
+                        self.assertEqual(
+                            actual["version"], version.VERSION_SERIES + ".0+unknown"
+                        )
+                        self.assertIsNone(actual["commit"])
+                        self.assertIsNone(actual["commit_count"])
+                        self.assertIn(
+                            "Source commit: unavailable", version.about_text(self.root)
+                        )
+            if marker.is_dir() and not marker.is_symlink():
+                marker.rmdir()
+            else:
+                marker.unlink()
+
+    def test_embedded_metadata_requires_typed_identity_fields(self):
+        valid = {
+            "version": "1.0.7+gfixture",
+            "commit": "a" * 40,
+            "commit_count": 36,
+            "dirty": False,
+            "distribution_version": "1.0.7",
+        }
+        cases = {
+            "version-only": {"version": "1.0.7"},
+            "version-type": {**valid, "version": 7},
+            "version-control": {**valid, "version": "1.0.7\nunsafe"},
+            "commit-type": {**valid, "commit": 7},
+            "commit-format": {**valid, "commit": "not-a-commit"},
+            "count-string": {**valid, "commit_count": "36"},
+            "count-bool": {**valid, "commit_count": True},
+            "count-zero": {**valid, "commit_count": 0},
+            "dirty-string": {**valid, "dirty": "false"},
+            "dirty-missing": {
+                key: value for key, value in valid.items() if key != "dirty"
+            },
+            "distribution-type": {**valid, "distribution_version": []},
+        }
+        for name, value in cases.items():
+            with self.subTest(case=name):
+                (self.root / "build-info.json").write_text(json.dumps(value))
+                actual = version.get_version_info(self.root)
+                self.assertIsNone(actual["commit"])
+                self.assertIsNone(actual["commit_count"])
+                self.assertIn("+unknown", version.about_text(self.root))
+        (self.root / "build-info.json").write_text(json.dumps(valid))
+        self.assertEqual(version.get_version_info(self.root), valid)
+
+    def test_build_rejects_shallow_git_even_with_embedded_identity(self):
+        from oc_box import version_info as runtime_version
+
+        (self.root / ".git").mkdir()
+        (self.root / "build-info.json").write_text(
+            json.dumps(
+                {
+                    "version": "1.6.1+gfixture",
+                    "commit": "a" * 40,
+                    "commit_count": 30,
+                    "dirty": False,
+                }
+            )
+        )
+        setuptools = ModuleType("setuptools")
+        setuptools.setup = lambda **kwargs: None
+        build_py = ModuleType("setuptools.command.build_py")
+        build_py.build_py = type("build_py", (), {})
+        sdist = ModuleType("setuptools.command.sdist")
+        sdist.sdist = type("sdist", (), {})
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "setuptools": setuptools,
+                    "setuptools.command.build_py": build_py,
+                    "setuptools.command.sdist": sdist,
+                },
+            ),
+            patch.object(
+                version.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, "true\n", ""),
+            ),
+            patch.object(
+                runtime_version,
+                "get_version_info",
+                side_effect=lambda root: version.get_version_info(self.root),
+            ),
+            self.assertRaisesRegex(RuntimeError, "requires full Git history"),
+        ):
+            runpy.run_path(str(APP / "src/_oc_box_build.py"), run_name="__main__")
 
     def test_minor_series_change_preserves_patch_count_and_source_provenance(self):
         self.git("init")

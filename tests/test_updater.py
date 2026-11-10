@@ -1,4 +1,5 @@
 import contextlib
+import fcntl
 import io
 import json
 import os
@@ -7,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from types import ModuleType
 import unittest
 from unittest.mock import patch
@@ -165,6 +167,8 @@ class UpdateTests(unittest.TestCase):
                 },
             ),
             patch.object(updater, "git", side_effect=answers),
+            patch.object(updater, "active_release", return_value=current),
+            patch.object(updater, "coordinated_installer", return_value=True),
             patch.object(
                 updater,
                 "get_version_info",
@@ -202,6 +206,152 @@ class UpdateTests(unittest.TestCase):
         install.assert_not_called()
         self.assertIn("ahead of the published branch", output.getvalue())
 
+    def test_post_download_identity_is_rechecked_under_publication_lock(self):
+        commit = "b" * 40
+        old = {"version": "1.6.1", "commit": "a" * 40, "commit_count": 30}
+        newer = {"version": "1.6.3", "commit": "c" * 40, "commit_count": 32}
+        reads = []
+
+        def current(root):
+            reads.append(root)
+            if len(reads) == 1:
+                return old
+            with (self.home / ".local/share/oc-box/.install.lock").open("a+") as other:
+                with self.assertRaises(BlockingIOError):
+                    fcntl.flock(other, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return newer
+
+        with (
+            patch.object(updater.os, "geteuid", return_value=1000),
+            patch.object(updater, "current_install", side_effect=current),
+            patch.object(
+                updater,
+                "git",
+                side_effect=[commit + "\trefs/heads/master", "", "", commit, "31", ""],
+            ),
+            patch.object(updater, "get_version_info", return_value=newer),
+            patch.object(updater.subprocess, "run") as installer,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertIsNone(updater.upgrade(APP))
+        self.assertEqual(len(reads), 2)
+        installer.assert_not_called()
+
+    def test_download_without_publication_protocol_is_refused_not_guessed(self):
+        source = self.root / "protocol-source"
+        source.mkdir()
+        for name, content, expected in (
+            ("missing", None, False),
+            ("comment", "# UPGRADE_PROTOCOL = 1\n", False),
+            ("boolean", "UPGRADE_PROTOCOL = True\n", False),
+            ("string", "UPGRADE_PROTOCOL = '1'\n", False),
+            ("different", "UPGRADE_PROTOCOL = 2\n", False),
+            ("nested", "if True:\n    UPGRADE_PROTOCOL = 1\n", False),
+            ("syntax", "UPGRADE_PROTOCOL = [\n", False),
+            ("supported", "UPGRADE_PROTOCOL = 1\n", True),
+        ):
+            with self.subTest(case=name):
+                if content is not None:
+                    (source / "installation.py").write_text(content)
+                self.assertEqual(updater.coordinated_installer(source), expected)
+        foreign = self.root / "foreign-protocol.py"
+        foreign.write_text("UPGRADE_PROTOCOL = 1\n")
+        (source / "installation.py").unlink()
+        (source / "installation.py").symlink_to(foreign)
+        self.assertFalse(updater.coordinated_installer(source))
+        commit = "b" * 40
+        with (
+            patch.object(updater.os, "geteuid", return_value=1000),
+            patch.object(
+                updater,
+                "current_install",
+                return_value={
+                    "version": "1.6.1",
+                    "commit": "a" * 40,
+                    "commit_count": 30,
+                },
+            ),
+            patch.object(
+                updater,
+                "git",
+                side_effect=[commit + "\trefs/heads/master", "", "", commit, "31", ""],
+            ),
+            patch.object(updater.subprocess, "run") as installer,
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(updater.UpdateError, "coordinated update protocol"),
+        ):
+            updater.upgrade(APP)
+        installer.assert_not_called()
+
+    def test_explicit_upgrade_obeys_the_same_lock_as_automatic_checks(self):
+        target = self.home / ".local/share/oc-box"
+        target.mkdir(parents=True)
+        ready, entered = self.root / "ready", self.root / "entered"
+        script = """import sys
+from pathlib import Path
+from oc_box import updater
+updater.os.geteuid=lambda:1000
+updater.package_managed=lambda root:False
+updater.current_install=lambda root:{'version':'1.6.1','commit':'a'*40}
+updater.dependencies.require=lambda feature:None
+def transport(*args,**kwargs):
+    Path(sys.argv[2]).write_text('entered')
+    raise updater.UpdateError('synthetic transport stop')
+updater.git=transport
+flock=updater.fcntl.flock
+def locking(fd,operation):
+    Path(sys.argv[1]+'.attempt').write_text('attempted')
+    return flock(fd,operation)
+updater.fcntl.flock=locking
+Path(sys.argv[1]).write_text('ready')
+try:
+    updater.upgrade(Path(sys.argv[3]))
+except updater.UpdateError:
+    pass
+"""
+        with (target / ".upgrade.lock").open("a+") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-B",
+                    "-c",
+                    script,
+                    str(ready),
+                    str(entered),
+                    str(self.root),
+                ],
+                env={
+                    "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                    "HOME": str(self.home),
+                    "PYTHONPATH": str(APP / "src"),
+                },
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                deadline = time.monotonic() + 5
+                attempted = Path(str(ready) + ".attempt")
+                while not attempted.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertTrue(ready.exists())
+                self.assertTrue(
+                    attempted.exists(),
+                    "explicit update did not attempt the shared lock",
+                )
+                self.assertFalse(
+                    entered.exists(),
+                    "explicit update bypassed the automatic-check lock",
+                )
+                fcntl.flock(lock, fcntl.LOCK_UN)
+                output, errors = process.communicate(timeout=5)
+                self.assertEqual(process.returncode, 0, output + errors)
+                self.assertTrue(entered.exists())
+            finally:
+                if process.poll() is None:
+                    process.kill()
+                process.communicate(timeout=5)
+
     def test_git_timeout_or_missing_tool_is_a_clear_bounded_failure(self):
         for error in (subprocess.TimeoutExpired([], 10), FileNotFoundError()):
             with (
@@ -229,7 +379,7 @@ class UpdateTests(unittest.TestCase):
 
     def test_auto_update_is_opt_in_skips_checkout_and_recursion(self):
         target = self.home / ".config/oc-box/config.json"
-        with patch.object(updater, "upgrade") as upgrade:
+        with patch.object(updater, "_upgrade") as upgrade:
             self.assertIsNone(updater.automatic_upgrade(self.root))
             target.parent.mkdir(parents=True)
             target.write_text('{"auto_update":false}')
@@ -252,9 +402,18 @@ class UpdateTests(unittest.TestCase):
         settings.write_text('{"auto_update":true}')
         with (
             (target / ".upgrade.lock").open("a+") as lock,
-            patch.object(updater, "upgrade") as upgrade,
+            patch.object(updater, "_upgrade") as upgrade,
         ):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertIsNone(updater.automatic_upgrade(self.root))
+        upgrade.assert_not_called()
+
+    def test_broken_checkout_marker_still_disables_automatic_updates(self):
+        (self.root / ".git").symlink_to(self.root / "missing-private-git")
+        settings = self.home / ".config/oc-box/config.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text('{"auto_update":true}')
+        with patch.object(updater, "_upgrade") as upgrade:
             self.assertIsNone(updater.automatic_upgrade(self.root))
         upgrade.assert_not_called()
 
@@ -430,7 +589,14 @@ class UpdateTests(unittest.TestCase):
     ):
         self.exercise_real_git_upgrade(src_layout=True, legacy_updater=True)
 
-    def exercise_real_git_upgrade(self, *, src_layout, legacy_updater):
+    def test_manual_install_between_download_check_and_child_publication_wins(self):
+        self.exercise_real_git_upgrade(
+            src_layout=True, legacy_updater=False, concurrent_manual=True
+        )
+
+    def exercise_real_git_upgrade(
+        self, *, src_layout, legacy_updater, concurrent_manual=False
+    ):
         active = updater
         if legacy_updater:
             archived = subprocess.run(
@@ -512,10 +678,21 @@ class UpdateTests(unittest.TestCase):
         local("add", "README.md")
         local("commit", "-m", "Second")
         expected = local("rev-parse", "HEAD")
+        requested = expected
+        if concurrent_manual:
+            (remote / "README.md").write_text(
+                (remote / "README.md").read_text() + "\nNewer manual installation.\n"
+            )
+            local("add", "README.md")
+            local("commit", "-m", "Newer manual source")
+            expected = local("rev-parse", "HEAD")
         calls = []
+        real_run = subprocess.run
 
         def transport(arguments, temporary, **kwargs):
             calls.append(arguments)
+            if concurrent_manual and arguments[0] == "ls-remote":
+                return requested + "\trefs/heads/master"
             arguments = [
                 str(remote) if item == active.UPSTREAM else item for item in arguments
             ]
@@ -529,20 +706,59 @@ class UpdateTests(unittest.TestCase):
                 timeout=30,
             ).stdout.strip()
 
+        published = []
+
+        def installer(command, *args, **kwargs):
+            if (
+                concurrent_manual
+                and any(str(part).endswith("/install.py") for part in command)
+                and kwargs.get("env", {}).get("OC_BOX_UPGRADE_EXPECTED_COMMIT")
+                == requested
+            ):
+                result = real_run(
+                    [sys.executable, "-B", str(remote / "install.py")],
+                    cwd=self.root,
+                    env={**updater.public_git_env(self.root), "HOME": str(self.home)},
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    get_version_info(self.home / ".local/share/oc-box")["commit"],
+                    expected,
+                )
+                published.append(expected)
+            return real_run(command, *args, **kwargs)
+
         with (
             patch.object(active.os, "geteuid", return_value=1000),
             patch.object(active, "git", side_effect=transport),
+            patch.object(subprocess, "run", side_effect=installer),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
             second = active.upgrade(APP)
         self.assertIn("Installed oc-box: 0.1.1+g", output.getvalue())
-        self.assertIn("Installed oc-box: " + VERSION_SERIES + ".1+g", output.getvalue())
-        self.assertIsNotNone(second)
+        if concurrent_manual:
+            self.assertEqual(published, [expected])
+            self.assertIn(
+                "Installed build advanced while downloading", output.getvalue()
+            )
+            self.assertIsNone(second)
+        else:
+            self.assertIn(
+                "Installed oc-box: " + VERSION_SERIES + ".1+g", output.getvalue()
+            )
+            self.assertIsNotNone(second)
         target = self.home / ".local/share/oc-box"
         build = get_version_info(target)
         self.assertEqual(build["commit"], expected)
-        self.assertEqual(build["commit_count"], 2)
-        self.assertTrue(build["version"].startswith(VERSION_SERIES + ".1+g"))
+        self.assertEqual(build["commit_count"], 3 if concurrent_manual else 2)
+        self.assertTrue(
+            build["version"].startswith(
+                VERSION_SERIES + (".2+g" if concurrent_manual else ".1+g")
+            )
+        )
         self.assertEqual(get_version_info(first)["commit"], first_commit)
         self.assertEqual(local("status", "--porcelain"), "")
         self.assertEqual(local("rev-parse", "HEAD"), expected)
