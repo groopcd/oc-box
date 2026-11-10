@@ -185,9 +185,11 @@ def require_empty_audit_overrides(content):
     This bounded check never evaluates JavaScript. Other table forms or uses
     require a manual port; a source-hash approval cannot retire real overrides.
     Strings/comments cannot stand in for the actual declaration.
+    Escaped executable identifiers, interpolated templates and regex/division
+    syntax are outside this grammar: reject rather than infer their meaning.
     """
     tokens = re.findall(
-        r"""//[^\r\n]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|[A-Za-z_$][\w$]*|[^\s]""",
+        r"""//[^\r\n\u2028\u2029]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|[A-Za-z_$][\w$]*|[^\s]""",
         content.decode(),
     )
     tokens = [token for token in tokens if not token.startswith(("//", "/*"))]
@@ -199,7 +201,11 @@ def require_empty_audit_overrides(content):
         for index in references
         if index and tokens[index - 1] in ("const", "let", "var")
     ]
-    valid = len(declarations) == 1
+    unsupported = any(
+        token in ("\\", "/") or (token.startswith("`") and "${" in token)
+        for token in tokens
+    )
+    valid = len(declarations) == 1 and not unsupported
     if valid:
         declaration = declarations[0]
         tail = tokens[declaration + 1 :]
@@ -237,11 +243,6 @@ def require_empty_audit_overrides(content):
                 or (use[1] == "size" and use[2:] in (["="], ["+"], ["-"]))
             ):
                 valid = False
-        if any(
-            token.startswith("`") and "${" in token and "DESCRIPTION_OVERRIDES" in token
-            for token in tokens
-        ):
-            valid = False  # Do not guess at code inside template interpolation.
     if not valid:
         raise ValueError(
             "Tool audit has active description overrides or a nonliteral override table; review before retiring it"
@@ -287,20 +288,14 @@ def audit(source, *, reviewed_sources=None):
                             in files[local.relative_to(source)].decode()
                         ):
                             unknown.append(str(local.relative_to(source)))
-                    elif name and target.startswith(("/", "./", "../", "~/", "file:")):
-                        directory = Path(
-                            target.removeprefix("-").removeprefix("file://")
-                        ).expanduser()
-                        if not directory.is_absolute():
-                            directory = source / directory
-                        if (
-                            not directory.is_dir()
-                            or not directory.resolve().is_relative_to(source)
-                        ):
-                            raise ValueError(
-                                "Known plugin source is outside the reviewed config root or missing: "
-                                + target
-                            )
+                    elif name and not package:
+                        # A directory basename is not implementation identity.
+                        # Only bounded standalone files enter files/reviews;
+                        # never invent a directory approval or discard its entry.
+                        raise ValueError(
+                            "Known plugin source is outside the reviewed config root, missing, or a configured directory requiring a manual port: "
+                            + target
+                        )
     for folder in ("plugins", "plugin", "custom-plugins"):
         directory = source / folder
         if directory.exists() or directory.is_symlink():

@@ -210,6 +210,98 @@ class NativeHostPortTests(unittest.TestCase):
                     self.assertEqual(file.read_bytes(), content)
         self.assertFalse(list(source.glob(".native-plugin-backup-*")))
 
+    def test_configured_recognized_directories_require_manual_port_before_writes(self):
+        for index, spelling in enumerate(
+            ("relative", "absolute", "uri", "bare-relative")
+        ):
+            with self.subTest(spelling=spelling):
+                source = self.root / ("directory-" + str(index))
+                directory = source / "vendor/output-clamp"
+                directory.mkdir(parents=True)
+                (directory / "index.js").write_text(
+                    'export default { id: "custom-output-clamp", setup() {} }'
+                )
+                target = {
+                    "relative": "./vendor/output-clamp",
+                    "absolute": str(directory),
+                    "uri": directory.as_uri(),
+                    "bare-relative": "vendor/output-clamp",
+                }[spelling]
+                (source / "opencode.json").write_text(json.dumps({"plugins": [target]}))
+                self.assert_refused_unchanged("director|manual port", source)
+                # An index-file digest is not a supported directory identity.
+                self.assert_refused_unchanged(
+                    "director|manual port",
+                    source,
+                    {
+                        Path("vendor/output-clamp"): hashlib.sha256(
+                            (directory / "index.js").read_bytes()
+                        ).hexdigest()
+                    },
+                )
+                self.assertFalse((source / "plugins/output-clamp").exists())
+
+    def test_escaped_override_identifiers_and_interpolations_refuse_even_with_review(
+        self,
+    ):
+        prefix = "const DESCRIPTION_OVERRIDES = new Map([]);\n"
+        cases = {
+            "leading escaped identifier": prefix
+            + r'const alias = \u0044ESCRIPTION_OVERRIDES; alias.set("read", "custom");',
+            "middle escaped identifier": prefix
+            + r'const alias = DESCRIPTI\u004fN_OVERRIDES; alias.set("read", "custom");',
+            "leading escaped interpolation": prefix
+            + r'`${\u0044ESCRIPTION_OVERRIDES.set("read", "custom")}`;',
+            "middle escaped interpolation": prefix
+            + r'`${DESCRIPTI\u004fN_OVERRIDES.set("read", "custom")}`;',
+            "Unicode comment terminator": prefix
+            + "// example only\u2028"
+            + r'const alias = \u0044ESCRIPTION_OVERRIDES; alias.set("read", "custom");',
+            "quoted regex character": prefix
+            + r'const pattern = /["]/; const alias = \u0044ESCRIPTION_OVERRIDES; alias.set("read", "custom");',
+            "quoted declaration is not evidence": 'const example = "const DESCRIPTION_OVERRIDES = new Map([])";',
+            "comment declaration is not evidence": "// const DESCRIPTION_OVERRIDES = new Map([])\n",
+        }
+        for index, (label, declaration) in enumerate(cases.items()):
+            with self.subTest(case=label):
+                source = self.root / ("escaped-" + str(index))
+                (source / "plugins").mkdir(parents=True)
+                (source / "opencode.json").write_text('{"plugins":[]}')
+                relative = Path("plugins/tool-definition-audit.ts")
+                content = (
+                    declaration
+                    + '\nexport default async () => ({ "tool.definition": async () => {} })\n'
+                ).encode()
+                (source / relative).write_bytes(content)
+                self.assert_refused_unchanged(
+                    "active description overrides|nonliteral|unsupported",
+                    source,
+                    {relative: hashlib.sha256(content).hexdigest()},
+                )
+
+    def test_escaped_quoted_and_comment_data_is_not_executable_override_evidence(self):
+        content = r"""const DESCRIPTION_OVERRIDES = new Map([]);
+const sample = "\u0044ESCRIPTION_OVERRIDES.set('read', 'data only')";
+const other = 'DESCRIPTI\u004fN_OVERRIDES';
+const staticTemplate = `\u0044ESCRIPTION_OVERRIDES`;
+// \u0044ESCRIPTION_OVERRIDES.set("read", "comment only")
+/* DESCRIPTI\u004fN_OVERRIDES.set("read", "comment only") */
+export default async () => ({ "tool.definition": async ({ toolID }, out) => {
+  const replacement = DESCRIPTION_OVERRIDES.get(toolID);
+  if (replacement) out.description = replacement;
+} });
+"""
+        source, file = self.isolated_source("tool-definition-audit", content)
+        approved = {
+            file.relative_to(source): hashlib.sha256(content.encode()).hexdigest()
+        }
+        receipt = port.apply(source, reviewed_sources=approved)
+        self.assertEqual(receipt["retired"], ["tool-definition-audit"])
+        self.assertEqual(
+            (Path(receipt["safety_backup"]) / file.relative_to(source)).read_bytes(),
+            content.encode(),
+        )
+
     def test_marker_only_source_refuses_without_review_before_any_writes(self):
         source, _ = self.isolated_source(
             content="// tool.execute.after CLAMP_THRESHOLDS\nexport default async () => ({})\n"
@@ -452,6 +544,15 @@ class NativeHostPortTests(unittest.TestCase):
         self.assertEqual(
             port.update_sandbox(self.source, apply_change=True)["status"], "current"
         )
+        with (
+            patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            # The dedicated receipt/update route must not audit the generated
+            # native directories as if this were another full V1 migration.
+            status = port.main(["--config", str(self.source), "--update-sandbox"])
+        self.assertEqual(status, 0)
+        self.assertIn("update current", output.getvalue())
 
     def test_sandbox_only_update_refuses_custom_code_and_changed_runtime_dependency(
         self,
