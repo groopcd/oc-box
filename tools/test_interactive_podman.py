@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Bounded, opt-in HOST-only manual TUI/web/persistent-shell observation.
+"""Bounded, opt-in HOST-only manual manager/TUI/web/persistent-shell observation.
 
 Start a FRESH synthetic owner on an unprivileged host terminal:
   python3 -B tools/test_interactive_podman.py start --work-dir /path/to/fixtures \
       --opencode-v2 /path/to/unmodified/opencode-2.2.6
-Use only the printed exact --fixture root for secondary tui/terminal/web/stop.
+Use only the printed exact --fixture root for secondary manager/tui/terminal/web/stop.
+Manager opens the actual Textual dashboard without a monitoring client lease;
+install optional textual/pyte dependencies in the helper's Python environment.
 No replay, resume, cleanup, real credentials or automatic manual-UI acceptance.
 """
 
@@ -31,7 +33,7 @@ from tools import test_global_vault_podman as fixture
 
 box = fixture.box
 FORMAT = "oc-box-interactive-only-host-observation"
-MODES = ("start", "tui", "terminal", "web", "stop")
+MODES = ("start", "manager", "tui", "terminal", "web", "stop")
 FIXTURE_PREFIXES = (fixture.PREFIX, "oc-box-live-v2-", "oc-box-live-backup-")
 FIXTURE_MARKERS = ("fixture.json", "interactive.json", "fixture-ids.json")
 MARKERS = frozenset((fixture.SHELL_MARKER, fixture.MCP_MARKER, fixture.TOOL_MARKER))
@@ -52,6 +54,7 @@ ERROR_CATEGORIES = frozenset(
         "native-changed",
         "workspace-allowlist",
         "live-owner-required",
+        "manager-unavailable",
         "provider-contract",
         "provider-cleanup-timeout",
         "runtime-boot-current",
@@ -393,7 +396,7 @@ def print_commands(root):
     command = shlex.join([sys.executable, "-B", str(Path(__file__).resolve())])
     print("Retained interactive-only root: " + str(root), flush=True)
     print("Wait for the owning TUI to be ready; in other HOST terminals:", flush=True)
-    for mode in ("tui", "terminal", "web", "stop"):
+    for mode in MODES[1:]:
         print(
             "  " + command + " " + mode + " --fixture " + shlex.quote(str(root)),
             flush=True,
@@ -402,6 +405,8 @@ def print_commands(root):
         "Use Build only, with one or two short synthetic prompts (12 provider requests total per owner window). "
         "Expect shell/MCP/permission-tool markers; no Plan/deny conversation support. "
         "Ctrl-] detaches the persistent shell; close attached clients before the owner. "
+        "Manager needs optional textual/pyte dependencies; monitoring takes no client lease. "
+        "Use explicit workspace Connect/terminal actions for leases; host sessions use only this fixture's private store. "
         "Web prints a private one-use pairing URL: open it manually, never share/record it. "
         "No vault prompt or operator credentials are needed. Manual UI observations are NOT automatically passed.",
         flush=True,
@@ -528,12 +533,23 @@ def attach(args, source):
                         "live-owner-required",
                     )
                     fixture.record_ids(root)
-                # Dispatch only native clients against this authenticated
-                # connection, NEVER owner-capable box.main. A stop/service
-                # failure can invalidate even a held lease; its client must
-                # fail rather than falling through to owning startup/unlock.
-                with fixture.workspace_service.attach(box, path, data) as connection:
-                    if args.mode == "tui":
+                # The dashboard monitors without an outer client lease. Its
+                # explicit workspace Connect/terminal actions take their own.
+                # Native clients use authenticated attach, NEVER owner-capable
+                # box.main or fallback startup/unlock after a service failure.
+                client = (
+                    contextlib.nullcontext()
+                    if args.mode == "manager"
+                    else fixture.workspace_service.attach(box, path, data)
+                )
+                with client as connection:
+                    if args.mode == "manager":
+                        try:
+                            from oc_box import tui
+                        except ImportError:
+                            raise fixture.FixtureError("manager-unavailable") from None
+                        code = tui.cli(box, ["--workspace", data["id"]])
+                    elif args.mode == "tui":
                         command = fixture.workspace_service.client_command(
                             box,
                             data,

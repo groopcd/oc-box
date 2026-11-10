@@ -15,7 +15,7 @@ import unittest
 from unittest.mock import patch
 from urllib.request import ProxyHandler, Request, build_opener
 
-from oc_box import oc_box as box, terminal_ui, vault
+from oc_box import oc_box as box, terminal_ui, tui, vault
 from tools import test_interactive_podman as ui
 
 fixture = ui.fixture
@@ -171,7 +171,9 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             ],
             *[[mode] for mode in ui.MODES if mode != "start"],
             *[
-                ["tui", "--fixture", "/old", flag, value]
+                [mode, "--fixture", "/old", flag, value]
+                for mode in ui.MODES
+                if mode != "start"
                 for flag, value in (
                     ("--work-dir", "/x"),
                     ("--temp-dir", "/x"),
@@ -190,30 +192,33 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             ["resume"],
             ["tui", "--fixture", "/old", "--no-vault"],
             ["terminal", "--workspace", "foreign"],
+            ["manager", "--fixture", "/old", "--workspace", "foreign"],
         ):
             with self.subTest(unknown=arguments), self.assertRaises(SystemExit):
                 ui.parser().parse_args(arguments)
 
     def test_container_refuses_before_source_placement_native_or_engine(self):
-        with (
-            patch.dict(os.environ, {"OC_BOX_CONTAINER": "1"}),
-            patch.object(ui, "source_identity") as source,
-            patch.object(ui, "own") as owner,
+        for arguments in (
+            [
+                "start",
+                "--work-dir",
+                str(self.parent),
+                "--opencode-v2",
+                str(self.binary),
+            ],
+            ["manager", "--fixture", str(self.root)],
         ):
-            self.assertEqual(
-                ui.main(
-                    [
-                        "start",
-                        "--work-dir",
-                        str(self.parent),
-                        "--opencode-v2",
-                        str(self.binary),
-                    ]
-                ),
-                1,
-            )
-        source.assert_not_called()
-        owner.assert_not_called()
+            with (
+                self.subTest(mode=arguments[0]),
+                patch.dict(os.environ, {"OC_BOX_CONTAINER": "1"}),
+                patch.object(ui, "source_identity") as source,
+                patch.object(ui, "own") as owner,
+                patch.object(ui, "attach") as client,
+                patch.object(tui, "cli") as manager,
+            ):
+                self.assertEqual(ui.main(arguments), 1)
+            for operation in (source, owner, client, manager):
+                operation.assert_not_called()
         self.run.assert_not_called()
         self.assertIn("host-only", self.output.getvalue())
 
@@ -240,13 +245,15 @@ class InteractiveHostFixtureTests(unittest.TestCase):
                         fixture.FixtureError, "interactive-tty-required"
                     ):
                         ui.require_tty(mode)
-        with (
-            patch.object(fixture, "host_guard"),
-            patch.object(sys.stdin, "isatty", return_value=False),
-            patch.object(ui, "source_identity") as source,
-        ):
-            self.assertEqual(ui.main(["tui", "--fixture", str(self.root)]), 1)
-            source.assert_not_called()
+        for mode in ("tui", "manager"):
+            with (
+                self.subTest(mode=mode),
+                patch.object(fixture, "host_guard"),
+                patch.object(sys.stdin, "isatty", return_value=False),
+                patch.object(ui, "source_identity") as source,
+            ):
+                self.assertEqual(ui.main([mode, "--fixture", str(self.root)]), 1)
+                source.assert_not_called()
 
     def test_fresh_parent_never_reuses_existing_completed_or_nested_fixture(self):
         self.assertEqual(ui.fresh_parent(self.parent), self.parent)
@@ -429,17 +436,18 @@ class InteractiveHostFixtureTests(unittest.TestCase):
                 marker.unlink()
             else:
                 marker.write_bytes(value)
-            with (
-                self.subTest(value=value),
-                patch.object(fixture, "validate_store") as store,
-                patch.object(fixture, "check_native_version") as native,
-                patch.object(box, "main") as launch,
-            ):
-                with self.assertRaises(fixture.FixtureError):
-                    ui.attach(self.args(), self.source)
-                store.assert_not_called()
-                native.assert_not_called()
-                launch.assert_not_called()
+            for mode in ("tui", "manager"):
+                with (
+                    self.subTest(value=value, mode=mode),
+                    patch.object(fixture, "validate_store") as store,
+                    patch.object(fixture, "check_native_version") as native,
+                    patch.object(box, "main") as launch,
+                    patch.object(tui, "cli") as manager,
+                ):
+                    with self.assertRaises(fixture.FixtureError):
+                        ui.attach(self.args(mode), self.source)
+                    for operation in (store, native, launch, manager):
+                        operation.assert_not_called()
         self.run.assert_not_called()
 
     def test_positive_isolation_and_metadata_never_retain_values_or_control_credentials(
@@ -478,23 +486,25 @@ class InteractiveHostFixtureTests(unittest.TestCase):
 
     def test_clients_refuse_without_live_owner_and_never_own_or_unlock(self):
         self.record()
-        for live, running in ((False, True), (True, False)):
-            with self.subTest(live=live, running=running):
-                stack = self.client_boundaries(live=live, running=running)
-                with (
-                    patch.object(box, "main") as launch,
-                    patch.object(vault, "hidden") as unlock,
-                ):
-                    self.assertEqual(ui.attach(self.args(), self.source), 1)
-                    launch.assert_not_called()
-                    unlock.assert_not_called()
-                stack.close()
-        self.assertTrue(
-            all(
-                report["category"] == "live-owner-required"
-                for report in self.reports("tui")
+        for mode in ("tui", "manager"):
+            for live, running in ((False, True), (True, False)):
+                with self.subTest(mode=mode, live=live, running=running):
+                    stack = self.client_boundaries(live=live, running=running)
+                    with (
+                        patch.object(box, "main") as launch,
+                        patch.object(vault, "hidden") as unlock,
+                        patch.object(tui, "cli") as manager,
+                    ):
+                        self.assertEqual(ui.attach(self.args(mode), self.source), 1)
+                        for operation in (launch, unlock, manager):
+                            operation.assert_not_called()
+                    stack.close()
+            self.assertTrue(
+                all(
+                    report["category"] == "live-owner-required"
+                    for report in self.reports(mode)
+                )
             )
-        )
 
     def test_attach_validation_order_journals_inflight_owner_and_holds_lease(self):
         self.record()
@@ -583,6 +593,270 @@ class InteractiveHostFixtureTests(unittest.TestCase):
         self.assertEqual(
             set(fixture.private_json(self.root, "fixture-ids.json")), {"source-a"}
         )
+
+    def test_manager_validates_then_selects_only_fixture_in_isolated_env_without_lease(
+        self,
+    ):
+        path, data = self.record()
+        self.client_boundaries()
+        expected_env = fixture.isolated_env(self.root)
+        order = []
+        real_boot, real_record = fixture.require_runtime_boot, fixture.record_ids
+        forbidden = [
+            self.enter(
+                patch.object(
+                    target,
+                    name,
+                    side_effect=AssertionError("monitoring changed lifecycle"),
+                )
+            )
+            for target, name in (
+                (fixture.workspace_service, "attach"),
+                (fixture.workspace_service, "client_command"),
+                (fixture.workspace_service, "web_session"),
+                (box, "main"),
+                (box, "create_workspace"),
+                (box, "create_container"),
+                (box, "start_container"),
+                (box, "prepare_runtime"),
+                (box, "launch"),
+                (box, "launch_credentials"),
+                (box, "remove_resources"),
+                (box, "sync_sessions"),
+                (box, "stop_container"),
+                (box, "run_tui"),
+                (vault, "hidden"),
+            )
+        ]
+
+        def dashboard(actual_box, arguments):
+            order.append("dashboard")
+            self.assertIs(actual_box, box)
+            self.assertEqual(arguments, ["--workspace", data["id"]])
+            self.assertEqual(dict(os.environ), expected_env)
+            for name in ("config", "data", "state", "cache"):
+                self.assertEqual(
+                    os.environ["XDG_" + name.upper() + "_HOME"], str(self.root / name)
+                )
+            self.assertEqual(Path(tempfile.gettempdir()), self.root / "temporary")
+            selected_path, selected = box.find_workspace(workspace_id=data["id"])
+            self.assertEqual((selected_path, selected), (path, data))
+            self.assertEqual(set(fixture.workspace_records(self.root)), {"source-a"})
+            self.assertEqual(
+                set(fixture.private_json(self.root, "fixture-ids.json")), {"source-a"}
+            )
+            print("synthetic-dashboard-visible")
+            return 0
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    name: "synthetic-provider-secret"
+                    for name in (fixture.KEY, fixture.SIDE, fixture.ADDED)
+                },
+            ),
+            patch.object(
+                fixture,
+                "require_runtime_boot",
+                side_effect=lambda root: (order.append("boot"), real_boot(root))[1],
+            ),
+            patch.object(
+                fixture,
+                "validate_store",
+                side_effect=lambda *a, **k: order.append("store"),
+            ) as store,
+            patch.object(
+                fixture,
+                "check_native_version",
+                side_effect=lambda *a: order.append("native"),
+            ),
+            patch.object(
+                fixture,
+                "verify_owned_resources",
+                side_effect=lambda *a: (
+                    order.append("resources"),
+                    {"State": {"Running": True}},
+                )[1],
+            ),
+            patch.object(
+                fixture.workspace_service,
+                "controller_running",
+                side_effect=lambda *a: (order.append("live"), True)[1],
+            ),
+            patch.object(
+                fixture,
+                "record_ids",
+                side_effect=lambda root: (order.append("journal"), real_record(root))[
+                    1
+                ],
+            ),
+            patch.object(tui, "cli", side_effect=dashboard) as manager,
+            patch.object(
+                ui,
+                "source_identity",
+                side_effect=lambda: (order.append("source"), self.source)[1],
+            ),
+        ):
+            self.assertEqual(ui.attach(self.args("manager"), self.source), 0)
+        self.assertEqual(
+            order,
+            [
+                "boot",
+                "store",
+                "native",
+                "resources",
+                "live",
+                "journal",
+                "dashboard",
+                "source",
+            ],
+        )
+        store.assert_called_once_with(self.root, allow_unrecorded=True)
+        manager.assert_called_once_with(box, ["--workspace", data["id"]])
+        for operation in forbidden:
+            operation.assert_not_called()
+        self.assertIn("synthetic-dashboard-visible", self.output.getvalue())
+        report = self.reports("manager")[0]
+        self.assertEqual(
+            (report["mode"], report["source"], report["outcome"]),
+            ("manager", self.source, "returned"),
+        )
+        self.assertEqual(report["manual_observations"], "NOT_AUTOMATICALLY_PASSED")
+        self.assertNotIn("synthetic-provider-secret", json.dumps(report))
+        self.run.assert_not_called()
+
+    def test_manager_store_native_resource_and_journal_refusals_precede_dispatch(self):
+        self.record()
+        self.client_boundaries()
+        for name, category in (
+            ("validate_store", "private-store"),
+            ("check_native_version", "native-changed"),
+            ("verify_owned_resources", "resource-allowlist"),
+            ("record_ids", "fixture-ids"),
+        ):
+            with (
+                self.subTest(step=name),
+                patch.object(fixture, name, side_effect=fixture.FixtureError(category)),
+                patch.object(tui, "cli") as manager,
+                patch.object(fixture.workspace_service, "attach") as lease,
+            ):
+                self.assertEqual(ui.attach(self.args("manager"), self.source), 1)
+                manager.assert_not_called()
+                lease.assert_not_called()
+        self.assertCountEqual(
+            [report["category"] for report in self.reports("manager")],
+            ["private-store", "native-changed", "resource-allowlist", "fixture-ids"],
+        )
+        self.run.assert_not_called()
+
+    def test_manager_exit_errors_and_cancel_restore_env_and_preserve_prior_reports(
+        self,
+    ):
+        self.record()
+        self.client_boundaries()
+        before_env, before_temp = dict(os.environ), tempfile.gettempdir()
+        retained = {}
+        for result, outcome, category, code in (
+            (0, "returned", "client-return", 0),
+            (17, "failed", "client-exit", 17),
+            (KeyboardInterrupt(), "interrupted", "interrupted", 130),
+            (
+                box.BoxError("synthetic-private-missing-dependencies"),
+                "failed",
+                "box-error",
+                1,
+            ),
+            (RuntimeError("synthetic-private-unknown-error"), "failed", "exception", 1),
+        ):
+            with (
+                self.subTest(category=category),
+                patch.object(
+                    tui,
+                    "cli",
+                    **(
+                        {"side_effect": result}
+                        if isinstance(result, BaseException)
+                        else {"return_value": result}
+                    ),
+                ),
+                patch.object(fixture.workspace_service, "attach") as lease,
+                patch.object(box, "stop_container") as stop,
+            ):
+                self.assertEqual(ui.attach(self.args("manager"), self.source), code)
+                lease.assert_not_called()
+                stop.assert_not_called()
+            self.assertEqual(dict(os.environ), before_env)
+            self.assertEqual(tempfile.gettempdir(), before_temp)
+            for path, content in retained.items():
+                self.assertEqual(path.read_bytes(), content)
+            current = {
+                path: path.read_bytes()
+                for path in self.root.glob("interactive-manager-*-report.json")
+            }
+            added = current.keys() - retained.keys()
+            self.assertEqual(len(added), 1)
+            report = json.loads(current[added.pop()])
+            self.assertEqual(
+                (report["outcome"], report["category"], report["exit_code"]),
+                (outcome, category, code),
+            )
+            self.assertEqual(report["source"], self.source)
+            self.assertEqual(report["manual_observations"], "NOT_AUTOMATICALLY_PASSED")
+            self.assertNotIn(
+                "synthetic-private", json.dumps(report) + self.output.getvalue()
+            )
+            retained = current
+
+    def test_manager_lazy_import_failure_is_fixed_category_without_raw_error(self):
+        self.record()
+        self.client_boundaries()
+        native_import = __import__
+
+        def unavailable(name, *args, **kwargs):
+            if name == "oc_box" and "tui" in (
+                args[2] if len(args) > 2 else kwargs.get("fromlist", ())
+            ):
+                raise ImportError("synthetic-private-import-error")
+            return native_import(name, *args, **kwargs)
+
+        with (
+            patch("builtins.__import__", side_effect=unavailable),
+            patch.object(tui, "cli") as manager,
+            patch.object(fixture.workspace_service, "attach") as lease,
+        ):
+            self.assertEqual(ui.attach(self.args("manager"), self.source), 1)
+            manager.assert_not_called()
+            lease.assert_not_called()
+        report = self.reports("manager")[0]
+        self.assertEqual(report["category"], "manager-unavailable")
+        self.assertNotIn(
+            "synthetic-private", json.dumps(report) + self.output.getvalue()
+        )
+
+    def test_manager_source_change_after_dashboard_is_not_relabelled(self):
+        self.record()
+        self.client_boundaries()
+        with (
+            patch.object(tui, "cli", return_value=0),
+            patch.object(
+                ui, "source_identity", return_value={**self.source, "commit": "b" * 40}
+            ),
+        ):
+            self.assertEqual(ui.attach(self.args("manager"), self.source), 1)
+        report = self.reports("manager")[0]
+        self.assertEqual(
+            (report["outcome"], report["category"]), ("failed", "source-changed")
+        )
+        self.assertEqual(report["source"], self.source)
+
+    def test_secondary_commands_include_manager_and_explain_monitoring_scope(self):
+        ui.print_commands(self.root)
+        output = self.output.getvalue()
+        self.assertIn(" manager --fixture " + str(self.root), output)
+        self.assertIn("optional textual/pyte", output)
+        self.assertIn("monitoring takes no client lease", output)
+        self.assertIn("Manual UI observations are NOT automatically passed", output)
 
     def test_clients_use_production_authenticated_commands_and_unmodified_relays_without_main(
         self,
