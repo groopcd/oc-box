@@ -188,6 +188,38 @@ def command(box, *args, check=True, timeout=60):
         return subprocess.CompletedProcess(result.args, result.returncode, value, "")
 
 
+def inspection_record(output, message):
+    try:
+        records = json.loads(output)
+    except (ValueError, TypeError) as exc:
+        raise BackupError(message) from exc
+    if (
+        not isinstance(records, list)
+        or len(records) != 1
+        or not isinstance(records[0], dict)
+    ):
+        raise BackupError(message)
+    return records[0]
+
+
+def image_identity(info):
+    identity = info.get("Id", info.get("ID"))
+    if not isinstance(identity, str) or not re.fullmatch(
+        r"(?:sha256:)?[0-9a-f]{64}", identity
+    ):
+        raise BackupError("Invalid backup image inspection identity.")
+    return identity.removeprefix("sha256:")
+
+
+def inspected_image(box, reference):
+    info = inspection_record(
+        command(box, "image", "inspect", reference).stdout,
+        "Cannot verify a single backup image inspection record.",
+    )
+    image_identity(info)
+    return info
+
+
 def owned_container(box, data):
     result = command(box, "container", "inspect", data["container"], check=False)
     if result.returncode:
@@ -199,9 +231,21 @@ def owned_container(box, data):
         ):
             return None
         raise BackupError("Cannot inspect backup container.")
-    info = json.loads(result.stdout)[0]
-    if (info.get("Config", {}).get("Labels") or {}).get(box.LABEL) != data["id"]:
+    info = inspection_record(
+        result.stdout, "Cannot verify a single backup container inspection record."
+    )
+    config = info.get("Config")
+    labels = config.get("Labels") if isinstance(config, dict) else None
+    if not isinstance(labels, dict) or labels.get(box.LABEL) != data["id"]:
         raise BackupError("Container backup ownership mismatch.")
+    state, mounts = info.get("State"), info.get("Mounts")
+    if (
+        not isinstance(state, dict)
+        or type(state.get("Running")) is not bool
+        or not isinstance(mounts, list)
+        or not all(isinstance(mount, dict) for mount in mounts)
+    ):
+        raise BackupError("Invalid backup container state/mount inspection.")
     return info
 
 
@@ -219,9 +263,17 @@ def archive_command(box, action, root, *, private=False, limit=None, status=None
 
 
 def owned_volume(box, data):
-    info = json.loads(command(box, "volume", "inspect", data["home_volume"]).stdout)[0]
-    if (info.get("Labels") or {}).get(box.LABEL) != data["id"] or not info.get(
-        "Mountpoint"
+    info = inspection_record(
+        command(box, "volume", "inspect", data["home_volume"]).stdout,
+        "Cannot verify a single private home volume inspection record.",
+    )
+    labels, mountpoint = info.get("Labels"), info.get("Mountpoint")
+    if (
+        not isinstance(labels, dict)
+        or labels.get(box.LABEL) != data["id"]
+        or not isinstance(mountpoint, str)
+        or not mountpoint.startswith("/")
+        or "\0" in mountpoint
     ):
         raise BackupError("Private home volume ownership/inspection mismatch.")
     return info
@@ -1053,12 +1105,8 @@ def restore_backup(box, args):
                             private,
                             ["podman", "load", "--quiet"],
                         )
-                    image = json.loads(
-                        command(box, "image", "inspect", data["image"]).stdout
-                    )[0]
-                    if image.get("Id", image.get("ID", "")).removeprefix(
-                        "sha256:"
-                    ) != data["image"].removeprefix("sha256:"):
+                    image = inspected_image(box, data["image"])
+                    if image_identity(image) != data["image"].removeprefix("sha256:"):
                         raise BackupError(
                             "Loaded image does not match manifest identity."
                         )

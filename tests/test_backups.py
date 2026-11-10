@@ -845,6 +845,136 @@ class WorkspaceBackupTests(unittest.TestCase):
                 self.assertFalse(self.archive.exists())
                 self.assertTrue(self.project.exists())
 
+    def test_forward_volume_inspection_requires_one_valid_owned_record(self):
+        self.backup(portable=True)
+        original_decrypt = self.decrypt
+        for shape in (
+            "null",
+            "empty",
+            "multiple",
+            "object",
+            "scalar",
+            "invalid-labels",
+            "missing-mountpoint",
+            "invalid-mountpoint",
+        ):
+            with self.subTest(shape=shape):
+                destination = self.root / ("forward-volume-" + shape)
+                created, inspected, extracted = [], [], []
+
+                def commands(box_arg, *args, **kwargs):
+                    result = self.podman(box_arg, *args, **kwargs)
+                    if args[:2] == ("volume", "create"):
+                        created.append(args[-1])
+                    if (
+                        args[:2] == ("volume", "inspect")
+                        and args[2] in created
+                        and not inspected
+                    ):
+                        inspected.append(True)
+                        owned = json.loads(result.stdout)[0]
+                        bodies = {
+                            "null": None,
+                            "empty": [],
+                            "multiple": [owned, {}],
+                            "object": owned,
+                            "scalar": ["PRIVATE_INVALID_RECORD"],
+                            "invalid-labels": [
+                                {**owned, "Labels": ["PRIVATE_INVALID_LABELS"]}
+                            ],
+                            "missing-mountpoint": [{"Labels": owned["Labels"]}],
+                            "invalid-mountpoint": [
+                                {**owned, "Mountpoint": {"PRIVATE": "INVALID_PATH"}}
+                            ],
+                        }
+                        return subprocess.CompletedProcess(
+                            args, 0, json.dumps(bodies[shape]), ""
+                        )
+                    return result
+
+                def decrypt(path, private, consumer):
+                    extracted.append(path.name)
+                    return original_decrypt(path, private, consumer)
+
+                with (
+                    patch.object(backups, "command", side_effect=commands),
+                    patch.object(crypto, "decrypt_stream", side_effect=decrypt),
+                    self.assertRaises(crypto.BackupError) as error,
+                ):
+                    self.restore(destination)
+                self.assertNotIn("PRIVATE", str(error.exception))
+                self.assertEqual(inspected, [True])
+                self.assertEqual(extracted, ["project.age"])
+                self.assertFalse(destination.exists())
+                self.assertFalse(
+                    any(data["project"] == str(destination) for data in self.created)
+                )
+                self.assertEqual(
+                    (self.home / ".local/share/opencode/opencode.db").read_bytes(),
+                    b"synthetic-private-database",
+                )
+
+    def test_loaded_image_inspection_requires_one_valid_identity_before_activation(
+        self,
+    ):
+        self.backup()
+        for shape in (
+            "null",
+            "empty",
+            "multiple",
+            "object",
+            "scalar",
+            "missing-id",
+            "invalid-id-type",
+            "invalid-id",
+        ):
+            with self.subTest(shape=shape):
+                destination = self.root / ("forward-image-" + shape)
+                queried = []
+
+                def commands(box_arg, *args, **kwargs):
+                    if (
+                        args[:2] == ("image", "inspect")
+                        and args[2] == self.snapshot_image
+                    ):
+                        queried.append(True)
+                        valid = {"Id": "sha256:" + self.snapshot_image}
+                        bodies = {
+                            "null": None,
+                            "empty": [],
+                            "multiple": [valid, {}],
+                            "object": valid,
+                            "scalar": ["PRIVATE_INVALID_RECORD"],
+                            "missing-id": [{}],
+                            "invalid-id-type": [{"Id": ["PRIVATE_INVALID_ID"]}],
+                            "invalid-id": [{"Id": "PRIVATE_INVALID_ID"}],
+                        }
+                        return subprocess.CompletedProcess(
+                            args, 0, json.dumps(bodies[shape]), ""
+                        )
+                    return self.podman(box_arg, *args, **kwargs)
+
+                with (
+                    patch.object(backups, "command", side_effect=commands),
+                    self.assertRaises(crypto.BackupError) as error,
+                ):
+                    self.restore(destination)
+                self.assertNotIn("PRIVATE", str(error.exception))
+                self.assertEqual(queried, [True])
+                self.assertFalse(destination.exists())
+                self.assertFalse(
+                    any(data["project"] == str(destination) for data in self.created)
+                )
+                record = next(
+                    box.read_json(path)
+                    for path in box.workspace_paths()
+                    if box.read_json(path)["project"] == str(destination)
+                )
+                self.assertTrue(record["restore_incomplete"])
+                self.assertEqual(
+                    record["restore_attempted_resources"], ["volume", "image"]
+                )
+
     def test_cleanup_failed_inspection_is_not_inferred_absent(self):
         for kind in ("container", "volume"):
             with self.subTest(kind=kind):
