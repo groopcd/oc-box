@@ -2,6 +2,7 @@
 
 import copy
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -10,7 +11,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from oc_box import oc_box as box, backup_crypto as crypto, backups, vault
 
@@ -1206,6 +1207,163 @@ with patch.object(fixture,'host_guard'), patch.object(fixture.shutil,'which',ret
         trace.fail(box.BoxError("synthetic-actual-shutdown-error"))
         self.assertEqual(trace.cleanup_errors[0]["stage"], "container-stop")
         self.assertEqual(trace.steps[-1]["state"], "failed")
+
+    def trace_owner(self, *, ready=False, code=None, primary=None, cleanup=None):
+        calls = []
+
+        class Owner:
+            def __enter__(self):
+                if primary is not None:
+                    try:
+                        raise primary
+                    except BaseException as error:
+                        self.shutdown(primary=error)
+                        raise
+                return self
+
+            def shutdown(self, *args, **kwargs):
+                calls.append((args, kwargs))
+                if cleanup is not None:
+                    raise cleanup
+                return "synthetic cleanup completed"
+
+        owner = Owner()
+        owner.ready = ready
+        owner.error_file = io.BytesIO(b"private-observer-sentinel")
+        owner.child = SimpleNamespace(
+            poll=Mock(side_effect=AssertionError("observer must not reap"))
+        )
+        owner.child_owner = SimpleNamespace(status=Mock(return_value=code))
+        return Owner, owner, calls
+
+    def test_owner_trace_observes_nonreaping_status_and_always_forwards_cleanup(self):
+        for state in (None, 0, 17, "no-child", "lost"):
+            with self.subTest(state=state):
+                cleanup = (
+                    box.BoxError("synthetic cleanup refusal")
+                    if state == "lost"
+                    else None
+                )
+                owner_class, owner, calls = self.trace_owner(
+                    code=state, cleanup=cleanup
+                )
+                status = owner.child_owner.status
+                if state == "no-child":
+                    owner.child = owner.child_owner = None
+                elif state == "lost":
+                    status.side_effect = ChildProcessError("private-observer-sentinel")
+                trace = fixture.SourceRetryTrace()
+                trace("private-owner")
+                with (
+                    patch.object(fixture.workspace_service, "Owner", owner_class),
+                    trace.installed(),
+                ):
+                    if cleanup is None:
+                        self.assertEqual(
+                            owner.shutdown(), "synthetic cleanup completed"
+                        )
+                    else:
+                        with self.assertRaises(box.BoxError) as raised:
+                            owner.shutdown()
+                        self.assertIs(raised.exception, cleanup)
+                self.assertEqual(calls, [((), {})])
+                if owner.child is not None:
+                    owner.child.poll.assert_not_called()
+                    status.assert_called_once()
+                else:
+                    status.assert_not_called()
+                if state != "lost":
+                    self.assertEqual(
+                        trace.subprocess_failure["exit_code"],
+                        None if state == "no-child" else state,
+                    )
+                self.assertNotIn(
+                    "private-observer-sentinel",
+                    json.dumps(
+                        {"failure": trace.failure, "cleanup": trace.cleanup_errors}
+                    ),
+                )
+
+    def test_owner_trace_preserves_startup_primary_identity_and_keyword(self):
+        primary = ValueError("private-primary-sentinel")
+        owner_class, owner, calls = self.trace_owner(code=17, primary=primary)
+        trace = fixture.SourceRetryTrace()
+        with (
+            patch.object(fixture.workspace_service, "Owner", owner_class),
+            trace.installed(),
+            self.assertRaises(ValueError) as raised,
+        ):
+            owner.__enter__()
+        self.assertIs(raised.exception, primary)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], ())
+        self.assertIs(calls[0][1]["primary"], primary)
+        self.assertEqual(trace.cleanup_errors, [])
+        self.assertEqual(len(trace._seen_failures), 1)
+        self.assertIs(trace._seen_failures[0], primary)
+        self.assertEqual(trace.failure["stage"], "private-owner")
+        self.assertEqual(trace.failure["exit_code"], 17)
+        owner.child.poll.assert_not_called()
+
+    def test_owner_trace_forwards_arguments_and_preserves_actual_cleanup_error(self):
+        primary, extra = ValueError("synthetic primary"), object()
+        cleanup = OSError("private-cleanup-sentinel")
+        owner_class, owner, calls = self.trace_owner(ready=True, cleanup=cleanup)
+        trace = fixture.SourceRetryTrace()
+        with (
+            patch.object(fixture.workspace_service, "Owner", owner_class),
+            trace.installed(),
+            self.assertRaises(OSError) as raised,
+        ):
+            owner.shutdown("synthetic argument", primary=primary, extra=extra)
+        self.assertIs(raised.exception, cleanup)
+        self.assertEqual(calls[0][0], ("synthetic argument",))
+        self.assertIs(calls[0][1]["primary"], primary)
+        self.assertIs(calls[0][1]["extra"], extra)
+        owner.child_owner.status.assert_not_called()
+        owner.child.poll.assert_not_called()
+        self.assertEqual(trace.failure["stage"], "private-owner-stop")
+        self.assertNotIn("private-cleanup-sentinel", json.dumps(trace.failure))
+
+    def test_owner_trace_wraps_real_partial_startup_without_replacing_primary(self):
+        service = fixture.workspace_service
+        with patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(self.parent)}):
+            owner = service.Owner(
+                box, self.root / "workspace.json", {"id": "synthetic-trace"}
+            )
+        primary = RuntimeError("private-primary-sentinel")
+        program = "import json,signal,sys; signal.alarm(10); print(json.dumps({'url':'http://127.0.0.1:12345','password':'a'*43}),flush=True); sys.stdin.read()"
+        trace = fixture.SourceRetryTrace()
+        previous = service.live_connection()
+        try:
+            with (
+                patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(self.parent)}),
+                patch.object(
+                    box,
+                    "exec_command",
+                    return_value=box.ContainerCommand(
+                        [sys.executable, "-B", "-c", program],
+                        box.maintenance_host_env(),
+                    ),
+                ),
+                patch.object(service.threading.Thread, "start", side_effect=primary),
+                trace.installed(),
+                box.workspace_lock(self.root / "workspace.json"),
+                self.assertRaises(RuntimeError) as raised,
+            ):
+                owner.__enter__()
+            self.assertIs(raised.exception, primary)
+            self.assertIsNone(owner.child)
+            self.assertIsNone(owner.child_owner)
+            self.assertTrue(owner.error_file.closed)
+            self.assertFalse(owner.address.exists())
+            self.assertIs(service.live_connection(), previous)
+            self.assertEqual(len(trace._seen_failures), 1)
+            self.assertIs(trace._seen_failures[0], primary)
+            self.assertEqual(trace.cleanup_errors, [])
+            self.assertNotIn("private-primary-sentinel", json.dumps(trace.failure))
+        finally:
+            owner.shutdown(primary=primary)
 
     def test_cleanup_validates_all_labels_before_any_removal(self):
         self.complete_fixture_metadata()

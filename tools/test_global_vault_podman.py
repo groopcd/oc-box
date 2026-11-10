@@ -2686,19 +2686,28 @@ class SourceRetryTrace:
                 self.fail(error)
                 raise
 
-        def owner_shutdown(owner):
+        def owner_shutdown(owner, *args, **kwargs):
             if not owner.ready and hasattr(owner, "error_file"):
-                child = owner.child
+                try:
+                    code = (
+                        None
+                        if owner.child_owner is None
+                        else owner.child_owner.status()
+                    )
+                except OSError:
+                    # A lost anchor has no trustworthy exit code. Observation
+                    # must not suppress the real owner's cleanup/refusal path.
+                    code = None
                 self.observe(
                     ["opencode"],
-                    None if child is None else child.poll(),
+                    code,
                     private_stderr(owner.error_file),
                 )
                 original_error = sys.exc_info()[1]
                 if original_error is not None:
                     self.fail(original_error)
             try:
-                return actual_shutdown(owner)
+                return actual_shutdown(owner, *args, **kwargs)
             except BaseException as error:
                 self("private-owner-stop")
                 self.fail(error)

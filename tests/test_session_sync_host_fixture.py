@@ -500,6 +500,153 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             harness.sync()
         harness.box.sync_sessions.assert_not_called()
 
+    def test_stopped_owner_requires_released_child_and_anchor_without_polling(self):
+        harness = self.harness()
+        harness.validate = Mock()
+        harness.f.verify_owned_resources = Mock()
+        harness.f.assert_host_clean = Mock()
+        harness.f.vault = SimpleNamespace(
+            vault_path=lambda: self.parent / "absent-vault"
+        )
+        harness.service.socket_path = Mock(return_value=self.parent / "absent-socket")
+        harness.service.live_connection = Mock(return_value=None)
+        harness.box.workspace_lock = Mock(return_value=contextlib.nullcontext())
+        harness.owner = SimpleNamespace(
+            child=None,
+            child_owner=None,
+            thread=SimpleNamespace(is_alive=lambda: False),
+            listener=SimpleNamespace(fileno=lambda: -1),
+        )
+        harness.stopped()
+        harness.f.assert_host_clean.assert_called_once()
+        for field in ("child", "child_owner"):
+            with self.subTest(retained=field):
+                retained = SimpleNamespace(
+                    poll=Mock(
+                        side_effect=AssertionError("must not reap observer child")
+                    )
+                )
+                setattr(harness.owner, field, retained)
+                harness.f.assert_host_clean.reset_mock()
+                try:
+                    with self.assertRaises(runner.Refusal):
+                        harness.stopped()
+                    retained.poll.assert_not_called()
+                    harness.f.assert_host_clean.assert_not_called()
+                finally:
+                    setattr(harness.owner, field, None)
+
+    def test_held_lease_observer_uses_nonreaping_status_and_preserves_guards(self):
+        from oc_box import session_terminal
+
+        for state in ("running", "exited", "lost"):
+            with self.subTest(state=state):
+                harness = self.harness()
+                ident = "ses_history_foreground"
+                harness.data, harness.connection = {}, {}
+                harness.box.container_project = Mock(return_value="/synthetic/project")
+                harness.seed = Mock(return_value=ident)
+                harness.request = Mock()
+                harness.service.api = Mock(
+                    return_value={"data": {ident: {"type": "running"}}}
+                )
+                harness.service.wait_history = Mock()
+                harness.provider = SimpleNamespace(
+                    entered=Mock(wait=Mock(return_value=True)),
+                    release=threading.Event(),
+                    requests=1,
+                    errors=0,
+                )
+                harness.export = Mock(
+                    return_value={"marker": "SYNTHETIC_HISTORY_FOREGROUND_DONE"}
+                )
+                harness.sync = Mock()
+                events, callbacks, failures = [], [], []
+                checkpoint = SimpleNamespace(
+                    read_bytes=lambda: events.append("checkpoint") or b"retained"
+                )
+                harness.box.session_file = Mock(return_value=checkpoint)
+                harness.wait_entered = threading.Event()
+                harness.wait_entered.set()
+                harness.f.verify_owned_resources = Mock(
+                    side_effect=lambda *_: (
+                        events.append("resource") or {"State": {"Running": True}}
+                    )
+                )
+                harness.box.BoxError = type("BoxError", (Exception,), {})
+
+                @contextlib.contextmanager
+                def attach(*_args):
+                    events.append("attach")
+                    yield {}
+
+                @contextlib.contextmanager
+                def locked(*_args):
+                    events.append("lock")
+                    raise harness.box.BoxError("synthetic lifecycle lock held")
+                    yield
+
+                harness.service.attach = attach
+                harness.box.workspace_lock = locked
+                status = Mock(
+                    side_effect=lambda: (
+                        events.append("status") or (None if state == "running" else 17)
+                    )
+                )
+                if state == "lost":
+                    status.side_effect = ChildProcessError("synthetic lost anchor")
+                harness.owner = SimpleNamespace(
+                    clients=1,
+                    closing=False,
+                    child=SimpleNamespace(
+                        poll=Mock(
+                            side_effect=AssertionError("must not reap observer child")
+                        )
+                    ),
+                    child_owner=SimpleNamespace(status=status),
+                )
+
+                def worker(callback):
+                    callbacks.append(callback)
+                    if callback.__name__ == "attached":
+                        # Exercise the observer closure, not the independently
+                        # tested foreground scheduler or real/native transport.
+                        events.clear()
+                        try:
+                            callback()
+                        except BaseException as error:
+                            failures.append(error)
+                    return SimpleNamespace(join=Mock(return_value=0))
+
+                with (
+                    patch.object(
+                        session_terminal,
+                        "choose_terminal",
+                        return_value={"status": "running"},
+                    ),
+                    patch.object(runner, "PairObserver"),
+                    patch.object(runner, "Worker", side_effect=worker),
+                ):
+                    self.assertEqual(harness.readiness("ses_parent"), 0)
+                self.assertEqual(len(callbacks), 3)
+                if state == "running":
+                    self.assertEqual(failures, [])
+                    self.assertEqual(
+                        events, ["attach", "resource", "status", "lock", "checkpoint"]
+                    )
+                    self.assertTrue(harness.checks["held_lease_shutdown"])
+                else:
+                    self.assertEqual(len(failures), 1)
+                    self.assertIsInstance(
+                        failures[0],
+                        ChildProcessError if state == "lost" else runner.Refusal,
+                    )
+                    self.assertNotIn("held_lease_shutdown", harness.checks)
+                    self.assertNotIn("lock", events)
+                    self.assertNotIn("checkpoint", events)
+                status.assert_called_once()
+                harness.owner.child.poll.assert_not_called()
+
     def pending_harness(self):
         """Synthetic observer inputs, never a production-runtime replacement."""
         harness = self.harness()

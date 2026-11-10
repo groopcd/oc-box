@@ -1115,7 +1115,9 @@ class Harness:
         require(not self.service.socket_path(self.box, self.data).exists())
         require(self.service.live_connection() is None)
         if hasattr(self, "owner"):
-            require(self.owner.child.poll() is not None)
+            # Owner releases both references only after its final signal/reap;
+            # do not retain or poll the private Popen merely to observe cleanup.
+            require(self.owner.child is None and self.owner.child_owner is None)
             require(
                 not self.owner.thread.is_alive() and self.owner.listener.fileno() == -1
             )
@@ -1409,7 +1411,8 @@ class Harness:
                 require(
                     self.owner.clients >= 1
                     and not self.owner.closing
-                    and self.owner.child.poll() is None
+                    and self.owner.child_owner is not None
+                    and self.owner.child_owner.status() is None
                 )
                 expect_context_refusal(
                     self.box.workspace_lock(self.path),
