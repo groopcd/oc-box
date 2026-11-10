@@ -394,6 +394,27 @@ class WorkspaceBackupTests(unittest.TestCase):
         self.assertEqual(data["image"], box.DISTROS["tumbleweed"][0])
         self.assertFalse(data["ready"])
 
+    def test_readonly_marker_full_and_portable_restore_preserves_source(self):
+        marker = self.project / box.MARKER
+        original = marker.read_bytes()
+        for mode in (0o400, 0o444):
+            marker.chmod(mode)
+            for portable in (False, True):
+                with self.subTest(mode=oct(mode), portable=portable):
+                    self.archive = self.root / f"readonly-{mode}-{portable}.ocbox"
+                    self.backup(portable=portable)
+                    destination = self.root / f"readonly-{mode}-{portable}"
+                    _, data = self.restore(destination)
+                    self.assertNotEqual(data["id"], self.data["id"])
+                    self.assertEqual(
+                        (destination / box.MARKER).read_text(), data["id"] + "\n"
+                    )
+                    self.assertEqual(
+                        (destination / box.MARKER).stat().st_mode & 0o777, 0o600
+                    )
+                    self.assertEqual(marker.read_bytes(), original)
+                    self.assertEqual(marker.stat().st_mode & 0o777, mode)
+
     def test_backup_info_omits_raw_extra_option_values_and_never_uses_podman(self):
         self.backup(portable=True)
         self.operations.clear()
@@ -860,6 +881,88 @@ class WorkspaceBackupTests(unittest.TestCase):
                 for command in self.operations
             )
         )
+
+
+class StagedMarkerTests(unittest.TestCase):
+    def test_readonly_marker_is_atomically_replaced_by_unprivileged_child(self):
+        with tempfile.TemporaryDirectory(prefix="oc-box-marker-") as temporary:
+            root = Path(temporary)
+            uid, gid = (
+                (65534, 65534) if os.geteuid() == 0 else (os.getuid(), os.getgid())
+            )
+            source, fresh = "a" * 32, "b" * 32
+            code = (
+                "import os,sys; from pathlib import Path; from oc_box import backups; "
+                "os.chdir(sys.argv[1]); "
+                "uid,gid=map(int,sys.argv[2:4]); "
+                "os.setgroups([]) if os.geteuid()==0 else None; "
+                "os.setgid(gid) if os.geteuid()==0 else None; "
+                "os.setuid(uid) if os.geteuid()==0 else None; "
+                "assert os.geteuid()!=0; "
+                "backups.replace_project_marker(Path('.'),'.oc-box-id',sys.argv[4],sys.argv[5])"
+            )
+            env = {
+                **crypto.environment(),
+                "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+            }
+            for mode in (0o400, 0o444):
+                with self.subTest(mode=oct(mode)):
+                    stage = root / str(mode)
+                    stage.mkdir(mode=0o700)
+                    marker = stage / ".oc-box-id"
+                    marker.write_text(source + "\n")
+                    marker.chmod(mode)
+                    before = marker.stat().st_ino
+                    if os.geteuid() == 0:
+                        os.chown(stage, uid, gid)
+                        os.chown(marker, uid, gid)
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-B",
+                            "-c",
+                            code,
+                            str(stage),
+                            str(uid),
+                            str(gid),
+                            source,
+                            fresh,
+                        ],
+                        env=env,
+                        capture_output=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(
+                        result.returncode, 0, result.stderr.decode(errors="replace")
+                    )
+                    self.assertEqual(marker.read_text(), fresh + "\n")
+                    self.assertEqual(marker.stat().st_mode & 0o777, 0o600)
+                    self.assertNotEqual(marker.stat().st_ino, before)
+                    self.assertEqual(list(stage.iterdir()), [marker])
+
+    def test_staged_marker_refuses_links_and_invalid_source_without_writes(self):
+        for kind in ("symlink", "hardlink", "wrong-id", "oversized"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                stage = root / "stage"
+                stage.mkdir(mode=0o700)
+                outside = root / "outside"
+                outside.write_text("a" * 32 + "\n")
+                marker = stage / ".oc-box-id"
+                if kind == "symlink":
+                    marker.symlink_to(outside)
+                elif kind == "hardlink":
+                    os.link(outside, marker)
+                else:
+                    marker.write_text("wrong" if kind == "wrong-id" else "a" * 128)
+                before = marker.read_bytes()
+                with self.assertRaises(crypto.BackupError):
+                    backups.replace_project_marker(
+                        stage, ".oc-box-id", "a" * 32, "b" * 32
+                    )
+                self.assertEqual(marker.read_bytes(), before)
+                self.assertEqual(outside.read_text(), "a" * 32 + "\n")
+                self.assertEqual(list(stage.iterdir()), [marker])
 
 
 class BackupCliTests(unittest.TestCase):

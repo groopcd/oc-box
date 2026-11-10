@@ -200,6 +200,58 @@ def activate_project(staging, destination):
         )
 
 
+def replace_project_marker(root, name, source_id, ident):
+    """Replace only a verified staged control file, never write its old inode."""
+    directory = os.open(
+        root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    )
+    temporary = None
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC,
+            dir_fd=directory,
+        )
+        with os.fdopen(descriptor, "rb") as stream:
+            metadata = os.fstat(stream.fileno())
+            if (
+                not stat.S_ISREG(metadata.st_mode)
+                or metadata.st_size > 64
+                or metadata.st_nlink != 1
+                or stream.read(65).decode("utf-8").strip() != source_id
+            ):
+                raise BackupError(
+                    "Project backup marker does not match the encrypted manifest."
+                )
+        candidate = ".oc-box-marker-" + uuid.uuid4().hex
+        descriptor = os.open(
+            candidate,
+            os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            0o600,
+            dir_fd=directory,
+        )
+        temporary = candidate
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            stream.write(ident + "\n")
+        current = os.stat(name, dir_fd=directory, follow_symlinks=False)
+        if (current.st_dev, current.st_ino, current.st_ctime_ns) != (
+            metadata.st_dev,
+            metadata.st_ino,
+            metadata.st_ctime_ns,
+        ):
+            raise BackupError("Project backup marker changed during restoration.")
+        os.replace(temporary, name, src_dir_fd=directory, dst_dir_fd=directory)
+        temporary = None
+    except (OSError, UnicodeError) as exc:
+        raise BackupError(
+            "Cannot verify/replace the staged project marker; no source files were changed."
+        ) from exc
+    finally:
+        if temporary is not None:
+            os.unlink(temporary, dir_fd=directory)
+        os.close(directory)
+
+
 def make_backup(box, args):
     crypto.validate_recipients(args.recipient or [])
     minimum = crypto.passphrase_minimum(
@@ -646,18 +698,9 @@ def restore_backup(box, args):
                             limit=manifest["expanded_byte_limit"],
                         ),
                     )
-                marker = project_stage / box.MARKER
-                if (
-                    marker.is_symlink()
-                    or not marker.is_file()
-                    or marker.stat().st_size > 64
-                    or marker.stat().st_nlink != 1
-                    or marker.read_text().strip() != manifest["source_workspace_id"]
-                ):
-                    raise BackupError(
-                        "Project backup marker does not match the encrypted manifest."
-                    )
-                marker.write_text(ident + "\n")
+                replace_project_marker(
+                    project_stage, box.MARKER, manifest["source_workspace_id"], ident
+                )
                 box.validate_project(project_stage)
                 for kind, name in (
                     ("volume", volume_name),
