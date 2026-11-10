@@ -193,6 +193,53 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(app.screen.get_selected_text(), span[2])
                     self.assert_highlight(app, span)
 
+    async def test_drag_copy_notifies_on_completion_but_never_reports_rejection_as_success(
+        self,
+    ):
+        for outcome in ("success", "oversized", "driver failure"):
+            with self.subTest(outcome=outcome):
+                async with self.dashboard() as (app, pilot, copies, _):
+                    await pilot.press("5")
+                    span = self.visible_span(
+                        app, app.query_one("#log-output"), "2026-01-01T12:00:00Z"
+                    )
+                    app.notify.reset_mock()
+                    with patch(
+                        "oc_box.tui_clipboard.MAX_CLIPBOARD_BYTES",
+                        8 if outcome == "oversized" else 1024 * 1024,
+                    ):
+                        failure = (
+                            patch.object(
+                                app,
+                                "_write_clipboard",
+                                side_effect=RuntimeError("PRIVATE_CLIPBOARD_DETAIL"),
+                            )
+                            if outcome == "driver failure"
+                            else patch.object(
+                                app, "_write_clipboard", wraps=app._write_clipboard
+                            )
+                        )
+                        with failure:
+                            await self.mouse(app, pilot, events.MouseDown, span[0])
+                            app.notify.assert_not_called()
+                            await self.mouse(app, pilot, events.MouseMove, span[1])
+                            app.notify.assert_not_called()
+                            await self.mouse(app, pilot, events.MouseUp, span[1])
+                    expected = {
+                        "success": "Copied text. Desktop clipboard delivery depends on your terminal.",
+                        "oversized": "Clipboard text exceeds the 1 MiB UTF-8 limit.",
+                        "driver failure": "Clipboard copy is unavailable.",
+                    }[outcome]
+                    app.notify.assert_called_once_with(expected, title="Clipboard")
+                    if outcome == "success":
+                        self.assertEqual(copies, [span[2]])
+                        automatic_notice = app.notify.call_args
+                        app.notify.reset_mock()
+                        app.action_copy_selection()
+                        self.assertEqual(app.notify.call_args, automatic_notice)
+                    else:
+                        self.assertEqual(copies, [])
+
     async def test_table_meter_bars_and_history_have_selectable_plain_text(self):
         async with self.dashboard() as (app, pilot, copies, _):
             surfaces = (

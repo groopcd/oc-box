@@ -316,7 +316,7 @@ class ClipboardActions:
             self._clipboard_notice("Selected text copy is unavailable.")
             return
         if isinstance(text, str) and text:
-            self.copy_to_clipboard(text)
+            self._copy_clipboard_text(text)
 
     def _completed_input_selection(self, field):
         if field.selected_text and not field.password:

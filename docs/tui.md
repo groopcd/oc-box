@@ -159,7 +159,8 @@ normal sync/stop proceed; the shell does not survive a container stop.
 Drag to select visible text throughout the dashboard: diagnostics, tables,
 logs, graphs, the embedded terminal and control labels. The highlight remains
 visible over colored logs, row cursors and meters. **Releasing the mouse copies
-the completed selection immediately**; no extra Copy click is required. A label
+the completed selection immediately**; no extra Copy click is required. A successful
+copy shows the same Clipboard notification as the Copy button. A label
 drag never presses its button, changes its tab/dropdown, or activates a footer
 shortcut. Normal clicks still operate those controls. Scrollbar drags still
 scroll. Panel captions and settings group titles are selectable text as well.
