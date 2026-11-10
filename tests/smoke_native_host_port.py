@@ -6,14 +6,15 @@ This verifies plugin behavior, not host filesystem/network sandbox isolation.
 """
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
-from pathlib import Path
-import subprocess
 import shutil
+import subprocess
 import sys
 import tempfile
+from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import quote
 
@@ -35,6 +36,22 @@ port = module("native_port_fixture", "tools/port_host_plugins.py")
 fixture = module("native_provider_fixture", "tools/test_v2_podman.py")
 
 
+# These literal bytes belong only to this disposable fixture. They are NOT
+# canonical personal plugins or a production implementation trust list. Approve
+# exactly these bytes, never a hash obtained by discovering arbitrary files.
+LEGACY_FIXTURES = {
+    "plugins/opencode-sandbox.ts": b'export default async () => ({ "tool.execute.before": async () => {} })\n',
+    "plugins/python-isolation.ts": b'export default async () => ({ "shell.env": async (_, out) => { out.env.PIP_REQUIRE_VIRTUALENV = "1" } })\n',
+    "plugins/output-clamp.ts": b'export default async () => ({ "tool.execute.after": async (_, out) => { out.output = out.output.slice(0, 8192) } })\n',
+    "plugins/lemonade-models.ts": b"export default async () => ({ config: async config => { config.provider.lemonade = { models: {} } } })\n",
+    "plugins/no-nested-sandbox.ts": b'export default async () => ({ "tool.execute.before": async (_, out) => { if (out.args.command.includes("bwrap")) throw Error("nested fixture") } })\n',
+    "custom-plugins/pdf-to-text.ts": b'export default async () => ({ "experimental.chat.messages.transform": async (_, out) => { out.messages = out.messages } })\n',
+    "custom-plugins/sandbox-uncloak.ts": b'export default async () => ({ "experimental.chat.messages.transform": async () => {} })\n',
+    "custom-plugins/tool-definition-audit.ts": b'const DESCRIPTION_OVERRIDES = new Map<string, string>([ /* no active overrides */ ])\nexport default async () => ({ "tool.definition": async ({ toolID }, out) => { const replacement = DESCRIPTION_OVERRIDES.get(toolID); if (replacement) out.description = replacement } })\n',
+    "custom-plugins/copilot-gpt6-effort.ts": b'export default async () => ({ "chat.headers": async (_, out) => { out.headers["x-oc-copilot-effort"] = "high" } })\n',
+}
+
+
 def main(binary):
     binary = str(Path(binary).resolve(strict=True))
     with tempfile.TemporaryDirectory(prefix="oc-box-native-host-") as temporary:
@@ -44,14 +61,14 @@ def main(binary):
         (source / "plugins").mkdir(parents=True)
         (source / "custom-plugins").mkdir()
         project.mkdir()
-        for name, markers in port.MARKERS.items():
-            folder = source / (
-                "custom-plugins"
-                if name in port.RETIRE or name == "pdf-to-text"
-                else "plugins"
-            )
-            (folder / (name + ".ts")).write_text(
-                "// " + " ".join(markers) + "\nexport default async () => ({})"
+        (root / "tmp").mkdir(mode=0o700)
+        reviewed = {}
+        review_arguments = []
+        for relative, content in LEGACY_FIXTURES.items():
+            (source / relative).write_bytes(content)
+            reviewed[relative] = hashlib.sha256(content).hexdigest()
+            review_arguments.extend(
+                ["--reviewed-source", relative + "=" + reviewed[relative]]
             )
         state = {"key": "synthetic-key", "markers": set(), "requests": 0, "errors": []}
         server, worker = fixture.make_provider(state)
@@ -189,7 +206,6 @@ def main(binary):
                 *[str(file) for file in (source / "custom-plugins").glob("*.ts")],
             ]
             (source / "opencode.jsonc").write_text(json.dumps(config))
-            receipt = port.apply(source)
             env = {
                 "PATH": os.environ["PATH"],
                 "HOME": str(root / "home"),
@@ -197,14 +213,33 @@ def main(binary):
                 "XDG_DATA_HOME": str(root / "data"),
                 "XDG_STATE_HOME": str(root / "state"),
                 "XDG_CACHE_HOME": str(root / "cache"),
+                "TMPDIR": str(root / "tmp"),
                 "OPENCODE_DISABLE_MODELS_FETCH": "1",
                 fixture.KEY: state["key"],
                 "LANG": "C.UTF-8",
                 "OC_BOX_CONTAINER": "0",
             }
+            # Exercise the actual review CLI against only the freshly-created
+            # synthetic profile, with no inherited host config or credentials.
+            with patch.dict(os.environ, env, clear=True):
+                migration_status = port.main(
+                    ["--config", str(source), "--apply", *review_arguments]
+                )
+            assert migration_status == 0
+            receipt = json.loads((source / "native-plugin-migration.json").read_text())
+            assert receipt["reviewed_source_sha256"] == reviewed
+            snapshot = Path(receipt["safety_backup"])
+            assert all(
+                (snapshot / relative).read_bytes() == content
+                for relative, content in LEGACY_FIXTURES.items()
+            ), "Explicitly reviewed fixture bytes were not preserved"
+            print(
+                "PASS: explicit --reviewed-source CLI approvals bind the literal fixture bytes and preserve their safety snapshot."
+            )
             subprocess.run(
                 ["npm", "install", "--prefix", str(source), "--no-audit", "--no-fund"],
                 env=env,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 check=True,
                 timeout=180,
@@ -400,6 +435,7 @@ def main(binary):
             server.shutdown()
             server.server_close()
             worker.join(timeout=3)
+            assert not worker.is_alive(), "Synthetic provider worker did not stop"
 
 
 if __name__ == "__main__":
