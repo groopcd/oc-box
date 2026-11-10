@@ -21,6 +21,7 @@ oc-box completion bash
 oc-box web [--project PATH | --workspace ID] [--port N] [--no-open] [--no-vault]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
+oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check | --auto-update on|off]
 oc-box secrets init|list|passwd
 oc-box secrets set|remove NAME
@@ -280,6 +281,86 @@ still stops the container, so running work is not promised to continue. This is
 bounded checking, not an atomic freeze of every possible history producer.
 `--no-vault` is accepted only when web becomes a new V2 owner; an attached web
 client rejects it and never changes the owner's credential snapshot.
+
+### tui — experimental workspace manager
+
+Open the optional Textual workspace dashboard, separate from the native OpenCode
+conversation TUI launched by `start`. This is a development-branch feature, not
+an accepted stable dashboard release; check `oc-box tui --help` for availability
+in the installed build. It requires the optional `tui` Python extra or GitHub
+installer `--with-tui`, a regular unprivileged Linux host user, and real TTY
+input/output. Normal CLI commands retain their stdlib-only baseline.
+
+```sh
+oc-box tui
+oc-box tui --project ~/devel/demo
+oc-box tui --workspace WORKSPACE_ID --read-only
+oc-box tui --demo
+```
+
+Select one existing project/workspace, or omit selectors for the registered
+workspace overview. Browsing does not create/start a workspace, take lifecycle
+ownership, reset, sync, refresh credentials or unlock the vault. `--read-only`
+disables native session mutation and terminal control/input. `--demo` is a
+synthetic-only preview that also permits execution inside a container: no host
+services, actual registry/log access or host/workspace actions.
+
+The five tabs are Status, Settings, Sessions, Terminals and Logs. `1`–`5` select
+them; `r` refreshes and `q` quits outside a focused embedded terminal. The
+always-visible case-insensitive literal log search remains usable while follow
+is paused; `Ctrl+L` opens Logs and focuses search. A focused terminal receives
+shell input; `Ctrl-]` detaches its client without ending the native shell.
+
+Status batches cheap metrics every five seconds by default, including host
+CPU/RAM/history, workspace readings, filesystems and mounts. Expensive allocated
+storage scans require a separate manual action. Settings shows saved/effective
+limits and dashboard refresh controls, not resource editing. All live CPU/RAM/
+storage changes, quotas, resizes and graphroot/runroot moves are deferred to a
+separate project. Existing explicit CLI `reset` remains outside the manager;
+there is no `podman update` action or resource-editing service extension.
+
+The Sessions tab uses manual Connect/refresh. Host global discovery consumes the
+complete paginated native V2 API across projects, children and archived sessions. Host
+project views include controller archive associations only where provenance is
+verified. Explicit host Connect uses normal native CLI discovery and **may start
+the native host service**, even when session actions are read-only; visiting the
+tab alone does not. Workspace connections lease only an existing ready private
+V2 owner, never the host service. The lease is held until Disconnect or dashboard
+exit and visibly keeps owner shutdown waiting. Favorites live in private UI
+state, not native pins.
+
+Archive/unarchive uses native V2 archive state. Native deletion is recursive,
+requires a selected verified source/store, descendant review and typed `DELETE`,
+and refuses unknown activity/ownership or active/unconsumed work. Host activity
+checks are process-local and warn about races with other native clients; this is
+not an atomic cross-process transaction. There is no bulk delete or permanent
+mirror suppression. Source and host archive copies are independent, and later
+normal sync may replace or recreate a managed host copy. Existing V1 launcher
+commands remain supported; these new live manager APIs are V2-only.
+
+The Terminals tab embeds the existing native persistent-session terminal client
+through a local PTY and optional `pyte` emulator, not a new container shell. Attachment
+validates the selected source's membership; a foreign session/host archive is not
+authority for a workspace shell. Create/takeover requires explicit confirmation.
+Closing the dashboard closes its clients/leases only, not the workspace owner or
+native persistent PTY. This is not a complete xterm implementation: no mouse,
+images, complex-grapheme or extended-keyboard support is promised. Actual embedded
+rendering/input/resize/detach acceptance still needs a new clean-host interactive
+run.
+
+The Logs tab defaults to `log/activity.jsonl` under the configured state root,
+with rotations `.1` through `.3`: four files capped at 256 KiB each, private files
+0600/directories 0700. Readers do not create files. Generated entries contain
+fixed categories and allowlisted metadata, never raw argv/environment,
+stdout/stderr, error messages, prompts or transcripts. The UI retains at most
+2000 log entries globally and displays at most 1000 generated-journal entries
+per refresh. There is no native OpenCode logfile reader in this first stage.
+Podman logs are a separate explicit opt-in for a selected verified owned
+container: tail 500 lines, 1 MiB byte cap, 10-second timeout, memory only. Common
+credential redaction is best-effort, not proof that arbitrary secrets are absent.
+Source filters/follow controls do not disable search. See `docs/tui.md` for
+design, installation and safety boundaries. Demo/headless/native offline checks
+are not host acceptance.
 
 ### terminal
 
@@ -1031,6 +1112,20 @@ exit the active owner first. Without this flag, terminal joins an active V2
 session's actual persistent shell PTY; 1.x continues to use
 the existing maintenance shell.
 
+### --read-only
+
+Tui-only. Disable native session mutations and terminal control/input while
+retaining inspection and refresh. Explicit native host Connect may still start
+the normal host service; this flag is not an offline/service-free mode. Opening
+the dashboard itself does not start a workspace or unlock credentials.
+
+### --demo
+
+Tui-only. Use synthetic data with no host services, real workspace registry or
+log access, or host/workspace actions. Allows a dashboard preview inside a
+container; it does not relax the normal manager's host/regular-user/TTY boundary
+or establish live host acceptance.
+
 ### --port N
 
 Web-only. Select the host-loopback relay port: 0 (default) chooses a free port;
@@ -1047,6 +1142,8 @@ host browser. The foreground relay still runs until Ctrl-C or workspace stop.
 Select an existing project directory; relative paths resolve from the host
 working directory. Quote paths containing spaces. For lifecycle commands the
 default is the current directory. For status, omission means all workspaces.
+For `tui`, it narrows the dashboard to an existing project; omit both selectors
+for the registered workspace overview. `tui` accepts only one selector.
 The project must not be the host home, `/`, `/home`, the oc-box registry, or a
 directory containing trusted launcher/state files. Colons, commas, and line
 breaks in the project path are unsupported because of Podman mount syntax.
@@ -1915,6 +2012,10 @@ independent; use `upgrade` or reinstall after updates.
 `~/.local/share/man/man1/oc-box.1` and `~/.local/share/info/oc-box.info` are the
 installed manuals. Installation requires no man/Info build tools.
 
+Optional GitHub TUI dependencies are private to each immutable release; they do
+not replace system Python packages. See Installation and manuals for opt-in
+flags and the Python-package extra.
+
 ### Host registry and archives
 
 `~/.local/state/oc-box/workspaces/ID/workspace.json` holds directory identity,
@@ -1961,6 +2062,20 @@ backups under `~/.local/state/oc-box/migrations/`; these are private data, not
 workspace resources or release artifacts, and later workspace purge leaves
 them intact. The original development-only relocation helper is retired.
 
+### Dashboard state and activity journal
+
+The experimental dashboard keeps favorites as private UI state, not native
+OpenCode pins. Its generated activity journal is `log/activity.jsonl` under
+`OC_BOX_STATE_HOME`, or `$XDG_STATE_HOME/oc-box` (default
+`~/.local/state/oc-box/log/activity.jsonl`). It rotates to `activity.jsonl.1`
+through `.3`, with four 256 KiB files, files mode 0600 and private directories
+0700. Readers do not create files. Generated entries use only fixed categories
+and allowlisted metadata, not raw argv/environment, native output/errors,
+prompts or transcripts. Opt-in bounded Podman log content stays in memory and
+is never written into this journal; best-effort credential redaction is not a
+guarantee that arbitrary secrets are absent. No native OpenCode logfile reader
+is added in the first stage.
+
 ### Container data
 
 The home volume is `oc-box-home-ID`, mounted at the host user's home pathname.
@@ -1972,9 +2087,10 @@ setup. Additional system tools belong to the container OS layer.
 
 ## Exit status
 
-`0` means successful informational/lifecycle work or normal TUI exit. A TUI
-launch normally returns OpenCode/Podman's exit code. oc-box validation, backend,
-setup, and sync failures return `1`; a successful TUI followed by failed history
+`0` means successful informational/lifecycle work or normal dashboard exit.
+A native OpenCode conversation TUI launch normally returns OpenCode/Podman's
+exit code. oc-box validation, backend, setup, and sync failures return `1`;
+a successful native TUI followed by failed history
 sync also returns `1` and retains container data. Argument syntax errors return
 `2`. A Python KeyboardInterrupt handled by the launcher returns `130`.
 An exception during final cleanup can also cause a nonzero result.
@@ -2305,6 +2421,21 @@ the curl installer's `~/.local/share/oc-box` release tree or a competing global
 wrapper. pipx/uv expose the package's console entrypoint in their normal bin
 directory. `python -m oc_box` is also available inside the package environment.
 
+For a release containing the experimental Textual manager, install the optional
+extra instead of the bare package:
+
+```sh
+uv tool install 'oc-box[tui]'
+# Or:
+pipx install 'oc-box[tui]'
+```
+
+Use `'oc-box[tui,vault]'` to request both extras. The initial dashboard ranges
+are `textual>=8.2.8,<9` and `pyte>=0.8.2,<0.9`; normal non-TUI commands do not
+require them. Existing published releases need not include this development
+feature. Keep optional dependencies in the tool's isolated environment, not
+system/user-site Python.
+
 Upgrade through the owner of the installation:
 
 ```sh
@@ -2332,7 +2463,8 @@ info --file "$VIRTUAL_ENV/share/info/oc-box.info"
 ```
 
 No source checkout, setuptools, documentation build tools, or third-party Python
-runtime dependency is required to use an installed wheel. For building or
+runtime dependency is required for the default CLI in an installed wheel.
+Vault/TUI features have explicit optional dependencies. For building or
 publishing, see CONTRIBUTING.md: GitHub's `publish.yml` workflow uses the `pypi`
 environment and PyPI Trusted Publishing without long-lived upload tokens.
 
@@ -2353,6 +2485,16 @@ curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/
 # Review install-oc-box.sh, then:
 sh install-oc-box.sh
 ```
+
+For a reviewed installer containing the experimental dashboard, enable its
+optional dependencies with `sh install.sh --with-tui`, or
+`sh install.sh --with-vault --with-tui` to include vault support. Use the actual
+downloaded filename (`install-oc-box.sh` above). A piped bootstrap accepts
+`sh -s -- --with-tui` or `sh -s -- --with-vault --with-tui`. Dependencies are
+installed privately in the immutable release; no system/user-site pip is used.
+GitHub updates retain these opt-ins while existing launchers remain pinned to
+their earlier release. Python-package installations instead use their extras
+and owning package manager.
 
 The bootstrap clones full history anonymously into a private temporary directory
 and removes that temporary checkout when finished. It does not configure Git

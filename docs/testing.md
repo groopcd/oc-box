@@ -28,6 +28,109 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
+### Experimental workspace manager
+
+The [Textual manager](tui.md) adds a separate validation surface from the native
+OpenCode conversation TUI. Its development-branch contract is **not a stable
+host-acceptance claim**. The checks below are requirements, not a record that
+they were executed or passed. Demo, headless behavior, real native APIs and
+operator-observed Podman/terminal behavior provide different evidence; none may
+be substituted for the next layer.
+
+**Stdlib unit/contract layer.** Keep normal non-TUI imports and commands usable
+without Textual/pyte. Cover CLI selectors, optional-dependency diagnostics,
+host/regular-user/TTY guards, read-only action refusals and synthetic-only demo
+isolation. `tests/test_tui_sessions.py` exercises the transport-free session
+domain; keep that separate from proof of actual native API behavior. Required
+cases include complete pagination across projects/children/archives, invalid or
+partial inventories, verified controller-archive mapping, identity-bound private
+favorites, recursive deletion scope and typed confirmation, active/unconsumed or
+unknown-activity refusal, process-local race warnings and independent source/copy
+effects. No inferred V1 archive API or permanent mirror suppression is allowed.
+
+Generated activity-journal tests must check private ownership/modes, unsafe-path
+refusals, fixed categories/allowlisted metadata, four 256 KiB files at
+`log/activity.jsonl` and rotations `.1` through `.3`, and readers that never
+create files. Supply synthetic credential/error/argv/env/transcript sentinels
+and verify they cannot enter generated entries. Podman output is a distinct
+opt-in: require a verified owned selected container, tail 500, 1 MiB and
+10-second bounds, memory-only retention and best-effort common-pattern
+redaction. Tests of known patterns are not proof that arbitrary secrets are
+removed. This stage has no native OpenCode logfile reader.
+
+**Optional headless UI layer.** Exercise all five tabs and `1`–`5`, `r`, `q`,
+`Ctrl+L` and focused-terminal routing with Textual's headless behavior tools.
+Log search must stay visible and case-insensitive/literal across tabs, source
+changes, follow and pause. Check global retention of at most 2000 entries and
+the 1000-generated-entry display bound per refresh. Verify five-second cheap
+batched refresh, host CPU/RAM/history/filesystem/mount presentation, unavailable
+readings, manual-only expensive storage scans and informational saved/effective
+resource values. Settings may change runtime UI refresh, never workspace limits.
+Demo must use synthetic data without real services/registry/log reads or actions;
+instrument those boundaries to fail if touched. There must be no implicit
+start/reset/sync/unlock, `podman update`, storage resize/quota or store move.
+
+Exercise the optional pyte view with bounded synthetic PTY bytes, resize/input
+routing, explicit create/takeover confirmation, session membership checks,
+`Ctrl-]` detach, worker cancellation and client-lease cleanup. These checks do
+not establish complete xterm support; mouse/images/complex graphemes/extended
+keyboard protocols are outside the initial emulator. Neither headless snapshots
+nor the container-permitted demo are interactive host acceptance.
+
+**Actual native V2 API layer.** Use unmodified native executables and private
+synthetic databases/config, not normal host history or credentials. Verify the
+real paginated global/project inventories including archived/child sessions,
+native archive/unarchive, recursive deletion/refusal and empty-success CLI
+responses as well as HTTP behavior. Exercise production discovery/connection
+paths explicitly: opening the manager must not connect; explicit host Connect
+may start the normal native host service, while a workspace connection must use
+an existing private service and never redirect to host. Check that Disconnect
+and TUI exit release only their client leases. Native API/CLI fixtures prove
+their scoped behavior, not rootless containment, interactive rendering or a
+cross-process delete transaction. V1 launcher/migration regressions remain
+required, without claiming native V1 manager actions.
+
+**Packaging layer.** Verify `oc-box[tui]` in isolated uv/pipx installations and
+GitHub `--with-tui` both alone and with `--with-vault`. Check private per-release
+dependencies, running-release pinning and retained opt-ins on GitHub update;
+never install packages into system/user-site Python. Default wheel/CLI tests
+must still run without the optional UI dependencies. Test help/argument handling
+and normal CLI compatibility in those environments, not just imported metadata.
+
+**New clean-host gate before stable publication.** Freeze the fully integrated
+candidate and record its full commit, clean state, native executable identities,
+dependency versions and exact test scope. Use a regular unprivileged host TTY,
+fresh synthetic projects/history/config and a verified isolated rootless Podman
+store outside containers/sandboxes. Do not run these probes inside oc-box, use
+real workspaces, or change the candidate while its tests run. Required manual
+observations include:
+
+- Five-tab navigation, visible log search while following/paused, responsive
+  cheap refresh and explicit bounded storage/log reads; Settings has no resource
+  mutation path.
+- No default service start; explicit native host Connect with its start warning;
+  verified host-project archive mapping and unchanged workspace source copies
+  after actions on synthetic host copies.
+- Existing private V2 owner attachment, visible owner wait while the manager
+  lease is held, Disconnect/quit lease release, and concurrent native TUI/web
+  clients staying independent. No vault prompt, credential refresh or implicit
+  ownership takeover on attach.
+- Actual embedded native shell rendering/input/resize, explicit create/takeover,
+  foreign-source refusal, Ctrl-] detach/reattach with retained shell state, and
+  dashboard closure leaving the native PTY/other clients intact. Terminal focus
+  must not turn ordinary shell keys into global dashboard actions.
+- Guarded native V2 session archive/unarchive and recursive-delete refusal/
+  confirmation on disposable sessions only; preserve process-local race warnings
+  instead of claiming cross-process exclusivity.
+
+Repeat relevant existing lifecycle/history/readiness/backup acceptance on that
+same clean integrated candidate where affected. Keep reports source-bound,
+retain failed evidence and encrypted artifacts, and record operator observations
+separately rather than self-certifying them from scripts. Earlier stable host
+reports and the old native terminal pass retain their original scope; they do
+not validate the new dashboard, embedding or journal. No new host pass or stable
+publication is recorded by adding this plan.
+
 ### V2 session-history synchronization
 
 The changes introduced in `d638907be97f9f33d00e59da526eb046e39a3627` add paginated

@@ -169,6 +169,38 @@ Published PyPI releases are selected separately from ordinary GitHub commits.
 Packaged manuals are in the package's `docs/` and the tool environment's
 `share/man`/`share/info`; those directories may need explicit reader paths.
 
+### Experimental workspace dashboard
+
+The development branch adds an optional Textual manager, separate from OpenCode's
+native conversation TUI:
+
+```sh
+oc-box tui
+oc-box tui --workspace WORKSPACE_ID --read-only
+oc-box tui --demo
+```
+
+Its five tabs are **Status, Settings, Sessions, Terminals, and Logs**. Log search
+stays available across tabs (`Ctrl+L` opens Logs), including when follow is
+paused. Browsing never starts, resets, syncs, or unlocks a workspace. Native V2
+session connections/actions are explicit; a host Connect may start the native
+host service, while workspace connections lease only an existing private owner.
+Embedded terminals reuse the native persistent-session shell, not a new
+container shell. CPU/RAM/storage editing, quotas, resizes and storage moves are
+deferred to a separate project; Settings is informational apart from UI refresh
+controls.
+
+For builds containing this feature, install `uv tool install 'oc-box[tui]'` or
+`pipx install 'oc-box[tui]'`; a reviewed GitHub installer accepts
+`sh install.sh --with-tui` or `sh install.sh --with-vault --with-tui`. Dependencies
+stay optional and isolated; GitHub updates retain the opt-in in private releases.
+Existing published packages need not yet include the experimental interface.
+Normal mode requires a regular-user host TTY. Synthetic-only `--demo` permits
+container preview without host service/registry/log access or actions. Demo and
+offline checks are **not a new interactive/Podman host acceptance pass**. See the
+[manager guide and design](docs/tui.md) for keys, connection/deletion boundaries,
+log privacy and the clean-candidate validation gate.
+
 ### OpenCode 2.x shared clients
 
 For plain host `opencode --standalone` outside oc-box, the original V1 plugins
@@ -243,9 +275,9 @@ unlocks credentials.
 ### GitHub installation layout
 
 The GitHub/curl installer copies the launcher to `~/.local/share/oc-box` and creates
-`~/.local/bin/oc-box`. Add that bin directory to PATH if needed. No Python/npm
-dependencies or documentation build tools are required for installation.
-Restart OpenCode to load new configuration. The installer stages a complete
+`~/.local/bin/oc-box`. Add that bin directory to PATH if needed. The default CLI
+requires no third-party Python/npm dependencies or documentation build tools;
+vault/TUI support is an explicit optional install. The installer stages a complete
 versioned copy under `~/.local/share/oc-box/releases/`, then atomically switches
 the launcher. Existing sessions keep their original code until they exit;
 earlier installed copies are retained, not removed while they may be in use.
@@ -323,6 +355,7 @@ oc-box --new                        # New conversation, same environment
 oc-box list                         # Workspace table and latest session IDs
 oc-box --status                     # CPU, RAM, storage, state, limits, sessions
 oc-box --status --project ~/devel/demo --json
+oc-box tui --read-only              # Experimental optional workspace dashboard
 oc-box distros                      # Supported images and host default
 oc-box stop --project ~/devel/demo
 oc-box terminal --project ~/devel/demo # V2 session shell; V1 maintenance shell
