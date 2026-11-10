@@ -382,6 +382,113 @@ print('EXPECTED_COMMIT_REFUSAL_BEFORE_IMPORT')
             self.assertEqual(identity["commit_count"], 1)
             self.assertEqual(changed, [True])
 
+    def test_replacement_ref_cannot_substitute_expected_commit_before_import(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            root = parent / "source"
+            root.mkdir()
+            expected = self.synthetic_source(root)
+            real_run = subprocess.run
+            with patch.object(fixture.subprocess, "run", wraps=real_run) as queries:
+                self.assertEqual(fixture.source_head(root), expected)
+                baseline = fixture.source_snapshot(root, expected)
+            query_calls = list(queries.call_args_list)
+            self.assertEqual(baseline["commit_count"], 1)
+
+            env = {
+                "PATH": os.defpath,
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+            }
+
+            def git(*args):
+                return real_run(
+                    ["git", "-C", str(root), *args],
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    check=True,
+                    timeout=10,
+                ).stdout
+
+            marker = parent / "replacement_application.executed"
+            app = root / "src/oc_box/oc_box.py"
+            app.write_text(
+                "VALUE='REPLACEMENT'\nopen("
+                + repr(str(marker))
+                + ", 'w').write('replacement code executed')\n"
+            )
+            git("add", "src/oc_box/oc_box.py")
+            replacement_tree = git("write-tree").decode().strip()
+            # Independent root B avoids a replacement/parent cycle. HEAD stays A.
+            replacement = (
+                git(
+                    "-c",
+                    "user.name=Synthetic",
+                    "-c",
+                    "user.email=synthetic@example.invalid",
+                    "commit-tree",
+                    replacement_tree,
+                    "-m",
+                    "replacement root",
+                )
+                .decode()
+                .strip()
+            )
+            self.assertNotEqual(replacement, expected)
+            git("replace", expected, replacement)
+            self.assertEqual(git("rev-parse", "HEAD").decode().strip(), expected)
+            self.assertEqual(git("status", "--porcelain", "--untracked-files=all"), b"")
+            self.assertEqual(
+                git("rev-parse", expected + "^{tree}").decode().strip(),
+                replacement_tree,
+            )
+            self.assertNotEqual(
+                git("--no-replace-objects", "rev-parse", expected + "^{tree}")
+                .decode()
+                .strip(),
+                replacement_tree,
+            )
+
+            program = """import importlib.util,pathlib,subprocess,sys
+root=pathlib.Path(sys.argv[1]); spec=importlib.util.spec_from_file_location('runner',root/'tools/test_v2_podman.py')
+runner=importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
+real_popen=subprocess.Popen
+def popen(argv,*args,**kwargs):
+ assert pathlib.Path(argv[0]).name=='git', 'unexpected native/engine process'
+ return real_popen(argv,*args,**kwargs)
+subprocess.Popen=popen
+try: runner.ExecutionBinding(root,sys.argv[2])
+except ValueError as error: assert str(error) in ('clean-source-required','source-changed'), str(error)
+else: raise AssertionError('replacement bytes authenticated under original commit')
+assert not pathlib.Path(sys.argv[3]).exists()
+assert not any(name=='oc_box' or name.startswith('oc_box.') for name in sys.modules)
+print('LITERAL_EXPECTED_OBJECT_REFUSED_BEFORE_IMPORT')
+"""
+            result = real_run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    program,
+                    str(root),
+                    expected,
+                    str(marker),
+                ],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=25,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(
+                result.stdout.strip(), "LITERAL_EXPECTED_OBJECT_REFUSED_BEFORE_IMPORT"
+            )
+            self.assertFalse(marker.exists())
+            for call in query_calls:
+                self.assertEqual(call.kwargs["env"]["GIT_NO_REPLACE_OBJECTS"], "1")
+
     def test_import_guard_checks_file_all_package_paths_and_spec_origin(self):
         manifest = {
             name.decode(): "tracked"
