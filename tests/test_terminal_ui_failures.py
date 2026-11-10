@@ -127,7 +127,7 @@ if mode.startswith(("ambient_", "primary_")):
     def handler(signum, value):
         result = original_signal(signum, value)
         if cleanup_active and value is previous:
-            cleanup_events.append("handler:" + str(signum))
+            cleanup_events.append("handler:" + str(int(signum)))
             if stage == "handler" and signum == signal.SIGTERM:
                 raise cleanup_failure
         return result
