@@ -589,7 +589,15 @@ print('NO_CANDIDATE_IMPORT')
             prepare.assert_not_called()
 
     def exercise_lifecycle(
-        self, root, *, fail_stage=None, fail_code=1, resume=False, shutdown_error=False
+        self,
+        root,
+        *,
+        fail_stage=None,
+        fail_code=1,
+        resume=False,
+        shutdown_error=False,
+        original_mutation=None,
+        rotation_evidence=None,
     ):
         """Real orchestration; every engine/native/provider action is mocked."""
         if resume:
@@ -602,6 +610,19 @@ print('NO_CANDIDATE_IMPORT')
             server.shutdown.side_effect = RuntimeError("synthetic shutdown failure")
         completed = []
         launched = []
+        evidence = rotation_evidence if rotation_evidence is not None else {}
+        vault_writes = 0
+
+        def mutate_original():
+            timing, relative, change = original_mutation
+            manifest = root / "original-inputs.json"
+            evidence["prior_manifest"] = manifest.read_bytes()
+            target = root / relative
+            if change == "bytes":
+                target.write_text(json.dumps({"unexpected_fixture_mutation": True}))
+            else:
+                target.chmod(0o400)
+
         originals = (
             {
                 relative: (root / relative).read_bytes()
@@ -664,13 +685,32 @@ print('NO_CANDIDATE_IMPORT')
             return copy.deepcopy(native)
 
         def request(data, ident, state, port):
+            if (
+                original_mutation is not None
+                and original_mutation[0] == "source-v2"
+                and launched[-1] == "source-v2"
+            ):
+                mutate_original()
             state["markers"].update(("VAULT_SHELL_OK", "VAULT_MCP_OK"))
             state["requests"] += 3
             return subprocess.CompletedProcess([], 0, "HOST_V2_ACCEPTANCE_OK", "")
 
         def encrypted(path, values, password):
+            nonlocal vault_writes
+            vault_writes += 1
+            evidence["vault_writes"] = vault_writes
+            if vault_writes == 2 and not resume:
+                evidence.setdefault(
+                    "prior_manifest", (root / "original-inputs.json").read_bytes()
+                )
+                if original_mutation is not None and original_mutation[0] == "rotation":
+                    mutate_original()
             box.atomic_json(
-                path, {"synthetic-encrypted": "not real vault/provider data"}
+                path,
+                {
+                    "synthetic-encrypted": "not real vault/provider data",
+                    "generation": vault_writes,
+                },
             )
 
         def restore(_box, args):
@@ -749,7 +789,17 @@ print('NO_CANDIDATE_IMPORT')
         with contextlib.ExitStack() as stack:
             for manager in managers:
                 stack.enter_context(manager)
-            if fail_stage is not None:
+            if original_mutation is not None:
+                with self.assertRaisesRegex(ValueError, "original-inputs"):
+                    fixture.run(
+                        root,
+                        Path(sys.executable),
+                        Path(sys.executable),
+                        "tumbleweed",
+                        resume=resume,
+                        binding=self.offline_binding(),
+                    )
+            elif fail_stage is not None:
                 with self.assertRaisesRegex(AssertionError, "launcher-exit"):
                     fixture.run(
                         root,
@@ -787,6 +837,81 @@ print('NO_CANDIDATE_IMPORT')
                 },
             )
         return completed, launched
+
+    def test_rotation_never_blesses_unrelated_input_bytes_or_modes(self):
+        for timing, relative, change in product(
+            ("source-v2", "rotation"),
+            (
+                "config/opencode/opencode.json",
+                "config/oc-box/config.json",
+                "execution-original.json",
+            ),
+            ("bytes", "mode"),
+        ):
+            with (
+                tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary,
+                self.subTest(timing=timing, relative=relative, change=change),
+            ):
+                root, evidence = Path(temporary), {}
+                completed, launched = self.exercise_lifecycle(
+                    root,
+                    original_mutation=(timing, relative, change),
+                    rotation_evidence=evidence,
+                )
+                self.assertEqual(completed[-1], "source-v2")
+                self.assertNotIn("rotate-v2", launched)
+                self.assertEqual(
+                    (root / "original-inputs.json").read_bytes(),
+                    evidence["prior_manifest"],
+                )
+                self.assertEqual(
+                    evidence["vault_writes"], 1 if timing == "source-v2" else 2
+                )
+                self.assertFalse((root / "result.json").exists())
+                self.assertFalse((root / "vault-rotation.json").exists())
+                with self.assertRaisesRegex(ValueError, "original-inputs"):
+                    fixture.record_original_inputs(root)
+                self.assertEqual(
+                    (root / "original-inputs.json").read_bytes(),
+                    evidence["prior_manifest"],
+                )
+                finalization = json.loads(
+                    (root / "provider-finalization.json").read_text()
+                )
+                self.assertEqual(finalization["component"], "provider-finalization")
+                self.assertIs(finalization["acceptance_verdict"], False)
+
+    def test_normal_rotation_changes_only_vault_proof_and_keeps_original_manifest(self):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
+            root, evidence = Path(temporary), {}
+            self.exercise_lifecycle(root, rotation_evidence=evidence)
+            manifest = json.loads(evidence["prior_manifest"])
+            self.assertEqual(
+                (root / "original-inputs.json").read_bytes(), evidence["prior_manifest"]
+            )
+            actual = fixture.original_input_hashes(root)
+            for relative, expected in manifest["files"].items():
+                if relative != "vault/vault.json":
+                    self.assertEqual(actual[relative], expected)
+            rotation = json.loads((root / "vault-rotation.json").read_text())
+            self.assertEqual(
+                rotation,
+                {
+                    "format": "oc-box-v2-vault-rotation-v1",
+                    "original_vault": manifest["files"]["vault/vault.json"],
+                    "vault": actual["vault/vault.json"],
+                },
+            )
+            self.assertNotEqual(
+                rotation["original_vault"]["sha256"], rotation["vault"]["sha256"]
+            )
+            self.assertEqual(
+                (root / "vault-rotation.json").stat().st_mode & 0o777, 0o600
+            )
+            fixture.validate_original_inputs(root)
+            self.assertEqual(
+                json.loads((root / "result.json").read_text())["status"], "passed"
+            )
 
     def test_every_lifecycle_success_stage_fails_if_callback_completes_but_launcher_fails(
         self,
@@ -2854,6 +2979,84 @@ print('NO_CANDIDATE_IMPORT')
                     with self.assertRaisesRegex(AssertionError, "seed content"):
                         fixture.verify_superseded_sync(path, data, checked)
                 verify.assert_not_called()
+
+    def test_archive_producer_cannot_corrupt_known_payload_while_all_derived_views_agree(
+        self,
+    ):
+        producer = box.archive_session
+        cases = [
+            (index, change)
+            for index in range(3)
+            for change in ("role", "text", "created", "identity")
+        ]
+        cases.append((2, "completed"))
+        for index, change in cases:
+            data, page, raw, checked = self.superseded_wire()
+            original_checked = copy.deepcopy(checked)
+            original_projection = copy.deepcopy(page)
+            with (
+                patch.object(
+                    fixture.workspace_service, "api", side_effect=[page, {"data": raw}]
+                ),
+                patch.object(box, "export_container_session", return_value=checked),
+            ):
+                fixture.verify_superseded_migration(data, {})
+
+            def corrupt_producer(export, workspace):
+                result = producer(export, workspace)
+                message = result["messages"][index]
+                if change == "role":
+                    message["type"] = (
+                        "assistant" if message["type"] == "user" else "user"
+                    )
+                elif change == "text":
+                    if message["type"] == "user":
+                        message["text"] = "CORRUPT_ARCHIVE_PRODUCER"
+                    else:
+                        message["content"][0]["text"] = "CORRUPT_ARCHIVE_PRODUCER"
+                elif change == "identity":
+                    message["id"] = "msg_wrong_archive_identity"
+                else:
+                    message["time"][change] += 1000
+                return result
+
+            with (
+                tempfile.TemporaryDirectory() as temporary,
+                self.subTest(index=index, change=change),
+            ):
+                path = Path(temporary) / "workspace.json"
+                archived = corrupt_producer(checked, data)
+                native_view = copy.deepcopy(archived)
+                ident = archived["info"]["id"]
+                target = path.parent / "history" / (ident + ".json")
+                box.atomic_json(target, archived)
+                state = {
+                    "host_sessions": {fixture.SUPERSEDED_ID: ident},
+                    "synced": {
+                        fixture.SUPERSEDED_ID: hashlib.sha256(
+                            target.read_bytes()
+                        ).hexdigest()
+                    },
+                }
+                with (
+                    patch.object(
+                        box, "archive_session", side_effect=corrupt_producer
+                    ) as archive,
+                    patch.object(box, "session_state", return_value=state),
+                    patch.object(
+                        box,
+                        "verify_host_archive",
+                        side_effect=lambda _path, _data, actual: self.assertEqual(
+                            actual, native_view
+                        ),
+                    ) as verify,
+                ):
+                    with self.assertRaisesRegex(AssertionError, "seed content"):
+                        fixture.verify_superseded_sync(path, data, checked)
+                archive.assert_called_once_with(checked, data)
+                verify.assert_not_called()
+                self.assertEqual(checked, original_checked)
+                self.assertEqual(page, original_projection)
 
     def exercise_downgrade_retry(self, root, *, changed_v1=False, failed_launch=None):
         path, source, _ = self.retained_downgrade(root)

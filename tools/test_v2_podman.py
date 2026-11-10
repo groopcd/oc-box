@@ -514,6 +514,7 @@ def existing_directory(path):
             "home-purpose.json",
             "history-result.json",
             "original-inputs.json",
+            "vault-rotation.json",
             "execution-original.json",
             "result.json",
             "full-restore-result.json",
@@ -937,7 +938,7 @@ def verify_superseded_migration(data, connection):
     return checked
 
 
-def verify_superseded_seed(messages, *, omitted=False):
+def verify_superseded_seed(messages, *, omitted=False, archive_workspace=None):
     """Known V1 payload, independent of all projection/export/archive views.
 
     V2 normalizes V1 user text parts to text and assistant text parts to content.
@@ -972,15 +973,27 @@ def verify_superseded_seed(messages, *, omitted=False):
             )
         )
         time = message.get("time", {})
+        expected_id = f"msg_v1_superseded_{number}"
+        if archive_workspace is not None:
+            # The measured V2 archive normalization changes message identities,
+            # not this known role/text/time payload. Do not call its producer.
+            namespace = hashlib.sha256(
+                (archive_workspace + "-v2").encode()
+            ).hexdigest()[:12]
+            expected_id = f"msg_{namespace}_v1_superseded_{number}"
         if (
-            message.get("id") != f"msg_v1_superseded_{number}"
+            not isinstance(time, dict)
+            or message.get("id") != expected_id
             or message.get("type") != role
             or actual != text
             or time.get("created") != number
             or type(time.get("created")) is not int
             or (
                 role == "assistant"
-                and time.get("completed") != (4 if number == 4 else None)
+                and (
+                    time.get("completed") != (4 if number == 4 else None)
+                    or (number == 4 and type(time.get("completed")) is not int)
+                )
             )
         ):
             raise AssertionError("Synthetic superseded seed content differs")
@@ -1011,6 +1024,9 @@ def verify_superseded_sync(path, data, checked):
         != hashlib.sha256(target.read_bytes()).hexdigest()
     ):
         raise AssertionError("Synced superseded archive or checkpoint differs")
+    verify_superseded_seed(
+        archived["messages"], omitted=True, archive_workspace=data["id"]
+    )
     box.verify_host_archive(path, data, archived)
 
 
@@ -1976,7 +1992,11 @@ def original_input_hashes(root):
 
 
 def record_original_inputs(root):
-    """Only the original fresh run records its intentional input mutations."""
+    """Record the fresh baseline once; an existing proof may never rebaseline."""
+    target = root / "original-inputs.json"
+    if target.exists() or target.is_symlink():
+        validate_original_inputs(root)
+        return
     box.atomic_json(
         root / "original-inputs.json",
         {
@@ -1991,19 +2011,76 @@ def validate_original_inputs(root):
         manifest = acceptance_helpers().read_private_json(
             root, "original-inputs.json", uid=os.getuid(), max_bytes=8192
         )
-        if manifest != {
-            "format": "oc-box-v2-original-inputs-v1",
-            "files": original_input_hashes(root),
-        }:
+        if (
+            not isinstance(manifest, dict)
+            or set(manifest) != {"format", "files"}
+            or manifest["format"] != "oc-box-v2-original-inputs-v1"
+            or not isinstance(manifest["files"], dict)
+            or set(manifest["files"]) != set(ORIGINAL_INPUTS)
+        ):
+            raise ValueError("original-inputs")
+        expected = dict(manifest["files"])
+        rotation_path = root / "vault-rotation.json"
+        if rotation_path.exists() or rotation_path.is_symlink():
+            rotation = acceptance_helpers().read_private_json(
+                root, rotation_path.name, uid=os.getuid(), max_bytes=8192
+            )
+            if (
+                not isinstance(rotation, dict)
+                or set(rotation) != {"format", "original_vault", "vault"}
+                or rotation["format"] != "oc-box-v2-vault-rotation-v1"
+                or rotation["original_vault"] != expected["vault/vault.json"]
+            ):
+                raise ValueError("original-inputs")
+            expected["vault/vault.json"] = rotation["vault"]
+        if original_input_hashes(root) != expected:
             raise ValueError("original-inputs")
         if (root / "source/unfinished.txt").read_bytes() != b"PROJECT_RETAINED\n":
             raise ValueError("original-inputs")
+        return manifest
     except (OSError, ValueError, TypeError):
         # Old fixtures remain retained evidence, not silently upgraded to this
         # stronger schema. Cleanup-v1 has its own unchanged eligibility contract.
         raise ValueError(
             "original-inputs: missing or changed; no repair or legacy acceptance upgrade"
         ) from None
+
+
+def rotate_original_vault(root, values, password):
+    """Authorize only new vault bytes; retain the complete original manifest."""
+    original = validate_original_inputs(root)
+    manifest_path = root / "original-inputs.json"
+    manifest_hash = acceptance_helpers().sha256_file(manifest_path)
+    rotation_path = root / "vault-rotation.json"
+    if (
+        rotation_path.exists()
+        or rotation_path.is_symlink()
+        or vault.vault_path() != root / "vault/vault.json"
+    ):
+        raise ValueError("original-inputs")
+    with vault.locked(vault.vault_path()):
+        vault.write_encrypted(vault.vault_path(), values, password)
+    current = original_input_hashes(root)
+    if (
+        any(
+            current[name] != proof
+            for name, proof in original["files"].items()
+            if name != "vault/vault.json"
+        )
+        or acceptance_helpers().sha256_file(manifest_path) != manifest_hash
+    ):
+        raise ValueError("original-inputs")
+    write_report_new(
+        rotation_path,
+        {
+            "format": "oc-box-v2-vault-rotation-v1",
+            "original_vault": original["files"]["vault/vault.json"],
+            "vault": current["vault/vault.json"],
+        },
+    )
+    # Also refuse unrelated changes during proof publication. The old manifest
+    # is never rewritten, including on this late refusal.
+    validate_original_inputs(root)
 
 
 def retry_inputs(root, binding=None):
@@ -2642,12 +2719,13 @@ def run(root, v1, v2, distro, *, resume=False, binding=None):
                     active["stage"] = stage
                     if stage == "rotate-v2":
                         state["key"] = "fixture-" + secrets.token_urlsafe(24)
-                        with vault.locked(vault.vault_path()):
-                            vault.write_encrypted(
-                                vault.vault_path(), {KEY: state["key"]}, password
-                            )
-                        if not resume:
-                            record_original_inputs(root)
+                        if resume:
+                            with vault.locked(vault.vault_path()):
+                                vault.write_encrypted(
+                                    vault.vault_path(), {KEY: state["key"]}, password
+                                )
+                        else:
+                            rotate_original_vault(root, {KEY: state["key"]}, password)
                     launch_success(
                         exits, stage, ["start", "--workspace", active["id"]], binding
                     )
