@@ -237,9 +237,14 @@ environment.
 Cold startup includes image/package/plugin downloads; timed stage
 messages appear every five seconds.  A loading line covers blank TUI
 startup frames and disappears when OpenCode draws text.  Warm launches
-retain compatible caches.  The container OpenCode version is verified
-against the host on every launch; exact upgrades and downgrades are
-supported, with no fallback to another release.
+retain compatible caches.  Loading-line updates wait for complete
+terminal-control/UTF-8 boundaries rather than inserting launcher bytes
+into an application fragment.  SIGTERM requests bounded termination of
+the launcher's owned TUI process group, escalating if needed; terminal
+settings and signal handlers are restored on exit/failure.  The
+container OpenCode version is verified against the host on every launch;
+exact upgrades and downgrades are supported, with no fallback to another
+release.
 
 4.4 stop
 ========
@@ -353,6 +358,14 @@ loopback port).  Keep the web command open; Ctrl-C closes that relay.
 Browser commands use a sanitized host environment without provider/vault
 values; the server retains the owning launch's credential snapshot.
 
+The relay uses bounded buffers in both directions.  A client ending its
+request write side does not discard the delayed response, and an early
+response does not by itself discard an upload still being forwarded.
+Shutdown closes accepted streams and attempts bounded cleanup of owned
+relay children.  Service-owner cleanup also runs after partial
+initialization.  Reported cleanup failures use fixed resource
+categories, not private child output.
+
 The owner keeps the lifecycle lock and waits for attached
 terminal/web/TUI clients before final history sync and container stop.
 Closing one attached client does not stop the others.  ‘oc-box stop’
@@ -386,12 +399,21 @@ the running server's environment.  ‘Ctrl-]’ detaches without ending the
 shell; reattach to retain shell variables and state.  Typing ‘exit’ ends
 the shell.  Connection takes interactive control and propagates terminal
 dimensions; TUI/web clients can regain control in their terminal panel.
-It does not forward new host credentials, refresh config/auth, or take
-the exclusive lifecycle lock.  A ready active V2 owner is required;
-start ‘oc-box’ or ‘oc-box web’ first.  Exit the attached client to
-release its lease without stopping other clients.  Use ‘--maintenance’
-for the shell described below.  On V1 the existing maintenance-shell
-default is retained.
+Input preceding the first ‘Ctrl-]’ in the same read is forwarded once;
+the detach byte and suffix are not sent.  Already received terminal
+errors or a known shell exit take precedence over a simultaneous local
+detach, so a failed shell cannot be reported as a successful detach.  A
+normal attachment-end close after replay can still return success
+without claiming the shell itself exited.  Unexpected disconnects,
+protocol/error closes, incomplete replay and truncated frames are
+failures; a clean message-boundary EOF preserves a known shell status.
+Terminal settings and resize handlers are restored even when connection
+close fails.  It does not forward new host credentials, refresh
+config/auth, or take the exclusive lifecycle lock.  A ready active V2
+owner is required; start ‘oc-box’ or ‘oc-box web’ first.  Exit the
+attached client to release its lease without stopping other clients.
+Use ‘--maintenance’ for the shell described below.  On V1 the existing
+maintenance-shell default is retained.
 
 Open an interactive maintenance shell in an existing workspace container
 instead of starting OpenCode.  Select the current project, ‘--project
@@ -658,10 +680,18 @@ branch history into a temporary directory, pins the checked commit,
 verifies source identity, and runs its staged user-local installer.  An
 identical clean build does not download the full history again.  A
 locally installed build whose commit count is ahead of the published
-branch is retained rather than downgraded.  Source-checkout updates
-remain a separate ‘git pull’/review task: upgrade always targets the
-installed user-local copy.  A changed published commit at the same count
-can replace a different installed build.
+branch is retained rather than downgraded.  Explicit and automatic
+updates coordinate through the same upgrade lock.  After network
+discovery, even a matching-commit no-op rereads healthy installed state
+under the publication lock.  New cooperating installers repeat the
+ordering check under that lock before activation; an unsupported
+downloaded installer protocol is refused rather than silently bypassing
+the guard.  Manual older-source installation remains an intentional
+separate choice, and old released updater callers are not retroactively
+made participants in the new lock/guard protocol.  Source-checkout
+updates remain a separate ‘git pull’/review task: upgrade always targets
+the installed user-local copy.  A changed published commit at the same
+count can replace a different installed build.
 
 The installer stages a complete release under
 ‘~/.local/share/oc-box/releases/’, including license and manuals, before
@@ -671,7 +701,17 @@ modules.  Old release directories are retained and have no automatic
 garbage collection.  ‘current’ and compatible top-level installed paths
 point to the activated release.  An older flat installation is migrated;
 its old manuals are preserved as ‘legacy-docs’.  No workspaces or
-credentials are migrated/deleted.
+credentials are migrated/deleted.  Activation first saves private
+rollback evidence, publishes the pinned launcher before advancing
+current metadata, and verifies the selected identity before removing its
+pending marker.  Handled pre-commit failures restore prior state;
+uncertain or failed rollback retains recovery evidence and refuses a
+false "up to date" result.  Do not remove pending/recovery files merely
+to bypass that refusal.  An interrupt may follow an already coherent
+commit; it does not promise that activation was rolled back.  Complete
+candidates are retained once publication is attempted, including unused
+candidates after failure.  This is process-failure recovery, not
+power-loss certification.
 
 Automatic updates are off by default.  ‘--auto-update on’ saves
 ‘auto_update: true’ in the existing host oc-box configuration, retaining
@@ -748,15 +788,18 @@ and bracketed-paste mode are restored on exit/errors.
 Long values use a width-bounded horizontal viewport with a count, so
 they do not normally wrap; only the current field is displayed, never
 prior vault values.  UTF-8 input is preserved exactly, with byte limits
-applied before insertion.  Terminal control/bidi/combining characters
-are never executed/rendered as active terminal sequences when revealed.
-Bracketed paste treats its contents as data, not toggle/edit/submit
-keystrokes: multiline, control-character, invalid UTF-8, or oversized
-bracketed pastes are rejected as a whole.  Correct/reenter rejected
-input before submission (Ctrl+U clears it); it is not silently
-truncated.  A terminal without bracketed-paste support cannot
-distinguish a pasted newline from Enter, so paste only a single-line
-token with no trailing newline.
+applied before insertion.  Malformed unbracketed UTF-8 aborts the prompt
+rather than silently removing bytes from an accepted credential or
+passphrase.  Retry the command and reenter the complete value; error
+paths still restore the terminal before returning.  Terminal
+control/bidi/combining characters are never executed/rendered as active
+terminal sequences when revealed.  Bracketed paste treats its contents
+as data, not toggle/edit/submit keystrokes: multiline,
+control-character, invalid UTF-8, or oversized bracketed pastes are
+rejected as a whole.  Correct/reenter rejected input before submission
+(Ctrl+U clears it); it is not silently truncated.  A terminal without
+bracketed-paste support cannot distinguish a pasted newline from Enter,
+so paste only a single-line token with no trailing newline.
 
 The field is erased on completion/cancellation, including when revealed.
 This does not undo exposure to terminal recordings, screen
@@ -877,6 +920,14 @@ first V2 launch without this command.  Use only selectors and credential
 options; session, device, resource, deletion, or update options are
 refused.
 
+An otherwise valid saved ‘vault’ policy with nonempty selection lists
+can be repaired explicitly: choose ‘--credential-mode env’ or ‘selected’
+to retain the names, or use ‘--clear-credentials’ to remove them.
+Validation and replacement are atomic under the workspace lock and never
+unlock the vault.  Unknown policy shapes, invalid names and conflicting
+sources are still refused unchanged; clearing is not permission to
+discard arbitrary malformed metadata.
+
 In ‘vault’ mode on V2, all current global encrypted entries are selected
 dynamically each time a new owner starts.  No automatic list of names is
 frozen or saved in the registry.  Adding/removing entries affects the
@@ -886,9 +937,17 @@ vault is present, global mode replaces ambient automatic
 noncredential routing preferences remain.  Global delivery is limited to
 1 MiB of combined UTF-8 environment names/values including separators.
 Larger valid vaults remain stored unchanged, but a global launch fails
-before setup/reset deletion; use selected mode with fewer entries.
-Nonempty per-name env/vault selections are refused in this mode.  To
-switch an existing selection to global use, clear it explicitly:
+before setup/reset deletion; use selected mode with fewer entries.  That
+cap is an upper bound, not a promise that every set below it fits an
+exec.  Preflight also accounts conservatively for effective system
+argument limits, the inherited/delivered environment, pointer overhead
+and reserved launcher arguments.  Reduced stack limits or a large
+ambient environment can therefore refuse a smaller set before container
+setup/reset deletion.  Values are not printed or moved into host
+‘os.environ’ to perform this check; no credential-mode fallback is
+implied by a size refusal.  Nonempty per-name env/vault selections are
+refused in this mode.  To switch an existing selection to global use,
+clear it explicitly:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
      oc-box --project ~/devel/demo
@@ -1023,7 +1082,12 @@ without replacing an existing file and has 0600 permissions.  Expect
 enough free space for staged ciphertext, final output, and a temporary
 committed image.  Failure leaves no final partial backup; the source
 remains stopped, not reset/deleted.  The temporary capture image is
-removed by its unique tag; shared base images remain.
+removed by its unique tag; shared base images remain.  If native
+creation took effect but its command outcome is uncertain, an error is
+not treated as proof that no resource exists.  Cleanup requires positive
+identity and ownership evidence for the fresh attempted name; otherwise
+recovery metadata is retained rather than deleting an unverified
+resource or silently forgetting it.
 
 4.18 backup-info
 ================
@@ -1051,6 +1115,14 @@ restore activation.
 
 4.19 restore
 ============
+
+Pipeline cleanup retains its child-leader ownership anchors until the
+last bounded TERM/KILL escalation, then reaps them.  An exited leader
+alone does not prove that descendants released their pipes or private
+descriptors.  Lost ownership proof refuses numeric group signaling;
+cleanup failure cannot be reported as a successful stream.  Deliberately
+escaped descendants and kernel-uninterruptible tasks are outside this
+bounded owned-group contract.
 
 Streaming failures identify the producer/consumer exit code and a fixed
 category (for example exhausted storage, permission denial or archive
@@ -1089,7 +1161,25 @@ commands or old host-archive paths.  Then a full backup loads the
 captured OCI image; portable mode selects the original distro catalog
 image.  Only after component restoration succeeds does atomic no-replace
 rename publish the project and record its actual destination identity
-with fresh IDs.
+with fresh IDs.  The staged project control marker is replaced with a
+fresh private marker, so a readable read-only source marker does not
+require making source files writable.  The source marker's contents and
+mode are not changed.
+
+Completion requires authenticated extraction and the ordered payload,
+metadata and registry file/directory synchronization barriers.  Failed
+or unsupported barriers retain available recovery state rather than
+accepting a complete restore.  If the control filesystem also refuses
+recovery writes/renames, inspect the retained files before any launch:
+publishing a blocking journal cannot then be guaranteed.  Atomic
+visibility and these checked ordering barriers are not universal
+power-loss or faulty-hardware certification; keep the encrypted source
+archive.  Completion also verifies the fresh stopped container's
+identity, ownership, selected image and exact typed project/home mounts.
+A successful native create exit alone does not finalize the restore;
+creation output and warnings stay privately captured.  Cancelling
+payload extraction retains uncertain recovery state without replacing
+the original cancellation with a secondary status error.
 
 The new environment is **created but not started**.  Its resume
 selection keeps the original conversation IDs and complete container DB.
@@ -1286,6 +1376,13 @@ add ‘.dirty’.  Untracked files do not.  Installed copies retain their
 installation-time identity in ‘build-info.json’; reinstall to update it.
 This is separate from the host OpenCode version matched inside
 containers.  Use alone, for example: ‘oc-box --version’.
+
+If Git inspection is unavailable or a checkout has shallow/invalid
+history, informational ‘--version’/‘--about’ remain readable with
+‘+unknown’; a detected checkout never substitutes stale embedded clean
+metadata.  Building a distribution requires verified source identity.
+Installed and source-distribution layouts without Git may use their
+validated embedded metadata.
 
 The OpenCode V2-compatible 1.5 series and the 1.6 refactoring series
 retain the same commit-derived patch count; a first published patch is
@@ -1981,9 +2078,17 @@ On launch, global OpenCode configuration, agents, skills, local plugins,
 and MCP settings are copied into private storage; they are not host
 mounts.  Project configuration runs natively inside the container.
 Removed host plugins are removed from the copy.  Container dependency
-caches and generated SDK locks are reused when host dependency inputs
-and runtime version are unchanged.  Cold plugin resolution has its own
-timed setup stage before the TUI opens.
+caches and generated SDK locks are reused when host dependency
+inputs/runtime version and installed dependency files match a
+completed-resolution receipt.  Copying inputs or leaving a partial
+‘node_modules’ directory after a failed installer does not mark the
+cache warm; the next launch retries resolution.  Older SDK-only
+generated caches can be adopted after bounded offline
+package-tree/entrypoint checks; old input hashes or matching custom
+manifests alone are not completion evidence.  These checks are
+structural consistency checks, not package authenticity or full-file
+integrity.  Cold plugin resolution has its own timed setup stage before
+the TUI opens.
 
 The generated profile selects Bash and enables native formatting when
 not configured, plus native LSP on 1.x only.  The V2 container-only
@@ -2755,20 +2860,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2540
 Node: Commands6045
-Node: Options60693
-Node: Lifecycle and persistence81417
-Node: Distribution images83537
-Node: Sessions and recovery88412
-Node: Devices and host permissions95515
-Node: Resource reports97861
-Node: Configuration and environment99972
-Node: Files111235
-Node: Exit status116088
-Node: Examples116899
-Node: Troubleshooting118985
-Node: Installation and manuals128313
-Node: Authors and license136260
-Node: See also136867
+Node: Options66504
+Node: Lifecycle and persistence87612
+Node: Distribution images89732
+Node: Sessions and recovery94607
+Node: Devices and host permissions101710
+Node: Resource reports104056
+Node: Configuration and environment106167
+Node: Files117918
+Node: Exit status122771
+Node: Examples123582
+Node: Troubleshooting125668
+Node: Installation and manuals134996
+Node: Authors and license142943
+Node: See also143550
 
 End Tag Table
 
