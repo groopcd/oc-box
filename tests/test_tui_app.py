@@ -16,7 +16,9 @@ from oc_box.tui_logs import LogEntry
 
 AVAILABLE = all(importlib.util.find_spec(name) for name in ("textual", "pyte"))
 if AVAILABLE:
-    from oc_box.tui_app import DashboardApp
+    from oc_box.tui_app import DashboardApp, Confirm
+    from textual.geometry import Offset
+    from textual.selection import Selection
     from textual.widgets import (
         Button,
         Collapsible,
@@ -751,6 +753,126 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("PRIVATE_OUTPUT", message)
             self.assertNotIn("synthetic-private", message)
             close.assert_called_once()
+
+    async def test_header_copy_and_paste_controls_fit_and_preserve_input_focus(self):
+        backend = SessionDemo()
+        app = DashboardApp(backend, read_only=True, demo=True)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.settle(app, pilot)
+            for ident in ("copy-selection", "copy-view", "paste-copied"):
+                button = app.query_one("#" + ident, Button)
+                geometry = app.screen.find_widget(button)
+                self.assertEqual(
+                    geometry.region.intersection(geometry.clip), geometry.region
+                )
+            search = app.query_one("#log-search", Input)
+            search.value = "copy 界é"
+            search.focus()
+            search.action_select_all()
+            await pilot.click("#copy-selection")
+            await pilot.pause()
+            self.assertEqual(app.clipboard, "copy 界é")
+            self.assertTrue(search.has_focus)
+
+            app.copy_to_clipboard("pasted 界\nnot a second search line")
+            search.value = "prefix "
+            search.cursor_position = len(search.value)
+            await pilot.click("#paste-copied")
+            await pilot.pause()
+            self.assertEqual(search.value, "prefix pasted 界")
+            self.assertTrue(search.has_focus)
+            self.assertTrue(app.read_only)
+            self.assertFalse(backend.calls)
+
+    async def test_copy_view_and_modal_clipboard_do_not_apply_or_delete(self):
+        backend = SessionDemo()
+        app = DashboardApp(backend, read_only=True)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.settle(app, pilot)
+            await pilot.click("#copy-view")
+            await pilot.pause()
+            self.assertIn("Registered workspaces", app.clipboard)
+            self.assertIn("Copy view", app.clipboard)
+            self.assertIn("Paste copied", app.clipboard)
+
+            app.action_settings()
+            await pilot.pause()
+            await pilot.click(app.screen.query_one("#copy-view", Button))
+            await pilot.pause()
+            self.assertIn("Dashboard settings", app.clipboard)
+            self.assertIn("Reset to defaults", app.clipboard)
+            self.assertIsInstance(app.screen, SettingsScreen)
+            await pilot.press("escape")
+
+            app.push_screen(Confirm("Synthetic deletion review", destructive=True))
+            await pilot.pause()
+            app.screen.query_one("#confirmation", Input).value = "DELETE"
+            await pilot.click(app.screen.query_one("#copy-view", Button))
+            await pilot.pause()
+            self.assertIn("Synthetic deletion review", app.clipboard)
+            self.assertIsInstance(app.screen, Confirm)
+            self.assertFalse(backend.calls)
+            await pilot.click(app.screen.query_one("#cancel", Button))
+
+    async def test_log_refresh_preserves_highlight_and_unchanged_snapshot(self):
+        from textual.widgets import RichLog
+
+        app = DashboardApp(DemoBackend(), read_only=True, demo=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.settle(app, pilot)
+            app.action_tab("logs")
+            await pilot.pause()
+            output = app.query_one("#log-output", RichLog)
+            with patch.object(output, "clear", wraps=output.clear) as clear:
+                app._render_logs()
+                clear.assert_not_called()
+                app.screen.selections = {output: Selection(Offset(0, 0), Offset(5, 0))}
+                await pilot.pause()
+                selected = app.screen.get_selected_text()
+                app._apply_logs(
+                    [
+                        LogEntry(
+                            "2026-01-01T12:00:02Z",
+                            "synthetic-copy-test",
+                            "info",
+                            "New event",
+                        )
+                    ]
+                )
+                await pilot.pause()
+                clear.assert_not_called()
+                self.assertEqual(app.screen.get_selected_text(), selected)
+                self.assertEqual(len(app.logs.search("New event")), 1)
+                app.screen.clear_selection()
+                app._render_logs()
+                clear.assert_called_once()
+
+    async def test_clipboard_shortcuts_preserve_native_control_keys(self):
+        app = DashboardApp(SessionDemo())
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.settle(app, pilot)
+            app.action_tab("terminals")
+            await pilot.pause()
+            terminal = app._terminal_widget
+            terminal.transport.state = "connected"
+            terminal.emulator.feed(b"READY")
+            terminal.focus()
+            app.screen.selections = {terminal: Selection(Offset(0, 0), Offset(5, 0))}
+            await pilot.pause()
+            with patch.object(terminal.transport, "send", return_value=True) as send:
+                await pilot.press("ctrl+shift+c")
+                await pilot.pause()
+                self.assertEqual(app.clipboard, "READY")
+                send.assert_not_called()
+                await pilot.press("ctrl+c", "ctrl+v")
+                self.assertEqual(
+                    [call.args[0] for call in send.call_args_list], [b"\x03", b"\x16"]
+                )
+                app.copy_to_clipboard("copied\ncommand")
+                await pilot.press("ctrl+shift+insert")
+                await pilot.pause()
+                self.assertEqual(send.call_args.args[0], b"copied\rcommand")
+                self.assertTrue(terminal.has_focus)
 
 
 if __name__ == "__main__":

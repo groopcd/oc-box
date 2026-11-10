@@ -6,6 +6,11 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static, Switch
 
+if __package__:
+    from .tui_clipboard import ClipboardBar, ClipboardInput
+else:
+    from tui_clipboard import ClipboardBar, ClipboardInput
+
 REFRESH_INTERVALS = (1, 2, 5, 10, 30, 60)
 SESSION_SCOPES = (
     ("Host · all projects", "global"),
@@ -113,7 +118,7 @@ class SettingsScreen(ModalScreen):
                         )
                     with Horizontal(classes="settings-row"):
                         yield Label("Session filter")
-                        yield Input(
+                        yield ClipboardInput(
                             self.values["session_filter"], id="pref-session-filter"
                         )
                     yield Static(
@@ -135,7 +140,9 @@ class SettingsScreen(ModalScreen):
                         )
                     with Horizontal(classes="settings-row"):
                         yield Label("Log search")
-                        yield Input(self.values["log_query"], id="pref-log-query")
+                        yield ClipboardInput(
+                            self.values["log_query"], id="pref-log-query"
+                        )
                     yield Static(
                         "Search stays available while paused. Retention: 2,000 entries / eight sources in memory; "
                         "Podman logs require explicit Load. Search text is not saved to disk.",
@@ -163,6 +170,7 @@ class SettingsScreen(ModalScreen):
                         "shell input keeps its normal keys while focused.",
                         markup=False,
                     )
+            yield ClipboardBar()
             with Horizontal(id="preferences-actions"):
                 yield Button("Apply", id="preferences-apply", variant="primary")
                 yield Button("Reset to defaults", id="preferences-reset")

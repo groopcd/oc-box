@@ -72,6 +72,12 @@ their checkout ownership distinct from unrelated source and flat installations.
   do not create a replacement container shell or record terminal output. Local
   client state is not proof of native readiness/controller ownership. Native
   and headless checks are not interactive/rootless-Podman acceptance.
+- `tui_clipboard.py`: explicit optional dashboard clipboard/viewport selection.
+  Never read the desktop clipboard in the background, write it on selection,
+  journal copied/pasted text or record terminal output. Only explicit UI copy
+  uses host clipboard support; container OSC clipboard requests stay stripped.
+  Paste copied is the in-app cache, not the current desktop clipboard. Preserve
+  focused shell control keys, byte/queue bounds and CLI read-only fences.
 - `activity_log.py` / `tui_logs.py`: private bounded fixed-category activity
   journal plus explicit in-memory external log views. Never journal raw argv,
   env, errors, prompts or stdout/stderr. Preserve legitimate owned legacy state

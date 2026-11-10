@@ -136,6 +136,8 @@ not gain a container-mode bypass from the existence of demo mode.
 | `Ctrl+L` | Open Logs and focus the log search |
 | `q` | Quit outside a focused embedded terminal |
 | `Ctrl-]` | Detach the focused session-terminal client |
+| `Ctrl+Shift+C` | Copy selected text, when the terminal forwards this shortcut |
+| `Ctrl+Shift+Insert` | Paste text copied inside the dashboard into the focused input or connected shell |
 
 When terminal input is focused, ordinary keystrokes belong to the shell rather
 than dashboard shortcuts, including `s`, `F2` and the shell's `Ctrl+L`. The
@@ -150,6 +152,50 @@ Closing the dashboard disconnects only its clients and releases their leases;
 it does not directly stop the workspace owner or end its native persistent shell.
 If the owner was already waiting to exit, releasing its final client lease lets
 normal sync/stop proceed; the shell does not survive a container stop.
+
+### Copying and pasting
+
+Drag to select visible text in diagnostics, session/workspace tables, logs and
+the embedded terminal. Use **Copy** in the header, or `Ctrl+Shift+C` when the
+terminal forwards that key. Selection highlighting alone never writes to the
+clipboard. Text fields also retain their normal Textual selection/copy/paste
+keys. In the native shell, ordinary `Ctrl+C` still interrupts and `Ctrl+V` keeps
+its shell meaning; neither is replaced by a global clipboard shortcut.
+
+**Copy view** copies the current visible screen as plain text, including labels
+on buttons and other controls that are not drag-selectable. Settings and review
+dialogs have their own clipboard controls. Copying is available in read-only
+mode and never confirms a dialog, changes a session, or starts a connection.
+Table/log/terminal selections cover the displayed viewport, not offscreen
+history. Scroll to the desired text before selecting. Followed-log display stays
+in place while its text is highlighted; bounded collection continues in memory.
+
+For text from your desktop clipboard, focus a text field or the connected shell
+and use your **host terminal's paste command**—commonly `Ctrl+Shift+V`,
+`Shift+Insert`, or its context menu. This delivers a normal terminal paste event.
+The dashboard does not read the desktop clipboard in the background or install
+clipboard helper programs.
+
+**Paste copied** (also `Ctrl+Shift+Insert`) instead pastes the last text copied
+**inside this dashboard**, not arbitrary current desktop clipboard contents.
+It targets only the focused, enabled text field or connected native terminal;
+it never connects or starts a shell. Single-line fields use normal terminal-paste
+semantics; the embedded terminal keeps its existing control filtering and
+bracketed-paste framing. Its 64 KiB input bound includes UTF-8 bytes and framing,
+and size/full-queue rejection sends no prefix of the rejected paste. A transport
+failure can occur after partial delivery; its warning tells you to inspect the
+shell rather than blindly retry a possibly partially executed command.
+
+Host clipboard delivery uses Textual's OSC 52 support and depends on the terminal
+and its clipboard permissions; it is not guaranteed in every terminal, remote
+session or multiplexer. Explicit copies are bounded to 1 MiB and remain only in
+the app's clipboard memory and the user-requested host clipboard. The dashboard
+never journals clipboard content or adds terminal recordings. Pasting into the
+native shell is still normal shell input and may enter its existing native
+session/shell history. Treat copied external logs/shell
+output as sensitive. OSC clipboard requests emitted by container applications
+remain stripped; only an explicit dashboard copy action writes to the host
+clipboard.
 
 ## Five tabs
 
@@ -322,7 +368,7 @@ may regain interactive control independently. Closing the dashboard releases
 its leases, not the owner or other clients. See the
 [native terminal reference](cli.md#terminal) for the existing client boundary.
 
-The emulator is not a complete xterm implementation. Mouse reporting, images,
+The emulator is not a complete xterm implementation. Native application mouse reporting, images,
 complex grapheme rendering and extended keyboard protocols are not supported;
 use the native standalone terminal client for applications needing those
 capabilities.

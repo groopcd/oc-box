@@ -498,13 +498,18 @@ try:
     from textual.message import Message
     from textual.strip import Strip
     from textual.widget import Widget
+
+    if __package__:
+        from .tui_clipboard import SelectableViewport
+    else:
+        from tui_clipboard import SelectableViewport
 except ImportError:
     Widget = None
 
 
 if Widget is not None and pyte is not None:
 
-    class NativeTerminal(Widget, can_focus=True):
+    class NativeTerminal(SelectableViewport, Widget, can_focus=True):
         """Explicit-connect embedded terminal; Textual alone owns UI signals.
 
         ``state`` / ``reason`` are fixed transport status, not proof of native
@@ -518,6 +523,7 @@ if Widget is not None and pyte is not None:
         DEFAULT_CSS = (
             "NativeTerminal { width: 1fr; height: 1fr; overflow: hidden hidden; }"
         )
+        _accepts_clipboard_paste = True
 
         class StateChanged(Message):
             def __init__(self, terminal):
@@ -603,6 +609,7 @@ if Widget is not None and pyte is not None:
             # these bindings are installed globally or on the dashboard.
             event.stop()
             event.prevent_default()
+            self.screen.clear_selection()
             if event.key in ("ctrl+]", "ctrl+right_square_bracket"):
                 self.disconnect()
                 self.blur()
@@ -625,8 +632,30 @@ if Widget is not None and pyte is not None:
                 event.stop()
                 event.prevent_default()
                 # Bound before encoding/copying a large clipboard payload.
-                if len(event.text) <= MAX_INPUT:
-                    self.transport.send(self.emulator.paste(event.text))
+                if len(event.text) > MAX_INPUT:
+                    self.notify(
+                        "Paste exceeds the terminal's 64 KiB input limit.",
+                        severity="warning",
+                    )
+                    return
+                content = self.emulator.paste(event.text)
+                if len(content) > MAX_INPUT:
+                    self.notify(
+                        "Paste exceeds the terminal's 64 KiB input limit.",
+                        severity="warning",
+                    )
+                    return
+                if not self.transport.send(content):
+                    self.notify(
+                        (
+                            "Terminal input is busy; the paste was not queued."
+                            if self.state == "connected"
+                            else "Terminal input failed; paste may have been partly sent. Inspect the shell before retrying."
+                        ),
+                        severity="warning",
+                    )
+                else:
+                    self.screen.clear_selection()
 
         @staticmethod
         def _color(value):
@@ -654,7 +683,7 @@ if Widget is not None and pyte is not None:
                 "brightwhite": "bright_white",
             }.get(value)
 
-        def render_line(self, y):
+        def _selection_line(self, y):
             width = self.content_size.width
             screen = self.emulator.screen
             if y >= screen.lines:

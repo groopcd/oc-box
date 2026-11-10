@@ -34,6 +34,14 @@ if __package__:
     from .tui_logs import LogBuffer, LogEntry
     from .tui_sessions import FavoriteStore, SessionCatalog
     from .tui_terminal import NativeTerminal
+    from .tui_clipboard import (
+        ClipboardActions,
+        ClipboardBar,
+        ClipboardButton,
+        ClipboardInput,
+        SelectableDataTable,
+        SelectableRichLog,
+    )
     from .tui_status import MonitorPanel, percentage
     from .tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
 else:
@@ -42,6 +50,14 @@ else:
     from tui_logs import LogBuffer, LogEntry
     from tui_sessions import FavoriteStore, SessionCatalog
     from tui_terminal import NativeTerminal
+    from tui_clipboard import (
+        ClipboardActions,
+        ClipboardBar,
+        ClipboardButton,
+        ClipboardInput,
+        SelectableDataTable,
+        SelectableRichLog,
+    )
     from tui_status import MonitorPanel, percentage
     from tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
 
@@ -68,7 +84,10 @@ class Confirm(ModalScreen):
             with VerticalScroll(id="confirmation-review"):
                 yield Static(text(self.message))
             if self.destructive:
-                yield Input(placeholder="Type DELETE to confirm", id="confirmation")
+                yield ClipboardInput(
+                    placeholder="Type DELETE to confirm", id="confirmation"
+                )
+            yield ClipboardBar()
             with Horizontal():
                 yield Button("Cancel", id="cancel")
                 yield Button(
@@ -89,7 +108,7 @@ class Confirm(ModalScreen):
             self.dismiss(True)
 
 
-class DashboardApp(App):
+class DashboardApp(ClipboardActions, App):
     TITLE = "oc-box control center"
     AUTO_FOCUS = "#workspaces"
     CSS = """
@@ -98,7 +117,8 @@ class DashboardApp(App):
       text-wrap: nowrap; text-overflow: ellipsis; }
     #log-tools { height: 3; }
     #log-search { width: 1fr; }
-    #log-hits { width: 20; padding: 1 1; }
+    #log-hits { width: 13; padding: 1 1; }
+    #log-tools Button { width: auto; min-width: 6; padding: 0 1; }
     #body { height: 1fr; }
     #sidebar { width: 24; border: round $primary; }
     #workspaces { height: 1fr; }
@@ -129,6 +149,8 @@ class DashboardApp(App):
         ("ctrl+l", "logs", "Search logs"),
         ("s", "settings", "Settings"),
         Binding("f2", "settings", show=False),
+        Binding("ctrl+shift+c", "copy_selection", show=False, priority=True),
+        Binding("ctrl+shift+insert", "paste_copied_text", show=False, priority=True),
         ("1", "tab('status')", "Status"),
         ("2", "tab('settings')", "Settings"),
         ("3", "tab('sessions')", "Sessions"),
@@ -159,6 +181,7 @@ class DashboardApp(App):
             False
         )
         self._last_report = self._last_logs = 0
+        self._rendered_logs = None
         self._catalog_generation = 0
         self.cpu_history = []
         self.ram_history = []
@@ -178,16 +201,33 @@ class DashboardApp(App):
             "Sampling host and workspace resources…", id="host-summary", markup=False
         )
         with Horizontal(id="log-tools"):
-            yield Input(
+            yield ClipboardInput(
                 placeholder="Search retained logs at any time · Ctrl+L opens Logs",
                 id="log-search",
             )
             yield Static("0 matches", id="log-hits", markup=False)
             yield Button("Logs", id="show-logs")
+            yield ClipboardButton(
+                "Copy",
+                id="copy-selection",
+                tooltip="Drag-select text, then copy it. Ctrl+Shift+C also copies if your terminal forwards it.",
+            )
+            yield ClipboardButton(
+                "Copy view",
+                id="copy-view",
+                tooltip="Copy the visible screen, including control labels. Offscreen text is not included.",
+            )
+            yield ClipboardButton(
+                "Paste copied",
+                id="paste-copied",
+                tooltip="Paste text copied within this dashboard into the focused field or connected shell. For desktop clipboard text, use your terminal's paste command.",
+            )
         with Horizontal(id="body"):
             with Vertical(id="sidebar"):
                 yield Label("Registered workspaces")
-                yield DataTable(id="workspaces", cursor_type="row", zebra_stripes=True)
+                yield SelectableDataTable(
+                    id="workspaces", cursor_type="row", zebra_stripes=True
+                )
                 yield Button("Refresh", id="refresh")
             with TabbedContent(id="content", initial="status"):
                 with TabPane("Status", id="status"):
@@ -245,11 +285,11 @@ class DashboardApp(App):
                             id="session-scope",
                         )
                         yield Button("Connect / refresh", id="connect-sessions")
-                    yield Input(
+                    yield ClipboardInput(
                         placeholder="Filter title, ID or native directory",
                         id="session-search",
                     )
-                    yield DataTable(
+                    yield SelectableDataTable(
                         id="session-table", cursor_type="row", zebra_stripes=True
                     )
                     yield Static(
@@ -318,7 +358,7 @@ class DashboardApp(App):
                         id="log-target",
                         markup=False,
                     )
-                    yield RichLog(
+                    yield SelectableRichLog(
                         id="log-output",
                         max_lines=2000,
                         wrap=True,
@@ -674,7 +714,13 @@ class DashboardApp(App):
 
     def on_button_pressed(self, event):
         action = event.button.id
-        if action == "refresh":
+        if action == "copy-selection":
+            self.action_copy_selection(event.button.consume_selection())
+        elif action == "copy-view":
+            self.action_copy_view()
+        elif action == "paste-copied":
+            self.action_paste_copied_text()
+        elif action == "refresh":
             self.action_refresh()
         elif action == "show-logs":
             self.action_logs()
@@ -805,8 +851,16 @@ class DashboardApp(App):
         entries = self.logs.search(
             self.log_query, source=None if source == "all" else source
         )
-        self.query_one("#log-hits", Static).update(f"{len(entries)} matches")
         output = self.query_one("#log-output", RichLog)
+        # Keep a highlighted log snapshot in place while it is being copied.
+        # Collection still updates the bounded in-memory source buffers.
+        if output.text_selection is not None:
+            return
+        self.query_one("#log-hits", Static).update(f"{len(entries)} matches")
+        rendered = tuple(entries)
+        if rendered == self._rendered_logs:
+            return
+        self._rendered_logs = rendered
         output.clear()
         for entry in entries:
             output.write(

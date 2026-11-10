@@ -207,6 +207,16 @@ observations include:
 - A multi-page Sessions table retaining its cursor/selection/scroll during
   background Status/log/storage updates, with explicit manual inventory refresh.
   Fixed demo data must remain clearly synthetic, not a live host measurement.
+- Visible-text selection/copy across diagnostics, table/log rows, the embedded
+  shell and modal reviews/settings, including wide/combining characters and
+  scrolled views. Copy view includes visible control labels without exporting
+  hidden/offscreen data. Selection alone never writes the clipboard; explicit
+  copying depends on actual terminal OSC 52 support/permissions. Check desktop
+  paste and the separately labelled in-app Paste copied control in text fields
+  and a connected shell; preserve ordinary shell Ctrl+C/Ctrl+V, focus, UTF-8/
+  framing/queue bounds, atomic size/capacity rejection, uncertainty-aware
+  partial-transport failure notices, read-only refusals and no clipboard
+  content in journals. Container output must not issue host clipboard writes.
 - Private fixed-category journal creation, permissions and bounded rotation;
   synthetic argv/env/error/prompt/transcript sentinels must not enter generated
   entries. Verify readers do not create files, default log browsing does not
@@ -628,6 +638,15 @@ Optional `--temp-dir /path/to/staging-parent` changes only private temporary
 placement. Both work and staging parents must be outside retained global-vault,
 V1/V2 and backup fixture roots and their descendants, including renamed roots
 with fixture evidence markers. No fixture files/store are moved or removed.
+Choose a **short work-parent path** for interactive TTY tests. Secondary clients
+use the fixture root's `temporary/` directory, even when the owner has a separate
+`--temp-dir`. Podman/conmon creates a filesystem Unix socket there; its complete
+pathname must fit Linux's 107-byte pathname budget (excluding the terminating
+NUL). A deeply nested versioned work parent can allow pipe-based API checks but
+fail TTY exec with a conmon socket-path error. Merely changing the owner's
+`--temp-dir` does not shorten that secondary-client path. Leave any failed
+fixture/evidence in place and create a fresh fixture under a shorter parent;
+never move its graphroot/runroot, rewrite selectors or relabel the failed run.
 The foreground owner prints its fresh exact root and secondary commands;
 wait until its TUI is ready, then use those commands in other host
 terminals. Only the single synthetic `source-a` workspace is allowed:

@@ -76,6 +76,7 @@ def check_archives(directory):
             "activity_log.py",
             "tui.py",
             "tui_app.py",
+            "tui_clipboard.py",
             "tui_backend.py",
             "tui_status.py",
             "tui_settings.py",

@@ -380,6 +380,8 @@ try:
     from textual.app import App, ComposeResult
     from textual.widgets import Button
     from textual import events
+    from textual.geometry import Offset
+    from textual.selection import Selection
 except ImportError:
     App = None
 
@@ -531,6 +533,93 @@ class NativeTerminalTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(line.cell_length, widget.content_size.width)
             self.assertIsNone(widget._color("1000000"))
             self.assertIsNone(widget._color("not-a-color"))
+
+    async def test_visible_output_selection_uses_literal_unicode_not_widget_name(self):
+        app = self.app()
+        async with app.run_test(size=(60, 16)) as pilot:
+            widget = app.terminal
+            with patch.object(app, "copy_to_clipboard") as copy:
+                widget.emulator.feed("界e\u0301 text\x1b]52;c;PRIVATE\a".encode())
+                app.screen.selections = {widget: Selection(Offset(0, 0), Offset(2, 0))}
+                await pilot.pause()
+                # pyte normalizes the combining sequence to its displayed NFC
+                # cell; selection coordinates index that rendered text.
+                self.assertEqual(app.screen.get_selected_text(), "界é")
+                self.assertNotIn("PRIVATE", widget.render_line(0).text)
+                copy.assert_not_called()
+
+    async def test_paste_is_atomic_for_utf8_framing_and_full_queue_limits(self):
+        app = self.app()
+        async with app.run_test(size=(60, 16)) as pilot:
+            widget = app.terminal
+            widget.transport.state = "connected"
+            widget.focus()
+            with (
+                patch.object(widget.transport, "send", return_value=True) as send,
+                patch.object(widget, "notify") as notify,
+            ):
+                for content in (
+                    "x" * (terminal.MAX_INPUT + 1),
+                    "界" * (terminal.MAX_INPUT // 3 + 1),
+                ):
+                    with self.subTest(kind="encoded-limit", length=len(content)):
+                        widget.post_message(events.Paste(content))
+                        await pilot.pause()
+                        send.assert_not_called()
+                        self.assertEqual(
+                            notify.call_args.args[0],
+                            "Paste exceeds the terminal's 64 KiB input limit.",
+                        )
+                widget.emulator.feed(b"\x1b[?2004h")
+                widget.post_message(events.Paste("x" * terminal.MAX_INPUT))
+                await pilot.pause()
+                send.assert_not_called()
+                widget.post_message(events.Paste("x" * (terminal.MAX_INPUT - 12)))
+                await pilot.pause()
+                self.assertEqual(len(send.call_args.args[0]), terminal.MAX_INPUT)
+                send.reset_mock()
+                send.return_value = False
+                widget.post_message(events.Paste("synthetic queue input"))
+                await pilot.pause()
+                send.assert_called_once()
+                self.assertEqual(
+                    notify.call_args.args[0],
+                    "Terminal input is busy; the paste was not queued.",
+                )
+                self.assertEqual(widget.state, "connected")
+
+    async def test_paste_transport_failure_warns_about_partial_delivery(self):
+        app = self.app()
+        callback = Mock()
+        async with app.run_test(size=(60, 16)) as pilot:
+            widget = app.terminal
+            widget.connect(
+                child("import os,time; os.write(1,b'READY'); time.sleep(20)"),
+                {},
+                callback,
+            )
+            widget.focus()
+            await self.until(
+                pilot, lambda: "READY" in widget.emulator.screen.display[0]
+            )
+            with (
+                patch.object(
+                    terminal.os,
+                    "write",
+                    side_effect=[2, BrokenPipeError("PRIVATE_TRANSPORT_DETAIL")],
+                ) as write,
+                patch.object(widget, "notify") as notify,
+            ):
+                widget.post_message(events.Paste("synthetic command"))
+                await pilot.pause()
+                self.assertEqual(write.call_count, 2)
+                self.assertEqual(widget.state, "failed")
+                self.assertEqual(
+                    notify.call_args.args[0],
+                    "Terminal input failed; paste may have been partly sent. Inspect the shell before retrying.",
+                )
+                self.assertNotIn("PRIVATE", notify.call_args.args[0])
+            callback.assert_called_once()
 
 
 if __name__ == "__main__":

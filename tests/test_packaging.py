@@ -59,6 +59,7 @@ class PackagingTests(unittest.TestCase):
                     "activity_log.py",
                     "tui_app.py",
                     "tui_terminal.py",
+                    "tui_clipboard.py",
                     "docs/tui.md",
                     "docs/cli.md",
                     "docs/opencode-2.md",

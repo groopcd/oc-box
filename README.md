@@ -191,6 +191,10 @@ readings from zero. Status/followed-log refresh defaults to one second, with
 on-demand snapshot: background refresh does not reset table scrolling or selection.
 `s` or `F2` opens grouped, **session-only** dashboard settings with Apply, Cancel
 and Reset to defaults; these preferences cannot weaken CLI `--read-only` mode.
+Visible text can be selected and copied, including table/log/terminal output.
+**Copy view** also copies visible control labels. **Paste copied** uses only
+text copied inside this dashboard; use your terminal's normal paste command for
+the desktop clipboard. Clipboard actions are explicit and never journal text.
 Embedded terminals are experimental and reuse the native persistent-session
 shell, not a new container shell. CPU/RAM/storage editing, quotas, resizes and
 storage moves remain deferred; resource settings are informational.

@@ -330,6 +330,22 @@ focused text inputs or the native shell. A focused terminal keeps its keys,
 including `s`, `F2` and `Ctrl+L`; use `Ctrl-]` to detach its client without ending
 the native shell before using dashboard shortcuts.
 
+Drag-select visible diagnostics, table/log rows and terminal output, then use
+**Copy** or `Ctrl+Shift+C` when forwarded by the host terminal. **Copy view**
+copies the visible screen, including control labels; dialogs have clipboard
+controls too. This is visible-viewport copying, not offscreen history export.
+**Paste copied** (`Ctrl+Shift+Insert`) uses only the last text copied inside the
+dashboard and targets the focused text field or connected shell. For the desktop
+clipboard, use the host terminal's paste command, commonly `Ctrl+Shift+V` or
+`Shift+Insert`. Ordinary shell `Ctrl+C` and `Ctrl+V` remain unchanged. Clipboard
+actions cannot weaken read-only mode or start a connection. The dashboard never
+journals clipboard text or creates terminal recordings; explicit copies are
+bounded to 1 MiB. Terminal pastes retain the 64 KiB UTF-8/framing/queue limit:
+size/capacity refusal queues no prefix; transport errors warn that delivery may
+be partial and must be inspected before retrying.
+Host copying requires terminal OSC 52 support/permission; container-originated
+OSC clipboard requests remain blocked. See `docs/tui.md` for clipboard limits.
+
 Status has compact gold Full diagnostics (workspace) and green System
 (OS-reported) panels with aligned single-line RAM, CPU and Home FS meters and
 short fixed 0–100% CPU/RAM histories, not auto-scaled sparklines. Workspace CPU

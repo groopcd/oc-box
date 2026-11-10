@@ -407,6 +407,24 @@ inputs or the native shell.  A focused terminal keeps its keys,
 including ‘s’, ‘F2’ and ‘Ctrl+L’; use ‘Ctrl-]’ to detach its client
 without ending the native shell before using dashboard shortcuts.
 
+Drag-select visible diagnostics, table/log rows and terminal output,
+then use **Copy** or ‘Ctrl+Shift+C’ when forwarded by the host terminal.
+**Copy view** copies the visible screen, including control labels;
+dialogs have clipboard controls too.  This is visible-viewport copying,
+not offscreen history export.  **Paste copied** (‘Ctrl+Shift+Insert’)
+uses only the last text copied inside the dashboard and targets the
+focused text field or connected shell.  For the desktop clipboard, use
+the host terminal's paste command, commonly ‘Ctrl+Shift+V’ or
+‘Shift+Insert’.  Ordinary shell ‘Ctrl+C’ and ‘Ctrl+V’ remain unchanged.
+Clipboard actions cannot weaken read-only mode or start a connection.
+The dashboard never journals clipboard text or creates terminal
+recordings; explicit copies are bounded to 1 MiB. Terminal pastes retain
+the 64 KiB UTF-8/framing/queue limit: size/capacity refusal queues no
+prefix; transport errors warn that delivery may be partial and must be
+inspected before retrying.  Host copying requires terminal OSC 52
+support/permission; container-originated OSC clipboard requests remain
+blocked.  See ‘docs/tui.md’ for clipboard limits.
+
 Status has compact gold Full diagnostics (workspace) and green System
 (OS-reported) panels with aligned single-line RAM, CPU and Home FS
 meters and short fixed 0–100% CPU/RAM histories, not auto-scaled
@@ -2919,20 +2937,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2613
 Node: Commands6118
-Node: Options68288
-Node: Lifecycle and persistence88417
-Node: Distribution images90537
-Node: Sessions and recovery95412
-Node: Devices and host permissions101997
-Node: Resource reports104343
-Node: Configuration and environment106454
-Node: Files117717
-Node: Exit status123661
-Node: Examples124514
-Node: Troubleshooting126600
-Node: Installation and manuals135928
-Node: Authors and license145148
-Node: See also145755
+Node: Options69476
+Node: Lifecycle and persistence89605
+Node: Distribution images91725
+Node: Sessions and recovery96600
+Node: Devices and host permissions103185
+Node: Resource reports105531
+Node: Configuration and environment107642
+Node: Files118905
+Node: Exit status124849
+Node: Examples125702
+Node: Troubleshooting127788
+Node: Installation and manuals137116
+Node: Authors and license146336
+Node: See also146943
 
 End Tag Table
 
