@@ -149,6 +149,31 @@ class SessionSyncTests(unittest.TestCase):
         self.assertEqual(state["missing"], [])
         self.assertEqual(state["last"], "ses_root")
 
+    def test_archived_roots_remain_in_sync_inventory_but_are_not_automatic_resume_targets(
+        self,
+    ):
+        archived = self.session("ses_archived", 100)
+        archived["time"]["archived"] = 101
+        available = self.session("ses_available", 2)
+        child = self.session("ses_child", 200, "ses_available")
+        with patch.object(
+            box, "run", return_value=self.result([archived, available, child])
+        ):
+            state = box.refresh_sessions(self.path, self.data)
+        self.assertEqual(state["last"], "ses_available")
+        self.assertEqual(
+            set(state["sessions"]), {"ses_archived", "ses_available", "ses_child"}
+        )
+        with patch.object(box, "run", return_value=self.result([archived])):
+            state = box.refresh_sessions(self.path, self.data)
+        self.assertIsNone(state["last"])
+        self.assertEqual(state["sessions"], ["ses_archived"])
+        archived["time"]["archived"] = 0
+        with patch.object(box, "run", return_value=self.result([archived])):
+            state = box.refresh_sessions(self.path, self.data)
+        self.assertIsNone(state["last"])
+        self.assertEqual(state["sessions"], ["ses_archived"])
+
     def test_invalid_or_failed_inventory_does_not_change_resume_or_archive_state(self):
         box.atomic_json(
             box.session_file(self.path), {"sessions": ["ses_root"], "last": "ses_root"}

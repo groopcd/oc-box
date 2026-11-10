@@ -38,6 +38,13 @@ RUNTIME_FILES = (
     "sync_config.py",
     "terminal_ui.py",
     "status_report.py",
+    "activity_log.py",
+    "tui.py",
+    "tui_app.py",
+    "tui_backend.py",
+    "tui_logs.py",
+    "tui_sessions.py",
+    "tui_terminal.py",
     "version_info.py",
     "paths.py",
     "workspace_identity.py",
@@ -61,6 +68,7 @@ MANUAL_FILES = (
     "oc-box.info",
     "opencode-2.md",
     "host-plugins.md",
+    "tui.md",
 )
 COMPLETION_FILE = "completions/oc-box"
 
@@ -127,7 +135,47 @@ def optional_crypto_runtime(release):
             )
 
 
-def install(source, home=None, *, with_vault=False):
+def optional_tui_runtime(release):
+    """Explicit optional feature; never install into host Python site packages."""
+    environment = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(release),
+        "LANG": "C.UTF-8",
+        "PYTHONNOUSERSITE": "1",
+        "PIP_REQUIRE_VIRTUALENV": "1",
+        "PIP_CONFIG_FILE": "/dev/null",
+        "PIP_DISABLE_PIP_VERSION_CHECK": "1",
+    }
+    with tempfile.TemporaryDirectory(prefix="oc-box-tui-build-") as temporary:
+        tools = Path(temporary) / "venv"
+        venv.EnvBuilder(with_pip=True).create(tools)
+        result = subprocess.run(
+            [
+                str(tools / "bin/python"),
+                "-m",
+                "pip",
+                "install",
+                "--index-url",
+                "https://pypi.org/simple",
+                "--only-binary=:all:",
+                "--no-cache-dir",
+                "--target",
+                str(release / "tui-deps"),
+                "textual>=8.2.8,<9",
+                "pyte>=0.8.2,<0.9",
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if result.returncode:
+            raise ValueError(
+                "Optional TUI installation failed; no launcher was switched."
+            )
+
+
+def install(source, home=None, *, with_vault=False, with_tui=False):
     source = source_root(source)
     if (source / "distribution.json").is_file():
         raise ValueError(
@@ -201,6 +249,14 @@ def install(source, home=None, *, with_vault=False):
                 atomic_file(
                     release / "vault-support.json", b'{"optional_crypto": true}\n'
                 )
+            if with_tui:
+                try:
+                    optional_tui_runtime(release)
+                except subprocess.TimeoutExpired as exc:
+                    raise ValueError(
+                        "Optional TUI installation timed out; existing installation retained."
+                    ) from exc
+                atomic_file(release / "tui-support.json", b'{"optional_tui": true}\n')
             # Readers/install-info are optional: ship prebuilt manuals.
             man = home / ".local/share/man/man1/oc-box.1"
             info = home / ".local/share/info/oc-box.info"

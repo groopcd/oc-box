@@ -27,6 +27,7 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import time
 from urllib.parse import quote, urlencode
 
 
@@ -35,6 +36,7 @@ MAX_SESSIONS = 100000
 MAX_CURSOR_BYTES = 16384
 MAX_FAVORITES = 10000
 MAX_STATE_BYTES = 4 * 1024 * 1024
+FAVORITES_LOCK_TIMEOUT = 0.25
 PROCESS_LOCAL_WARNING = (
     "Native activity checks cover this server only; another process may change "
     "host sessions between validation and mutation."
@@ -354,7 +356,7 @@ class SessionCatalog:
             "warning": PROCESS_LOCAL_WARNING if ownership == "process-local" else "",
             "token": secrets.token_hex(24),
         }
-        self._previews[preview["token"]] = copy.deepcopy(preview)
+        self._previews = {preview["token"]: copy.deepcopy(preview)}
         return preview
 
     def delete(self, preview):
@@ -376,7 +378,8 @@ class SessionCatalog:
             _fail("snapshot-changed")
         for item in selected:
             self._unchanged(item)
-        self._idle([item["id"] for item in selected])
+        if self._idle([item["id"] for item in selected]) != preview["ownership"]:
+            _fail("snapshot-changed")
         self._validate_binding()
         result = _call(
             self.request, "DELETE", "/api/session/" + quote(preview["id"], safe="")
@@ -539,9 +542,18 @@ class FavoriteStore:
             )
             if not self._private(os.fstat(lock_fd)):
                 _fail("unsafe-favorites-state")
-            fcntl.flock(lock_fd, fcntl.LOCK_EX if write else fcntl.LOCK_SH)
+            deadline = time.monotonic() + FAVORITES_LOCK_TIMEOUT
+            operation = fcntl.LOCK_EX if write else fcntl.LOCK_SH
+            while True:
+                try:
+                    fcntl.flock(lock_fd, operation | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        _fail("favorites-busy")
+                    time.sleep(0.005)
             yield root_fd
-        except (OSError, ValueError, UnicodeError):
+        except (OSError, ValueError, UnicodeError, RecursionError):
             _fail("favorites-state-failed")
         finally:
             if lock_fd is not None:
@@ -564,7 +576,7 @@ class FavoriteStore:
                 _fail("unsafe-favorites-state")
             try:
                 state = json.loads(stream.read(MAX_STATE_BYTES + 1))
-            except (ValueError, UnicodeError):
+            except (ValueError, UnicodeError, RecursionError):
                 _fail("invalid-favorites-state")
         if (
             not isinstance(state, dict)

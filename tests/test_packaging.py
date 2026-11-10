@@ -56,6 +56,10 @@ class PackagingTests(unittest.TestCase):
                     "opencode_compat.py",
                     "opencode_v2_io.py",
                     "workspace_service.py",
+                    "activity_log.py",
+                    "tui_app.py",
+                    "tui_terminal.py",
+                    "docs/tui.md",
                     "docs/cli.md",
                     "docs/opencode-2.md",
                     "docs/oc-box.1",
@@ -69,6 +73,7 @@ class PackagingTests(unittest.TestCase):
                     "tests/test_session_sync.py",
                     "tests/smoke_session_sync_v2.py",
                     "tests/smoke_v2.py",
+                    "tests/smoke_tui_v2.py",
                 )
             ),
         )
@@ -85,7 +90,9 @@ class PackagingTests(unittest.TestCase):
                             "oc_box-1.6.1.dist-info/METADATA",
                             "Name: oc-box\nVersion: 1.6.1\nRequires-Python: >=3.10\n"
                             "License-Expression: GPL-3.0-or-later\n"
-                            'Requires-Dist: cryptography>=44; extra == "vault"\n',
+                            'Requires-Dist: cryptography>=44; extra == "vault"\n'
+                            'Requires-Dist: textual<9,>=8.2.8; extra == "tui"\n'
+                            'Requires-Dist: pyte<0.9,>=0.8.2; extra == "tui"\n',
                         )
                         for name in sorted(wheel_names):
                             if kind != "wheel" or name != omitted:

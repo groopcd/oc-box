@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from oc_box import backups, dependencies, oc_box as box, workspace_service
+from oc_box import backups, dependencies, oc_box as box, tui, workspace_service
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
@@ -65,6 +65,7 @@ class DocumentationTests(unittest.TestCase):
             parser,
             dependencies.parser(),
             workspace_service.web_parser(),
+            tui.parser(),
             box.secrets_parser(),
             box.completion_parser(),
             *(

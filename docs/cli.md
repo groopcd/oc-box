@@ -298,8 +298,9 @@ oc-box tui --workspace WORKSPACE_ID --read-only
 oc-box tui --demo
 ```
 
-Select one existing project/workspace, or omit selectors for the registered
-workspace overview. Browsing does not create/start a workspace, take lifecycle
+Initially select one existing project/workspace, or omit selectors for the registered
+workspace overview. The sidebar still permits switching between registrations.
+Browsing does not create/start a workspace, take lifecycle
 ownership, reset, sync, refresh credentials or unlock the vault. `--read-only`
 disables native session mutation and terminal control/input. `--demo` is a
 synthetic-only preview that also permits execution inside a container: no host
@@ -329,8 +330,12 @@ V2 owner, never the host service. The lease is held until Disconnect or dashboar
 exit and visibly keeps owner shutdown waiting. Favorites live in private UI
 state, not native pins.
 
-Archive/unarchive uses native V2 archive state. Native deletion is recursive,
+Archive/unarchive uses native V2 archive state. Archived V2 roots remain in history
+and synchronization inventories but are not selected by automatic workspace resume;
+when no unarchived root remains, the next normal start creates a new conversation.
+Native deletion is recursive,
 requires a selected verified source/store, descendant review and typed `DELETE`,
+with a 50-entry cascade review limit in this initial dashboard,
 and refuses unknown activity/ownership or active/unconsumed work. Host activity
 checks are process-local and warn about races with other native clients; this is
 not an atomic cross-process transaction. There is no bulk delete or permanent
@@ -350,7 +355,9 @@ run.
 
 The Logs tab defaults to `log/activity.jsonl` under the configured state root,
 with rotations `.1` through `.3`: four files capped at 256 KiB each, private files
-0600/directories 0700. Readers do not create files. Generated entries contain
+0600/log directory 0700. An existing owned, non-group/world-writable state root
+can retain its legacy permissions; it is not automatically chmodded.
+Readers do not create files. Generated entries contain
 fixed categories and allowlisted metadata, never raw argv/environment,
 stdout/stderr, error messages, prompts or transcripts. The UI retains at most
 2000 log entries globally and displays at most 1000 generated-journal entries

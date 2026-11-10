@@ -521,6 +521,17 @@ class NativeTerminalTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(widget.transport.fd)
             callback.assert_called_once_with()
 
+    async def test_out_of_range_truecolor_output_cannot_crash_rich_rendering(self):
+        app = self.app()
+        async with app.run_test(size=(60, 16)):
+            widget = app.terminal
+            widget.emulator.feed(b"\x1b[38;2;256;0;0mX\x1b[48;2;999;0;0mY")
+            line = widget.render_line(0)
+            self.assertTrue(line.text.startswith("XY"))
+            self.assertEqual(line.cell_length, widget.content_size.width)
+            self.assertIsNone(widget._color("1000000"))
+            self.assertIsNone(widget._color("not-a-color"))
+
 
 if __name__ == "__main__":
     unittest.main()

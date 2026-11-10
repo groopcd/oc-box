@@ -150,12 +150,16 @@ def validate_workspace(box, path, data):
         )
 
 
-def client_command(box, data, connection, arguments, *, interactive=False):
+def client_command(
+    box, data, connection, arguments, *, interactive=False, force_tty=False
+):
     """No host pass_env, auth refresh, profiles, or vault unlock on attach."""
     env = box.maintenance_host_env()
     env["OPENCODE_PASSWORD"] = connection["password"]
     command = ["podman", "exec", "-i"]
-    if interactive and sys.stdin.isatty() and sys.stdout.isatty():
+    # An embedded client has its own local PTY even when the dashboard's
+    # Python stdio isn't a TTY (e.g. headless terminal protocol fixtures).
+    if force_tty or (interactive and sys.stdin.isatty() and sys.stdout.isatty()):
         command.append("-t")
     command.extend(
         [

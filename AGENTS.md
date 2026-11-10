@@ -43,6 +43,27 @@ their checkout ownership distinct from unrelated source and flat installations.
 - `sync_config.py`: container-only config refresh with dependency-cache reuse.
 - `terminal_ui.py`: native TUI relay and startup loading indicator.
 - `status_report.py`: read-only host resource and storage reporting.
+- `tui.py` / `tui_app.py` / `tui_backend.py`: optional, host-side Textual manager.
+  Keep ordinary CLI imports stdlib-only, demo strictly synthetic, browsing free
+  of workspace starts/unlocks/sync, and resource values informational. Live
+  CPU/RAM/storage edits are deferred; do not introduce resource-control RPCs.
+  Host session Connect may use normal native host discovery; workspace sources
+  must use an existing private owner, with explicit visible client leases.
+- `tui_sessions.py`: paginated metadata-only catalogs and private UI favorites.
+  Preserve source/store identity, verified controller-archive provenance, native
+  child cascades and process-local activity limits. Archive/delete are explicit,
+  source-specific actions, never bidirectional mirror synchronization. Archived
+  V2 roots remain synchronized but are not automatic resume targets.
+- `tui_terminal.py`: bounded local PTY/emulator for the existing native session
+  terminal client. Require explicit validated attachment and remote exec TTY;
+  do not create a replacement container shell or record terminal output. Local
+  client state is not proof of native readiness/controller ownership. Native
+  and headless checks are not interactive/rootless-Podman acceptance.
+- `activity_log.py` / `tui_logs.py`: private bounded fixed-category activity
+  journal plus explicit in-memory external log views. Never journal raw argv,
+  env, errors, prompts or stdout/stderr. Preserve legitimate owned legacy state
+  permissions while keeping log directories/files private. External-log
+  redaction is best-effort, not a guarantee of arbitrary-secret removal.
 - `dependencies.py`: read-only feature-scoped doctor, OS package providers and
   early preflight guidance. Keep host and workspace-container scopes distinct;
   never install packages automatically from diagnostics.

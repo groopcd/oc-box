@@ -1,4 +1,5 @@
 import copy
+import fcntl
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
@@ -445,6 +446,25 @@ class CatalogTests(unittest.TestCase):
         self.assert_refused("origin-changed", lambda: catalog.archive("ses_root", True))
         self.assertEqual(fixture.mutations(), [])
 
+    def test_final_ownership_downgrade_refuses_after_earlier_quiet_checks(self):
+        fixture = NativeFixture(session())
+        probe = Mock(side_effect=["exclusive", "exclusive", "process-local"])
+        catalog = self.catalog(fixture, ownership=probe)
+        preview = catalog.prepare_delete("ses_root")
+        self.assert_refused("snapshot-changed", lambda: catalog.delete(preview))
+        self.assertEqual(fixture.mutations(), [])
+        self.assertEqual(probe.call_count, 3)
+
+    def test_new_delete_preparation_invalidates_cancelled_preview(self):
+        fixture = NativeFixture(session())
+        catalog = self.catalog(fixture)
+        old = catalog.prepare_delete("ses_root")
+        current = catalog.prepare_delete("ses_root")
+        self.assert_refused("invalid-preview", lambda: catalog.delete(old))
+        self.assertEqual(fixture.mutations(), [])
+        self.assertIsNone(catalog.delete(current))
+        self.assertEqual(fixture.values, {})
+
     def test_managed_archive_children_refuse_without_title_guessing(self):
         fixture = NativeFixture(
             session(), session("ses_child", "/other", parentID="ses_root")
@@ -665,6 +685,7 @@ class FavoriteStoreTests(unittest.TestCase):
         target = self.root / "favorites.json"
         for content in [
             b"broken PRIVATE",
+            b"[" * 2000 + b"]" * 2000,
             b'{"version":1,"favorites":[{"origin":"host","store":"global","id":"ses_root","metadata":"PRIVATE"}]}',
             b'{"version":1,"favorites":[{"origin":"host","store":"global","id":"ses_root"},{"origin":"host","store":"global","id":"ses_root"}]}',
         ]:
@@ -724,6 +745,18 @@ class FavoriteStoreTests(unittest.TestCase):
             {file.name for file in self.root.iterdir()},
             {"favorites.json", "favorites.lock"},
         )
+
+    def test_busy_favorites_lock_refuses_boundedly_without_replacing_state(self):
+        self.store.toggle("host", "global", "ses_root")
+        target = self.root / "favorites.json"
+        before = target.read_bytes()
+        with (self.root / "favorites.lock").open("rb") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch.object(sessions, "FAVORITES_LOCK_TIMEOUT", 0):
+                with self.assertRaises(sessions.CatalogError) as caught:
+                    self.store.list()
+                self.assertEqual(caught.exception.reason, "favorites-busy")
+            self.assertEqual(target.read_bytes(), before)
 
 
 if __name__ == "__main__":

@@ -209,7 +209,7 @@ class ActivityLogTests(unittest.TestCase):
     def test_unsafe_permissions_are_refused_without_repair(self):
         self.seed()
         for path, mode in (
-            (self.root, 0o755),
+            (self.root, 0o775),
             (self.log, 0o750),
             (self.active, 0o644),
             (self.log / "activity.lock", 0o660),
@@ -226,9 +226,19 @@ class ActivityLogTests(unittest.TestCase):
                 finally:
                     path.chmod(original_mode)
         unsafe_root = self.base / "public"
-        unsafe_root.mkdir(mode=0o755)
+        unsafe_root.mkdir(mode=0o775)
+        unsafe_root.chmod(0o775)
         self.assertFalse(journal.record_event("tui.started", root=unsafe_root))
         self.assertFalse((unsafe_root / "log").exists())
+
+    def test_existing_owned_legacy_state_root_is_preserved_with_private_log_child(self):
+        self.root.mkdir(mode=0o755)
+        self.root.chmod(0o755)
+        self.assertTrue(self.record(exit_code=0))
+        self.assertEqual(len(journal.read_events(self.root)), 1)
+        self.assertEqual(stat.S_IMODE(self.root.stat().st_mode), 0o755)
+        self.assertEqual(stat.S_IMODE(self.log.stat().st_mode), 0o700)
+        self.assertEqual(stat.S_IMODE(self.active.stat().st_mode), 0o600)
 
     def test_foreign_ownership_is_refused_without_mutation(self):
         self.seed()

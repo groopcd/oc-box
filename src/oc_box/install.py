@@ -19,8 +19,17 @@ def main(argv=None):
             action="store_true",
             help="install optional cryptography into a private per-release runtime (no system/user-site packages)",
         )
+        parser.add_argument(
+            "--with-tui",
+            action="store_true",
+            help="install optional TUI dependencies into this immutable release's private runtime",
+        )
         args = parser.parse_args(argv)
-        install(Path(__file__).resolve().parent, with_vault=args.with_vault)
+        install(
+            Path(__file__).resolve().parent,
+            with_vault=args.with_vault,
+            with_tui=args.with_tui,
+        )
     except (OSError, ValueError) as exc:
         print(f"oc-box install: {exc}", file=sys.stderr)
         return 1

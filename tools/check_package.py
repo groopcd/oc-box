@@ -36,11 +36,23 @@ def check_archives(directory):
         assert metadata["Requires-Python"] == ">=3.10"
         assert metadata["License-Expression"] == "GPL-3.0-or-later"
         requirements = metadata.get_all("Requires-Dist") or []
-        assert (
-            len(requirements) == 1
-            and requirements[0].startswith("cryptography>=44")
-            and 'extra == "vault"' in requirements[0]
+        assert len(requirements) == 3, requirements
+        assert any(
+            r.startswith("cryptography>=44") and 'extra == "vault"' in r
+            for r in requirements
         ), requirements
+        for dependency, lower, upper in (
+            ("textual", ">=8.2.8", "<9"),
+            ("pyte", ">=0.8.2", "<0.9"),
+        ):
+            assert any(
+                r.startswith(dependency)
+                and lower in r
+                and upper in r
+                and 'extra == "tui"' in r
+                for r in requirements
+            ), requirements
+        assert all("extra ==" in r for r in requirements), requirements
         for name in (
             "oc_box.py",
             "dependencies.py",
@@ -61,6 +73,13 @@ def check_archives(directory):
             "sync_config.py",
             "terminal_ui.py",
             "status_report.py",
+            "activity_log.py",
+            "tui.py",
+            "tui_app.py",
+            "tui_backend.py",
+            "tui_logs.py",
+            "tui_sessions.py",
+            "tui_terminal.py",
             "updater.py",
             "installation.py",
             "version_info.py",
@@ -73,6 +92,7 @@ def check_archives(directory):
             "docs/oc-box.info",
             "docs/opencode-2.md",
             "docs/host-plugins.md",
+            "docs/tui.md",
             "completions/oc-box",
             "build-info.json",
             "distribution.json",
@@ -105,6 +125,10 @@ def check_archives(directory):
             "tests/test_session_terminal.py",
             "tests/test_session_sync.py",
             "tests/smoke_session_sync_v2.py",
+            "tests/smoke_tui_v2.py",
+            "tests/test_tui_app.py",
+            "tests/test_tui_sessions.py",
+            "tests/test_activity_log.py",
             "tests/smoke_v2.py",
             "tests/plugin_bridge_fixture.mjs",
             "tests/copied_plugin_bytes.mjs",
@@ -134,7 +158,7 @@ def check_archives(directory):
     return wheels[0], build
 
 
-def check(directory, *, with_vault=False):
+def check(directory, *, with_vault=False, with_tui=False):
     wheel, build = check_archives(directory)
     version = build["distribution_version"]
     with tempfile.TemporaryDirectory(prefix="oc-box-wheel-check-") as temporary:
@@ -210,6 +234,10 @@ def check(directory, *, with_vault=False):
         assert "secrets" in run(cli, "--help")
         assert "--recipient" in run(cli, "backup", "--help")
         assert "--no-open" in run(cli, "web", "--help")
+        assert "--read-only" in run(cli, "tui", "--help")
+        assert "textual" not in run(
+            python, "-c", "import sys,oc_box.tui; print(' '.join(sys.modules))"
+        )
         assert "--maintenance" in run(cli, "--help")
         assert "--min-passphrase-length" in run(cli, "backup", "--help")
         assert "--identity" in run(cli, "restore", "--help")
@@ -360,6 +388,31 @@ assert 'EXAMPLE_TOKEN' not in os.environ
 print('PASS: installed vault extra encrypts, unlocks, and selects without exposing values to os.environ or disk.')
 """
             print(run(python, "-c", exercise).strip())
+        if with_tui:
+            run(
+                python,
+                "-m",
+                "pip",
+                "install",
+                "--index-url",
+                "https://pypi.org/simple",
+                "--only-binary=:all:",
+                str(wheel.resolve()) + "[tui]",
+            )
+            exercise = """import asyncio
+from oc_box.tui import DemoBackend
+from oc_box.tui_app import DashboardApp
+async def check():
+    app=DashboardApp(DemoBackend(), read_only=True, demo=True)
+    async with app.run_test(size=(80,24)) as pilot:
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        assert len(app.report['workspaces'])==1
+        assert len(app.logs.search('ready'))==1
+asyncio.run(check())
+print('PASS: installed TUI extra renders the synthetic dashboard without Podman or user state.')
+"""
+            print(run(python, "-c", exercise).strip())
     print(
         f"PASS: oc-box {version} wheel/sdist metadata, packaged resources/manuals, isolated CLI, workspace/status tools, and safe package-manager upgrades."
     )
@@ -374,5 +427,14 @@ if __name__ == "__main__":
         action="store_true",
         help="also resolve/test the optional crypto extra inside the temporary venv",
     )
+    parser.add_argument(
+        "--with-tui",
+        action="store_true",
+        help="also resolve/test the optional TUI extra in the temporary venv",
+    )
     arguments = parser.parse_args()
-    check(arguments.distribution_dir, with_vault=arguments.with_vault)
+    check(
+        arguments.distribution_dir,
+        with_vault=arguments.with_vault,
+        with_tui=arguments.with_tui,
+    )

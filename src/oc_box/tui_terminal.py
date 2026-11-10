@@ -630,11 +630,19 @@ if Widget is not None and pyte is not None:
 
         @staticmethod
         def _color(value):
-            if value == "default":
+            if not isinstance(value, str) or value == "default":
                 return None
             if re.fullmatch("[0-9a-fA-F]{6}", value):
                 return "#" + value
             return {
+                "black": "black",
+                "red": "red",
+                "green": "green",
+                "yellow": "yellow",
+                "blue": "blue",
+                "magenta": "magenta",
+                "cyan": "cyan",
+                "white": "white",
                 "brown": "yellow",
                 "brightblack": "bright_black",
                 "brightred": "bright_red",
@@ -644,7 +652,7 @@ if Widget is not None and pyte is not None:
                 "brightmagenta": "bright_magenta",
                 "brightcyan": "bright_cyan",
                 "brightwhite": "bright_white",
-            }.get(value, value)
+            }.get(value)
 
         def render_line(self, y):
             width = self.content_size.width

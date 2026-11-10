@@ -58,6 +58,7 @@ oc-box completion bash
 oc-box web [--project PATH | --workspace ID] [--port N] [--no-open] [--no-vault]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
+oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check | --auto-update on|off]
 oc-box secrets init|list|passwd
 oc-box secrets set|remove NAME
@@ -167,6 +168,31 @@ oc-box terminal --project ~/devel/demo
 The browser uses upstream's short-lived one-use pairing link and opens the same session through the native web app. A host relay binds only @code{127.0.0.1}, forwards HTTP/streaming/WebSocket bytes through Podman exec to container loopback, and does not publish a container port, allow LAN access, or join the host OpenCode service. Links grant access to the workspace service; do not share or log them. @code{--no-open} prints the link without launching a browser. @code{--port} defaults to 0 (choose a free loopback port). Keep the web command open; Ctrl-C closes that relay. Browser commands use a sanitized host environment without provider/vault values; the server retains the owning launch's credential snapshot.
 
 The owner keeps the lifecycle lock and waits for attached terminal/web/TUI clients before final history sync and container stop. Closing one attached client does not stop the others. @code{oc-box stop} from another host terminal stops the whole workspace and disconnects all clients. Backup/reset/purge continue to require the lifecycle lock. Run normal @code{oc-box start --project PATH} to join a running web-owned session with the full TUI. Additional clients accept selectors (and start's @code{--resume}) only; change model/session/configuration when no owner is active. The owning foreground command is needed for web access; closing the browser tab alone does not close its relay or terminate the owner. After the last client exits, V2 final sync waits up to 30 seconds for the same private server's foreground sessions and unconsumed background jobs to settle. An idle persistent shell terminal does not block this wait. Timeout or an invalid activity response leaves history sync pending and returns nonzero; normal cleanup still stops the container, so running work is not promised to continue. This is bounded checking, not an atomic freeze of every possible history producer. @code{--no-vault} is accepted only when web becomes a new V2 owner; an attached web client rejects it and never changes the owner's credential snapshot.
+
+@section tui — experimental workspace manager
+
+Open the optional Textual workspace dashboard, separate from the native OpenCode conversation TUI launched by @code{start}. This is a development-branch feature, not an accepted stable dashboard release; check @code{oc-box tui --help} for availability in the installed build. It requires the optional @code{tui} Python extra or GitHub installer @code{--with-tui}, a regular unprivileged Linux host user, and real TTY input/output. Normal CLI commands retain their stdlib-only baseline.
+
+@example
+oc-box tui
+oc-box tui --project ~/devel/demo
+oc-box tui --workspace WORKSPACE_ID --read-only
+oc-box tui --demo
+@end example
+
+Initially select one existing project/workspace, or omit selectors for the registered workspace overview. The sidebar still permits switching between registrations. Browsing does not create/start a workspace, take lifecycle ownership, reset, sync, refresh credentials or unlock the vault. @code{--read-only} disables native session mutation and terminal control/input. @code{--demo} is a synthetic-only preview that also permits execution inside a container: no host services, actual registry/log access or host/workspace actions.
+
+The five tabs are Status, Settings, Sessions, Terminals and Logs. @code{1}–@code{5} select them; @code{r} refreshes and @code{q} quits outside a focused embedded terminal. The always-visible case-insensitive literal log search remains usable while follow is paused; @code{Ctrl+L} opens Logs and focuses search. A focused terminal receives shell input; @code{Ctrl-]} detaches its client without ending the native shell.
+
+Status batches cheap metrics every five seconds by default, including host CPU/RAM/history, workspace readings, filesystems and mounts. Expensive allocated storage scans require a separate manual action. Settings shows saved/effective limits and dashboard refresh controls, not resource editing. All live CPU/RAM/ storage changes, quotas, resizes and graphroot/runroot moves are deferred to a separate project. Existing explicit CLI @code{reset} remains outside the manager; there is no @code{podman update} action or resource-editing service extension.
+
+The Sessions tab uses manual Connect/refresh. Host global discovery consumes the complete paginated native V2 API across projects, children and archived sessions. Host project views include controller archive associations only where provenance is verified. Explicit host Connect uses normal native CLI discovery and **may start the native host service**, even when session actions are read-only; visiting the tab alone does not. Workspace connections lease only an existing ready private V2 owner, never the host service. The lease is held until Disconnect or dashboard exit and visibly keeps owner shutdown waiting. Favorites live in private UI state, not native pins.
+
+Archive/unarchive uses native V2 archive state. Archived V2 roots remain in history and synchronization inventories but are not selected by automatic workspace resume; when no unarchived root remains, the next normal start creates a new conversation. Native deletion is recursive, requires a selected verified source/store, descendant review and typed @code{DELETE}, with a 50-entry cascade review limit in this initial dashboard, and refuses unknown activity/ownership or active/unconsumed work. Host activity checks are process-local and warn about races with other native clients; this is not an atomic cross-process transaction. There is no bulk delete or permanent mirror suppression. Source and host archive copies are independent, and later normal sync may replace or recreate a managed host copy. Existing V1 launcher commands remain supported; these new live manager APIs are V2-only.
+
+The Terminals tab embeds the existing native persistent-session terminal client through a local PTY and optional @code{pyte} emulator, not a new container shell. Attachment validates the selected source's membership; a foreign session/host archive is not authority for a workspace shell. Create/takeover requires explicit confirmation. Closing the dashboard closes its clients/leases only, not the workspace owner or native persistent PTY. This is not a complete xterm implementation: no mouse, images, complex-grapheme or extended-keyboard support is promised. Actual embedded rendering/input/resize/detach acceptance still needs a new clean-host interactive run.
+
+The Logs tab defaults to @code{log/activity.jsonl} under the configured state root, with rotations @code{.1} through @code{.3}: four files capped at 256 KiB each, private files 0600/log directory 0700. An existing owned, non-group/world-writable state root can retain its legacy permissions; it is not automatically chmodded. Readers do not create files. Generated entries contain fixed categories and allowlisted metadata, never raw argv/environment, stdout/stderr, error messages, prompts or transcripts. The UI retains at most 2000 log entries globally and displays at most 1000 generated-journal entries per refresh. There is no native OpenCode logfile reader in this first stage. Podman logs are a separate explicit opt-in for a selected verified owned container: tail 500 lines, 1 MiB byte cap, 10-second timeout, memory only. Common credential redaction is best-effort, not proof that arbitrary secrets are absent. Source filters/follow controls do not disable search. See @code{docs/tui.md} for design, installation and safety boundaries. Demo/headless/native offline checks are not host acceptance.
 
 @section terminal
 
@@ -471,6 +497,14 @@ Doctor-only, repeatable. Limit the dependency report and exit-status evaluation 
 
 Terminal-only. Open the restricted maintenance shell instead of a live V2 session client. This retains the existing allowlisted environment, no host credential forwarding/unlock, no config/auth refresh, no startup profiles and no persistent shell history. Maintenance holds the exclusive workspace lock; exit the active owner first. Without this flag, terminal joins an active V2 session's actual persistent shell PTY; 1.x continues to use the existing maintenance shell.
 
+@section --read-only
+
+Tui-only. Disable native session mutations and terminal control/input while retaining inspection and refresh. Explicit native host Connect may still start the normal host service; this flag is not an offline/service-free mode. Opening the dashboard itself does not start a workspace or unlock credentials.
+
+@section --demo
+
+Tui-only. Use synthetic data with no host services, real workspace registry or log access, or host/workspace actions. Allows a dashboard preview inside a container; it does not relax the normal manager's host/regular-user/TTY boundary or establish live host acceptance.
+
 @section --port N
 
 Web-only. Select the host-loopback relay port: 0 (default) chooses a free port; explicit ports are 1..65535. Binding failure is reported without replacing an existing listener. The container service's own random loopback port stays private.
@@ -481,7 +515,7 @@ Web-only. Print the native one-use browser pairing link instead of invoking the 
 
 @section --project PATH
 
-Select an existing project directory; relative paths resolve from the host working directory. Quote paths containing spaces. For lifecycle commands the default is the current directory. For status, omission means all workspaces. The project must not be the host home, @code{/}, @code{/home}, the oc-box registry, or a directory containing trusted launcher/state files. Colons, commas, and line breaks in the project path are unsupported because of Podman mount syntax.
+Select an existing project directory; relative paths resolve from the host working directory. Quote paths containing spaces. For lifecycle commands the default is the current directory. For status, omission means all workspaces. For @code{tui}, it narrows the dashboard to an existing project; omit both selectors for the registered workspace overview. @code{tui} accepts only one selector. The project must not be the host home, @code{/}, @code{/home}, the oc-box registry, or a directory containing trusted launcher/state files. Colons, commas, and line breaks in the project path are unsupported because of Podman mount syntax.
 
 @example
 oc-box --project "$HOME/devel/my project"
@@ -935,6 +969,8 @@ Legacy env forwarding can use @code{OPENCODE_AUTH_CONTENT} as a provider-auth ov
 
 @code{~/.local/bin/oc-box} is the launcher. @code{~/.local/share/oc-box/} contains installed Python sources, documentation, LICENSE, NOTICE, and embedded @code{build-info.json}. New installations stage complete versioned copies under @code{releases/} and use a @code{current} symlink plus compatibility pointers for the documented top-level files. The launcher pins a release path so other active launchers keep their code unchanged. Old copies are retained, not automatically deleted. When first switching from an older flat installation, exit old active launchers before reinstalling; only launchers installed with release-path pinning have this concurrent-update guarantee. The source checkout and installation are independent; use @code{upgrade} or reinstall after updates. @code{~/.local/share/man/man1/oc-box.1} and @code{~/.local/share/info/oc-box.info} are the installed manuals. Installation requires no man/Info build tools.
 
+Optional GitHub TUI dependencies are private to each immutable release; they do not replace system Python packages. See Installation and manuals for opt-in flags and the Python-package extra.
+
 @section Host registry and archives
 
 @code{~/.local/state/oc-box/workspaces/ID/workspace.json} holds directory identity, container/volume names, distro, limits, and saved Podman/device settings. Explicit credential policy contains mode and selected names only, never values. Global vault mode does not save an automatic entry-name list. @code{project_identity} retains the last verified device/inode for diagnostics; @code{project_filesystem_identity}, when supported, records @code{linux-file-handle-v1} filesystem ID and opaque persistent directory handle. Driver-provided handles can include generation, dataset/subvolume, or other identifying information; oc-box neither decodes them nor selects a format by filesystem name. The transient mount ID is not recorded. The registry need not share the project's filesystem: no hard links or filesystem-specific utilities are used. @code{sessions.json} (1.x) and @code{sessions-v2.json} (2.x) hold separate session IDs and archive associations. @code{imports/} and @code{imports-v2/} hold private source exports; @code{history/} holds private host archive JSON files. V2 resume state also records missing source IDs without removing their saved archive associations. Archive relationship annotations remain in @code{history/} and host transcript metadata, including private provenance retained by plain purge. @code{lock} serializes mutating commands. These files are outside the project and not mounted into the container. Transcript files may contain private content.
@@ -945,6 +981,10 @@ Plain purge retains verified archive recovery evidence under @code{~/.local/stat
 
 The normal host OpenCode database, usually under @code{~/.local/share/opencode/}, contains archive copies. Old installations may retain one-time relocation backups under @code{~/.local/state/oc-box/migrations/}; these are private data, not workspace resources or release artifacts, and later workspace purge leaves them intact. The original development-only relocation helper is retired.
 
+@section Dashboard state and activity journal
+
+The experimental dashboard keeps favorites as private UI state, not native OpenCode pins. Its generated activity journal is @code{log/activity.jsonl} under @code{OC_BOX_STATE_HOME}, or @code{$XDG_STATE_HOME/oc-box} (default @code{~/.local/state/oc-box/log/activity.jsonl}). It rotates to @code{activity.jsonl.1} through @code{.3}, with four 256 KiB files, files mode 0600 and private directories 0700. Readers do not create files. Generated entries use only fixed categories and allowlisted metadata, not raw argv/environment, native output/errors, prompts or transcripts. Opt-in bounded Podman log content stays in memory and is never written into this journal; best-effort credential redaction is not a guarantee that arbitrary secrets are absent. No native OpenCode logfile reader is added in the first stage.
+
 @section Container data
 
 The home volume is @code{oc-box-home-ID}, mounted at the host user's home pathname. OpenCode data lives under its @code{.local/share/opencode/}. Copied configuration and generated @code{oc-box-profile.json} live under @code{.config/opencode/}. The matching OpenCode executable is @code{/opt/oc-box/runtime/bin/opencode}; Node/npm, Python/uv, Bash, Git, ripgrep, curl, archive tools, and PDF tools are provided by baseline setup. Additional system tools belong to the container OS layer.
@@ -952,7 +992,7 @@ The home volume is @code{oc-box-home-ID}, mounted at the host user's home pathna
 @node Exit status
 @chapter Exit status
 
-@code{0} means successful informational/lifecycle work or normal TUI exit. A TUI launch normally returns OpenCode/Podman's exit code. oc-box validation, backend, setup, and sync failures return @code{1}; a successful TUI followed by failed history sync also returns @code{1} and retains container data. Argument syntax errors return @code{2}. A Python KeyboardInterrupt handled by the launcher returns @code{130}. An exception during final cleanup can also cause a nonzero result.
+@code{0} means successful informational/lifecycle work or normal dashboard exit. A native OpenCode conversation TUI launch normally returns OpenCode/Podman's exit code. oc-box validation, backend, setup, and sync failures return @code{1}; a successful native TUI followed by failed history sync also returns @code{1} and retains container data. Argument syntax errors return @code{2}. A Python KeyboardInterrupt handled by the launcher returns @code{130}. An exception during final cleanup can also cause a nonzero result.
 
 Warnings about host devices/SELinux do not themselves make creation fail. Podman/driver errors still propagate. A nonzero status is not permission to purge data; recover or inspect the existing environment first.
 
@@ -1157,6 +1197,16 @@ On later visits, activate it again or call @code{~/.venvs/oc-box/bin/oc-box} dir
 
 Podman, OpenCode, Linux/cgroup configuration, and device drivers are external host requirements, not Python dependencies. Package installation never creates the curl installer's @code{~/.local/share/oc-box} release tree or a competing global wrapper. pipx/uv expose the package's console entrypoint in their normal bin directory. @code{python -m oc_box} is also available inside the package environment.
 
+For a release containing the experimental Textual manager, install the optional extra instead of the bare package:
+
+@example
+uv tool install 'oc-box[tui]'
+# Or:
+pipx install 'oc-box[tui]'
+@end example
+
+Use @code{'oc-box[tui,vault]'} to request both extras. The initial dashboard ranges are @code{textual>=8.2.8,<9} and @code{pyte>=0.8.2,<0.9}; normal non-TUI commands do not require them. Existing published releases need not include this development feature. Keep optional dependencies in the tool's isolated environment, not system/user-site Python.
+
 Upgrade through the owner of the installation:
 
 @example
@@ -1175,7 +1225,7 @@ man "$VIRTUAL_ENV/share/man/man1/oc-box.1"
 info --file "$VIRTUAL_ENV/share/info/oc-box.info"
 @end example
 
-No source checkout, setuptools, documentation build tools, or third-party Python runtime dependency is required to use an installed wheel. For building or publishing, see CONTRIBUTING.md: GitHub's @code{publish.yml} workflow uses the @code{pypi} environment and PyPI Trusted Publishing without long-lived upload tokens.
+No source checkout, setuptools, documentation build tools, or third-party Python runtime dependency is required for the default CLI in an installed wheel. Vault/TUI features have explicit optional dependencies. For building or publishing, see CONTRIBUTING.md: GitHub's @code{publish.yml} workflow uses the @code{pypi} environment and PyPI Trusted Publishing without long-lived upload tokens.
 
 @section GitHub/curl installations
 
@@ -1192,6 +1242,8 @@ curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/
 # Review install-oc-box.sh, then:
 sh install-oc-box.sh
 @end example
+
+For a reviewed installer containing the experimental dashboard, enable its optional dependencies with @code{sh install.sh --with-tui}, or @code{sh install.sh --with-vault --with-tui} to include vault support. Use the actual downloaded filename (@code{install-oc-box.sh} above). A piped bootstrap accepts @code{sh -s -- --with-tui} or @code{sh -s -- --with-vault --with-tui}. Dependencies are installed privately in the immutable release; no system/user-site pip is used. GitHub updates retain these opt-ins while existing launchers remain pinned to their earlier release. Python-package installations instead use their extras and owning package manager.
 
 The bootstrap clones full history anonymously into a private temporary directory and removes that temporary checkout when finished. It does not configure Git authentication, download credentials, or keep a source checkout in your project. When moving from an older flat installation, exit its active oc-box launchers first; future versioned installations can coexist with already running versions.
 

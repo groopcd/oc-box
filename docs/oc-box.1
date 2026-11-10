@@ -22,6 +22,7 @@ oc\-box completion bash
 oc\-box web [\-\-project PATH | \-\-workspace ID] [\-\-port N] [\-\-no\-open] [\-\-no\-vault]
 oc\-box \-\-status [\-\-project PATH | \-\-workspace ID] [\-\-json]
 oc\-box status [\-\-project PATH | \-\-workspace ID] [\-\-json]
+oc\-box tui [\-\-project PATH | \-\-workspace ID] [\-\-read\-only] [\-\-demo]
 oc\-box upgrade [\-\-check | \-\-auto\-update on|off]
 oc\-box secrets init|list|passwd
 oc\-box secrets set|remove NAME
@@ -133,6 +134,32 @@ oc\-box terminal \-\-project ~/devel/demo
 The browser uses upstream's short\-lived one\-use pairing link and opens the same session through the native web app. A host relay binds only \fB127.0.0.1\fR, forwards HTTP/streaming/WebSocket bytes through Podman exec to container loopback, and does not publish a container port, allow LAN access, or join the host OpenCode service. Links grant access to the workspace service; do not share or log them. \fB\-\-no\-open\fR prints the link without launching a browser. \fB\-\-port\fR defaults to 0 (choose a free loopback port). Keep the web command open; Ctrl\-C closes that relay. Browser commands use a sanitized host environment without provider/vault values; the server retains the owning launch's credential snapshot.
 .PP
 The owner keeps the lifecycle lock and waits for attached terminal/web/TUI clients before final history sync and container stop. Closing one attached client does not stop the others. \fBoc\-box stop\fR from another host terminal stops the whole workspace and disconnects all clients. Backup/reset/purge continue to require the lifecycle lock. Run normal \fBoc\-box start \-\-project PATH\fR to join a running web\-owned session with the full TUI. Additional clients accept selectors (and start's \fB\-\-resume\fR) only; change model/session/configuration when no owner is active. The owning foreground command is needed for web access; closing the browser tab alone does not close its relay or terminate the owner. After the last client exits, V2 final sync waits up to 30 seconds for the same private server's foreground sessions and unconsumed background jobs to settle. An idle persistent shell terminal does not block this wait. Timeout or an invalid activity response leaves history sync pending and returns nonzero; normal cleanup still stops the container, so running work is not promised to continue. This is bounded checking, not an atomic freeze of every possible history producer. \fB\-\-no\-vault\fR is accepted only when web becomes a new V2 owner; an attached web client rejects it and never changes the owner's credential snapshot.
+.SS tui — experimental workspace manager
+.PP
+Open the optional Textual workspace dashboard, separate from the native OpenCode conversation TUI launched by \fBstart\fR\&. This is a development\-branch feature, not an accepted stable dashboard release; check \fBoc\-box tui \-\-help\fR for availability in the installed build. It requires the optional \fBtui\fR Python extra or GitHub installer \fB\-\-with\-tui\fR, a regular unprivileged Linux host user, and real TTY input/output. Normal CLI commands retain their stdlib\-only baseline.
+.PP
+.nf
+.fam C
+oc\-box tui
+oc\-box tui \-\-project ~/devel/demo
+oc\-box tui \-\-workspace WORKSPACE_ID \-\-read\-only
+oc\-box tui \-\-demo
+.fam T
+.fi
+.PP
+Initially select one existing project/workspace, or omit selectors for the registered workspace overview. The sidebar still permits switching between registrations. Browsing does not create/start a workspace, take lifecycle ownership, reset, sync, refresh credentials or unlock the vault. \fB\-\-read\-only\fR disables native session mutation and terminal control/input. \fB\-\-demo\fR is a synthetic\-only preview that also permits execution inside a container: no host services, actual registry/log access or host/workspace actions.
+.PP
+The five tabs are Status, Settings, Sessions, Terminals and Logs. \fB1\fR–\fB5\fR select them; \fBr\fR refreshes and \fBq\fR quits outside a focused embedded terminal. The always\-visible case\-insensitive literal log search remains usable while follow is paused; \fBCtrl+L\fR opens Logs and focuses search. A focused terminal receives shell input; \fBCtrl\-]\fR detaches its client without ending the native shell.
+.PP
+Status batches cheap metrics every five seconds by default, including host CPU/RAM/history, workspace readings, filesystems and mounts. Expensive allocated storage scans require a separate manual action. Settings shows saved/effective limits and dashboard refresh controls, not resource editing. All live CPU/RAM/ storage changes, quotas, resizes and graphroot/runroot moves are deferred to a separate project. Existing explicit CLI \fBreset\fR remains outside the manager; there is no \fBpodman update\fR action or resource\-editing service extension.
+.PP
+The Sessions tab uses manual Connect/refresh. Host global discovery consumes the complete paginated native V2 API across projects, children and archived sessions. Host project views include controller archive associations only where provenance is verified. Explicit host Connect uses normal native CLI discovery and **may start the native host service**, even when session actions are read\-only; visiting the tab alone does not. Workspace connections lease only an existing ready private V2 owner, never the host service. The lease is held until Disconnect or dashboard exit and visibly keeps owner shutdown waiting. Favorites live in private UI state, not native pins.
+.PP
+Archive/unarchive uses native V2 archive state. Archived V2 roots remain in history and synchronization inventories but are not selected by automatic workspace resume; when no unarchived root remains, the next normal start creates a new conversation. Native deletion is recursive, requires a selected verified source/store, descendant review and typed \fBDELETE\fR, with a 50\-entry cascade review limit in this initial dashboard, and refuses unknown activity/ownership or active/unconsumed work. Host activity checks are process\-local and warn about races with other native clients; this is not an atomic cross\-process transaction. There is no bulk delete or permanent mirror suppression. Source and host archive copies are independent, and later normal sync may replace or recreate a managed host copy. Existing V1 launcher commands remain supported; these new live manager APIs are V2\-only.
+.PP
+The Terminals tab embeds the existing native persistent\-session terminal client through a local PTY and optional \fBpyte\fR emulator, not a new container shell. Attachment validates the selected source's membership; a foreign session/host archive is not authority for a workspace shell. Create/takeover requires explicit confirmation. Closing the dashboard closes its clients/leases only, not the workspace owner or native persistent PTY. This is not a complete xterm implementation: no mouse, images, complex\-grapheme or extended\-keyboard support is promised. Actual embedded rendering/input/resize/detach acceptance still needs a new clean\-host interactive run.
+.PP
+The Logs tab defaults to \fBlog/\:activity.jsonl\fR under the configured state root, with rotations \fB\&.1\fR through \fB\&.3\fR: four files capped at 256 KiB each, private files 0600/log directory 0700. An existing owned, non\-group/world\-writable state root can retain its legacy permissions; it is not automatically chmodded. Readers do not create files. Generated entries contain fixed categories and allowlisted metadata, never raw argv/environment, stdout/stderr, error messages, prompts or transcripts. The UI retains at most 2000 log entries globally and displays at most 1000 generated\-journal entries per refresh. There is no native OpenCode logfile reader in this first stage. Podman logs are a separate explicit opt\-in for a selected verified owned container: tail 500 lines, 1 MiB byte cap, 10\-second timeout, memory only. Common credential redaction is best\-effort, not proof that arbitrary secrets are absent. Source filters/follow controls do not disable search. See \fBdocs/\:tui.md\fR for design, installation and safety boundaries. Demo/headless/native offline checks are not host acceptance.
 .SS terminal
 .PP
 On V2, the default connects to the active session's native persistent shell terminal, also shown in OpenCode's TUI/web terminal panel. It can run concurrently with those clients. The currently controlled running PTY is reused (otherwise the last running PTY), or a new session terminal is created when none exists. It uses the session project and the running server's environment. \fBCtrl\-]\fR detaches without ending the shell; reattach to retain shell variables and state. Typing \fBexit\fR ends the shell. Connection takes interactive control and propagates terminal dimensions; TUI/web clients can regain control in their terminal panel. It does not forward new host credentials, refresh config/auth, or take the exclusive lifecycle lock. A ready active V2 owner is required; start \fBoc\-box\fR or \fBoc\-box web\fR first. Exit the attached client to release its lease without stopping other clients. Use \fB\-\-maintenance\fR for the shell described below. On V1 the existing maintenance\-shell default is retained.
@@ -457,6 +484,12 @@ Doctor\-only, repeatable. Limit the dependency report and exit\-status evaluatio
 .SS \-\-maintenance
 .PP
 Terminal\-only. Open the restricted maintenance shell instead of a live V2 session client. This retains the existing allowlisted environment, no host credential forwarding/unlock, no config/auth refresh, no startup profiles and no persistent shell history. Maintenance holds the exclusive workspace lock; exit the active owner first. Without this flag, terminal joins an active V2 session's actual persistent shell PTY; 1.x continues to use the existing maintenance shell.
+.SS \-\-read\-only
+.PP
+Tui\-only. Disable native session mutations and terminal control/input while retaining inspection and refresh. Explicit native host Connect may still start the normal host service; this flag is not an offline/service\-free mode. Opening the dashboard itself does not start a workspace or unlock credentials.
+.SS \-\-demo
+.PP
+Tui\-only. Use synthetic data with no host services, real workspace registry or log access, or host/workspace actions. Allows a dashboard preview inside a container; it does not relax the normal manager's host/regular\-user/TTY boundary or establish live host acceptance.
 .SS \-\-port N
 .PP
 Web\-only. Select the host\-loopback relay port: 0 (default) chooses a free port; explicit ports are 1..65535. Binding failure is reported without replacing an existing listener. The container service's own random loopback port stays private.
@@ -465,7 +498,7 @@ Web\-only. Select the host\-loopback relay port: 0 (default) chooses a free port
 Web\-only. Print the native one\-use browser pairing link instead of invoking the host browser. The foreground relay still runs until Ctrl\-C or workspace stop.
 .SS \-\-project PATH
 .PP
-Select an existing project directory; relative paths resolve from the host working directory. Quote paths containing spaces. For lifecycle commands the default is the current directory. For status, omission means all workspaces. The project must not be the host home, \fB/\:\fR, \fB/\:home\fR, the oc\-box registry, or a directory containing trusted launcher/state files. Colons, commas, and line breaks in the project path are unsupported because of Podman mount syntax.
+Select an existing project directory; relative paths resolve from the host working directory. Quote paths containing spaces. For lifecycle commands the default is the current directory. For status, omission means all workspaces. For \fBtui\fR, it narrows the dashboard to an existing project; omit both selectors for the registered workspace overview. \fBtui\fR accepts only one selector. The project must not be the host home, \fB/\:\fR, \fB/\:home\fR, the oc\-box registry, or a directory containing trusted launcher/state files. Colons, commas, and line breaks in the project path are unsupported because of Podman mount syntax.
 .PP
 .nf
 .fam C
@@ -923,6 +956,8 @@ Legacy env forwarding can use \fBOPENCODE_AUTH_CONTENT\fR as a provider\-auth ov
 .SS Host installation
 .PP
 \fB~/\:.local/\:bin/\:oc\-box\fR is the launcher. \fB~/\:.local/\:share/\:oc\-box/\:\fR contains installed Python sources, documentation, LICENSE, NOTICE, and embedded \fBbuild\-info.json\fR\&. New installations stage complete versioned copies under \fBreleases/\:\fR and use a \fBcurrent\fR symlink plus compatibility pointers for the documented top\-level files. The launcher pins a release path so other active launchers keep their code unchanged. Old copies are retained, not automatically deleted. When first switching from an older flat installation, exit old active launchers before reinstalling; only launchers installed with release\-path pinning have this concurrent\-update guarantee. The source checkout and installation are independent; use \fBupgrade\fR or reinstall after updates. \fB~/\:.local/\:share/\:man/\:man1/\:oc\-box.1\fR and \fB~/\:.local/\:share/\:info/\:oc\-box.info\fR are the installed manuals. Installation requires no man/Info build tools.
+.PP
+Optional GitHub TUI dependencies are private to each immutable release; they do not replace system Python packages. See Installation and manuals for opt\-in flags and the Python\-package extra.
 .SS Host registry and archives
 .PP
 \fB~/\:.local/\:state/\:oc\-box/\:workspaces/\:ID/\:workspace.json\fR holds directory identity, container/volume names, distro, limits, and saved Podman/device settings. Explicit credential policy contains mode and selected names only, never values. Global vault mode does not save an automatic entry\-name list. \fBproject_identity\fR retains the last verified device/inode for diagnostics; \fBproject_filesystem_identity\fR, when supported, records \fBlinux\-file\-handle\-v1\fR filesystem ID and opaque persistent directory handle. Driver\-provided handles can include generation, dataset/subvolume, or other identifying information; oc\-box neither decodes them nor selects a format by filesystem name. The transient mount ID is not recorded. The registry need not share the project's filesystem: no hard links or filesystem\-specific utilities are used. \fBsessions.json\fR (1.x) and \fBsessions\-v2.json\fR (2.x) hold separate session IDs and archive associations. \fBimports/\:\fR and \fBimports\-v2/\:\fR hold private source exports; \fBhistory/\:\fR holds private host archive JSON files. V2 resume state also records missing source IDs without removing their saved archive associations. Archive relationship annotations remain in \fBhistory/\:\fR and host transcript metadata, including private provenance retained by plain purge. \fBlock\fR serializes mutating commands. These files are outside the project and not mounted into the container. Transcript files may contain private content.
@@ -932,12 +967,15 @@ Legacy env forwarding can use \fBOPENCODE_AUTH_CONTENT\fR as a provider\-auth ov
 Plain purge retains verified archive recovery evidence under \fB~/\:.local/\:state/\:oc\-box/\:retired/\:ID/\:\fR, outside the active workspace registry. It contains only minimal ID/project provenance and private \fBhistory/\:\fR JSON files, not container storage, auth, installed dependencies, or the full live database. Keep it while those host archives may need importing; it is private saved data, not a project file or active environment. It has no automatic expiry.
 .PP
 The normal host OpenCode database, usually under \fB~/\:.local/\:share/\:opencode/\:\fR, contains archive copies. Old installations may retain one\-time relocation backups under \fB~/\:.local/\:state/\:oc\-box/\:migrations/\:\fR; these are private data, not workspace resources or release artifacts, and later workspace purge leaves them intact. The original development\-only relocation helper is retired.
+.SS Dashboard state and activity journal
+.PP
+The experimental dashboard keeps favorites as private UI state, not native OpenCode pins. Its generated activity journal is \fBlog/\:activity.jsonl\fR under \fBOC_BOX_STATE_HOME\fR, or \fB$XDG_STATE_HOME/\:oc\-box\fR (default \fB~/\:.local/\:state/\:oc\-box/\:log/\:activity.jsonl\fR). It rotates to \fBactivity.jsonl.1\fR through \fB\&.3\fR, with four 256 KiB files, files mode 0600 and private directories 0700. Readers do not create files. Generated entries use only fixed categories and allowlisted metadata, not raw argv/environment, native output/errors, prompts or transcripts. Opt\-in bounded Podman log content stays in memory and is never written into this journal; best\-effort credential redaction is not a guarantee that arbitrary secrets are absent. No native OpenCode logfile reader is added in the first stage.
 .SS Container data
 .PP
 The home volume is \fBoc\-box\-home\-ID\fR, mounted at the host user's home pathname. OpenCode data lives under its \fB\&.local/\:share/\:opencode/\:\fR\&. Copied configuration and generated \fBoc\-box\-profile.json\fR live under \fB\&.config/\:opencode/\:\fR\&. The matching OpenCode executable is \fB/\:opt/\:oc\-box/\:runtime/\:bin/\:opencode\fR; Node/npm, Python/uv, Bash, Git, ripgrep, curl, archive tools, and PDF tools are provided by baseline setup. Additional system tools belong to the container OS layer.
 .SH EXIT STATUS
 .PP
-\fB0\fR means successful informational/lifecycle work or normal TUI exit. A TUI launch normally returns OpenCode/Podman's exit code. oc\-box validation, backend, setup, and sync failures return \fB1\fR; a successful TUI followed by failed history sync also returns \fB1\fR and retains container data. Argument syntax errors return \fB2\fR\&. A Python KeyboardInterrupt handled by the launcher returns \fB130\fR\&. An exception during final cleanup can also cause a nonzero result.
+\fB0\fR means successful informational/lifecycle work or normal dashboard exit. A native OpenCode conversation TUI launch normally returns OpenCode/Podman's exit code. oc\-box validation, backend, setup, and sync failures return \fB1\fR; a successful native TUI followed by failed history sync also returns \fB1\fR and retains container data. Argument syntax errors return \fB2\fR\&. A Python KeyboardInterrupt handled by the launcher returns \fB130\fR\&. An exception during final cleanup can also cause a nonzero result.
 .PP
 Warnings about host devices/SELinux do not themselves make creation fail. Podman/driver errors still propagate. A nonzero status is not permission to purge data; recover or inspect the existing environment first.
 .SH EXAMPLES
@@ -1156,6 +1194,18 @@ On later visits, activate it again or call \fB~/\:.venvs/\:oc\-box/\:bin/\:oc\-b
 .PP
 Podman, OpenCode, Linux/cgroup configuration, and device drivers are external host requirements, not Python dependencies. Package installation never creates the curl installer's \fB~/\:.local/\:share/\:oc\-box\fR release tree or a competing global wrapper. pipx/uv expose the package's console entrypoint in their normal bin directory. \fBpython \-m oc_box\fR is also available inside the package environment.
 .PP
+For a release containing the experimental Textual manager, install the optional extra instead of the bare package:
+.PP
+.nf
+.fam C
+uv tool install 'oc\-box[tui]'
+# Or:
+pipx install 'oc\-box[tui]'
+.fam T
+.fi
+.PP
+Use \fB\&'oc\-box[tui,vault]'\fR to request both extras. The initial dashboard ranges are \fBtextual>=8.2.8,<9\fR and \fBpyte>=0.8.2,<0.9\fR; normal non\-TUI commands do not require them. Existing published releases need not include this development feature. Keep optional dependencies in the tool's isolated environment, not system/user\-site Python.
+.PP
 Upgrade through the owner of the installation:
 .PP
 .nf
@@ -1178,7 +1228,7 @@ info \-\-file "$VIRTUAL_ENV/share/info/oc\-box.info"
 .fam T
 .fi
 .PP
-No source checkout, setuptools, documentation build tools, or third\-party Python runtime dependency is required to use an installed wheel. For building or publishing, see CONTRIBUTING.md: GitHub's \fBpublish.yml\fR workflow uses the \fBpypi\fR environment and PyPI Trusted Publishing without long\-lived upload tokens.
+No source checkout, setuptools, documentation build tools, or third\-party Python runtime dependency is required for the default CLI in an installed wheel. Vault/TUI features have explicit optional dependencies. For building or publishing, see CONTRIBUTING.md: GitHub's \fBpublish.yml\fR workflow uses the \fBpypi\fR environment and PyPI Trusted Publishing without long\-lived upload tokens.
 .SS GitHub/curl installations
 .PP
 One\-line installation from the public GitHub branch requires curl, Git, and Python 3.10+ already available on the host. It installs oc\-box, not Podman or host OpenCode, and executes the downloaded installer as your user:
@@ -1198,6 +1248,8 @@ curl \-fsSL \-\-proto '=https' \-\-tlsv1.2 https://raw.githubusercontent.com/gro
 sh install\-oc\-box.sh
 .fam T
 .fi
+.PP
+For a reviewed installer containing the experimental dashboard, enable its optional dependencies with \fBsh install.sh \-\-with\-tui\fR, or \fBsh install.sh \-\-with\-vault \-\-with\-tui\fR to include vault support. Use the actual downloaded filename (\fBinstall\-oc\-box.sh\fR above). A piped bootstrap accepts \fBsh \-s \-\- \-\-with\-tui\fR or \fBsh \-s \-\- \-\-with\-vault \-\-with\-tui\fR\&. Dependencies are installed privately in the immutable release; no system/user\-site pip is used. GitHub updates retain these opt\-ins while existing launchers remain pinned to their earlier release. Python\-package installations instead use their extras and owning package manager.
 .PP
 The bootstrap clones full history anonymously into a private temporary directory and removes that temporary checkout when finished. It does not configure Git authentication, download credentials, or keep a source checkout in your project. When moving from an older flat installation, exit its active oc\-box launchers first; future versioned installations can coexist with already running versions.
 .PP

@@ -96,12 +96,16 @@ def _root(root):
     return path
 
 
-def _private_directory(fd):
+def _private_directory(fd, *, state_root=False):
     info = os.fstat(fd)
     if (
         not stat.S_ISDIR(info.st_mode)
         or info.st_uid != os.getuid()
-        or stat.S_IMODE(info.st_mode) != 0o700
+        or (
+            bool(stat.S_IMODE(info.st_mode) & 0o022)
+            if state_root
+            else stat.S_IMODE(info.st_mode) != 0o700
+        )
     ):
         raise ValueError("Unsafe activity directory")
 
@@ -122,7 +126,9 @@ def _log_directory(root, *, create):
             os.close(fd)
             fd = child
         # Ancestors may be public (/tmp, /home); state/log must be private.
-        _private_directory(fd)
+        # Older registrations can have an owned 0755 state root. Preserve it;
+        # the journal itself remains in a strictly private child directory.
+        _private_directory(fd, state_root=True)
         if create:
             try:
                 os.mkdir("log", 0o700, dir_fd=fd)

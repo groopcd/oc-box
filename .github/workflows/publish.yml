@@ -37,7 +37,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends age
           python -m venv "$RUNNER_TEMP/oc-box-build"
-          "$RUNNER_TEMP/oc-box-build/bin/python" -m pip install build twine 'cryptography>=44'
+          "$RUNNER_TEMP/oc-box-build/bin/python" -m pip install build twine 'cryptography>=44' 'textual>=8.2.8,<9' 'pyte>=0.8.2,<0.9'
       - name: Validate source and release version
         env:
           RELEASE_TAG: ${{ github.event.release.tag_name }}

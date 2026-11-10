@@ -175,7 +175,7 @@ def inspect_resource(podman, kind, name, owner, notes, *, size=False):
     return value
 
 
-def collect_workspace(path, data, *, podman, session_state, now):
+def collect_workspace(path, data, *, podman, session_state, now, scan_storage=True):
     notes = []
     state = session_state(path)
     report = {
@@ -205,6 +205,13 @@ def collect_workspace(path, data, *, podman, session_state, now):
             "pids": data.get("pids"),
         },
         "metrics": None,
+        "effective_limits": None,
+        "configured_limits": {
+            "cpu_cores": data.get("cpus"),
+            "memory_bytes": memory_limit(data.get("memory", "")),
+            "pids": data.get("pids"),
+        },
+        "mounts": [],
         "storage": {
             "writable_layer_bytes": None,
             "rootfs_bytes": None,
@@ -229,11 +236,12 @@ def collect_workspace(path, data, *, podman, session_state, now):
     report["project_marker_workspace"] = selected
     report["related_workspace_ids"] = []
     if condition == "present":
-        size, error = directory_bytes(project)
-        report["storage"]["project_bytes"] = size
         report["storage"]["project_filesystem"] = filesystem_usage(project)
-        if error:
-            notes.append("Project: " + error)
+        if scan_storage:
+            size, error = directory_bytes(project)
+            report["storage"]["project_bytes"] = size
+            if error:
+                notes.append("Project: " + error)
     elif condition in ("identity changed", "marker missing"):
         notes.append(
             f"Project {condition}; directory not measured. Exit/stop this workspace and run: oc-box repair --workspace {data['id']}. Do not delete the marker or create a new workspace."
@@ -249,11 +257,30 @@ def collect_workspace(path, data, *, podman, session_state, now):
 
     try:
         info = inspect_resource(
-            podman, "container", data["container"], data["id"], notes, size=True
+            podman,
+            "container",
+            data["container"],
+            data["id"],
+            notes,
+            size=scan_storage,
         )
         if info:
             current = info.get("State", {})
             limits = info.get("HostConfig", {})
+            observed_cpu = number(limits.get("NanoCpus"))
+            if observed_cpu is not None:
+                observed_cpu /= 1e9
+            elif limits.get("CpuQuota") in (0, -1):
+                observed_cpu = 0
+            elif number(limits.get("CpuQuota")) and number(limits.get("CpuPeriod")):
+                observed_cpu = limits["CpuQuota"] / limits["CpuPeriod"]
+            report["effective_limits"] = {
+                "cpu_cores": observed_cpu,
+                "memory_bytes": number(limits.get("Memory")),
+                "pids": 0
+                if limits.get("PidsLimit") == -1
+                else number(limits.get("PidsLimit")),
+            }
             cpu = number(limits.get("NanoCpus"))
             if cpu:
                 report["limits"]["cpu_cores"] = cpu / 1e9
@@ -291,6 +318,19 @@ def collect_workspace(path, data, *, podman, session_state, now):
             )
             report["storage"]["writable_layer_bytes"] = number(info.get("SizeRw"))
             report["storage"]["rootfs_bytes"] = number(info.get("SizeRootFs"))
+            report["mounts"] = [
+                {
+                    key: mount.get(field)
+                    for key, field in (
+                        ("type", "Type"),
+                        ("source", "Source"),
+                        ("destination", "Destination"),
+                        ("writable", "RW"),
+                    )
+                }
+                for mount in info.get("Mounts", [])
+                if isinstance(mount, dict)
+            ]
     except (RuntimeError, ValueError, KeyError, IndexError, TypeError) as exc:
         report["state"] = "unavailable"
         notes.append(str(exc))
@@ -303,22 +343,28 @@ def collect_workspace(path, data, *, podman, session_state, now):
             report["storage"]["private_home_state"] = "present"
             mount = volume.get("Mountpoint")
             if mount:
-                size, error = directory_bytes(mount, private=True)
-                report["storage"]["private_home_bytes"] = size
                 report["storage"]["home_filesystem"] = filesystem_usage(mount)
-                if error:
-                    notes.append("Private home: " + error)
+                if scan_storage:
+                    size, error = directory_bytes(mount, private=True)
+                    report["storage"]["private_home_bytes"] = size
+                    if error:
+                        notes.append("Private home: " + error)
     except (RuntimeError, ValueError, KeyError, IndexError, TypeError) as exc:
         report["storage"]["private_home_state"] = "unavailable"
         notes.append(str(exc))
     return report
 
 
-def collect_reports(workspaces, *, podman, session_state):
+def collect_reports(workspaces, *, podman, session_state, scan_storage=True):
     now = datetime.now(timezone.utc)
     reports = [
         collect_workspace(
-            path, data, podman=podman, session_state=session_state, now=now
+            path,
+            data,
+            podman=podman,
+            session_state=session_state,
+            now=now,
+            scan_storage=scan_storage,
         )
         for path, data in workspaces
     ]

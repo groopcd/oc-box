@@ -3,10 +3,12 @@
 set -eu
 
 main() {
-    if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --with-vault ]; }; then
-        printf '%s\n' 'Usage: sh install.sh [--with-vault]' >&2
-        exit 2
-    fi
+    for option in "$@"; do
+        case "$option" in
+            --with-vault|--with-tui) ;;
+            *) printf '%s\n' 'Usage: sh install.sh [--with-vault] [--with-tui]' >&2; exit 2 ;;
+        esac
+    done
     if [ "$(id -u)" = 0 ]; then
         printf '%s\n' 'Run the oc-box installer as your regular host user, without sudo.' >&2
         exit 1

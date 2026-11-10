@@ -90,6 +90,21 @@ their scoped behavior, not rootless containment, interactive rendering or a
 cross-process delete transaction. V1 launcher/migration regressions remain
 required, without claiming native V1 manager actions.
 
+Run the focused transport-free contracts and actual native CLI fixture separately:
+
+```bash
+uv run --no-project --with-editable '.[tui]' python -B -m unittest discover -s tests -p 'test_tui*.py' -v
+python3 -B tests/smoke_tui_v2.py --opencode /path/to/opencode-v2
+```
+
+The native fixture uses 106 synthetic sessions, including two directories,
+archived roots/children and a real `100 -> 6 -> 0` pagination chain. It checks
+native PATCH/DELETE no-content transport, quiet-store refusals, scoped recursive
+deletion and preservation of independent roots. It does not exercise the host
+dashboard discovery path, real history, inference, Podman or interactive terminal
+rendering. The UI tests also cover bounded favorites locking, malformed colors,
+stale connections, typed deletion, source identity and searchable paused logs.
+
 **Packaging layer.** Verify `oc-box[tui]` in isolated uv/pipx installations and
 GitHub `--with-tui` both alone and with `--with-vault`. Check private per-release
 dependencies, running-release pinning and retained opt-ins on GitHub update;

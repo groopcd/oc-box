@@ -1818,7 +1818,13 @@ def refresh_sessions(path, data):
         for item in values
         if opencode_compat.directory({"info": item}) == container_project(data)
         and valid_session_id(item.get("id"))
-        and (not v2 or not item.get("parentID"))
+        and (
+            not v2
+            or (
+                not item.get("parentID")
+                and item.get("time", {}).get("archived") is None
+            )
+        )
     ]
     roots.sort(
         key=lambda item: (
@@ -2764,6 +2770,7 @@ def parser():
             "status",
             "doctor",
             "completion",
+            "tui",
         ),
         default="start",
     )
@@ -3031,6 +3038,12 @@ def completion_parser():
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "tui":
+        if __package__:
+            from .tui import cli
+        else:
+            from tui import cli
+        return cli(sys.modules[__name__], arguments[1:])
     if arguments and arguments[0] == "completion":
         completion_parser().parse_args(arguments[1:])
         print((APP / "completions/oc-box").read_text(), end="")
@@ -3072,6 +3085,10 @@ def main(argv=None):
         workspace_service.preflight_port(web.port)
     else:
         args = parser().parse_args(argv)
+    if args.command == "tui":
+        raise BoxError(
+            "Use 'oc-box tui' first, followed by its workspace selectors/options; see 'oc-box tui --help'."
+        )
     if args.command == "web" and not hasattr(args, "port"):
         raise BoxError(
             "Use 'oc-box web' first, followed by --project/--workspace/--port/--no-open."
@@ -3592,13 +3609,68 @@ def main(argv=None):
 
 
 def entrypoint():
+    arguments = sys.argv[1:]
+    command = (
+        arguments[0] if arguments and not arguments[0].startswith("-") else "start"
+    )
+    journaled = command in {
+        "start",
+        "stop",
+        "sync",
+        "reset",
+        "repair",
+        "terminal",
+        "web",
+        "tui",
+        "backup",
+        "restore",
+        "purge",
+        "credentials",
+        "secrets",
+        "upgrade",
+    } and not any(
+        arg in arguments
+        for arg in ("--help", "-h", "--version", "--about", "--status", "--demo")
+    )
+    started = time.monotonic()
+
+    def journal(event, code=None):
+        if not journaled:
+            return
+        try:
+            if __package__:
+                from .activity_log import record_event
+            else:
+                from activity_log import record_event
+            record_event(
+                event,
+                command=command,
+                exit_code=code,
+                duration_ms=int((time.monotonic() - started) * 1000),
+                root=state_root(),
+            )
+        except Exception:
+            # Diagnostics must never alter lifecycle results or expose private
+            # errors. No argv/env/native output is sent to the journal.
+            pass
+
+    journal("command.started")
     try:
-        return main()
+        result = main()
     except (BoxError, vault.VaultError, OSError, ValueError) as exc:
         print(f"oc-box: {exc}", file=sys.stderr)
-        return 1
+        result = 1
     except KeyboardInterrupt:
-        return 130
+        result = 130
+    except SystemExit as exc:
+        code = exc.code if type(exc.code) is int else 1
+        journal("command.finished" if code == 0 else "command.failed", code)
+        raise
+    except BaseException:
+        journal("command.failed", 1)
+        raise
+    journal("command.finished" if not result else "command.failed", result or 0)
+    return result
 
 
 if __name__ == "__main__":

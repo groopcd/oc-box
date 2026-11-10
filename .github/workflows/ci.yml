@@ -33,7 +33,7 @@ jobs:
           bash -n completions/oc-box
           shellcheck --shell=bash completions/oc-box
           python -m venv "$RUNNER_TEMP/tests"
-          "$RUNNER_TEMP/tests/bin/python" -m pip install 'cryptography>=44'
+          "$RUNNER_TEMP/tests/bin/python" -m pip install 'cryptography>=44' 'textual>=8.2.8,<9' 'pyte>=0.8.2,<0.9'
           "$RUNNER_TEMP/tests/bin/python" -B -m unittest discover -s tests -v
           python tools/build_docs.py --check
           git diff --check
@@ -43,7 +43,7 @@ jobs:
           "$RUNNER_TEMP/build/bin/python" -m pip install build twine
           "$RUNNER_TEMP/build/bin/python" -m build
           "$RUNNER_TEMP/build/bin/python" -m twine check dist/*
-          python tools/check_package.py dist --with-vault
+          python tools/check_package.py dist --with-vault --with-tui
   opencode-v2:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -65,6 +65,7 @@ jobs:
           export PATH="$RUNNER_TEMP/opencode-v1/node_modules/.bin:$PATH"
           python3 -B tests/smoke_mainline.py
           python3 -B tests/smoke_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_tui_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_host_plugins.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_native_host_port.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -m venv "$RUNNER_TEMP/global-vault-tests"

@@ -120,6 +120,45 @@ class StatusTests(unittest.TestCase):
         self.assertIn("--no-stream", command)
         self.assertEqual(command[-1], self.info["Id"])
 
+    def test_dashboard_fast_sample_avoids_size_walks_and_preserves_saved_limits(self):
+        self.info["HostConfig"]["NanoCpus"] = 2_000_000_000
+        self.info["Config"]["Env"] = ["PRIVATE_VALUE=never-display-this"]
+        self.info["Mounts"] = [
+            {
+                "Type": "bind",
+                "Source": str(self.project),
+                "Destination": "/project",
+                "RW": True,
+                "Secret": "never-display-this",
+            }
+        ]
+        with patch.object(
+            status, "directory_bytes", side_effect=AssertionError("slow scan")
+        ):
+            report = status.collect_reports(
+                [(self.path, self.data)],
+                podman=self.podman,
+                session_state=box.session_state,
+                scan_storage=False,
+            )
+        item = report["workspaces"][0]
+        self.assertEqual(item["limits"]["cpu_cores"], 2)
+        self.assertEqual(item["effective_limits"]["cpu_cores"], 2)
+        self.assertEqual(item["configured_limits"]["cpu_cores"], "4")
+        self.assertIsNone(item["storage"]["project_bytes"])
+        self.assertEqual(item["mounts"][0]["destination"], "/project")
+        self.assertNotIn("never-display-this", json.dumps(report))
+        self.assertFalse(any("--size" in call for call in self.calls))
+
+    def test_missing_effective_fields_do_not_masquerade_as_observed_saved_values(self):
+        self.info["HostConfig"] = {}
+        item = self.collect()["workspaces"][0]
+        self.assertEqual(item["configured_limits"]["cpu_cores"], "4")
+        self.assertEqual(
+            item["effective_limits"],
+            {"cpu_cores": None, "memory_bytes": None, "pids": None},
+        )
+
     def test_stopped_container_has_storage_but_no_live_sample(self):
         self.info["State"].update(
             Running=False, Status="exited", ExitCode=137, OOMKilled=True

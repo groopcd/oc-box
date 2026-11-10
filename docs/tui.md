@@ -87,14 +87,16 @@ oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 ```
 
 Run normal mode on the Linux host as your regular unprivileged user, with real
-TTY input/output. A selector narrows the dashboard to the chosen existing
-project/workspace; without one it offers the registered workspace overview.
+TTY input/output. A selector initially focuses the chosen existing
+project/workspace; the sidebar still permits switching registrations.
+Without one it offers the registered workspace overview.
 Opening the manager does not create an environment or become its lifecycle
 owner. `--read-only` disables session mutation and terminal control/input; it is
 not a promise that an explicitly requested native host connection cannot start
 the native host service.
 
-`--demo` supplies synthetic workspaces, metrics, sessions, terminals, and logs.
+`--demo` supplies synthetic workspace metrics and logs; native session and
+terminal connections are disabled.
 It permits a container preview, but never contacts host services, reads the real
 workspace registry or host logs, or performs host/workspace actions. Synthetic
 entries are not evidence of live connectivity or isolation. Normal mode does
@@ -109,8 +111,9 @@ not gain a container-mode bypass from the existence of demo mode.
 | `Ctrl-]` | Detach the focused session-terminal client |
 
 When terminal input is focused, ordinary keystrokes belong to the shell rather
-than dashboard shortcuts; `Ctrl+L` remains the log-search shortcut. Detach first
-to return to ordinary dashboard navigation.
+than dashboard shortcuts, including the shell's `Ctrl+L`. The always-visible log
+search can still be clicked without ending the shell. Detach with `Ctrl-]` first
+to use `Ctrl+L` and ordinary dashboard keyboard navigation again.
 Closing the dashboard disconnects only its clients and releases their leases;
 it does not directly stop the workspace owner or end its native persistent shell.
 If the owner was already waiting to exit, releasing its final client lease lets

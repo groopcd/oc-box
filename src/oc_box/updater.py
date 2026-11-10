@@ -229,14 +229,14 @@ def upgrade(root, *, check=False):
         current_root = (Path.home() / ".local/share/oc-box/current").resolve()
         extra = (
             ["--with-vault"] if (current_root / "vault-support.json").is_file() else []
-        )
+        ) + (["--with-tui"] if (current_root / "tui-support.json").is_file() else [])
         try:
             subprocess.run(
                 [sys.executable, "-B", str(source / "install.py"), *extra],
                 cwd=work,
                 env=environment,
                 check=True,
-                timeout=240,
+                timeout=480,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise UpdateError(

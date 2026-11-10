@@ -28,6 +28,7 @@ classifiers = [
 
 [project.optional-dependencies]
 vault = ["cryptography>=44"]
+tui = ["textual>=8.2.8,<9", "pyte>=0.8.2,<0.9"]
 
 [project.urls]
 Homepage = "https://github.com/groopcd/oc-box"
