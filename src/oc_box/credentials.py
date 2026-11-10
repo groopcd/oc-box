@@ -7,8 +7,10 @@ not secrets previously copied in OpenCode config/auth, files, or other processes
 import contextlib
 from contextvars import ContextVar
 import os
+from pathlib import Path
 import struct
 import sys
+from types import ModuleType
 
 if __package__:
     from . import opencode_compat, vault
@@ -192,6 +194,55 @@ def _check_global_env_budget(values):
         )
 
 
+def _application_module():
+    """Keep the active launcher's hooks and exception classes, including flat CLI.
+
+    A file name alone is not enough to adopt an arbitrary __main__ module. The
+    sibling launcher must own this credentials module and its entrypoint/error
+    boundary. Ordinary library imports still resolve the canonical application.
+    """
+    expected = Path(__file__).resolve().with_name("oc_box.py")
+
+    def matching(module):
+        if not isinstance(module, ModuleType):
+            return False
+        namespace = vars(module)
+        filename = namespace.get("__file__")
+        if not isinstance(filename, (str, os.PathLike)):
+            return False
+        try:
+            same_file = Path(filename).resolve() == expected
+        except (OSError, ValueError):
+            return False
+        boundary = namespace.get("entrypoint")
+        error = namespace.get("BoxError")
+        return (
+            same_file
+            and namespace.get("PACKAGE") == expected.parent
+            and namespace.get("credentials") is sys.modules.get(__name__)
+            and getattr(boundary, "__globals__", None) is namespace
+            and getattr(boundary, "__module__", None) == module.__name__
+            and isinstance(error, type)
+            and issubclass(error, Exception)
+            and error.__module__ == module.__name__
+            and callable(namespace.get("exec_command"))
+            and callable(namespace.get("container_env"))
+        )
+
+    running = sys.modules.get("__main__")
+    if matching(running):
+        return running
+    if __package__:
+        from . import oc_box as box
+    else:
+        import oc_box as box
+    if not matching(box):
+        raise vault.VaultError(
+            "Cannot resolve the oc-box launcher for credential exec preflight."
+        )
+    return box
+
+
 def _check_exec_budget(data, *, version=None):
     """Conservative launch preflight, not a guarantee about future execs.
 
@@ -222,10 +273,7 @@ def _check_exec_budget(data, *, version=None):
         refuse()
     # Linux bounds each argv/environment string to 32 pages, including NUL.
     per_string = 32 * page_size
-    if __package__:
-        from . import oc_box as box
-    else:
-        import oc_box as box
+    box = _application_module()
     planned = dict(data)
     if version is not None:
         planned["opencode_version"] = version
