@@ -5,11 +5,15 @@ managing native OpenCode 2.x sessions, and attaching to their persistent session
 terminals. It is separate from the native OpenCode conversation TUI opened by
 `oc-box start`; it does not replace that client or add a new chat interface.
 
-**Status: experimental development-branch interface, not a stable-release
-acceptance claim.** The contract below describes the integrated manager target.
+**Status: first-release candidate; host acceptance pending, not published as
+stable.** The embedded terminal remains experimental. The contract below
+describes the integrated manager, not a test-execution report.
 Check `oc-box tui --help` in the installed build for availability; previously
 published packages need not include it. Demo/headless checks and native offline
 fixtures do not establish interactive host or rootless-Podman acceptance.
+The publication decision is **stable after fresh source-pinned host checks**,
+not an early preview. See the [candidate notes](releases/tui-v1.md) for the
+release-summary template and evidence still required.
 
 ## Design and scope
 
@@ -66,6 +70,11 @@ updates, and leave running releases pinned to their original copy. No system or
 user-site pip installation is needed. Normal non-TUI CLI operation retains its
 stdlib-only baseline; the UI dependencies are optional, not prerequisites for
 `start`, `status`, or recovery commands.
+
+These installation examples apply to a release/source revision containing the
+manager; they do not assert availability in the current stable PyPI package.
+For ordinary unrelated projects, use the installed `oc-box tui` normally. The
+self-checkout launch below is specifically for managing oc-box's own source.
 
 The initial UI dependency ranges are `textual>=8.2.8,<9` and
 `pyte>=0.8.2,<0.9`. These are optional dashboard dependencies, not replacements
@@ -254,12 +263,21 @@ Favorites are private dashboard state, keyed by source/store/session identity.
 They are not native OpenCode pins and do not modify native pin APIs or
 transcripts.
 
-Native V2 **archive/unarchive** changes the selected native session's archive
-state; it is not oc-box history export. **Delete** is a guarded native recursive
-deletion: inspect the selected source/store and descendant scope, then type
-`DELETE` to confirm. There is no bulk-delete operation. The manager refuses
-mutations when activity/ownership cannot be established or work is active or
-unconsumed. It does not abort work to make deletion possible.
+Native V2 **archive/unarchive** changes only the selected native session's archive
+state; it is not oc-box history export or a recursive archive operation. Archived
+workspace roots remain in history synchronization but are not automatic resume
+targets. Archive and resume selection therefore need checking separately.
+
+**Delete** is a guarded native recursive deletion. Deleting a parent includes
+its native descendants, even when they are outside the current project filter;
+the preview lists the affected native IDs and directories. Inspect the selected
+source/store and full cascade, then type `DELETE` to confirm. The dashboard
+refuses cascades larger than **50 sessions**, including the selected parent,
+rather than presenting an incomplete review. A managed host archive with native
+children is refused, not treated as an ordinary recursive-delete target.
+There is no bulk-delete operation. The manager refuses mutations when
+activity/ownership cannot be established or work is active or unconsumed. It
+does not abort work to make deletion possible.
 
 Native activity checks describe the connected server process, not all processes
 that might access host history. A process-local connection carries a race
@@ -350,10 +368,10 @@ that display as sensitive; do not share screenshots or terminal recordings
 without your own review. Opting in is not permission to read unrelated
 containers or unlimited historical output.
 
-## Phases and validation gate
+## Stable-release validation gate
 
-This document defines the experimental branch contract, not a completion or
-test-execution report. Integration proceeds in bounded layers:
+This document describes the candidate contract, not a completed host acceptance
+or publication. Its bounded implementation/validation layers are:
 
 1. Transport-free session domain, private favorites and fixed-category logging.
 2. Optional installation, five-tab UI, cheap metrics and synthetic-only demo.
@@ -362,9 +380,15 @@ test-execution report. Integration proceeds in bounded layers:
 5. Clean-candidate host acceptance and review before any stable publication.
 
 Each integrated layer needs behavior-focused tests; declaring a phase does not
-mark it passed. See the [manager test plan](testing.md#experimental-workspace-manager).
+mark it passed. See the [manager test plan](testing.md#experimental-workspace-manager)
+and [publication checklist](../CONTRIBUTING.md#release-gate-and-publication-checklist).
 Keep the tested full commit, clean/dirty state, native executable identities and
 manual observations with the evidence. Existing stable host reports validate
 their own earlier source and scope, not this new dashboard. No resource-editing
 phase is included: CPU/RAM/storage updates, quotas, resizes and store moves remain
 separate work.
+
+Do not advance `master` (the curl/self-update source), create the stable tag or
+publish to PyPI before the new candidate passes the required external-host
+checks and report review. A build artifact, demo, prior native conversation-TUI
+pass or GitHub prerelease is not an alternative to that gate.

@@ -34,6 +34,19 @@ Ignored `.venv`, bytecode and egg-info directories are not source files and
 must not be deleted or moved merely to make this refactor's tree look cleaner.
 Offline src-layout checks do not establish a new live Podman lifecycle pass.
 
+For the optional dashboard, use `--with-editable '.[tui]'` for isolated tests or
+synthetic demo development. To manage **this checkout's own workspace**, build
+and run an isolated non-editable copy instead:
+
+```sh
+uv run --no-project --with '.[tui]' python -I -m oc_box tui
+```
+
+An editable launcher in the project mount is correctly refused by trusted-path
+exposure validation. Do not bypass that guard, replace the marker or reset the
+workspace to make it attach. A normal installed package is appropriate for
+unrelated projects; see the [manager guide](docs/tui.md#launch-and-navigation).
+
 ## Checks
 
 See [the test strategy and audit](docs/testing.md) before adding/removing tests.
@@ -324,8 +337,10 @@ The wheel contains a namespaced `oc_box` package, runtime helper scripts,
 prebuilt manuals, license/notice, and immutable source metadata. V1 legacy env
 and V2 absent-vault env-file compatibility need no third-party runtime Python
 dependencies. Native OpenCode saved/OAuth credential refresh/copy remains
-independent in every mode, whether a vault exists or not. The optional `vault`
-extra adds maintained cryptography for Scrypt/AES-GCM; full CI/security
+independent in every mode, whether a vault exists or not. The optional `tui`
+extra adds Textual/pyte for the dashboard; `oc-box[tui,vault]` enables both
+independent extras. Neither extra is a default CLI dependency. The optional
+`vault` extra adds maintained cryptography for Scrypt/AES-GCM; full CI/security
 tests install that extra in an isolated environment, while plain installs still
 test absent-vault compatibility without crypto. A configured vault must fail
 closed when crypto is missing. GitHub source/curl installations stay
@@ -338,13 +353,15 @@ install is needed):
 ```sh
 uv run --no-project --with build --with twine python -m build
 uv run --no-project --with twine python -m twine check dist/*
-python3 tools/check_package.py dist --with-vault
+python3 tools/check_package.py dist --with-vault --with-tui
 ```
 
 The last check installs only the wheel into a temporary virtual environment,
-tests CLI commands/resources, and ensures package upgrades do not invoke the
-GitHub installer. Standard build produces the wheel from the sdist to verify
-that it works without Git. Do not publish a dirty working tree.
+tests CLI commands/resources plus the requested vault/TUI extras, and ensures
+package upgrades do not invoke the GitHub installer. Plain CLI behavior must
+remain covered without optional dependencies. Standard build produces the wheel
+from the sdist to verify that it works without Git. Do not publish a dirty
+working tree.
 
 PyPI rejects local `+gHASH` version suffixes: the distribution version is
 `1.6.N` from full-history commit count minus `VERSION_BASE_COMMIT_COUNT`, and
@@ -371,10 +388,15 @@ Actions are pinned by commit. The user must create/own the PyPI account and
 configure the matching publisher; pending publishers do not reserve names.
 
 First run the workflow with its `publish` input false to verify a build-only
-run. A published GitHub release named `v1.6.N` (matching `public_version(build)`)
-builds, validates, and publishes to PyPI. Alternatively manually dispatch
-`publish.yml` on a reviewed commit with `publish` true. Environment protection
-rules may require owner approval. Do not publish from untrusted pull requests.
+run, including isolated package checks with `--with-vault --with-tui`. A
+published **stable, non-prerelease** GitHub release named `v1.6.N` (matching
+`public_version(build)`) builds, validates, and publishes to PyPI. The workflow's
+prerelease guard must prevent a GitHub prerelease from automatically uploading
+a regular `1.6.N` package: that version has no Python prerelease suffix and would
+otherwise be a stable PyPI release. A GitHub preview is not permission to bypass
+the stable acceptance gate. Alternatively manually dispatch `publish.yml` on a
+reviewed, accepted commit with `publish` true. Environment protection rules may
+require owner approval. Do not publish from untrusted pull requests.
 The repository's CI builds/verifies packages on Python 3.10 and 3.13; the full
 mainline smoke fixture remains part of local verification with OpenCode.
 
@@ -383,6 +405,9 @@ mainline smoke fixture remains part of local verification with OpenCode.
 GitHub/curl and PyPI are separate distribution channels. `install.sh` and the
 GitHub self-updater fetch `master`, not the latest release tag. Do not advance
 that branch to an unaccepted runtime candidate merely to start release CI.
+For the first Textual manager, the chosen path is **stable after host checks**,
+not a preview. Its [candidate notes](docs/releases/tui-v1.md) are a template,
+not a published release or passing report.
 
 1. Integrate changes on a `feature/**` candidate branch, preserving full history.
    Finish documentation and regenerate the manuals before freezing the commit.
@@ -390,16 +415,23 @@ that branch to an unaccepted runtime candidate merely to start release CI.
    candidate unchanged throughout validation; record its full commit identity.
 2. Require the source/package/native integration workflow to pass, and the
    seven-image distro workflow for package-map changes. Run `publish.yml` with
-   `publish=false` on the candidate as a build-only gate. Neither this workflow
+   `publish=false` on the candidate as a build-only gate, including vault/TUI
+   package verification and the prerelease-publication guard. Neither this workflow
    nor the release-triggered publisher automatically checks other workflows or
    host reports; the release owner must review those gates explicitly.
-3. For history/lifecycle changes, obtain new external-host reports for the
-   focused history/readiness runner, global-vault fixture and V1/V2 lifecycle
+3. For history/lifecycle changes and this first integrated TUI release, obtain
+   new external-host reports for the focused history/readiness runner,
+   global-vault fixture and V1/V2 lifecycle
    fixture on the same clean candidate. Include regression-specific host cases,
    not just the previously accepted baseline. Use only private synthetic state;
    never bypass host-only guards from an oc-box container. Follow the
    [history/readiness handoff](docs/testing.md#focused-historyreadiness-host-runner)
-   and preserve failed attempts separately.
+   and preserve failed attempts separately. The TUI additionally requires the
+   [manager host observations](docs/testing.md#experimental-workspace-manager):
+   actual Textual navigation/settings and embedded PTY behavior, lease cleanup,
+   journal privacy/rotation and opt-in external logs, stable session-table
+   scrolling, native parent deletion and archived-root resume behavior. Earlier
+   native OpenCode conversation-TUI acceptance does not cover this dashboard.
 4. Review the real reports, every required check, native and source identities,
    expected refusals, recovery and secondary failures. Offline rehearsals, old
    reports and a successful build cannot substitute for host acceptance. If any
@@ -416,7 +448,8 @@ that branch to an unaccepted runtime candidate merely to start release CI.
    `python-distributions` artifact and attach its exact wheel and sdist, plus a
    `SHA256SUMS` file, to the GitHub Release.
 7. Download the public PyPI files and compare their hashes with the GitHub assets
-   and checksum file. Re-run `tools/check_package.py DISTDIR --with-vault`, verify
+   and checksum file. Re-run
+   `tools/check_package.py DISTDIR --with-vault --with-tui`, verify
    an isolated installed CLI reports the accepted full `+gHASH` identity, and
    check tag, release and `master` identities. Keep the full commit/count in
    wheel and sdist resources even though the public version has no local suffix.

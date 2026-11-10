@@ -185,21 +185,48 @@ stays available across tabs (`Ctrl+L` opens Logs), including when follow is
 paused. Browsing never starts, resets, syncs, or unlocks a workspace. Native V2
 session connections/actions are explicit; a host Connect may start the native
 host service, while workspace connections lease only an existing private owner.
-Embedded terminals reuse the native persistent-session shell, not a new
-container shell. CPU/RAM/storage editing, quotas, resizes and storage moves are
-deferred to a separate project; Settings is informational apart from UI refresh
-controls.
+Compact aligned meters and fixed-scale CPU/RAM histories distinguish unavailable
+readings from zero. Status/followed-log refresh defaults to one second, with
+1/2/5/10/30/60-second choices and no overlapping queries. Sessions stay an
+on-demand snapshot: background refresh does not reset table scrolling or selection.
+`s` or `F2` opens grouped, **session-only** dashboard settings with Apply, Cancel
+and Reset to defaults; these preferences cannot weaken CLI `--read-only` mode.
+Embedded terminals are experimental and reuse the native persistent-session
+shell, not a new container shell. CPU/RAM/storage editing, quotas, resizes and
+storage moves remain deferred; resource settings are informational.
 
-For builds containing this feature, install `uv tool install 'oc-box[tui]'` or
-`pipx install 'oc-box[tui]'`; a reviewed GitHub installer accepts
-`sh install.sh --with-tui` or `sh install.sh --with-vault --with-tui`. Dependencies
-stay optional and isolated; GitHub updates retain the opt-in in private releases.
-Existing published packages need not yet include the experimental interface.
-Normal mode requires a regular-user host TTY. Synthetic-only `--demo` permits
+For a Python release **containing this feature**, opt in to the dashboard and,
+optionally, the independent vault extra:
+
+```sh
+uv tool install 'oc-box[tui,vault]'
+# Or: pipx install 'oc-box[tui,vault]'
+oc-box tui --read-only
+```
+
+A reviewed GitHub installer containing it accepts `sh install.sh --with-tui` or
+`sh install.sh --with-vault --with-tui` (piped suffix:
+`sh -s -- --with-vault --with-tui`). Dependencies stay optional and isolated;
+GitHub updates retain the opt-in in private releases. These instructions do not
+claim that the currently published stable PyPI package contains the dashboard.
+
+An ordinary installed launcher is appropriate for unrelated projects. To manage
+the **oc-box checkout itself**, run a non-editable isolated package from that
+checkout instead of `--with-editable` launcher code in the mounted project:
+
+```sh
+uv run --no-project --with '.[tui]' python -I -m oc_box tui
+```
+
+Keep the trusted-path validation enabled; see the [self-workspace launch
+explanation](docs/tui.md#launch-and-navigation). Normal mode requires a
+regular-user host TTY. Synthetic-only `--demo` uses fixed sample data and permits
 container preview without host service/registry/log access or actions. Demo and
-offline checks are **not a new interactive/Podman host acceptance pass**. See the
-[manager guide and design](docs/tui.md) for keys, connection/deletion boundaries,
-log privacy and the clean-candidate validation gate.
+offline checks are **not a new interactive/Podman host acceptance pass**.
+The first TUI release is planned as **stable only after fresh, source-pinned
+host checks**, not as a preview workaround. See the [manager guide](docs/tui.md)
+and [candidate release notes](docs/releases/tui-v1.md) for keys, source-specific
+session actions, log privacy and the publication gate.
 
 ### OpenCode 2.x shared clients
 
@@ -248,12 +275,14 @@ export without those superseded assistants and records only their omitted count
 in archive metadata. An unfinished tail, running shell/compaction, or active
 superseded-assistant case stays pending; other sessions can still synchronize.
 
-Stable 1.6.51 passed the earlier history/readiness, global-vault and V1/V2 lifecycle
-host checks. The superseded-assistant correction has unit and native offline
-coverage, including actual V1 process crashes, but needs fresh acceptance on the
-clean integrated candidate before the next stable GitHub/PyPI release. Earlier
-reports do not validate a later source revision. See [test evidence and release
-boundaries](docs/testing.md#v2-session-history-synchronization).
+Stable [v1.6.58](https://github.com/groopcd/oc-box/releases/tag/v1.6.58) records
+reviewed external history/readiness, global-vault and V1/V2 lifecycle reports,
+including the migrated superseded-assistant correction. This is a reconciliation
+with the published release notes, not a fresh review of its raw reports or
+acceptance of the later Textual manager. The new TUI candidate still needs fresh
+host checks on its exact clean source before stable GitHub/PyPI publication.
+Earlier reports do not validate a later revision; see [test evidence and release
+boundaries](docs/testing.md#published-v1658-evidence-reconciliation).
 
 ### Bash completion
 

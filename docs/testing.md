@@ -31,11 +31,12 @@ not a deprecated feature that can be removed from the regression suite.
 ### Experimental workspace manager
 
 The [Textual manager](tui.md) adds a separate validation surface from the native
-OpenCode conversation TUI. Its development-branch contract is **not a stable
-host-acceptance claim**. The checks below are requirements, not a record that
-they were executed or passed. Demo, headless behavior, real native APIs and
-operator-observed Podman/terminal behavior provide different evidence; none may
-be substituted for the next layer.
+OpenCode conversation TUI. Its first-release candidate is **not a published
+stable build or host-acceptance claim**. The decision is stable after fresh
+source-pinned host checks, not a preview release. The checks below are
+requirements, not a record that they were executed or passed. Demo, headless
+behavior, real native APIs and operator-observed Podman/terminal behavior
+provide different evidence; none may be substituted for the next layer.
 
 **Stdlib unit/contract layer.** Keep normal non-TUI imports and commands usable
 without Textual/pyte. Cover CLI selectors, optional-dependency diagnostics,
@@ -44,9 +45,10 @@ isolation. `tests/test_tui_sessions.py` exercises the transport-free session
 domain; keep that separate from proof of actual native API behavior. Required
 cases include complete pagination across projects/children/archives, invalid or
 partial inventories, verified controller-archive mapping, identity-bound private
-favorites, recursive deletion scope and typed confirmation, active/unconsumed or
-unknown-activity refusal, process-local race warnings and independent source/copy
-effects. No inferred V1 archive API or permanent mirror suppression is allowed.
+favorites, recursive deletion scope and typed confirmation, the 50-session
+dashboard cascade-review limit, active/unconsumed or unknown-activity refusal,
+process-local race warnings and independent source/copy effects. No inferred V1
+archive API or permanent mirror suppression is allowed.
 
 Generated activity-journal tests must check private ownership/modes, unsafe-path
 refusals, fixed categories/allowlisted metadata, four 256 KiB files at
@@ -86,14 +88,23 @@ Exercise quick monitoring controls, Open all settings and `s`/`F2`, categorized
 Monitoring, Display, Sessions, Logs, Resources and Safety/terminals topics, built-in
 Textual themes and details visibility. Esc/Cancel must discard pending edits;
 Apply must accept only allowlisted session-only preferences without persistence
-or journal writes. Session scope/filter changes must not connect or refresh
-native inventories; log source changes must preserve explicit opt-in guards.
+or journal writes. Reset to defaults must stage the full factory preference set
+without changing active values until Apply; Cancel/Esc must discard that staged
+reset without altering history, favorites or retained logs. Session scope/filter
+changes must not connect or refresh native inventories; log source changes must
+preserve explicit opt-in guards.
 Log search must never persist or enter the journal. Resources and CLI-mode safety
 information stay read-only, and no preference may weaken `--read-only` or change
 OpenCode `cli.json`/host settings. Settings shortcuts must not steal focused text
 input or native-shell keys, including `s` and `F2`; detach with `Ctrl-]` before
 dashboard shortcuts. Keep log search available from every tab without stealing
 native terminal focus on refresh.
+
+Background Status/log/storage updates must leave Sessions rows, selection,
+cursor and scroll position unchanged. Check this with enough rows to scroll,
+not only a single-page table. Inventories update only on explicit Connect/manual
+refresh or relevant on-demand filters/actions; a static snapshot is not a live
+subscription. Demo refresh must keep its fixed synthetic readings unchanged.
 
 Demo must use synthetic data without real services/registry/log reads or actions;
 instrument those boundaries to fail if touched. There must be no implicit
@@ -120,6 +131,13 @@ their scoped behavior, not rootless containment, interactive rendering or a
 cross-process delete transaction. V1 launcher/migration regressions remain
 required, without claiming native V1 manager actions.
 
+Keep native parent cascades distinct from archive provenance relationships:
+delete previews include native descendants across project filters, while a
+managed host copy with native children refuses deletion. Running PTYs, even idle
+shells, must block deletion without being killed. Archive changes only the
+selected native object; archived workspace roots remain synchronized but must
+not become automatic resume targets.
+
 Run the focused transport-free contracts and actual native CLI fixture separately:
 
 ```bash
@@ -142,6 +160,11 @@ never install packages into system/user-site Python. Default wheel/CLI tests
 must still run without the optional UI dependencies. Test help/argument handling
 and normal CLI compatibility in those environments, not just imported metadata.
 
+The build-only publication gate must check `--with-vault --with-tui`. Preserve
+the workflow guard preventing a GitHub prerelease from automatically uploading
+the ordinary stable `1.6.N` version to PyPI; manual `publish=true` is an explicit
+publication path, not a bypass of acceptance/review.
+
 **New clean-host gate before stable publication.** Freeze the fully integrated
 candidate and record its full commit, clean state, native executable identities,
 dependency versions and exact test scope. Use a regular unprivileged host TTY,
@@ -157,7 +180,8 @@ observations include:
   best-effort slow-query behavior, and explicit bounded storage/log reads.
 - Quick monitoring controls and categorized settings via the button and `s`/`F2`,
   including with no workspace selected. Check Esc/Cancel discard, session-only
-  Apply, theme/details display, no automatic session connection, unchanged host/
+  Apply, staged Reset to defaults followed by both Cancel and Apply,
+  theme/details display, no automatic session connection, unchanged host/
   OpenCode settings and no settings/search journal entries. Read-only mode cannot
   be weakened; there is no resource mutation path.
 - No default service start; explicit native host Connect with its start warning;
@@ -175,12 +199,33 @@ observations include:
   terminal focus, and settings shortcuts must leave focused text inputs alone.
 - Guarded native V2 session archive/unarchive and recursive-delete refusal/
   confirmation on disposable sessions only; preserve process-local race warnings
-  instead of claiming cross-process exclusivity.
+  instead of claiming cross-process exclusivity. Check complete parent cascades
+  across project filters, the 50-session review ceiling, managed-copy child
+  refusal and running/idle-PTY deletion refusal. Verify an archived workspace
+  root still syncs, is excluded from automatic resume, and remains available
+  for an intentional unarchive. Keep independent workspace/host copies intact.
+- A multi-page Sessions table retaining its cursor/selection/scroll during
+  background Status/log/storage updates, with explicit manual inventory refresh.
+  Fixed demo data must remain clearly synthetic, not a live host measurement.
+- Private fixed-category journal creation, permissions and bounded rotation;
+  synthetic argv/env/error/prompt/transcript sentinels must not enter generated
+  entries. Verify readers do not create files, default log browsing does not
+  fetch container output, and opt-in Podman logs stay owned, bounded and
+  memory-only. Known-pattern redaction is not a guarantee of secret removal.
+- An isolated non-editable launcher for managing oc-box's own synthetic checkout;
+  an exposed editable launcher must still refuse rather than bypass APP/state
+  trusted-path validation. Ordinary installed launchers for unrelated projects
+  must continue to work.
 
-Repeat relevant existing lifecycle/history/readiness/backup acceptance on that
-same clean integrated candidate where affected. Keep reports source-bound,
-retain failed evidence and encrypted artifacts, and record operator observations
-separately rather than self-certifying them from scripts. Earlier stable host
+For this first integrated manager release, repeat all three current host
+fixtures—`tools/test_session_sync_podman.py`,
+`tools/test_global_vault_podman.py` and `tools/test_v2_podman.py`—on that same
+clean candidate, in addition to the Textual/journal/archive-resume observations.
+Use the [source-pinned handoff](#next-migrated-history-release-candidate) below
+and the [publication checklist](../CONTRIBUTING.md#release-gate-and-publication-checklist).
+Repeat other relevant backup/ownership checks where affected. Keep reports
+source-bound, retain failed evidence and encrypted artifacts, and record operator
+observations separately rather than self-certifying them from scripts. Earlier stable host
 reports and the old native terminal pass retain their original scope; they do
 not validate the new dashboard, embedding or journal. No new host pass or stable
 publication is recorded by adding this plan.
@@ -322,11 +367,14 @@ rehearsal is not host acceptance.
 
 ### Next migrated-history release candidate
 
-Published `v1.6.51` remains unchanged. Its accepted host reports predate the
-superseded-assistant correction; the correction's native/offline pass is not new
-host acceptance. Freeze a clean candidate containing the runtime fix, regression
-fixtures and documentation, then run all three host fixtures on that exact
-revision before the next stable GitHub/PyPI publication.
+**Historical handoff, reusable for a new candidate.** Published `v1.6.51` remains
+unchanged and its accepted reports predate the superseded-assistant correction.
+The later [v1.6.58 release record](#published-v1658-evidence-reconciliation)
+reports all three host fixtures, including that correction, on its exact source.
+That reconciliation does not accept a later TUI revision. Freeze a clean new
+candidate containing runtime, regression fixtures and final documentation, then
+run all three fixtures on that exact revision before the first stable TUI
+GitHub/PyPI publication; add the manager-specific observations above.
 
 The focused V2 runner retains its original 27 checks and adds six pending-shell
 checks: all **33** must pass, including same-pass progress on both sides of a
@@ -404,6 +452,35 @@ After acceptance, follow the
 fast-forward the accepted commit without changing its identity, publish the
 matching GitHub Release/PyPI version, and compare the public artifacts' hashes.
 No new host pass or release is recorded by preparing this handoff.
+
+### Published v1.6.58 evidence reconciliation
+
+The public [v1.6.58 release notes](https://github.com/groopcd/oc-box/releases/tag/v1.6.58),
+published **2026-11-09**, record stable source
+`3138a8727c3638983a8b9d19b1cb93a83d94a027`, absolute commit count **87**, version
+**1.6.58+g3138a87**. The entries below reconcile this document's older pending
+migrated-history handoff with that publication. They are **reported by the
+published release**, not inferred from a tag existing, and the raw external
+reports were **not re-reviewed in this documentation session**.
+
+| Scope | Recorded by the published release |
+| --- | --- |
+| Focused history/readiness | Reviewed external report: all 33 checks true, no failures. |
+| Global vault | Reviewed external report: all 13 stages passed. |
+| V1/V2 lifecycle and migrated history | Reviewed external report: six stages, nine superseded-history checks and 18 synthetic provider requests. |
+| Exact-source automated gates | Source CI, seven distro images and the build-only package gate passed. |
+
+These are source-bound scripted synthetic host scopes. They do not establish
+Textual navigation/settings, embedded dashboard rendering/input, new journal/log
+behavior, real-provider inference, real-project restore, network containment or
+security certification. They do not make an older native OpenCode conversation
+TUI observation into a Textual-manager pass. The current TUI candidate still
+needs fresh external-host acceptance on its final clean commit; no new candidate
+CI success, host run or publication is claimed here.
+
+Keep the earlier reviewed reports below, runner/oracle failures, exact source
+identities and all retained evidence unchanged. A later successful release record
+does not convert a failed attempt into a pass.
 
 ### Reviewed host reports — 2026-11-09
 
