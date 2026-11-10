@@ -214,10 +214,9 @@ def source_snapshot(source, expected):
             if name
             and (
                 name.startswith((b"src/", b"tools/"))
-                or (
-                    b"/" not in name
-                    and name.endswith((b".py", b".pyc", b".pyo", b".so"))
-                )
+                # Tracked donors may temporarily install their checkout root.
+                # Cover packages/namespace descendants there, not only tools.py.
+                or name.endswith((b".py", b".pyc", b".pyo", b".so"))
             )
         ),
         "clean-source-required",
@@ -336,6 +335,11 @@ def load_source(source, expected):
     terminal_ui = importlib.import_module("oc_box.terminal_ui")
     fixture = importlib.import_module("tools.test_global_vault_podman")
     box = fixture.box
+    # Do not retain root paths that a tracked donor installed while importing.
+    sys.path[:] = [
+        str(source / "src"),
+        *(entry for entry in sys.path if entry not in candidate_paths),
+    ]
     import_guard(source, initial["sha256"])
     require(box.PACKAGE.resolve() == source / "src/oc_box", "source-shadowing")
     require(source_snapshot(source, expected) == initial, "source-changed")

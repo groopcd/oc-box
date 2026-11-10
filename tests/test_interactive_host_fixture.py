@@ -1765,6 +1765,25 @@ except BaseException as error:
         self.assertEqual(result["tools_paths"], [str(self.source / "tools")])
         self.assertFalse(result["root_on_path"])
 
+    def test_ignored_root_package_cannot_execute_through_tracked_donor_root_path(self):
+        # A tracked donor may install its checkout root while initializing, as
+        # the retained global helper does. Its whole allowed import root must
+        # already be checked, not only root-level module files or src/tools.
+        helper = self.source / "tools/test_global_vault_podman.py"
+        helper.write_text(
+            "import sys\nfrom pathlib import Path\n"
+            "sys.path.insert(0, str(Path(__file__).resolve().parents[1]))\n"
+            "import ignored_namespace\n" + helper.read_text()
+        )
+        self.git("add", "tools/test_global_vault_podman.py")
+        self.git("commit", "-qm", "synthetic tracked donor import root")
+        self.commit = self.git("rev-parse", "HEAD").strip()
+        self.ignored("ignored_namespace/__init__.py", self.shadow_payload())
+        result = self.child()
+        self.assertFalse(self.stale.exists(), "ignored root package executed")
+        self.assertFalse(self.marker.exists())
+        self.assertEqual(result["category"], "clean-source-required")
+
     def test_ignored_source_root_shadow_modules_are_not_allowed_import_roots(self):
         for relative in (
             "argparse.py",
