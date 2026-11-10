@@ -315,6 +315,100 @@ class V1ArchiveSyncTests(unittest.TestCase):
             box.session_state(self.path)["host_sessions"]["ses_source"], self.ident
         )
 
+    def cached_archive_fixture(self, damage):
+        unchanged = copy.deepcopy(self.source)
+        self.sync_fixture()
+        self.source = unchanged
+        archived = self.target.read_bytes()
+        checkpoint = box.session_file(self.path).read_bytes()
+        if damage == "missing":
+            self.target.unlink()
+        else:
+            self.target.write_bytes(b"corrupt private recovery copy")
+        return archived, checkpoint
+
+    def test_cached_success_restores_missing_and_corrupt_private_archives(self):
+        for damage in ("missing", "corrupt"):
+            for receipt in (False, True):
+                with self.subTest(target=damage, receipt=receipt):
+                    archived, checkpoint = self.cached_archive_fixture(damage)
+                    source_before = copy.deepcopy(self.source)
+                    host_before = copy.deepcopy(self.host)
+                    associations = copy.deepcopy(
+                        box.session_state(self.path)["host_sessions"]
+                    )
+                    if receipt:
+                        box.atomic_json(
+                            self.journal,
+                            {
+                                "version": 1,
+                                "workspace": self.data["id"],
+                                "source": "ses_source",
+                                "archive": self.ident,
+                                "digest": hashlib.sha256(archived).hexdigest(),
+                            },
+                        )
+                    self.sync()
+                    self.assertEqual(self.target.read_bytes(), archived)
+                    self.assertEqual(self.target.stat().st_mode & 0o777, 0o600)
+                    self.assertTrue(any("export" in command for command in self.calls))
+                    self.assertFalse(
+                        any(
+                            "import" in command or "delete" in command
+                            for command in self.calls
+                        )
+                    )
+                    self.assertEqual(
+                        box.session_file(self.path).read_bytes(), checkpoint
+                    )
+                    self.assertEqual(
+                        box.session_state(self.path)["host_sessions"], associations
+                    )
+                    self.assertEqual(self.source, source_before)
+                    self.assertEqual(self.host, host_before)
+                    self.assertFalse(self.journal.exists())
+                    self.assertEqual(
+                        list(self.target.parent.glob(".pending-*.json")), []
+                    )
+
+    def test_cached_recovery_copy_is_not_replaced_after_host_or_journal_refusal(self):
+        for damage in ("missing", "corrupt"):
+            for refusal in ("host", "journal"):
+                with self.subTest(target=damage, refusal=refusal):
+                    _, checkpoint = self.cached_archive_fixture(damage)
+                    if refusal == "host":
+                        self.host["messages"][0]["parts"][0]["text"] = (
+                            "unexpected host content"
+                        )
+                    else:
+                        box.atomic_json(self.journal, {"invalid": "recovery record"})
+                    target_before = (
+                        self.target.read_bytes() if self.target.exists() else None
+                    )
+                    host_before = copy.deepcopy(self.host)
+                    source_before = copy.deepcopy(self.source)
+                    with self.assertRaises(box.BoxError):
+                        self.sync()
+                    self.assertEqual(
+                        self.target.read_bytes() if self.target.exists() else None,
+                        target_before,
+                    )
+                    self.assertEqual(
+                        box.session_file(self.path).read_bytes(), checkpoint
+                    )
+                    self.assertEqual(self.host, host_before)
+                    self.assertEqual(self.source, source_before)
+                    self.assertFalse(
+                        any(
+                            "import" in command or "delete" in command
+                            for command in self.calls
+                        )
+                    )
+                    if refusal == "journal":
+                        self.assertEqual(
+                            box.read_json(self.journal), {"invalid": "recovery record"}
+                        )
+
     def test_unmatched_or_corrupt_replacement_evidence_never_authorizes_retry(self):
         for field in (
             "workspace",

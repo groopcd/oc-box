@@ -2523,6 +2523,9 @@ def sync_sessions(path, data):
                     journal, _ = v1_replacement_record(
                         path, data, ident, archived["info"]["id"], digest
                     )
+                    # The cache describes verified content, not the current
+                    # health of the private recovery copy. Restore it too.
+                    candidate.replace(target)
                     journal.unlink(missing_ok=True)
                 continue
             journal = None
