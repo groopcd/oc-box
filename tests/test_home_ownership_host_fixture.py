@@ -17,9 +17,23 @@ import unittest
 from unittest.mock import patch
 
 from oc_box import backup_crypto as crypto, backups, oc_box as box
+from tools import acceptance_guards, test_global_vault_podman as fixture
+from tools import test_interactive_podman as interactive
 from tools import test_home_ownership_podman as probe
 
-fixture = probe.global_fixture
+# Unit-only dependency binding; real authentication/late imports are tested in
+# fresh children by EntryBootstrapTests and the final clean-checkout probes.
+probe.global_fixture, probe.interactive, probe.guards = (
+    fixture,
+    interactive,
+    acceptance_guards,
+)
+probe.crypto, probe.backups, probe.box = crypto, backups, box
+interactive.fixture, interactive.box, interactive.guards = (
+    fixture,
+    box,
+    acceptance_guards,
+)
 REAL_PIPELINE = crypto.stream_pipeline
 REAL_SOURCE_SNAPSHOT = probe.source_snapshot
 
@@ -79,6 +93,12 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
             },
             "audited_sha256": {"synthetic.py": "a" * 64},
         }
+        self.enter(
+            patch.object(probe, "load_source", return_value=self.current["identity"])
+        )
+        self.enter(
+            patch.object(probe, "host_guard", side_effect=lambda: fixture.host_guard())
+        )
         self.enter(probe.invocation_source(self.current))
         self.enter(patch.object(probe, "source_snapshot", return_value=self.current))
         self.purpose = probe.write_purpose(self.root, self.current)
@@ -682,6 +702,7 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
                 probe.execute(self.root, "run", later, failed_operation), 1
             )
             self.assertIs(probe.INVOCATION_SOURCE.get(), self.current)
+
             with patch.object(
                 fixture, "write_json_new", side_effect=OSError("private report detail")
             ):
@@ -690,6 +711,31 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
             with probe.lifecycle(self.root), self.assertRaises(fixture.FixtureError):
                 probe.execute(self.root, "run", later, lambda: {})
             self.assertIs(probe.INVOCATION_SOURCE.get(), self.current)
+
+    def test_verified_bootstrap_source_errors_refuse_with_fixed_categories(self):
+        for value in ("source-changed", "synthetic-private-source-detail"):
+            with (
+                self.subTest(
+                    value_kind="known" if value == "source-changed" else "unknown"
+                ),
+                patch.object(
+                    probe,
+                    "source_snapshot",
+                    side_effect=interactive.BootstrapError(value),
+                ),
+            ):
+                with self.assertRaisesRegex(fixture.FixtureError, "^source-changed$"):
+                    probe.same_source(self.current)
+                self.assertNotEqual(
+                    probe.category(interactive.BootstrapError(value)),
+                    "synthetic-private-source-detail",
+                )
+        self.assertEqual(
+            probe.category(interactive.BootstrapError("source-changed")),
+            "source-changed",
+        )
+        self.box_run.assert_not_called()
+        self.command.assert_not_called()
 
     def test_docs_only_cleanup_checks_current_invocation_not_original_run_source(self):
         later = copy.deepcopy(self.current)

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Fresh-only HOST global-vault edge acceptance, without provider inference.
 
-  python3 -B tools/test_global_vault_edges_podman.py \
-      --work-dir /path/to/fixtures --opencode-v2 /path/to/opencode-2.2.6
+  python3 -I -B tools/test_global_vault_edges_podman.py \
+      --work-dir /path/to/fixtures --opencode-v2 /path/to/opencode-2.2.6 \
+      --expect-commit FULL_COMMIT
 
 Unprivileged HOST only, clean unchanged checkout, synthetic private state. No
 resume/replay, real credentials/history, backup, automatic cleanup or interactive
@@ -10,12 +11,21 @@ UI claim. Public upstream catalog/package metadata traffic may occur; this is
 not network containment. Native environment/credential selection is unmodified.
 """
 
+import sys
+
+if __name__ == "__main__" and not sys.flags.isolated:
+    print(
+        "fixture entry: category=isolation-required; use python3 -I -B", file=sys.stderr
+    )
+    raise SystemExit(1)
+
 import argparse
 import ast
 import errno
 import fcntl
 import fnmatch
 import hashlib
+import importlib.machinery
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -27,27 +37,23 @@ import select
 import shlex
 import shutil
 import signal
+import stat
 import struct
 import subprocess
-import sys
 import tempfile
 import termios
 import threading
 import time
+import types
 import venv
 from unittest.mock import patch
 
-APP = Path(__file__).resolve().parents[1]
-sys.path[:0] = [str(APP), str(APP / "src")]
-from tools import test_global_vault_podman as fixture
-from tools import test_interactive_podman as interactive
-
-box, vault, credentials, service = (
-    fixture.box,
-    fixture.vault,
-    fixture.credentials,
-    fixture.workspace_service,
-)
+APP = Path(__file__).absolute().parents[1]
+# Imports stay stdlib-only until the expected Git blob authenticates the
+# bootstrap, whose full source proof precedes all candidate helper imports.
+fixture = interactive = box = vault = credentials = service = guards = None
+INITIAL_SOURCE = None
+FIXTURE_PREFIXES = ("oc-box-gv-host-", "oc-box-live-v2-", "oc-box-live-backup-")
 FORMAT = "oc-box-global-vault-edges-host-v2"
 SNAPSHOT_SCHEMA = 2
 HOME_MANIFEST_CONTRACT = "oc-box-home-topology-v2"
@@ -66,6 +72,7 @@ FRESH_MARKERS = (
     "history-purpose.json",
     "history-result.json",
     "home-component.json",
+    "home-purpose.json",
     "home-ready.json",
     "home-mapping.json",
     "home-created-*.json",
@@ -121,9 +128,11 @@ CHECKS = frozenset(
 CATEGORIES = frozenset(
     (
         "host-only",
+        "isolation-required",
         "invalid-options",
         "clean-source-required",
         "source-changed",
+        "source-shadowing",
         "fresh-parent-required",
         "placement",
         "unsafe-path",
@@ -205,19 +214,180 @@ CATEGORIES = frozenset(
 )
 
 
-class CaseFailure(fixture.FixtureError):
+class BootstrapError(Exception):
+    """Fixed entrypoint refusal independent of candidate exception classes."""
+
+
+class CaseFailure(BootstrapError):
     def __init__(self, primary, secondary=()):
         super().__init__(primary)
         self.secondary = list(secondary)
 
 
 def require(value, category):
-    fixture.require(value, category)
+    if fixture is not None:
+        fixture.require(value, category)
+    elif not value:
+        raise BootstrapError(category)
+
+
+def host_guard():
+    require(
+        os.geteuid() != 0
+        and os.environ.get("OC_BOX_CONTAINER") != "1"
+        and not Path("/.dockerenv").exists()
+        and not Path("/run/.containerenv").exists(),
+        "host-only",
+    )
+
+
+def checked_entry_path(path, *, directory=True):
+    path = Path(path).expanduser().absolute()
+    require(
+        ".." not in path.parts
+        and not any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in str(path)),
+        "unsafe-path",
+    )
+    for ancestor in (*reversed(path.parents), path):
+        mode = ancestor.lstat().st_mode
+        require(not stat.S_ISLNK(mode), "unsafe-path")
+        require(
+            stat.S_ISDIR(mode) if ancestor != path or directory else stat.S_ISREG(mode),
+            "unsafe-path",
+        )
+    return path
+
+
+def load_source(source, expected):
+    """Authenticate the actual stdlib bootstrap, then delegate full verification.
+
+    This small caller-side root of trust cannot import a candidate helper or
+    consult candidate bytecode to establish the bootstrap's own authenticity.
+    """
+    global interactive, fixture, box, vault
+    global credentials, service, guards, INITIAL_SOURCE
+    require(sys.flags.isolated == 1, "isolation-required")
+    source = checked_entry_path(source)
+    require(
+        source == APP and re.fullmatch(r"[0-9a-f]{40}", expected or ""),
+        "clean-source-required",
+    )
+    checked_entry_path(__file__, directory=False)
+    executable = shutil.which("git", path=os.defpath)
+    require(executable is not None, "clean-source-required")
+
+    def git(*args):
+        return subprocess.run(
+            [executable, "-C", str(source), *args],
+            env={
+                "PATH": os.defpath,
+                "LANG": "C.UTF-8",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_OPTIONAL_LOCKS": "0",
+            },
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=True,
+            timeout=15,
+        ).stdout
+
+    require(
+        git("rev-parse", "--show-toplevel").decode().strip() == str(source)
+        and git("rev-parse", "HEAD").decode().strip() == expected
+        and git("rev-parse", "--is-shallow-repository").strip() == b"false",
+        "clean-source-required",
+    )
+    relative = "tools/test_interactive_podman.py"
+    content = git("cat-file", "blob", expected + ":" + relative)
+    path = checked_entry_path(source / relative, directory=False)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as stream:
+        require(
+            stat.S_ISREG(os.fstat(stream.fileno()).st_mode)
+            and stream.read(len(content) + 1) == content,
+            "source-changed",
+        )
+    require(
+        not any(
+            name in ("oc_box", "tools") or name.startswith(("oc_box.", "tools."))
+            for name in sys.modules
+        ),
+        "source-shadowing",
+    )
+    name = "tools.test_interactive_podman"
+    # Construct the authenticated namespace without resolving ordinary imports
+    # through cwd/root tools.py or an unrelated regular tools package.
+    package_path = checked_entry_path(source / "tools")
+    package = types.ModuleType("tools")
+    package.__package__, package.__path__ = "tools", [str(package_path)]
+    package.__spec__ = importlib.machinery.ModuleSpec(
+        "tools", loader=None, is_package=True
+    )
+    package.__spec__.submodule_search_locations = package.__path__
+    sys.modules["tools"] = package
+    bootstrap = types.ModuleType(name)
+    bootstrap.__file__, bootstrap.__package__ = str(path), "tools"
+    sys.modules[name] = bootstrap
+    package.test_interactive_podman = bootstrap
+    try:
+        exec(compile(content, str(path), "exec", dont_inherit=True), bootstrap.__dict__)
+        initial = bootstrap.load_source(source, expected)
+        loaded_fixture, loaded_box, loaded_guards = (
+            bootstrap.fixture,
+            bootstrap.box,
+            bootstrap.guards,
+        )
+        require(
+            loaded_fixture is not None
+            and loaded_box is not None
+            and loaded_guards is not None,
+            "source-shadowing",
+        )
+        loaded_vault, loaded_credentials, loaded_service = (
+            loaded_fixture.vault,
+            loaded_fixture.credentials,
+            loaded_fixture.workspace_service,
+        )
+    except BaseException as error:
+        if sys.modules.get(name) is bootstrap:
+            del sys.modules[name]
+        if sys.modules.get("tools") is package:
+            del sys.modules["tools"]
+        if isinstance(error, getattr(bootstrap, "BootstrapError", ())):
+            raise BootstrapError(
+                str(error) if str(error) in CATEGORIES else "clean-source-required"
+            ) from None
+        raise
+    interactive, fixture, box, guards = (
+        bootstrap,
+        loaded_fixture,
+        loaded_box,
+        loaded_guards,
+    )
+    vault, credentials, service, INITIAL_SOURCE = (
+        loaded_vault,
+        loaded_credentials,
+        loaded_service,
+        initial,
+    )
+    return initial
+
+
+def guarded(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except guards.GuardError as error:
+        raise fixture.FixtureError(error.code) from None
 
 
 def category(error):
     # Never serialize raw exceptions, errors, argv, request bodies or environment.
-    if isinstance(error, fixture.FixtureError):
+    if (
+        isinstance(error, BootstrapError)
+        or (fixture is not None and isinstance(error, fixture.FixtureError))
+        or (interactive is not None and isinstance(error, interactive.BootstrapError))
+    ):
         return str(error) if str(error) in CATEGORIES else "fixture-refusal"
     if isinstance(error, OSError):
         return "io-error"
@@ -233,16 +403,30 @@ class ArgumentParser(argparse.ArgumentParser):
 
 def parser():
     value = ArgumentParser(description=__doc__)
+    value.add_argument("--source", type=Path, default=APP)
+    value.add_argument("--expect-commit", help="Full expected clean self-hosted commit")
     value.add_argument("--work-dir", type=Path, required=True)
     value.add_argument("--temp-dir", type=Path)
     value.add_argument("--opencode-v2", type=Path, required=True)
-    value.add_argument("--distro", choices=tuple(box.DISTROS), default="tumbleweed")
+    value.add_argument("--distro", default="tumbleweed")
     return value
 
 
 def fresh_parent(path):
-    parent = interactive.fresh_parent(path)
+    parent = (
+        checked_entry_path(path)
+        if guards is None
+        else guarded(
+            guards.fresh_parent,
+            path,
+            prefixes=FIXTURE_PREFIXES,
+            markers=tuple(
+                dict.fromkeys((*interactive.FIXTURE_MARKERS, *FRESH_MARKERS))
+            ),
+        )
+    )
     for ancestor in (parent, *parent.parents):
+        require(not ancestor.name.startswith(FIXTURE_PREFIXES), "fresh-parent-required")
         # Match entry names, never a marker target. Python 3.10's literal glob
         # selector omits dangling symlinks, which still identify retained proof.
         with os.scandir(ancestor) as entries:
@@ -322,7 +506,12 @@ def validate_edges(root, *, allow_unrecorded=False):
         "workspace-policy",
     )
     native = meta["native"]
-    binary = interactive.native_binary(Path(native["path"]))
+    binary = guarded(
+        guards.native_identity,
+        Path(native["path"]),
+        outside=(APP,),
+        resolve_entry=False,
+    ).path
     require(
         native["version"] == fixture.NATIVE_VERSION
         and interactive.file_hash(binary) == native["sha256"],
@@ -715,7 +904,7 @@ def verify_crypto_absent():
         "crypto-free-environment",
     )
     require(
-        not (Path(vault.__file__).resolve().parent / "vault-deps").exists(),
+        not (APP / "src/oc_box/vault-deps").exists(),
         "bundled-crypto",
     )
     require(importlib.util.find_spec("cryptography") is None, "crypto-free-environment")
@@ -724,7 +913,7 @@ def verify_crypto_absent():
     except ImportError:
         pass
     else:
-        raise fixture.FixtureError("crypto-free-environment")
+        require(False, "crypto-free-environment")
     require(
         not any(
             name == "cryptography" or name.startswith("cryptography.")
@@ -749,9 +938,15 @@ def create_crypto_free_python(root):
         "private-venv",
     )
     python = directory / "bin/python"
-    bootstrap = "import sys; sys.path[:0]=[sys.argv[1],sys.argv[1]+'/src']; from tools.test_global_vault_edges_podman import verify_crypto_absent; verify_crypto_absent()"
+    relative = "tools/test_global_vault_edges_podman.py"
+    digest = interactive.file_hash(APP / relative)
+    if INITIAL_SOURCE is not None:
+        require(digest == INITIAL_SOURCE["sha256"][relative], "source-changed")
+    # Pure crypto-absence probe: authenticate entry bytes against the parent's
+    # pinned source, compile without pyc, and import no candidate application.
+    bootstrap = "import hashlib,pathlib,sys; p=pathlib.Path(sys.argv[1])/'tools/test_global_vault_edges_podman.py'; data=p.read_bytes()\nif hashlib.sha256(data).hexdigest()!=sys.argv[2]: raise SystemExit(95)\nnamespace={'__file__':str(p),'__name__':'crypto_absence_probe'}; exec(compile(data,str(p),'exec',dont_inherit=True),namespace); namespace['verify_crypto_absent']()"
     result = subprocess.run(
-        [str(python), "-I", "-B", "-c", bootstrap, str(APP)],
+        [str(python), "-I", "-B", "-c", bootstrap, str(APP), digest],
         env=dict(os.environ),
         stdin=subprocess.DEVNULL,
         capture_output=True,
@@ -857,14 +1052,18 @@ def owner_worker(root, case):
 TTY_BOOTSTRAP = "import fcntl,termios; fcntl.ioctl(0,termios.TIOCSCTTY,0)\n"
 OWNER_BOOTSTRAP = (
     TTY_BOOTSTRAP
-    + """import json,sys
+    + """import hashlib,json,sys
 from pathlib import Path
-sys.path[:0]=[sys.argv[1],sys.argv[1]+'/src']
-from tools import test_global_vault_edges_podman as edge
+path=Path(sys.argv[1])/'tools/test_global_vault_edges_podman.py'
+content=path.read_bytes()
+if hashlib.sha256(content).hexdigest()!=sys.argv[5]: raise SystemExit(95)
+edge={'__file__':str(path),'__name__':'edge_owner_entry'}
+exec(compile(content,str(path),'exec',dont_inherit=True),edge)
 try:
-    value=edge.owner_worker(Path(sys.argv[2]),sys.argv[3])
+    edge['load_source'](Path(sys.argv[1]),sys.argv[4])
+    value=edge['owner_worker'](Path(sys.argv[2]),sys.argv[3])
 except BaseException as error:
-    value={'checks':{},'primary':edge.category(error),'secondary':[]}
+    value={'checks':{},'primary':edge['category'](error),'secondary':[]}
 print('OC_BOX_EDGES_CHILD:'+json.dumps(value,sort_keys=True),flush=True)
 raise SystemExit(1 if value['primary'] or value['secondary'] else 0)
 """
@@ -872,7 +1071,9 @@ raise SystemExit(1 if value['primary'] or value['secondary'] else 0)
 # No fixture import, function replacement or exception substitution in failures.
 FAILURE_BOOTSTRAP = (
     TTY_BOOTSTRAP
-    + """import importlib.util,json,pathlib,sys
+    + """import importlib.util,json,pathlib,secrets,sys
+sys.dont_write_bytecode=True
+sys.pycache_prefix='/nonexistent-oc-box-bytecode-'+secrets.token_hex(16)
 sys.path.insert(0,sys.argv[1]+'/src')
 missing=sys.argv[2]=='missing-crypto'
 if missing:
@@ -979,7 +1180,18 @@ def owner_case(root, case, password, python):
     try:
         checkpoint(root)
         result = drive_child(
-            [str(python), "-I", "-B", "-c", OWNER_BOOTSTRAP, str(APP), str(root), case],
+            [
+                str(python),
+                "-I",
+                "-B",
+                "-c",
+                OWNER_BOOTSTRAP,
+                str(APP),
+                str(root),
+                case,
+                INITIAL_SOURCE["commit"],
+                INITIAL_SOURCE["sha256"]["tools/test_global_vault_edges_podman.py"],
+            ],
             environment=dict(os.environ),
             password=password,
             timeout=1200,
@@ -1419,9 +1631,16 @@ def main(argv=None):
     primary, secondary = None, []
     old_umask = os.umask(0o077)
     try:
-        fixture.host_guard()  # Before placement, native/source probes or writes.
+        host_guard()  # stdlib-only: before source/helper imports or writes.
+        require(sys.flags.optimize == 0, "invalid-options")
         parent = fresh_parent(args.work_dir)
         temporary = fresh_parent(args.temp_dir) if args.temp_dir is not None else None
+        load_source(args.source, args.expect_commit)
+        # Recheck with the verified common guard before allocating fresh state.
+        parent = fresh_parent(parent)
+        if temporary is not None:
+            temporary = fresh_parent(temporary)
+        require(args.distro in box.DISTROS, "invalid-options")
         source = interactive.source_identity()
         binary = interactive.native_binary(args.opencode_v2)
         podman = shutil.which(

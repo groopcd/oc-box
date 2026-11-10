@@ -1,10 +1,21 @@
 #!/usr/bin/env python3
 """Fresh HOST-only, image-free probe of the shared encrypted home component.
 
+Run with python3 -I -B tools/test_home_ownership_podman.py \
+    --work-dir /path/to/fixtures --expect-commit FULL_COMMIT.
+
 No workspace/container/image lifecycle, first mount, keep-id/auto/custom mapping
 acceptance. Retain all evidence; only the separate --cleanup EXACT_ROOT removes
 the two proven local volumes, without force. Never use the global fixture cleanup.
 """
+
+import sys
+
+if __name__ == "__main__" and not sys.flags.isolated:
+    print(
+        "fixture entry: category=isolation-required; use python3 -I -B", file=sys.stderr
+    )
+    raise SystemExit(1)
 
 import argparse
 import contextlib
@@ -12,6 +23,7 @@ from contextvars import ContextVar
 import fcntl
 import fnmatch
 import hashlib
+import importlib.machinery
 import json
 import os
 from pathlib import Path
@@ -20,24 +32,22 @@ import resource
 import secrets
 import shutil
 import stat
-import sys
+import subprocess
 import tempfile
+import types
 from unittest.mock import patch
 
-APP = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(APP))
-sys.path.insert(0, str(APP / "src"))
-from oc_box import backup_crypto as crypto, backups, oc_box as box
-from tools import test_global_vault_podman as global_fixture
-from tools import test_interactive_podman as interactive
-
-require = global_fixture.require
+APP = Path(__file__).absolute().parents[1]
+crypto = backups = box = global_fixture = interactive = guards = None
+INITIAL_SOURCE = None
+FIXTURE_PREFIXES = ("oc-box-gv-host-", "oc-box-live-v2-", "oc-box-live-backup-")
 FORMAT = "oc-box-shared-home-component-ownership"
-PREFIX = global_fixture.PREFIX + "home-ownership-"
+PREFIX = "oc-box-gv-host-home-ownership-"
 LABEL = "io.oc-box.home-component"
 ROLES = ("source", "destination")
 HOME_MARKERS = (
     "home-component.json",
+    "home-purpose.json",
     "home-ready.json",
     *("home-created-" + role + ".json" for role in ROLES),
 )
@@ -148,6 +158,154 @@ print(json.dumps({'mapping':{'euid':os.geteuid(),'egid':os.getegid(),
 """
 
 
+class BootstrapError(Exception):
+    """Fixed entrypoint refusal independent of candidate exception classes."""
+
+
+def require(value, category):
+    if global_fixture is not None:
+        global_fixture.require(value, category)
+    elif not value:
+        raise BootstrapError(category)
+
+
+def host_guard():
+    require(
+        os.geteuid() != 0
+        and os.environ.get("OC_BOX_CONTAINER") != "1"
+        and not Path("/.dockerenv").exists()
+        and not Path("/run/.containerenv").exists(),
+        "host-only",
+    )
+
+
+def checked_entry_path(path, *, directory=True):
+    path = Path(path).expanduser().absolute()
+    require(
+        ".." not in path.parts
+        and not any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in str(path)),
+        "unsafe-path",
+    )
+    for ancestor in (*reversed(path.parents), path):
+        mode = ancestor.lstat().st_mode
+        require(not stat.S_ISLNK(mode), "unsafe-path")
+        require(
+            stat.S_ISDIR(mode) if ancestor != path or directory else stat.S_ISREG(mode),
+            "unsafe-path",
+        )
+    return path
+
+
+def load_source(source, expected):
+    """Authenticate bootstrap bytes without candidate imports or pyc reads."""
+    global interactive, global_fixture, box, crypto, backups, guards, INITIAL_SOURCE
+    require(sys.flags.isolated == 1, "isolation-required")
+    source = checked_entry_path(source)
+    require(
+        source == APP and re.fullmatch(r"[0-9a-f]{40}", expected or ""),
+        "clean-source-required",
+    )
+    checked_entry_path(__file__, directory=False)
+    executable = shutil.which("git", path=os.defpath)
+    require(executable is not None, "clean-source-required")
+
+    def git(*args):
+        return subprocess.run(
+            [executable, "-C", str(source), *args],
+            env={
+                "PATH": os.defpath,
+                "LANG": "C.UTF-8",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_OPTIONAL_LOCKS": "0",
+            },
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            check=True,
+            timeout=15,
+        ).stdout
+
+    require(
+        git("rev-parse", "--show-toplevel").decode().strip() == str(source)
+        and git("rev-parse", "HEAD").decode().strip() == expected
+        and git("rev-parse", "--is-shallow-repository").strip() == b"false",
+        "clean-source-required",
+    )
+    relative = "tools/test_interactive_podman.py"
+    content = git("cat-file", "blob", expected + ":" + relative)
+    path = checked_entry_path(source / relative, directory=False)
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+    with os.fdopen(fd, "rb") as stream:
+        require(
+            stat.S_ISREG(os.fstat(stream.fileno()).st_mode)
+            and stream.read(len(content) + 1) == content,
+            "source-changed",
+        )
+    require(
+        not any(
+            name in ("oc_box", "tools") or name.startswith(("oc_box.", "tools."))
+            for name in sys.modules
+        ),
+        "source-shadowing",
+    )
+    name = "tools.test_interactive_podman"
+    package_path = checked_entry_path(source / "tools")
+    package = types.ModuleType("tools")
+    package.__package__, package.__path__ = "tools", [str(package_path)]
+    package.__spec__ = importlib.machinery.ModuleSpec(
+        "tools", loader=None, is_package=True
+    )
+    package.__spec__.submodule_search_locations = package.__path__
+    sys.modules["tools"] = package
+    bootstrap = types.ModuleType(name)
+    bootstrap.__file__, bootstrap.__package__ = str(path), "tools"
+    sys.modules[name] = bootstrap
+    package.test_interactive_podman = bootstrap
+    try:
+        exec(compile(content, str(path), "exec", dont_inherit=True), bootstrap.__dict__)
+        initial = bootstrap.load_source(source, expected)
+        loaded_fixture, loaded_box, loaded_guards = (
+            bootstrap.fixture,
+            bootstrap.box,
+            bootstrap.guards,
+        )
+        require(
+            loaded_fixture is not None
+            and loaded_box is not None
+            and loaded_guards is not None,
+            "source-shadowing",
+        )
+        loaded_crypto, loaded_backups = loaded_fixture.crypto, loaded_fixture.backups
+    except BaseException as error:
+        if sys.modules.get(name) is bootstrap:
+            del sys.modules[name]
+        if sys.modules.get("tools") is package:
+            del sys.modules["tools"]
+        if isinstance(error, getattr(bootstrap, "BootstrapError", ())):
+            raise BootstrapError(
+                str(error)
+                if str(error)
+                in ("clean-source-required", "source-changed", "source-shadowing")
+                else "clean-source-required"
+            ) from None
+        raise
+    interactive, global_fixture, box, guards = (
+        bootstrap,
+        loaded_fixture,
+        loaded_box,
+        loaded_guards,
+    )
+    crypto, backups, INITIAL_SOURCE = loaded_crypto, loaded_backups, initial
+    return initial
+
+
+def guarded(function, *args, **kwargs):
+    try:
+        return function(*args, **kwargs)
+    except guards.GuardError as error:
+        raise global_fixture.FixtureError(error.code) from None
+
+
 def source_snapshot():
     source = interactive.source_identity()
     paths = (
@@ -159,13 +317,30 @@ def source_snapshot():
         ),
     )
     return {
-        "identity": source,
+        # Preserve the old run identity separately from this invocation's full
+        # initial manifest. Cleanup never backfills old purpose/evidence files.
+        "identity": {
+            key: source[key]
+            for key in ("checkout", "version", "commit", "commit_count", "dirty")
+        },
         "audited_sha256": {name: interactive.file_hash(APP / name) for name in paths},
     }
 
 
 def same_source(source):
-    require(source_snapshot() == source, "source-changed")
+    require(interactive is not None and global_fixture is not None, "source-changed")
+    try:
+        unchanged = source_snapshot() == source
+    except (
+        BootstrapError,
+        interactive.BootstrapError,
+        global_fixture.FixtureError,
+        OSError,
+        ValueError,
+        subprocess.SubprocessError,
+    ):
+        unchanged = False
+    require(unchanged, "source-changed")
 
 
 @contextlib.contextmanager
@@ -178,8 +353,20 @@ def invocation_source(current):
 
 
 def fresh_parent(path):
-    parent = interactive.fresh_parent(path)
+    parent = (
+        checked_entry_path(path)
+        if guards is None
+        else guarded(
+            guards.fresh_parent,
+            path,
+            prefixes=FIXTURE_PREFIXES,
+            markers=tuple(
+                dict.fromkeys((*interactive.FIXTURE_MARKERS, *FRESH_MARKERS))
+            ),
+        )
+    )
     for ancestor in (parent, *parent.parents):
+        require(not ancestor.name.startswith(FIXTURE_PREFIXES), "fresh-parent-required")
         with os.scandir(ancestor) as entries:
             names = tuple(entry.name for entry in entries)
         require(
@@ -226,7 +413,8 @@ def write_purpose(root, source):
         "roles": plan(root, token),
         "source": source,
         "native_sha256": {
-            name: interactive.file_hash(Path(path)) for name, path in mapping.items()
+            name: guarded(guards.native_identity, Path(path), outside=(APP,)).sha256
+            for name, path in mapping.items()
         },
     }
     global_fixture.write_json_new(root / "home-component.json", purpose)
@@ -294,7 +482,10 @@ def validate_purpose(root, current):
     mapping = global_fixture.private_json(root, "podman-executable.json")
     require(
         data["native_sha256"]
-        == {name: interactive.file_hash(Path(path)) for name, path in mapping.items()},
+        == {
+            name: guarded(guards.native_identity, Path(path), outside=(APP,)).sha256
+            for name, path in mapping.items()
+        },
         "native-changed",
     )
     return data
@@ -767,11 +958,30 @@ def run_fresh(root, args, current):
 def category(error):
     # Only fixture require() literals enter FixtureError; other exception text is
     # never retained (including crypto argv, private stderr, keys or environment).
-    if isinstance(error, global_fixture.FixtureError) and re.fullmatch(
-        r"[a-z][a-z-]{1,48}", str(error)
-    ):
+    if interactive is not None and isinstance(error, interactive.BootstrapError):
+        return (
+            str(error)
+            if str(error)
+            in (
+                "clean-source-required",
+                "source-changed",
+                "source-shadowing",
+                "host-only",
+                "unsafe-path",
+            )
+            else "exception"
+        )
+    if (
+        isinstance(error, BootstrapError)
+        or (
+            global_fixture is not None
+            and isinstance(error, global_fixture.FixtureError)
+        )
+    ) and re.fullmatch(r"[a-z][a-z-]{1,48}", str(error)):
         return str(error)
-    return global_fixture.safe_error_class(error)
+    if global_fixture is not None:
+        return global_fixture.safe_error_class(error)
+    return "io-error" if isinstance(error, OSError) else "exception"
 
 
 def execute(root, mode, current, operation):
@@ -793,10 +1003,11 @@ def execute(root, mode, current, operation):
                 secondary.append(category(error))
         report = {
             "format": FORMAT,
-            "schema": 1,
+            "schema": 2,
             "scope": "shared-home-component-only",
             "mode": mode,
             "source": current,
+            "initial_source": INITIAL_SOURCE,
             "outcome": "failed" if primary else "passed",
             "primary_failure": primary,
             "secondary_failures": secondary,
@@ -829,13 +1040,17 @@ class ArgumentParser(argparse.ArgumentParser):
 
 def main(argv=None):
     parser = ArgumentParser(description=__doc__)
+    parser.add_argument("--source", type=Path, default=APP)
+    parser.add_argument(
+        "--expect-commit", help="Full expected clean self-hosted commit"
+    )
     parser.add_argument("--work-dir", type=Path)
     parser.add_argument("--temp-dir", type=Path)
     parser.add_argument("--cleanup", type=Path, metavar="EXACT_ROOT")
     args = parser.parse_args(argv)
     old_umask = os.umask(0o077)
     try:
-        global_fixture.host_guard()  # before placement, source/native or engine
+        host_guard()  # stdlib-only: before source/helper imports or writes
         require(sys.platform == "linux", "host-only")
         require(sys.flags.optimize == 0, "optimization-refused")
         require(
@@ -851,6 +1066,11 @@ def main(argv=None):
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         if args.cleanup is None:
             parent = fresh_parent(args.work_dir)
+            if args.temp_dir is not None:
+                fresh_parent(args.temp_dir)
+        load_source(args.source, args.expect_commit)
+        if args.cleanup is None:
+            parent = fresh_parent(parent)
             if args.temp_dir is not None:
                 fresh_parent(args.temp_dir)
         current = source_snapshot()

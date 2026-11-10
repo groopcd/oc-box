@@ -11,14 +11,376 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import textwrap
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
 from oc_box import oc_box as box, session_terminal, vault
+from tools import acceptance_guards, test_global_vault_podman as fixture
+from tools import test_interactive_podman as interactive
 from tools import test_global_vault_edges_podman as edge
 
-fixture = edge.fixture
+# Explicit unit-only runtime binding. Fresh subprocess tests below exercise the
+# production authentication/late-import path without these preloaded modules.
+edge.fixture, edge.interactive, edge.guards = fixture, interactive, acceptance_guards
+edge.box, edge.vault, edge.credentials, edge.service = (
+    box,
+    vault,
+    fixture.credentials,
+    fixture.workspace_service,
+)
+interactive.fixture, interactive.box, interactive.guards = (
+    fixture,
+    box,
+    acceptance_guards,
+)
+
+
+class EntryBootstrapTests(unittest.TestCase):
+    """Fresh child callers, not the already-imported offline runtime above."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="entry-bootstrap-")
+        self.addCleanup(temporary.cleanup)
+        self.parent = Path(temporary.name)
+
+    def repository(self, name, case=""):
+        root = self.parent / (name + case)
+        (root / "tools").mkdir(parents=True)
+        entry = root / "tools" / name
+        entry.write_bytes((edge.APP / "tools" / name).read_bytes())
+        (root / ".gitignore").write_text("__pycache__/\n*.pyc\n")
+        bootstrap = root / "tools/test_interactive_podman.py"
+        bootstrap.write_text(
+            textwrap.dedent("""\
+            from pathlib import Path
+            (Path(__file__).parents[1]/'authenticated-bootstrap-ran').write_text('known-source')
+            def load_source(source, expected):
+                raise ValueError('authenticated-probe-only')
+        """)
+        )
+        (root / "tools/test_global_vault_podman.py").write_text(
+            "from pathlib import Path\n(Path(__file__).parents[1]/'candidate-imported').write_text('bad')\nraise RuntimeError('candidate-import-before-proof')\n"
+        )
+        for args in (
+            ("init", "-q"),
+            ("add", "."),
+            (
+                "-c",
+                "user.name=Synthetic",
+                "-c",
+                "user.email=synthetic@example.invalid",
+                "commit",
+                "-qm",
+                "synthetic bootstrap",
+            ),
+        ):
+            subprocess.run(
+                ["git", "-C", str(root), *args],
+                env={"PATH": os.defpath},
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=True,
+                timeout=10,
+            )
+        commit = (
+            subprocess.check_output(
+                ["git", "-C", str(root), "rev-parse", "HEAD"], env={"PATH": os.defpath}
+            )
+            .decode()
+            .strip()
+        )
+        return root, entry, bootstrap, commit
+
+    def child(self, entry, root, expected, *, preload=False):
+        program = """import json,pathlib,runpy,sys,types
+root=pathlib.Path(sys.argv[2]); category='none'; preserved=True
+try:
+    namespace=runpy.run_path(sys.argv[1],run_name='fixture_bootstrap_probe')
+    if sys.argv[4]=='preload':
+        sentinel=types.ModuleType('oc_box'); sentinel.__file__=str(root/'src/oc_box/__init__.py')
+        sys.modules['oc_box']=sentinel
+    namespace['load_source'](root,sys.argv[3])
+except BaseException as error:
+    category=str(error) if str(error) in ('clean-source-required','source-changed','source-shadowing','unsafe-path','authenticated-probe-only') else 'unfixed'
+    if sys.argv[4]=='preload' and 'sentinel' in locals(): preserved=sys.modules.get('oc_box') is sentinel
+print(json.dumps({'category':category,'candidate':(root/'candidate-imported').exists(),'bootstrap':(root/'authenticated-bootstrap-ran').exists(),'poison':(root/'poisoned-bootstrap-ran').exists(),'namespace_poison':(root/'namespace-poisoned').exists(),'namespace_probe':(root/'namespace-probe').exists(),'preloaded_preserved':preserved}))
+"""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                program,
+                str(entry),
+                str(root),
+                expected,
+                "preload" if preload else "none",
+            ],
+            env={"PATH": os.defpath},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stderr, b"")
+        return json.loads(result.stdout)
+
+    def test_entry_help_and_host_refusal_do_not_import_candidate_code(self):
+        for name in (
+            "test_global_vault_edges_podman.py",
+            "test_home_ownership_podman.py",
+        ):
+            with self.subTest(entry=name):
+                root, entry, _, commit = self.repository(name)
+                result = subprocess.run(
+                    [sys.executable, "-I", "-B", str(entry), "--help"],
+                    env={"PATH": os.defpath},
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 0)
+                self.assertIn(b"--expect-commit", result.stdout)
+                self.assertFalse((root / "candidate-imported").exists())
+                self.assertFalse((root / "authenticated-bootstrap-ran").exists())
+                command = [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    str(entry),
+                    "--work-dir",
+                    str(root),
+                    "--expect-commit",
+                    commit,
+                ]
+                if name.startswith("test_global"):
+                    command.extend(("--opencode-v2", sys.executable))
+                result = subprocess.run(
+                    command,
+                    env={"PATH": os.defpath, "OC_BOX_CONTAINER": "1"},
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn(b"host-only", result.stdout + result.stderr)
+                self.assertFalse((root / "candidate-imported").exists())
+                self.assertFalse((root / "authenticated-bootstrap-ran").exists())
+
+    def test_authenticated_bootstrap_expected_commit_and_source_matrix(self):
+        for name in (
+            "test_global_vault_edges_podman.py",
+            "test_home_ownership_podman.py",
+        ):
+            for case in (
+                "valid",
+                "wrong-head",
+                "shallow",
+                "changed-bootstrap",
+                "staged-bootstrap",
+                "symlink-bootstrap",
+                "preloaded",
+            ):
+                with self.subTest(entry=name, case=case):
+                    root, entry, bootstrap, commit = self.repository(name, "-" + case)
+                    # The entry filename is immaterial; APP still names this repo.
+                    expected = commit
+                    if case == "wrong-head":
+                        expected = "0" * 40
+                    elif case == "shallow":
+                        (root / ".git/shallow").write_text(commit + "\n")
+                    elif case in ("changed-bootstrap", "staged-bootstrap"):
+                        bootstrap.write_text(
+                            bootstrap.read_text() + "# changed source\n"
+                        )
+                        if case == "staged-bootstrap":
+                            subprocess.run(
+                                ["git", "-C", str(root), "add", str(bootstrap)],
+                                check=True,
+                                capture_output=True,
+                                timeout=10,
+                            )
+                    elif case == "symlink-bootstrap":
+                        saved = self.parent / (name + "-saved")
+                        bootstrap.rename(saved)
+                        bootstrap.symlink_to(saved)
+                    result = self.child(
+                        entry, root, expected, preload=case == "preloaded"
+                    )
+                    self.assertFalse(result["candidate"])
+                    self.assertEqual(result["bootstrap"], case == "valid")
+                    self.assertTrue(result["preloaded_preserved"])
+                    if case != "valid":
+                        self.assertIn(
+                            result["category"],
+                            (
+                                "clean-source-required",
+                                "source-changed",
+                                "source-shadowing",
+                                "unsafe-path",
+                            ),
+                        )
+
+    def test_bootstrap_source_execution_ignores_valid_poisoned_bytecode(self):
+        import importlib.util
+        import importlib._bootstrap_external
+
+        for name in (
+            "test_global_vault_edges_podman.py",
+            "test_home_ownership_podman.py",
+        ):
+            with self.subTest(entry=name):
+                root, entry, bootstrap, commit = self.repository(name)
+                poison = "from pathlib import Path\n(Path(__file__).parents[1]/'poisoned-bootstrap-ran').write_text('bad')\n"
+                data = importlib._bootstrap_external._code_to_hash_pyc(
+                    compile(poison, str(bootstrap), "exec"),
+                    importlib.util.source_hash(bootstrap.read_bytes()),
+                    checked=True,
+                )
+                cache = Path(importlib.util.cache_from_source(str(bootstrap)))
+                cache.parent.mkdir()
+                cache.write_bytes(data)
+                result = self.child(entry, root, commit)
+                self.assertTrue(result["bootstrap"])
+                self.assertFalse(result["poison"])
+                self.assertFalse(result["candidate"])
+
+    def test_nonisolated_entry_refuses_before_sibling_stdlib_shadow(self):
+        for name in (
+            "test_global_vault_edges_podman.py",
+            "test_home_ownership_podman.py",
+        ):
+            with self.subTest(entry=name):
+                root, entry, _, _ = self.repository(name)
+                (root / "tools/argparse.py").write_text(
+                    "from pathlib import Path\n(Path(__file__).parents[1]/'stdlib-shadow-ran').write_text('bad')\nraise RuntimeError('shadow')\n"
+                )
+                result = subprocess.run(
+                    [sys.executable, "-B", str(entry), "--help"],
+                    env={"PATH": os.defpath},
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    timeout=10,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(
+                    result.stderr,
+                    b"fixture entry: category=isolation-required; use python3 -I -B\n",
+                )
+                self.assertFalse((root / "stdlib-shadow-ran").exists())
+                self.assertFalse((root / "candidate-imported").exists())
+
+    def test_authenticated_bootstrap_pins_tools_namespace_before_first_import(self):
+        for name in (
+            "test_global_vault_edges_podman.py",
+            "test_home_ownership_podman.py",
+        ):
+            for case in ("ignored-root-module", "fresh-foreign-package"):
+                with self.subTest(entry=name, case=case):
+                    root, entry, bootstrap, _ = self.repository(name, "-" + case)
+                    foreign = self.parent / (name + "-" + case + "-foreign")
+                    (foreign / "tools").mkdir(parents=True)
+                    poison = (
+                        "from pathlib import Path\nPath("
+                        + repr(str(root / "namespace-poisoned"))
+                        + ").write_text('bad')\nraise RuntimeError('namespace-shadow')\n"
+                    )
+                    (foreign / "tools/__init__.py").write_text(poison)
+                    (root / "tools.py").write_text(poison)
+                    (root / ".gitignore").write_text("__pycache__/\n*.pyc\ntools.py\n")
+                    (root / "tools/probe.py").write_text(
+                        "from pathlib import Path\n(Path(__file__).parents[1]/'namespace-probe').write_text('verified-path')\n"
+                    )
+                    bootstrap.write_text(
+                        "import sys\ndef load_source(source, expected):\n    sys.path[:0]=["
+                        + repr(
+                            str(foreign)
+                            if case == "fresh-foreign-package"
+                            else str(root)
+                        )
+                        + "]\n    import tools.probe\n    raise ValueError('authenticated-probe-only')\n"
+                    )
+                    subprocess.run(
+                        ["git", "-C", str(root), "add", "."],
+                        check=True,
+                        capture_output=True,
+                        timeout=10,
+                    )
+                    subprocess.run(
+                        [
+                            "git",
+                            "-C",
+                            str(root),
+                            "-c",
+                            "user.name=Synthetic",
+                            "-c",
+                            "user.email=synthetic@example.invalid",
+                            "commit",
+                            "-qm",
+                            "namespace fixture",
+                        ],
+                        check=True,
+                        capture_output=True,
+                        timeout=10,
+                    )
+                    commit = (
+                        subprocess.check_output(
+                            ["git", "-C", str(root), "rev-parse", "HEAD"]
+                        )
+                        .decode()
+                        .strip()
+                    )
+                    result = self.child(entry, root, commit)
+                    self.assertTrue(result["namespace_probe"])
+                    self.assertFalse(result["namespace_poison"])
+                    self.assertFalse(result["candidate"])
+
+    def test_prebootstrap_parent_prefixes_and_dangling_markers_need_no_imports(self):
+        for name in (
+            "test_global_vault_edges_podman.py",
+            "test_home_ownership_podman.py",
+        ):
+            root, entry, _, _ = self.repository(name)
+            for case in (
+                "oc-box-gv-host-",
+                "oc-box-live-v2-",
+                "oc-box-live-backup-",
+                "edges.json",
+                "home-component.json",
+                "home-ready.json",
+            ):
+                retained = self.parent / (case + name)
+                child = retained / "nested"
+                child.mkdir(parents=True)
+                if case.endswith(".json"):
+                    (retained / case).symlink_to("missing-synthetic-evidence")
+                for path in (retained, child):
+                    with self.subTest(entry=name, case=case, child=path.name):
+                        code = "import json,runpy,sys; ns=runpy.run_path(sys.argv[1],run_name='prebootstrap_parent_probe'); category='none'\ntry: ns['fresh_parent'](sys.argv[2])\nexcept BaseException as error: category=str(error) if str(error)=='fresh-parent-required' else 'unfixed'\nprint(json.dumps({'category':category,'candidate':any(n=='oc_box' or n.startswith(('oc_box.','tools.')) for n in sys.modules)}))"
+                        result = subprocess.run(
+                            [
+                                sys.executable,
+                                "-I",
+                                "-B",
+                                "-c",
+                                code,
+                                str(entry),
+                                str(path),
+                            ],
+                            env={"PATH": os.defpath},
+                            stdin=subprocess.DEVNULL,
+                            capture_output=True,
+                            timeout=10,
+                        )
+                        self.assertEqual(result.returncode, 0)
+                        self.assertEqual(
+                            json.loads(result.stdout),
+                            {"category": "fresh-parent-required", "candidate": False},
+                        )
+                        self.assertFalse((root / "candidate-imported").exists())
 
 
 class GlobalVaultEdgesHostFixtureTests(unittest.TestCase):
@@ -39,6 +401,24 @@ class GlobalVaultEdgesHostFixtureTests(unittest.TestCase):
             "commit_count": 74,
             "dirty": False,
         }
+        self.enter(patch.object(edge, "load_source", return_value=self.source))
+        self.enter(
+            patch.object(
+                edge,
+                "INITIAL_SOURCE",
+                {
+                    "commit": self.source["commit"],
+                    "sha256": {
+                        "tools/test_global_vault_edges_podman.py": hashlib.sha256(
+                            Path(edge.__file__).read_bytes()
+                        ).hexdigest()
+                    },
+                },
+            )
+        )
+        self.enter(
+            patch.object(edge, "host_guard", side_effect=lambda: fixture.host_guard())
+        )
         self.environment = {
             "PATH": os.defpath,
             "HOME": str(self.root / "host-home"),
@@ -539,10 +919,12 @@ os.stat=_stat; pathlib.Path.lstat=_lstat; os.open=_open; io.open=_io_open
                     fixture.FixtureError, "fresh-parent-required"
                 ):
                     edge.fresh_parent(child)
-        for marker in (
-            *edge.interactive.FIXTURE_MARKERS,
-            "edges.json",
-            "edges-result.json",
+        for marker in dict.fromkeys(
+            (
+                *edge.interactive.FIXTURE_MARKERS,
+                "edges.json",
+                "edges-result.json",
+            )
         ):
             with self.subTest(marker=marker):
                 root = self.parent / ("renamed-" + marker)
@@ -729,6 +1111,16 @@ os.stat=_stat; pathlib.Path.lstat=_lstat; os.open=_open; io.open=_io_open
         ):
             with self.assertRaisesRegex(fixture.FixtureError, "source-changed"):
                 edge.checkpoint(self.root)
+        self.engine.assert_not_called()
+
+    def test_retained_native_entry_cannot_repin_a_new_symlink(self):
+        meta = fixture.private_json(self.root, "edges.json")
+        redirect = self.root / "redirected-native"
+        redirect.symlink_to(self.binary)
+        meta["native"]["path"] = str(redirect)
+        (self.root / "edges.json").write_text(json.dumps(meta))
+        with self.assertRaisesRegex(fixture.FixtureError, "native-executable"):
+            edge.validate_edges(self.root)
         self.engine.assert_not_called()
 
     def test_selectors_unchanged_and_old_results_refused_before_engine(self):
