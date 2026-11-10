@@ -660,6 +660,129 @@ time.sleep(10)
             crypto.cleanup_pipeline([process])
         signal_group.assert_not_called()
 
+    def assert_finalization_failure(
+        self,
+        *,
+        body_error=None,
+        close_error=False,
+        cleanup_error=False,
+        caller_except=False,
+    ):
+        children, close_patches, cleaned = [], [], []
+        real_popen = subprocess.Popen
+        real_cleanup, real_codes = crypto.cleanup_pipeline, crypto.pipeline_codes
+        injected = False
+        cleanup_failure = crypto.BackupError(
+            "Backup pipeline cleanup failed; private tool output was not logged."
+        )
+
+        def spawned(*args, **kwargs):
+            process = real_popen(*args, cwd=self.root, **kwargs)
+            children.append(process)
+            if close_error and process.stdout is not None:
+                original_close = process.stdout.close
+                calls = 0
+
+                def close():
+                    nonlocal calls
+                    calls += 1
+                    original_close()
+                    if calls == 2:  # Fail finalization, not the initial pipe handoff.
+                        raise OSError("synthetic-private-close-error")
+
+                patched = patch.object(process.stdout, "close", side_effect=close)
+                patched.start()
+                close_patches.append(patched)
+            return process
+
+        def codes(processes):
+            nonlocal injected
+            if body_error is not None and not injected:
+                injected = True
+                raise body_error
+            return real_codes(processes)
+
+        def cleanup(processes):
+            real_cleanup(processes)
+            cleaned.extend(processes)
+            if cleanup_error:
+                raise cleanup_failure
+
+        def invoke():
+            crypto.stream_pipeline(
+                [sys.executable, "-B", "-c", "import signal; signal.alarm(10)"],
+                [
+                    sys.executable,
+                    "-B",
+                    "-c",
+                    "import signal,sys; signal.alarm(10); sys.stdin.buffer.read()",
+                ],
+                timeout=2,
+            )
+
+        try:
+            with (
+                patch.object(crypto.subprocess, "Popen", side_effect=spawned),
+                patch.object(crypto, "pipeline_codes", side_effect=codes),
+                patch.object(crypto, "cleanup_pipeline", side_effect=cleanup),
+                self.assertRaises(
+                    type(body_error) if body_error is not None else crypto.BackupError
+                ) as error,
+            ):
+                if caller_except:
+                    try:
+                        raise ValueError("synthetic-caller-context")
+                    except ValueError:
+                        invoke()
+                else:
+                    invoke()
+            if body_error is not None:
+                self.assertIs(error.exception, body_error)
+            else:
+                self.assertEqual(str(error.exception), str(cleanup_failure))
+                if not close_error:
+                    self.assertIs(error.exception, cleanup_failure)
+                self.assertTrue(all(child.returncode == 0 for child in children))
+            self.assertEqual(cleaned, children)
+            self.assertEqual(len(cleaned), 2)
+            self.assertTrue(all(child.returncode is not None for child in children))
+            self.assertTrue(children[0].stdout.closed)
+            self.assertIsNone(self.unrelated.poll())
+        finally:
+            for patched in close_patches:
+                patched.stop()
+            for process in children:
+                if process.poll() is None:
+                    process.kill()
+                process.wait(timeout=2)
+                if process.stdout is not None:
+                    process.stdout.close()
+
+    def test_successful_pipeline_in_caller_except_cannot_swallow_cleanup_failure(self):
+        self.assert_finalization_failure(cleanup_error=True, caller_except=True)
+
+    def test_stdout_close_failure_still_cleans_groups_and_reports_fixed_failure(self):
+        for cleanup_error in (False, True):
+            with self.subTest(cleanup_error=cleanup_error):
+                self.assert_finalization_failure(
+                    close_error=True, cleanup_error=cleanup_error, caller_except=True
+                )
+
+    def test_stdout_close_and_cleanup_failure_preserve_body_and_cancellation_identity(
+        self,
+    ):
+        for primary in (
+            crypto.BackupError("fixed primary failure"),
+            KeyboardInterrupt(),
+        ):
+            with self.subTest(primary=type(primary).__name__):
+                self.assert_finalization_failure(
+                    body_error=primary,
+                    close_error=True,
+                    cleanup_error=True,
+                    caller_except=True,
+                )
+
 
 class BackupEnvironmentTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("age"), "optional age host tool unavailable")

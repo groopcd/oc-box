@@ -533,6 +533,7 @@ def stream_pipeline(
 ):
     """Pipe bytes directly; stderr is anonymous memory and never echoed."""
     processes = []
+    primary_failure = False
     with memory_file() as producer_errors, memory_file() as consumer_errors:
         errors = (producer_errors, consumer_errors)
         try:
@@ -572,20 +573,33 @@ def stream_pipeline(
             if any(codes):
                 raise pipeline_error(codes, errors)
         except OSError as exc:
+            primary_failure = True
             raise BackupError(
                 "Cannot run backup tool; check age, Python, and Podman on the host."
             ) from exc
+        except BaseException:
+            primary_failure = True
+            raise
         finally:
-            primary_failure = sys.exc_info()[0] is not None
+            # Only an exception escaping this invocation is primary. Ambient
+            # sys.exc_info() may instead belong to a caller's handled exception.
+            finalization_failure = None
             try:
                 if processes and processes[0].stdout is not None:
                     processes[0].stdout.close()
-            finally:
-                try:
-                    cleanup_pipeline(processes)
-                except BackupError:
-                    if not primary_failure:
-                        raise
+            except OSError:
+                finalization_failure = BackupError(
+                    "Backup pipeline cleanup failed; private tool output was not logged."
+                )
+            except BaseException as exc:
+                finalization_failure = exc
+            try:
+                cleanup_pipeline(processes)
+            except BaseException as exc:
+                if finalization_failure is None:
+                    finalization_failure = exc
+            if finalization_failure is not None and not primary_failure:
+                raise finalization_failure
 
 
 def encrypt_stream(producer, recipient, path):
