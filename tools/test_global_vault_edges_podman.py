@@ -47,7 +47,9 @@ box, vault, credentials, service = (
     fixture.credentials,
     fixture.workspace_service,
 )
-FORMAT = "oc-box-global-vault-edges-host-v1"
+FORMAT = "oc-box-global-vault-edges-host-v2"
+SNAPSHOT_SCHEMA = 2
+HOME_MANIFEST_CONTRACT = "oc-box-home-topology-v2"
 # Native 2.2.6 appends this exact host-side file even for --version. Its content
 # digest is diagnostic, not protected state; every other native file still is.
 NATIVE_LOG = "opencode/log/opencode.log"
@@ -158,6 +160,7 @@ CATEGORIES = frozenset(
         "unexpected-child-result",
         "refusal-category",
         "state-changed",
+        "snapshot-contract",
         "ciphertext-changed",
         "report-schema",
         "fixture-only",
@@ -239,6 +242,8 @@ def write_report(root, case, checks, primary=None, secondary=(), *, exit_code=No
         root / ("edges-" + case + "-report.json"),
         {
             "format": FORMAT,
+            "snapshot_schema": SNAPSHOT_SCHEMA,
+            "home_manifest_contract": HOME_MANIFEST_CONTRACT,
             "case": case,
             "status": "PASS" if primary is None and not secondary else "FAIL",
             "checks": checks,
@@ -263,7 +268,11 @@ def validate_edges(root, *, allow_unrecorded=False):
     root = fixture.validate_fixture(root, allow_unrecorded=allow_unrecorded)
     meta = fixture.private_json(root, "edges.json")
     require(
-        meta.get("format") == FORMAT and meta.get("cases") == list(CASES),
+        meta.get("format") == FORMAT
+        and type(meta.get("snapshot_schema")) is int
+        and meta.get("snapshot_schema") == SNAPSHOT_SCHEMA
+        and meta.get("home_manifest_contract") == HOME_MANIFEST_CONTRACT
+        and meta.get("cases") == list(CASES),
         "fixture-only",
     )
     require(
@@ -1004,31 +1013,58 @@ def owner_case(root, case, password, python):
     finish_case(root, case, checks, primary, secondary, exit_code=exit_code)
 
 
+# Exact stopped-home contract, including root '.': lstat kind/mode/UID/GID/nlink
+# for every entry, file size + complete SHA-256, symlink target, and canonical
+# first relative path for each non-directory hardlink group. Device/inode values
+# identify groups only; they are not serialized. Symlinks are never traversed.
+# As before, times (including mtime), ACLs and xattrs are NOT proof fields: a
+# timestamp-only change does not waive content or any ownership/topology check.
 HOME_MANIFEST = """import hashlib,json,os,pathlib,stat,sys
-root=pathlib.Path(sys.argv[1]); result={}
-for path in sorted(root.rglob('*')):
-    item=path.lstat(); relative=str(path.relative_to(root))
+root=pathlib.Path(sys.argv[1]); result={}; heads={}
+def scan(path,relative):
+    item=path.lstat()
+    common=[stat.S_IMODE(item.st_mode),item.st_uid,item.st_gid,item.st_nlink]
+    head=heads.setdefault((item.st_dev,item.st_ino),relative)
     if stat.S_ISLNK(item.st_mode):
-        result[relative]=['link',os.readlink(path)]
+        result[relative]=['link',*common,os.readlink(path),head]
     elif stat.S_ISREG(item.st_mode):
         digest=hashlib.sha256()
         with path.open('rb') as stream:
             for content in iter(lambda:stream.read(1048576),b''): digest.update(content)
-        result[relative]=['file',stat.S_IMODE(item.st_mode),item.st_uid,item.st_gid,digest.hexdigest()]
+        result[relative]=['file',*common,item.st_size,digest.hexdigest(),head]
     elif stat.S_ISDIR(item.st_mode):
-        result[relative]=['directory',stat.S_IMODE(item.st_mode),item.st_uid,item.st_gid]
+        result[relative]=['directory',*common]
+        for child in sorted(path.iterdir()):
+            scan(child,child.name if relative=='.' else relative+'/'+child.name)
     else:
-        result[relative]=['special',stat.S_IFMT(item.st_mode),item.st_uid,item.st_gid]
-print(hashlib.sha256(json.dumps(result,sort_keys=True,separators=(',',':')).encode()).hexdigest())
+        result[relative]=['special',stat.S_IFMT(item.st_mode),*common,item.st_rdev,head]
+if not stat.S_ISDIR(root.lstat().st_mode): raise ValueError('home-root')
+scan(root,'.')
+payload={'contract':'oc-box-home-topology-v2','entries':result}
+print(hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':')).encode()).hexdigest())
 """
 
 
-def protected_snapshot(snapshot):
+def protected_snapshot(snapshot, *, legacy_inspection=False):
     """Pure projection: waive ONLY the native 2.2.6 --version log digest.
 
     Original before/after snapshots retain that digest. Other log files, native
     DB/config/auth/cache, and the complete container-home manifest remain exact.
+    Legacy projection is explicit read-only inspection, never acceptance: it
+    does not add schema/contract fields or rewrite the retained evidence.
     """
+    require(
+        isinstance(snapshot, dict)
+        and (
+            legacy_inspection
+            or (
+                type(snapshot.get("snapshot_schema")) is int
+                and snapshot.get("snapshot_schema") == SNAPSHOT_SCHEMA
+                and snapshot.get("home_manifest_contract") == HOME_MANIFEST_CONTRACT
+            )
+        ),
+        "snapshot-contract",
+    )
     result = dict(snapshot)
     if "native" in snapshot:
         native = {name: dict(files) for name, files in snapshot["native"].items()}
@@ -1099,6 +1135,8 @@ def stopped_snapshot(root, *, forbidden=()):
         require(re.fullmatch(r"[0-9a-f]{64}", digest) is not None, "state-changed")
         homes[name] = digest
     return {
+        "snapshot_schema": SNAPSHOT_SCHEMA,
+        "home_manifest_contract": HOME_MANIFEST_CONTRACT,
         "source": source,
         "resources": resources,
         "homes": homes,
@@ -1132,7 +1170,9 @@ def failure_case(root, fault, action, password, python, *, forbidden=()):
         with os.fdopen(descriptor, "wb") as stream:
             stream.write(source.read_bytes())
         # Snapshot AFTER the fault. Never roll back unexpected starts/deletion.
-        before = stopped_snapshot(root, forbidden=forbidden)
+        candidate = stopped_snapshot(root, forbidden=forbidden)
+        protected_snapshot(candidate)  # Legacy inspection is never a new baseline.
+        before = candidate
         fixture.write_json_new(root / ("edges-" + case + "-baseline.json"), before)
         ident = fixture.workspace(root, "source-a")[1]["id"]
         result = drive_child(
@@ -1283,6 +1323,8 @@ def main(argv=None):
                 root / "edges.json",
                 {
                     "format": FORMAT,
+                    "snapshot_schema": SNAPSHOT_SCHEMA,
+                    "home_manifest_contract": HOME_MANIFEST_CONTRACT,
                     "cases": list(CASES),
                     "source": source,
                     "distro": args.distro,
@@ -1347,6 +1389,8 @@ def main(argv=None):
                     root / "edges-result.json",
                     {
                         "format": FORMAT,
+                        "snapshot_schema": SNAPSHOT_SCHEMA,
+                        "home_manifest_contract": HOME_MANIFEST_CONTRACT,
                         "status": "PASS"
                         if primary is None and not secondary
                         else "FAIL",

@@ -4,12 +4,14 @@ import io
 import importlib.util
 import hashlib
 import copy
+import json
 import os
 from pathlib import Path
 import shlex
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -88,6 +90,8 @@ class GlobalVaultEdgesHostFixtureTests(unittest.TestCase):
             self.root / "edges.json",
             {
                 "format": edge.FORMAT,
+                "snapshot_schema": 2,
+                "home_manifest_contract": "oc-box-home-topology-v2",
                 "cases": list(edge.CASES),
                 "source": self.source,
                 "distro": "tumbleweed",
@@ -131,6 +135,254 @@ class GlobalVaultEdgesHostFixtureTests(unittest.TestCase):
         vault.private_directory(target.parent)
         target.write_bytes(b"synthetic-private-ciphertext-unit-evidence\n")
         return target.read_bytes()
+
+    def snapshot(self, **fields):
+        return {
+            "snapshot_schema": 2,
+            "home_manifest_contract": "oc-box-home-topology-v2",
+            **fields,
+        }
+
+    def home_digest(self, home, *, metadata=None):
+        # Execute only the read-only scanner against private synthetic files.
+        # Metadata overrides let unprivileged runs exercise numeric ownership.
+        prelude = ""
+        if metadata is not None:
+            prelude = (
+                "import pathlib,os\n_original_lstat=pathlib.Path.lstat\n"
+                + "_overrides="
+                + repr(metadata)
+                + "\n"
+                + "def _lstat(path,*args,**kwargs):\n"
+                + " info=_original_lstat(path,*args,**kwargs)\n"
+                + " values=list(info)\n"
+                + " for index,value in _overrides.get(str(path),{}).items(): values[index]=value\n"
+                + " return os.stat_result(values)\n"
+                + "pathlib.Path.lstat=_lstat\n"
+            )
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", prelude + edge.HOME_MANIFEST, str(home)],
+            env={"PATH": os.defpath},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, "private scanner failed")
+        self.assertRegex(result.stdout.decode().strip(), r"^[0-9a-f]{64}$")
+        return result.stdout.decode().strip()
+
+    def test_home_topology_root_and_link_metadata_independent_mutations(self):
+        home = self.root / "topology-home"
+        home.mkdir(mode=0o700)
+        target = home / "target"
+        target.write_bytes(b"SYNTHETIC_TOPOLOGY_BYTES\n")
+        link = home / "link"
+        link.symlink_to("target")
+        initial = self.home_digest(home)
+        # stat_result's UID/GID/mode/nlink slots are independent expectations,
+        # not derived from the scanner's serialization.
+        for name, path, index, value in (
+            ("root-uid", home, 4, home.lstat().st_uid + 1),
+            ("root-gid", home, 5, home.lstat().st_gid + 1),
+            ("root-mode", home, 0, home.lstat().st_mode ^ 0o010),
+            ("root-nlink", home, 3, home.lstat().st_nlink + 1),
+            ("link-uid", link, 4, link.lstat().st_uid + 1),
+            ("link-gid", link, 5, link.lstat().st_gid + 1),
+            ("link-mode", link, 0, link.lstat().st_mode ^ 0o010),
+            ("link-nlink", link, 3, link.lstat().st_nlink + 1),
+            ("file-nlink", target, 3, target.lstat().st_nlink + 1),
+        ):
+            with self.subTest(name=name):
+                self.assertNotEqual(
+                    self.home_digest(home, metadata={str(path): {index: value}}),
+                    initial,
+                )
+                self.assertEqual(self.home_digest(home), initial)
+
+    def test_home_topology_digest_has_independent_exact_root_and_entry_contract(self):
+        home = self.root / "exact-home"
+        home.mkdir(mode=0o700)
+        content = b"FIXED_HOME_BYTES\n"
+        (home / "a").write_bytes(content)
+        (home / "a").chmod(0o600)
+        os.link(home / "a", home / "b")
+        (home / "link").symlink_to("a")
+        root_info, link_info = home.lstat(), (home / "link").lstat()
+        fixed_file = [
+            "file",
+            0o600,
+            os.getuid(),
+            os.getgid(),
+            2,
+            len(content),
+            hashlib.sha256(content).hexdigest(),
+            "a",
+        ]
+        expected = {
+            "contract": "oc-box-home-topology-v2",
+            "entries": {
+                ".": ["directory", 0o700, os.getuid(), os.getgid(), root_info.st_nlink],
+                "a": fixed_file,
+                "b": fixed_file,
+                "link": [
+                    "link",
+                    0o777,
+                    os.getuid(),
+                    os.getgid(),
+                    link_info.st_nlink,
+                    "a",
+                    "link",
+                ],
+            },
+        }
+        expected_digest = hashlib.sha256(
+            json.dumps(expected, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        self.assertEqual(self.home_digest(home), expected_digest)
+
+    def test_home_topology_hardlinked_symlinks_keep_lstat_heads_and_owners(self):
+        home = self.root / "symlink-hardlinks"
+        home.mkdir(mode=0o700)
+        (home / "a").symlink_to("absent")
+        (home / "c").symlink_to("absent")
+        os.link(home / "a", home / "b", follow_symlinks=False)
+        os.link(home / "c", home / "d", follow_symlinks=False)
+        before = self.home_digest(home)
+        (home / "b").unlink()
+        (home / "d").unlink()
+        os.link(home / "a", home / "d", follow_symlinks=False)
+        os.link(home / "c", home / "b", follow_symlinks=False)
+        self.assertTrue(all((home / name).is_symlink() for name in "abcd"))
+        self.assertTrue(all((home / name).lstat().st_nlink == 2 for name in "abcd"))
+        self.assertNotEqual(self.home_digest(home), before)
+
+    def test_home_topology_hardlink_heads_detect_equal_content_and_count_regrouping(
+        self,
+    ):
+        home = self.root / "hardlink-home"
+        home.mkdir(mode=0o700)
+        for name in ("a", "c"):
+            (home / name).write_bytes(b"SAME_SYNTHETIC_BYTES\n")
+        os.link(home / "a", home / "b")
+        os.link(home / "c", home / "d")
+        before = self.home_digest(home)
+        # All paths still have two links and identical bytes/owners/modes.
+        # Only the internal equivalence classes change: ab/cd -> ad/bc.
+        (home / "b").unlink()
+        (home / "d").unlink()
+        os.link(home / "a", home / "d")
+        os.link(home / "c", home / "b")
+        self.assertTrue(all((home / name).lstat().st_nlink == 2 for name in "abcd"))
+        self.assertNotEqual(self.home_digest(home), before)
+
+    def test_home_topology_link_targets_are_not_followed_and_external_links_count(self):
+        home = self.root / "link-home"
+        home.mkdir(mode=0o700)
+        outside = self.parent / "outside"
+        outside.mkdir(mode=0o700)
+        (outside / "data").write_bytes(b"OUTSIDE_SYNTHETIC_BYTES\n")
+        (home / "external").symlink_to(outside, target_is_directory=True)
+        (home / "dangling").symlink_to("absent")
+        (home / "cycle").symlink_to(".", target_is_directory=True)
+        target = home / "file"
+        target.write_bytes(b"INSIDE_SYNTHETIC_BYTES\n")
+        before = self.home_digest(home)
+        (outside / "data").write_bytes(b"CHANGED_OUTSIDE_BYTES\n")
+        self.assertEqual(self.home_digest(home), before)
+        os.link(target, outside / "alias")
+        self.assertNotEqual(self.home_digest(home), before)
+        (outside / "alias").unlink()
+        self.assertEqual(self.home_digest(home), before)
+
+    def test_legacy_snapshot_inspection_is_explicit_and_never_extended_proof(self):
+        legacy = {"homes": {"source-a": "a" * 64}, "ciphertext": "b" * 64}
+        original = copy.deepcopy(legacy)
+        with self.assertRaisesRegex(fixture.FixtureError, "snapshot-contract"):
+            edge.protected_snapshot(legacy)
+        inspected = edge.protected_snapshot(legacy, legacy_inspection=True)
+        self.assertEqual(inspected, legacy)
+        self.assertEqual(legacy, original)
+        self.assertNotIn("snapshot_schema", inspected)
+        self.assertNotIn("home_manifest_contract", inspected)
+        for mutate in (
+            lambda value: value.update(snapshot_schema=True),
+            lambda value: value.update(snapshot_schema=1),
+            lambda value: value.update(home_manifest_contract="legacy"),
+        ):
+            current = self.snapshot(**legacy)
+            mutate(current)
+            with (
+                self.subTest(snapshot=current),
+                self.assertRaisesRegex(fixture.FixtureError, "snapshot-contract"),
+            ):
+                edge.protected_snapshot(current)
+
+    def test_legacy_fault_baseline_refuses_without_child_or_second_snapshot(self):
+        self.record()
+        self.cipher_evidence()
+        legacy = {"ciphertext": "a" * 64, "homes": {"source-a": "b" * 64}}
+        with (
+            patch.object(edge, "checkpoint"),
+            patch.object(edge, "install_cipher"),
+            patch.object(edge, "stopped_snapshot", return_value=legacy) as snapshot,
+            patch.object(edge, "drive_child") as child,
+        ):
+            with self.assertRaisesRegex(edge.CaseFailure, "snapshot-contract"):
+                edge.failure_case(
+                    self.root, "corrupt-vault", "start", "synthetic", sys.executable
+                )
+        snapshot.assert_called_once()
+        child.assert_not_called()
+        self.assertFalse(
+            (self.root / "edges-corrupt-vault-start-baseline.json").exists()
+        )
+        self.assertEqual(self.report("corrupt-vault-start")["status"], "FAIL")
+        self.assertEqual(
+            legacy, {"ciphertext": "a" * 64, "homes": {"source-a": "b" * 64}}
+        )
+
+    def test_stopped_snapshot_binds_versioned_home_digest_without_weakening_source(
+        self,
+    ):
+        _, record = self.record()
+        self.cipher_evidence()
+        with (
+            patch.object(edge, "checkpoint"),
+            patch.object(
+                fixture, "snapshot_source", return_value={"db": "fixed-source"}
+            ) as source,
+            patch.object(
+                fixture,
+                "verify_owned_resources",
+                return_value={
+                    "Id": "fixed-container",
+                    "State": {"StartedAt": "start", "FinishedAt": "stop"},
+                },
+            ),
+            patch.object(
+                box, "run", return_value=SimpleNamespace(stdout="c" * 64 + "\n")
+            ) as engine,
+        ):
+            snapshot = edge.stopped_snapshot(self.root)
+        self.assertEqual(snapshot["snapshot_schema"], 2)
+        self.assertEqual(snapshot["home_manifest_contract"], "oc-box-home-topology-v2")
+        self.assertEqual(snapshot["source"], {"db": "fixed-source"})
+        self.assertEqual(snapshot["homes"], {"source-a": "c" * 64})
+        source.assert_called_once()
+        command = engine.call_args.args[0]
+        self.assertEqual(command[:2], ["podman", "unshare"])
+        self.assertEqual(command[-2], edge.HOME_MANIFEST)
+        self.assertEqual(
+            command[-1],
+            str(
+                self.root
+                / "data/containers/storage/volumes"
+                / record["home_volume"]
+                / "_data"
+            ),
+        )
+        self.assertIs(engine.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertTrue(engine.call_args.kwargs["private"])
 
     def test_host_guard_precedes_all_placement_probes_and_writes(self):
         with (
@@ -842,11 +1094,11 @@ raise SystemExit(97)
             for action in ("start", "reset"):
                 with self.subTest(fault=fault, action=action):
                     events = []
-                    snapshot = {
-                        "ciphertext": "a" * 64,
-                        "resources": {"id": "synthetic"},
-                        "registry": {"selection": "b" * 64},
-                    }
+                    snapshot = self.snapshot(
+                        ciphertext="a" * 64,
+                        resources={"id": "synthetic"},
+                        registry={"selection": "b" * 64},
+                    )
                     result = {
                         "exit_code": 1,
                         "value": {
@@ -920,7 +1172,7 @@ raise SystemExit(97)
     ):
         self.record()
         self.cipher_evidence()
-        before = {"ciphertext": "a" * 64}
+        before = self.snapshot(ciphertext="a" * 64)
         result = {
             "exit_code": 2,
             "value": {"exit_code": 2},
@@ -954,7 +1206,7 @@ raise SystemExit(97)
     ):
         self.record()
         self.cipher_evidence()
-        before = {"ciphertext": "a" * 64, "resources": {"container_id": "old"}}
+        before = self.snapshot(ciphertext="a" * 64, resources={"container_id": "old"})
         after = {**before, "resources": {"container_id": "changed"}}
         result = {
             "exit_code": 1,
@@ -1001,13 +1253,13 @@ raise SystemExit(97)
         log = self.root / "host-data-2" / edge.NATIVE_LOG
         log.parent.mkdir(parents=True)
         log.write_bytes(b"synthetic native startup metadata\n")
-        before = {
-            "ciphertext": "a" * 64,
-            "native": {
+        before = self.snapshot(
+            ciphertext="a" * 64,
+            native={
                 name: fixture.tree_digest(self.root / ("host-" + name + "-2"))
                 for name in ("config", "data", "state", "cache")
             },
-        }
+        )
         original = copy.deepcopy(before)
         with log.open("ab") as stream:
             stream.write(b"synthetic --version metadata\n")
@@ -1070,12 +1322,10 @@ raise SystemExit(97)
         for case, (kind, relative) in zip(edge.CASES[len(edge.OWNERS) :], protected):
             fault, action = case.rsplit("-", 1)
             with self.subTest(kind=kind, relative=relative):
-                before = {
-                    "ciphertext": "a" * 64,
-                    "native": {
-                        name: {} for name in ("config", "data", "state", "cache")
-                    },
-                }
+                before = self.snapshot(
+                    ciphertext="a" * 64,
+                    native={name: {} for name in ("config", "data", "state", "cache")},
+                )
                 before["native"]["data"][edge.NATIVE_LOG] = "b" * 64
                 before["native"][kind][relative] = "c" * 64
                 after = copy.deepcopy(before)
