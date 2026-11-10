@@ -647,8 +647,10 @@ def refresh_workspace_identity(path, data):
         atomic_json(path, data)
 
 
-def inspect_owned(data, *, env=None):
+def inspect_owned(data, *, env=None, private=False):
     options = {"env": env} if env is not None else {}
+    if private:
+        options["private"] = True
     result = podman(
         "container", "inspect", data["container"], capture=True, check=False, **options
     )
@@ -663,7 +665,11 @@ def inspect_owned(data, *, env=None):
         )
         if exists.returncode == 1:
             return None
-        raise BoxError(f"Cannot inspect container: {result.stderr.strip()}")
+        raise BoxError(
+            "Cannot inspect container."
+            if private
+            else f"Cannot inspect container: {result.stderr.strip()}"
+        )
     info = json.loads(result.stdout)[0]
     if info.get("Config", {}).get("Labels", {}).get(LABEL) != data["id"]:
         raise BoxError("Container ownership label mismatch; refusing to manage it.")
@@ -1003,8 +1009,10 @@ def start_container(path, data):
         )
 
 
-def stop_container(data, *, env=None):
+def stop_container(data, *, env=None, private=False):
     options = {"env": env} if env is not None else {}
+    if private:
+        options["private"] = True
     info = inspect_owned(data, **options)
     if info and info["State"]["Running"]:
         podman("stop", "--time", "10", data["container"], capture=True, **options)
@@ -2095,8 +2103,10 @@ def validate_session_export(exported, ident):
             parts.add(pid)
 
 
-def export_container_session(data, ident):
+def export_container_session(data, ident, *, private=False):
+    """Export normally, or opt into anonymous-memory host captures explicitly."""
     if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2:
+        # The V2 bridge always uses private capture, with or without this opt-in.
         exported = json.loads(run_v2_history(data, "export", session=ident).stdout)
         validate_session_export(exported, ident)
         if opencode_compat.directory(exported) != container_project(data):
@@ -2128,6 +2138,7 @@ with tempfile.TemporaryFile() as output:
         ),
         capture=True,
         timeout=60,
+        **({"private": True} if private else {}),
     )
     return json.loads(result.stdout)
 
