@@ -823,8 +823,10 @@ def container_project(data):
     return data.get("container_project", data["project"])
 
 
-def create_container(path, data, *, environment=None):
+def create_container(path, data, *, environment=None, private=False):
     def create_podman(*args, **kwargs):
+        if private:
+            kwargs.update(capture=True, private=True)
         return podman(
             *args, **kwargs, **({"env": environment} if environment is not None else {})
         )
@@ -839,7 +841,12 @@ def create_container(path, data, *, environment=None):
     for option in data.get("podman_args", []):
         validate_podman_arg(option)
     warn_device_access(data)
-    print(f"Creating {data['distro']} environment ({data['image']})", flush=True)
+    print(
+        "Creating private workspace environment"
+        if private
+        else f"Creating {data['distro']} environment ({data['image']})",
+        flush=True,
+    )
     # The named home is container-only storage, not a bind of the user's home.
     volume = create_podman(
         "volume", "exists", data["home_volume"], capture=True, check=False
@@ -855,12 +862,25 @@ def create_container(path, data, *, environment=None):
         )
     elif volume.returncode != 0:
         raise BoxError("Cannot check the private home volume.")
-    volume_info = json.loads(
-        create_podman("volume", "inspect", data["home_volume"], capture=True).stdout
-    )[0]
-    if (volume_info.get("Labels") or {}).get(LABEL) != data["id"]:
+    inspected = create_podman("volume", "inspect", data["home_volume"], capture=True)
+    try:
+        values = json.loads(inspected.stdout)
+    except (ValueError, TypeError) as exc:
+        raise BoxError("Invalid private home volume inspection response.") from exc
+    if (
+        not isinstance(values, list)
+        or len(values) != 1
+        or not isinstance(values[0], dict)
+    ):
+        raise BoxError("Invalid private home volume inspection response.")
+    labels = values[0].get("Labels")
+    if labels is None:
+        labels = {}
+    if not isinstance(labels, dict):
+        raise BoxError("Invalid private home volume inspection response.")
+    if labels.get(LABEL) != data["id"]:
         raise BoxError("Private home volume ownership mismatch.")
-    create_podman(
+    created = create_podman(
         "create",
         "--name",
         data["container"],
@@ -904,6 +924,7 @@ def create_container(path, data, *, environment=None):
     )
     data["ready"] = False
     atomic_json(path, data)
+    return created if private else None
 
 
 def start_container(path, data):
