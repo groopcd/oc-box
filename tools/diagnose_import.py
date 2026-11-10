@@ -21,6 +21,7 @@ Interruption exits 130. Reports retain exact-match and positional differences.
 
 import argparse
 import contextlib
+import copy
 import json
 import math
 import re
@@ -164,9 +165,29 @@ def workspace_lock(path, state):
                 )
 
 
-def live_export(path, data, session, state):
+def saved_import_path(path, data, session):
+    major = box.opencode_compat.major(data.get("opencode_version", "1.0.0"))
+    return (
+        path.parent / ("imports-v2" if major == 2 else "imports") / (session + ".json")
+    )
+
+
+def live_export(path, data, session, source, state):
     state["stage"] = "workspace-lock"
     with workspace_lock(path, state):
+        state["stage"] = "freshness"
+        fresh_path, fresh_data = box.find_workspace(workspace_id=data["id"])
+        if fresh_path != path or differences(data, fresh_data, limit=1):
+            raise box.BoxError(
+                "Diagnostic inputs changed; no native operation requested"
+            )
+        fresh_source = box.read_json(saved_import_path(fresh_path, fresh_data, session))
+        if differences(source, fresh_source, limit=1):
+            raise box.BoxError(
+                "Diagnostic inputs changed; no native operation requested"
+            )
+        state["stage"] = "backend"
+        box.check_backend()
         state["stage"] = "inspect"
         info = box.inspect_owned(data)
         if info is None:
@@ -283,23 +304,23 @@ def main(argv=None, *, state=None):
     ):
         raise InvalidOptions()
     if args.live:
-        if not args.workspace or args.source_export or args.container_export:
+        if (
+            not args.workspace
+            or args.source_export is not None
+            or args.container_export is not None
+        ):
             raise InvalidOptions()
-        state["stage"] = "backend"
-        box.check_backend()
         state["stage"] = "workspace"
         path, data = box.find_workspace(workspace_id=args.workspace)
-        major = box.opencode_compat.major(data.get("opencode_version", "1.0.0"))
-        backup = (
-            path.parent
-            / ("imports-v2" if major == 2 else "imports")
-            / (args.session + ".json")
-        )
+        data = copy.deepcopy(data)
+        if data.get("id") != args.workspace:
+            raise box.BoxError("Invalid workspace registration")
+        backup = saved_import_path(path, data, args.session)
         state["stage"] = "read-source"
-        source = box.read_json(backup)
+        source = copy.deepcopy(box.read_json(backup))
         state["stage"] = "validate-source"
         validate_export(source, args.session)
-        actual = live_export(path, data, args.session, state)
+        actual = live_export(path, data, args.session, source, state)
     else:
         if args.workspace or not args.source_export or not args.container_export:
             raise InvalidOptions()

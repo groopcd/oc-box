@@ -142,6 +142,7 @@ class DiagnoseImportTests(unittest.TestCase):
                     "read-container",
                     "validate-source",
                     "workspace-lock",
+                    "freshness",
                     "inspect",
                     "start",
                     "export",
@@ -994,6 +995,134 @@ class DiagnoseImportTests(unittest.TestCase):
             diagnostic.main(self.arguments, state=state)
         self.assertIs(raised.exception, primary)
         self.assertEqual(state["secondary_failures"], [])
+
+    def test_locked_freshness_refuses_completed_intervening_changes_before_native_io(
+        self,
+    ):
+        original_data, original_source = (
+            copy.deepcopy(self.data),
+            copy.deepcopy(self.source),
+        )
+        for case in (
+            "unchanged",
+            "version",
+            "identity",
+            "container",
+            "registration-path",
+            "source",
+        ):
+            with self.subTest(case=case), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                registration = root / "workspace.json"
+                import_path = root / "imports" / (self.session + ".json")
+                import_path.parent.mkdir()
+                registration.write_text(json.dumps(original_data), encoding="utf-8")
+                import_path.write_text(json.dumps(original_source), encoding="utf-8")
+                replacement = copy.deepcopy(original_data)
+                replacement_source = copy.deepcopy(original_source)
+                if case == "version":
+                    replacement["opencode_version"] = "2.2.6"
+                elif case == "identity":
+                    replacement["project_identity"] = [991, 882]
+                elif case == "container":
+                    replacement["container"] = "replacement-never-executed"
+                elif case == "source":
+                    replacement_source["messages"][0]["parts"][0]["state"]["input"] = {}
+                entered = False
+                observations = []
+
+                def discover(**options):
+                    selected = (
+                        root / "replacement.json"
+                        if entered and case == "registration-path"
+                        else registration
+                    )
+                    observations.append((entered, selected))
+                    return selected, json.loads(
+                        registration.read_text(encoding="utf-8")
+                    )
+
+                @contextlib.contextmanager
+                def lock(path):
+                    nonlocal entered
+                    # A different owner completed its update before our lock was
+                    # acquired: use independently decoded/replaced file contents.
+                    registration.write_text(json.dumps(replacement), encoding="utf-8")
+                    import_path.write_text(
+                        json.dumps(replacement_source), encoding="utf-8"
+                    )
+                    entered = True
+                    yield
+
+                self.fake.find_workspace.side_effect = discover
+                self.fake.read_json.side_effect = lambda path: json.loads(
+                    path.read_text(encoding="utf-8")
+                )
+                self.fake.workspace_lock.side_effect = lock
+                for name in (
+                    "check_backend",
+                    "inspect_owned",
+                    "podman",
+                    "export_container_session",
+                    "stop_container",
+                ):
+                    getattr(self.fake, name).reset_mock()
+                code, output, errors = self.invoke()
+                if case == "unchanged":
+                    self.assertEqual(code, 0)
+                    self.assertTrue(json.loads(output)["transcript_verified"])
+                    self.assertEqual(errors, "")
+                    self.assertEqual(
+                        observations, [(False, registration), (True, registration)]
+                    )
+                    self.fake.inspect_owned.assert_called_once()
+                    self.fake.check_backend.assert_called_once()
+                    self.fake.export_container_session.assert_called_once()
+                else:
+                    self.assertEqual(code, 2)
+                    self.assertEqual(output, "")
+                    self.assertEqual(
+                        json.loads(errors)["primary_failure"],
+                        {"stage": "freshness", "category": "box-error"},
+                    )
+                    for name in (
+                        "check_backend",
+                        "inspect_owned",
+                        "podman",
+                        "export_container_session",
+                        "stop_container",
+                    ):
+                        getattr(self.fake, name).assert_not_called()
+                self.assertEqual(
+                    json.loads(registration.read_text(encoding="utf-8")), replacement
+                )
+                self.assertEqual(
+                    json.loads(import_path.read_text(encoding="utf-8")),
+                    replacement_source,
+                )
+                self.assertEqual(
+                    sorted(
+                        path.relative_to(root).as_posix()
+                        for path in root.rglob("*")
+                        if path.is_file()
+                    ),
+                    ["imports/" + self.session + ".json", "workspace.json"],
+                )
+                self.assertEqual(self.data, original_data)
+                self.assertEqual(self.source, original_source)
+
+    def test_explicit_empty_export_option_is_mixed_mode_refusal_before_backend(self):
+        for option in ("--source-export", "--container-export"):
+            with self.subTest(option=option):
+                code, output, errors = self.invoke([*self.arguments, option, ""])
+                self.assertEqual(code, 2)
+                self.assertEqual(output, "")
+                self.assertEqual(
+                    json.loads(errors)["primary_failure"],
+                    {"stage": "options", "category": "invalid-options"},
+                )
+        self.fake.check_backend.assert_not_called()
+        self.fake.find_workspace.assert_not_called()
 
     def test_malformed_live_export_remains_primary_over_stop_failure(self):
         self.fake.inspect_owned.return_value = {"State": {"Running": False}}
