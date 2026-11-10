@@ -990,6 +990,120 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             "synthetic-private", json.dumps(report) + self.output.getvalue()
         )
 
+    @contextlib.contextmanager
+    def owner_boundaries(self, *, cleanup_error=None, preparation_error=None):
+        roots = []
+
+        @contextlib.contextmanager
+        def provider(state):
+            try:
+                yield 12345
+            finally:
+                if cleanup_error is not None:
+                    raise cleanup_error
+
+        def launch(arguments):
+            root = Path(arguments[arguments.index("--project") + 1]).parent
+            roots.append(root)
+            path, data = box.create_workspace(root / "source-a", "tumbleweed")
+            data["opencode_version"] = fixture.NATIVE_VERSION
+            box.atomic_json(path, data)
+            return 0
+
+        with (
+            patch.object(ui.shutil, "which", return_value=str(self.binary)),
+            patch.object(fixture, "validate_store"),
+            patch.object(
+                fixture, "prepare_native_cli", side_effect=self.prepare_native
+            ),
+            patch.object(ui, "provider", side_effect=provider),
+            patch.object(fixture, "write_plugin", side_effect=preparation_error),
+            patch.object(box, "main", side_effect=launch) as launcher,
+            patch.object(fixture, "verify_owned_resources"),
+            patch.object(ui, "source_identity", return_value=self.source),
+        ):
+            yield roots, launcher
+
+    def test_preparation_primary_precedes_provider_unwind_and_reporting_errors(self):
+        original = fixture.FixtureError("provider-contract")
+        with self.owner_boundaries(
+            preparation_error=original,
+            cleanup_error=fixture.FixtureError("provider-cleanup-timeout"),
+        ) as (_, launcher):
+            self.assertEqual(ui.own(self.owner_args(), self.source), 1)
+        launcher.assert_not_called()
+        reports = list(
+            self.parent.glob(
+                fixture.PREFIX + "interactive-*/interactive-start-*-report.json"
+            )
+        )
+        report = json.loads(reports[0].read_text())
+        self.assertEqual(report["category"], "provider-contract")
+        self.assertEqual(report["secondary_errors"], ["provider-cleanup-timeout"])
+        self.assertEqual(report["manual_observations"], "NOT_AUTOMATICALLY_PASSED")
+        failures = ui.Failures()
+        failures.record(original)
+        failures.record(OSError("private-cleanup-details"))
+        self.assertIs(failures.primary, original)
+        self.assertEqual(failures.secondary, ["os-error"])
+
+    def test_reporting_failure_cannot_mask_primary_or_leave_success_exit(self):
+        for primary, expected in ((None, 1), (KeyboardInterrupt(), 130)):
+            with (
+                self.subTest(primary=type(primary).__name__),
+                self.owner_boundaries(preparation_error=primary),
+                patch.object(ui, "save_report", side_effect=OSError("private-report")),
+            ):
+                self.assertEqual(ui.own(self.owner_args(), self.source), expected)
+        text = self.output.getvalue()
+        self.assertIn("reporting-error", text)
+        self.assertNotIn("private-report", text)
+
+    def test_successful_body_cleanup_failure_inside_callers_except_is_failure(self):
+        with self.owner_boundaries(
+            cleanup_error=fixture.FixtureError("provider-cleanup-timeout")
+        ):
+            try:
+                raise ValueError("already-handled-caller-error")
+            except ValueError:
+                self.assertEqual(ui.own(self.owner_args(), self.source), 1)
+        report = json.loads(
+            next(
+                self.parent.glob(
+                    fixture.PREFIX + "interactive-*/interactive-start-*-report.json"
+                )
+            ).read_text()
+        )
+        self.assertEqual(
+            (report["outcome"], report["category"]),
+            ("failed", "provider-cleanup-timeout"),
+        )
+
+    def test_attach_primary_survives_lease_and_report_failures(self):
+        self.record()
+        self.client_boundaries()
+
+        @contextlib.contextmanager
+        def lease(*args):
+            try:
+                yield {
+                    "url": "http://127.0.0.1:12345",
+                    "password": "synthetic",
+                    "session": "ses_shared",
+                }
+            finally:
+                raise OSError("private-lease-cleanup")
+
+        with (
+            patch.object(fixture.workspace_service, "attach", side_effect=lease),
+            patch.object(box, "run_tui", side_effect=KeyboardInterrupt()),
+        ):
+            self.assertEqual(ui.attach(self.args(), self.source), 130)
+        report = self.reports("tui")[0]
+        self.assertEqual(report["category"], "interrupted")
+        self.assertEqual(report["secondary_errors"], ["os-error"])
+        self.assertNotIn("private-lease", json.dumps(report))
+
     def test_owner_preparation_order_foreground_provider_and_no_vault_only_owner(self):
         order = []
         live = [False]

@@ -383,10 +383,77 @@ def report_value(mode, source, outcome, category, code, state=None, secondary=()
 
 def save_report(root, mode, source, outcome, category, code, state=None, secondary=()):
     path = root / ("interactive-" + mode + "-" + secrets.token_hex(8) + "-report.json")
+    # Announcing a destination is not success evidence. Do it before the final
+    # write, so an output failure cannot leave a successful terminal report.
+    print("Interactive-only report: " + str(path), flush=True)
     fixture.write_json_new(
         path, report_value(mode, source, outcome, category, code, state, secondary)
     )
-    print("Interactive-only report: " + str(path), flush=True)
+
+
+class Failures:
+    """Invocation-local precedence; never consult the caller's sys.exc_info()."""
+
+    def __init__(self):
+        self.primary = None
+        self.secondary = []
+        self.result = ("failed", "preparation", 1)
+
+    def record(self, error, *, category=None):
+        outcome, fixed, code = error_outcome(error)
+        fixed = category or fixed
+        if self.primary is None:
+            self.primary = error
+            self.result = outcome, fixed, code
+        else:
+            self.secondary.append(fixed)
+
+    def returned(self, code, label):
+        self.result = (
+            ("returned", label + "-return", 0)
+            if code == 0
+            else ("failed", label + "-exit", code)
+        )
+        if code != 0:
+            self.primary = code
+
+    def enter(self, stack, manager):
+        value = manager.__enter__()
+
+        def finish():
+            try:
+                manager.__exit__(None, None, None)
+            except BaseException as error:
+                self.record(error)
+
+        stack.callback(finish)
+        return value
+
+    @contextlib.contextmanager
+    def capture(self):
+        try:
+            yield
+        except BaseException as error:
+            self.record(error)
+
+    def report(self, root, mode, source, state=None):
+        try:
+            save_report(root, mode, source, *self.result, state, self.secondary)
+        except BaseException as error:
+            self.record(error, category="reporting-error")
+            # Persistence may be unavailable. Only fixed categories escape;
+            # never retry into the original evidence or print private errors.
+            print("interactive fixture: category=reporting-error", file=sys.stderr)
+        outcome, category, code = self.result
+        print(
+            "interactive fixture: outcome="
+            + outcome
+            + " category="
+            + category
+            + "; manual observations NOT automatically passed",
+            flush=True,
+        )
+        return code
 
 
 def print_commands(root):
@@ -422,83 +489,67 @@ def own(args, source):
     root.chmod(0o700)
     print_commands(root)
     state = provider_state()
-    outcome, category, code = "failed", "preparation", 1
-    primary_failure = False
-    secondary = []
-
-    def failure(error):
-        nonlocal outcome, category, code, primary_failure
-        failed = error_outcome(error)
-        if primary_failure:
-            secondary.append(failed[1])
-        else:
-            outcome, category, code = failed
-            primary_failure = True
-
+    failures = Failures()
     try:
         with fixture.private_output():
             fixture.prepare_root(root, args.distro or "tumbleweed")
             fixture.prepare_podman_cli(root, podman)
         with patch.dict(os.environ, fixture.isolated_env(root), clear=True):
             with contextlib.ExitStack() as stack:
-                # Enter temporary placement privately, but NEVER redirect the UI.
-                with fixture.private_output():
-                    stack.enter_context(fixture.temporary_location(root, args.temp_dir))
-                    fixture.validate_store(root)
-                    fixture.prepare_native_cli(root, binary)
-                    write_metadata(root, source, binary)
-                    port = stack.enter_context(provider(state))
-                    fixture.write_json_new(
-                        root / "config/opencode/opencode.json",
-                        fixture.fixture_config(port, root),
-                    )
-                    fixture.write_plugin(root)
                 try:
-                    with patch.dict(os.environ, state["values"]):
-                        # The real main-thread run_tui path owns the provider lifetime.
-                        code = box.main(
-                            ["start", "--project", str(root / "source-a"), "--no-vault"]
+                    # Capture preparation BEFORE unwinding either finalizer.
+                    # Each callback records its own failure independently.
+                    with fixture.private_output():
+                        failures.enter(
+                            stack, fixture.temporary_location(root, args.temp_dir)
                         )
-                    outcome, category = (
-                        ("returned", "launcher-return")
-                        if code == 0
-                        else ("failed", "launcher-exit")
-                    )
-                    primary_failure = code != 0
+                        fixture.validate_store(root)
+                        fixture.prepare_native_cli(root, binary)
+                        write_metadata(root, source, binary)
+                        port = failures.enter(stack, provider(state))
+                        fixture.write_json_new(
+                            root / "config/opencode/opencode.json",
+                            fixture.fixture_config(port, root),
+                        )
+                        fixture.write_plugin(root)
                 except BaseException as error:
-                    failure(error)
-                # Preserve the first UI failure if journal/shutdown also fails.
-                with fixture.private_output():
+                    failures.record(error)
+                if failures.primary is None:
                     try:
-                        records = fixture.workspace_records(root)
-                        fixture.require(
-                            set(records) == {"source-a"}, "workspace-allowlist"
-                        )
-                        fixture.verify_owned_resources(
-                            root, records["source-a"][1], stopped=True
-                        )
-                        fixture.record_ids(root)
+                        with patch.dict(os.environ, state["values"]):
+                            code = box.main(
+                                [
+                                    "start",
+                                    "--project",
+                                    str(root / "source-a"),
+                                    "--no-vault",
+                                ]
+                            )
+                        failures.returned(code, "launcher")
                     except BaseException as error:
-                        failure(error)
-                if state["errors"]:
-                    failure(fixture.FixtureError("provider-contract"))
+                        failures.record(error)
+                    # Preserve the first UI failure if journal/shutdown fails.
+                    with fixture.private_output():
+                        try:
+                            records = fixture.workspace_records(root)
+                            fixture.require(
+                                set(records) == {"source-a"}, "workspace-allowlist"
+                            )
+                            fixture.verify_owned_resources(
+                                root, records["source-a"][1], stopped=True
+                            )
+                            fixture.record_ids(root)
+                        except BaseException as error:
+                            failures.record(error)
+                    if state["errors"]:
+                        failures.record(fixture.FixtureError("provider-contract"))
         # The real UI and owner lease drain, provider shutdown and resource
         # journal have finished. The report retains the original identity.
-        if not primary_failure:
+        if failures.primary is None:
             require_same_source(source)
     except BaseException as error:
-        failure(error)
-    finally:
-        save_report(root, "start", source, outcome, category, code, state, secondary)
-    print(
-        "interactive fixture: outcome="
-        + outcome
-        + " category="
-        + category
-        + "; manual observations NOT automatically passed",
-        flush=True,
-    )
-    return code
+        failures.record(error)
+    return failures.report(root, "start", source, state)
 
 
 def attach(args, source):
@@ -507,10 +558,11 @@ def attach(args, source):
     with fixture.private_output():
         root, binary = validate_interactive(args.fixture, source)
         fixture.require_runtime_boot(root)
-    outcome, category, code = "failed", "validation", 1
+    failures = Failures()
     try:
         with patch.dict(os.environ, fixture.isolated_env(root), clear=True):
-            with fixture.temporary_location(root):
+            with contextlib.ExitStack() as stack, failures.capture():
+                failures.enter(stack, fixture.temporary_location(root))
                 with fixture.private_output():
                     fixture.validate_store(root, allow_unrecorded=True)
                     fixture.check_native_version(root, binary, "2")
@@ -532,7 +584,10 @@ def attach(args, source):
                 # connection, NEVER owner-capable box.main. A stop/service
                 # failure can invalidate even a held lease; its client must
                 # fail rather than falling through to owning startup/unlock.
-                with fixture.workspace_service.attach(box, path, data) as connection:
+                connection = failures.enter(
+                    stack, fixture.workspace_service.attach(box, path, data)
+                )
+                try:
                     if args.mode == "tui":
                         command = fixture.workspace_service.client_command(
                             box,
@@ -590,26 +645,14 @@ def attach(args, source):
                             "Container stopped; files, packages, and conversations retained.",
                             flush=True,
                         )
-                    outcome, category = (
-                        ("returned", "client-return")
-                        if code == 0
-                        else ("failed", "client-exit")
-                    )
-        if code == 0:
+                    failures.returned(code, "client")
+                except BaseException as error:
+                    failures.record(error)
+        if failures.primary is None:
             require_same_source(source)
     except BaseException as error:
-        outcome, category, code = error_outcome(error)
-    finally:
-        save_report(root, args.mode, source, outcome, category, code)
-    print(
-        "interactive fixture: outcome="
-        + outcome
-        + " category="
-        + category
-        + "; manual observations NOT automatically passed",
-        flush=True,
-    )
-    return code
+        failures.record(error)
+    return failures.report(root, args.mode, source)
 
 
 def error_outcome(error):
