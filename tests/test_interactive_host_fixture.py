@@ -16,6 +16,7 @@ import unittest
 from unittest.mock import patch
 from urllib.request import ProxyHandler, Request, build_opener
 from importlib.util import cache_from_source
+from importlib.machinery import PathFinder
 
 from oc_box import oc_box as box, terminal_ui, vault
 from tools import test_global_vault_podman as fixture
@@ -239,6 +240,16 @@ class InteractiveHostFixtureTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             ui.main(["start", "--unknown-private-value"])
         self.assertNotIn("unknown-private-value", self.output.getvalue())
+
+    def test_printed_secondary_commands_require_isolated_python(self):
+        ui.print_commands(self.root)
+        commands = [
+            line.strip()
+            for line in self.output.getvalue().splitlines()
+            if " --fixture " in line
+        ]
+        self.assertEqual(len(commands), 4)
+        self.assertTrue(all(" -I -B " in command for command in commands))
 
     def test_ui_modes_require_real_terminals_before_source_or_placement(self):
         for mode in ui.MODES:
@@ -1582,23 +1593,60 @@ class InteractiveBootstrapTests(unittest.TestCase):
             timeout=10,
         ).stdout
 
-    def child(self, operation="load", *, expected=None, source=None, poison=False):
+    def child(
+        self,
+        operation="load",
+        *,
+        expected=None,
+        source=None,
+        poison=False,
+        extra_path=None,
+    ):
         code = """
-import json, runpy, sys
+import json, runpy, subprocess, sys
+from importlib.machinery import ModuleSpec
 from pathlib import Path
 from types import ModuleType
-runner, source, expected, operation, poison = sys.argv[1:]
-namespace = runpy.run_path(runner, run_name='interactive_offline_probe')
+runner, source, expected, operation, poison, extra_path = sys.argv[1:]
+if operation == 'pre-pinned-namespace':
+    # Match the independently authenticated edge/home caller ABI. Verify the
+    # bootstrap Git bytes before compiling, with no candidate imports or pycs.
+    content = subprocess.check_output(['git', '-C', source, 'show',
+                                      expected + ':tools/test_interactive_podman.py'])
+    assert Path(runner).read_bytes() == content
+    package = ModuleType('tools')
+    package.__package__ = 'tools'
+    package.__path__ = [str(Path(source) / 'tools')]
+    package.__spec__ = ModuleSpec('tools', loader=None, is_package=True)
+    package.__spec__.submodule_search_locations = package.__path__
+    sys.modules['tools'] = package
+    name = 'tools._interactive_verified_bootstrap'
+    module = ModuleType(name)
+    module.__file__ = runner
+    module.__package__ = 'tools'
+    module.__spec__ = ModuleSpec(name, loader=None, origin=runner)
+    sys.modules[name] = module
+    package._interactive_verified_bootstrap = module
+    exec(compile(content, runner, 'exec'), module.__dict__)
+    namespace = module.__dict__
+else:
+    namespace = runpy.run_path(runner, run_name='interactive_offline_probe')
+if extra_path:
+    sys.path.append(extra_path)
 if poison != 'no':
-    module = ModuleType('oc_box')
-    module.__file__ = str(Path(source) / 'src/oc_box/__init__.py'
+    name = 'tools.acceptance_guards' if poison == 'guard' else 'oc_box'
+    module = ModuleType(name)
+    module.__file__ = str(Path(source) / 'tools/acceptance_guards.py' if poison == 'guard'
+                          else Path(source) / 'src/oc_box/__init__.py'
                           if poison == 'tracked' else Path(source).parent / 'foreign.py')
-    sys.modules['oc_box'] = module
+    sys.modules[name] = module
 try:
-    if operation == 'load':
+    if operation in ('load', 'pre-pinned-namespace'):
         identity = namespace['load_source'](Path(source), expected)
         print(json.dumps({'category': 'loaded', 'source': identity,
-                          'value': namespace['load_source'].__globals__['terminal_ui'].VALUE}))
+                          'value': namespace['load_source'].__globals__['terminal_ui'].VALUE,
+                          'tools_paths': list(sys.modules['tools'].__path__),
+                          'root_on_path': source in sys.path}))
     elif operation == 'snapshot':
         print(json.dumps({'category': 'snapshot', 'source': namespace['source_snapshot'](Path(source), expected)}))
     elif operation == 'index-race':
@@ -1638,7 +1686,8 @@ except BaseException as error:
                 str(source or self.source),
                 self.commit if expected is None else expected,
                 operation,
-                "tracked" if poison == "tracked" else "yes" if poison else "no",
+                poison if isinstance(poison, str) else "yes" if poison else "no",
+                str(extra_path) if extra_path else "",
             ],
             env={
                 "PATH": os.defpath,
@@ -1657,6 +1706,171 @@ except BaseException as error:
     def test_import_only_has_no_candidate_initialization(self):
         self.assertEqual(self.child("import-only")["category"], "import-only")
         self.assertFalse(self.marker.exists())
+
+    def ignored(self, relative, payload):
+        path = self.source / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(payload)
+        with (self.source / ".git/info/exclude").open("a") as stream:
+            stream.write("\n/" + relative + "\n")
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        return path
+
+    def shadow_payload(self):
+        return "open(" + repr(str(self.stale)) + ", 'w').write('shadow executed')\n"
+
+    def test_ignored_root_tools_module_refuses_without_executing_shadow_or_engine(self):
+        for suffix in (".py", ".pyc"):
+            with self.subTest(suffix=suffix):
+                self.stale.unlink(missing_ok=True)
+                self.marker.unlink(missing_ok=True)
+                path = self.ignored("tools" + suffix, self.shadow_payload())
+                if suffix == ".pyc":
+                    # Sourceless bytecode is not a __pycache__ read, so moving
+                    # pycache_prefix alone does NOT prevent this shadow.
+                    source = self.parent / "shadow-source.py"
+                    source.write_text(self.shadow_payload())
+                    py_compile.compile(str(source), cfile=str(path), doraise=True)
+                # Demonstrate ordinary resolution would select the shadow, but
+                # inspect its spec only: no shadow code is executed as a probe.
+                spec = PathFinder.find_spec("tools", [str(self.source)])
+                self.assertEqual(spec.origin, str(path))
+                try:
+                    result = self.child()
+                    self.assertFalse(
+                        self.stale.exists(), "ignored root tools module executed"
+                    )
+                    self.assertFalse(self.marker.exists())
+                    self.assertEqual(result["category"], "clean-source-required")
+                finally:
+                    path.unlink()
+
+    def test_fresh_foreign_regular_tools_package_never_overrides_verified_namespace(
+        self,
+    ):
+        foreign = self.parent / "foreign"
+        (foreign / "tools").mkdir(parents=True)
+        (foreign / "tools/__init__.py").write_text(self.shadow_payload())
+        result = self.child(extra_path=foreign)
+        self.assertFalse(self.stale.exists(), "foreign regular tools package executed")
+        self.assertEqual(result["category"], "loaded")
+        self.assertEqual(result["tools_paths"], [str(self.source / "tools")])
+        self.assertFalse(result["root_on_path"])
+
+    def test_authenticated_caller_namespace_and_bootstrap_child_remain_supported(self):
+        result = self.child("pre-pinned-namespace")
+        self.assertEqual(result["category"], "loaded")
+        self.assertEqual(result["tools_paths"], [str(self.source / "tools")])
+        self.assertFalse(result["root_on_path"])
+
+    def test_ignored_source_root_shadow_modules_are_not_allowed_import_roots(self):
+        for relative in (
+            "argparse.py",
+            "src/socket.py",
+            "src/ignored.py",
+            "tools/ignored.py",
+            "tools/__init__.py",
+        ):
+            with self.subTest(relative=relative):
+                self.marker.unlink(missing_ok=True)
+                path = self.ignored(relative, self.shadow_payload())
+                try:
+                    result = self.child()
+                    self.assertFalse(self.stale.exists())
+                    self.assertFalse(self.marker.exists())
+                    self.assertEqual(result["category"], "clean-source-required")
+                finally:
+                    path.unlink()
+
+    def test_actual_direct_entry_requires_I_before_sibling_stdlib_shadow_can_execute(
+        self,
+    ):
+        self.ignored(
+            "tools/argparse.py", self.shadow_payload() + "raise SystemExit(73)\n"
+        )
+        for isolated in (False, True):
+            with self.subTest(isolated=isolated):
+                self.stale.unlink(missing_ok=True)
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        *(["-I"] if isolated else []),
+                        "-B",
+                        str(self.source / "tools/test_interactive_podman.py"),
+                        "--help",
+                    ],
+                    cwd=self.parent,
+                    env={"PATH": os.defpath},
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                self.assertFalse(
+                    self.stale.exists(), "sibling argparse shadow executed"
+                )
+                self.assertFalse(self.marker.exists())
+                self.assertFalse(self.engine.exists())
+                self.assertEqual(result.returncode, 0 if isolated else 1)
+                if not isolated:
+                    self.assertIn("isolated-python-required", result.stderr)
+
+    def test_authenticated_bootstrap_requires_isolated_interpreter_before_imports(self):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                "import runpy,sys; runpy.run_path(sys.argv[1], run_name='interactive_verified_bootstrap')",
+                str(self.source / "tools/test_interactive_podman.py"),
+            ],
+            cwd=self.parent,
+            env={"PATH": os.defpath},
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("isolated-python-required", result.stderr)
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.engine.exists())
+        # A normal library import remains usable for unit tests, but cannot
+        # promote its unisolated interpreter to a host acceptance loader.
+        code = """
+import runpy, sys
+from pathlib import Path
+namespace = runpy.run_path(sys.argv[1], run_name='tools.test_interactive_podman')
+try:
+    namespace['load_source'](Path(sys.argv[2]), sys.argv[3])
+except BaseException as error:
+    print(str(error))
+"""
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                code,
+                str(self.source / "tools/test_interactive_podman.py"),
+                str(self.source),
+                self.commit,
+            ],
+            cwd=self.parent,
+            env={
+                "PATH": os.defpath,
+                "INTERACTIVE_IMPORT_MARKER": str(self.marker),
+                "INTERACTIVE_ENGINE_MARKER": str(self.engine),
+            },
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "isolated-python-required")
+        self.assertFalse(self.marker.exists())
+        self.assertFalse(self.engine.exists())
 
     def test_source_bootstrap_rejects_dirty_shallow_missing_expect_and_external_source(
         self,
@@ -1704,7 +1918,7 @@ except BaseException as error:
                         path.unlink()
 
     def test_poisoned_preloaded_module_is_refused_before_candidate_or_engine(self):
-        for poison in (True, "tracked"):
+        for poison in (True, "tracked", "guard"):
             with self.subTest(origin=poison):
                 self.assertEqual(
                     self.child(poison=poison)["category"], "source-shadowing"

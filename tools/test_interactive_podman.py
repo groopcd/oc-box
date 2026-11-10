@@ -2,16 +2,32 @@
 """Bounded, opt-in HOST-only manual TUI/web/persistent-shell observation.
 
 Start a FRESH synthetic owner on an unprivileged host terminal:
-  python3 -B tools/test_interactive_podman.py start --work-dir /path/to/fixtures \
+  python3 -I -B tools/test_interactive_podman.py start --work-dir /path/to/fixtures \
       --opencode-v2 /path/to/unmodified/opencode-2.2.6 --expect-commit FULL_COMMIT
 Use only the printed exact --fixture root for secondary tui/terminal/web/stop.
 No replay, resume, cleanup, real credentials or automatic manual-UI acceptance.
+Acceptance entrypoints and externally authenticated bootstrap loaders require
+an isolated (-I) interpreter BEFORE executing this file. Ordinary library imports
+are permitted for unit tests, but cannot initialize host acceptance without -I.
 """
+
+import sys
+
+# sys is built in and already initialized by Python. Refuse an unsafe entry
+# BEFORE even an apparent stdlib import: a sibling argparse.py must not execute.
+# The canonical library name remains importable by normal offline unit tests;
+# load_source separately refuses acceptance initialization without isolation.
+if not sys.flags.isolated and __name__ != "tools.test_interactive_podman":
+    sys.stderr.write(
+        "interactive fixture: category=isolated-python-required; use python3 -I -B\n"
+    )
+    raise SystemExit(1)
 
 import argparse
 import contextlib
 import hashlib
 import importlib
+from importlib.machinery import ModuleSpec
 import os
 from pathlib import Path
 import re
@@ -20,10 +36,10 @@ import shlex
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 import threading
 from unittest.mock import patch
+from types import ModuleType
 
 APP = Path(__file__).resolve().parents[1]
 # No candidate imports, path installation or integration initialization here.
@@ -67,6 +83,7 @@ EGG_INFO = frozenset(
 ERROR_CATEGORIES = frozenset(
     {
         "host-only",
+        "isolated-python-required",
         "owner-options",
         "client-options",
         "interactive-tty-required",
@@ -183,9 +200,6 @@ def source_snapshot(source, expected):
         "--ignored",
         "--exclude-standard",
         "-z",
-        "--",
-        "src",
-        "tools",
     ).split(b"\0")
     require(
         all(
@@ -196,6 +210,13 @@ def source_snapshot(source, expected):
             )
             for name in ignored
             if name
+            and (
+                name.startswith((b"src/", b"tools/"))
+                or (
+                    b"/" not in name
+                    and name.endswith((b".py", b".pyc", b".pyo", b".so"))
+                )
+            )
         ),
         "clean-source-required",
     )
@@ -272,6 +293,7 @@ def isolate_bytecode():
 
 def load_source(source, expected):
     global fixture, box, terminal_ui, guards, INITIAL_SOURCE
+    require(sys.flags.isolated, "isolated-python-required")
     initial = source_snapshot(source, expected)
     source = checked_source_path(source)
     import_guard(source, initial["sha256"])
@@ -288,7 +310,26 @@ def load_source(source, expected):
         "source-shadowing",
     )
     isolate_bytecode()
-    sys.path[:0] = [str(source / "src"), str(source)]
+    # tools is a namespace in this checkout. Normal resolution can execute an
+    # ignored root tools.py or a later foreign regular package BEFORE any
+    # post-import origin check. Install only its verified namespace, not the
+    # repository root as an ambient import path. No candidate code executes here.
+    tools_path = checked_source_path(source / "tools")
+    require(
+        tools_path.is_dir() and "tools/__init__.py" not in initial["sha256"],
+        "source-shadowing",
+    )
+    tools = ModuleType("tools")
+    tools.__package__ = "tools"
+    tools.__path__ = [str(tools_path)]
+    tools.__spec__ = ModuleSpec("tools", loader=None, is_package=True)
+    tools.__spec__.submodule_search_locations = tools.__path__
+    sys.modules["tools"] = tools
+    candidate_paths = {str(source), str(tools_path), str(source / "src")}
+    sys.path[:] = [
+        str(source / "src"),
+        *(entry for entry in sys.path if entry not in candidate_paths),
+    ]
     guards = importlib.import_module("tools.acceptance_guards")
     terminal_ui = importlib.import_module("oc_box.terminal_ui")
     fixture = importlib.import_module("tools.test_global_vault_podman")
@@ -795,7 +836,7 @@ class Failures:
 
 
 def print_commands(root):
-    command = shlex.join([sys.executable, "-B", str(Path(__file__).resolve())])
+    command = shlex.join([sys.executable, "-I", "-B", str(Path(__file__).resolve())])
     print("Retained interactive-only root: " + str(root), flush=True)
     print("Wait for the owning TUI to be ready; in other HOST terminals:", flush=True)
     for mode in ("tui", "terminal", "web", "stop"):
