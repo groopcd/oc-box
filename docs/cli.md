@@ -303,8 +303,10 @@ workspace overview. The sidebar still permits switching between registrations.
 Browsing does not create/start a workspace, take lifecycle
 ownership, reset, sync, refresh credentials or unlock the vault. `--read-only`
 disables native session mutation and terminal control/input. `--demo` is a
-synthetic-only preview that also permits execution inside a container: no host
-services, actual registry/log access or host/workspace actions.
+synthetic-only preview with fixed CPU/RAM/storage readings that also permits
+execution inside a container: no host services, actual registry/log access or
+host/workspace actions. Refreshing demo data does not animate those sample values;
+use normal host mode (optionally `--read-only`) for live measurements.
 
 The five tabs are Status, Settings, Sessions, Terminals and Logs. `1`–`5` select
 them; `r` refreshes and `q` quits outside a focused embedded terminal. The
@@ -330,12 +332,21 @@ are batched; slow queries never overlap or queue refreshes, so cadence is
 best-effort rather than an exact timing guarantee. Expensive allocated storage
 scans remain a separate manual action for the selected workspace. Native session
 inventories still require manual Connect/refresh.
+Their rows, selection and scroll position are not rebuilt by background status,
+log or storage refreshes. Use Connect / refresh (or `r` on an already-connected
+Sessions tab) to fetch a new snapshot. Explicit filters/project selection and
+session actions can update the displayed rows.
 
 The Settings tab keeps quick monitoring controls and an Open all settings button.
 The categorized modal window covers Monitoring (auto-refresh/interval), Display
 (built-in Textual theme/details), Sessions (scope/text filter only, no automatic
 connection), Logs (follow/source/search), read-only Resources (saved/observed),
-and read-only Safety/terminals (CLI-selected mode). Esc/Cancel discards edits;
+and read-only Safety/terminals (CLI-selected mode). **Reset to defaults** fills
+the form with factory dashboard preferences; click Apply to activate them, or
+Esc/Cancel to discard the reset. Defaults include one-second automatic refresh,
+the dark theme, collapsed details, global session scope, followed logs from all
+loaded sources, and empty search filters. It never resets containers, history,
+favorites, retained logs or the CLI-selected safety mode. Esc/Cancel discards edits;
 Apply changes only allowlisted dashboard preferences **for this session**, with
 no persistence or logging. Search text is never persisted. The window cannot
 weaken `--read-only`, modify OpenCode `cli.json` or host settings, or change

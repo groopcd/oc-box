@@ -80,7 +80,7 @@ def cli(box, arguments):
 
 
 class DemoBackend:
-    """Never touches a registry, native service, logs, or container engine."""
+    """Fixed sample readings; never touches real workspace or host collectors."""
 
     box = None
 

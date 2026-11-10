@@ -22,7 +22,7 @@ if AVAILABLE:
         Switch,
         TabbedContent,
     )
-    from oc_box.tui_settings import SettingsScreen
+    from oc_box.tui_settings import SettingsScreen, DEFAULT_SETTINGS
     from oc_box.tui_status import MonitorPanel
 
 
@@ -544,6 +544,174 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                             region.region.intersection(region.clip), region.region
                         )
                         self.assertTrue(search.has_focus)
+
+    async def test_reset_defaults_stages_all_preferences_and_cancel_preserves_live_settings(
+        self,
+    ):
+        backend = SessionDemo()
+        app = DashboardApp(backend, read_only=True, demo=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.settle(app, pilot)
+            modified = {
+                **DEFAULT_SETTINGS,
+                "theme": next(
+                    name
+                    for name in app.available_themes
+                    if name != DEFAULT_SETTINGS["theme"]
+                ),
+                "interval": 30,
+                "auto_refresh": False,
+                "details": True,
+                "session_scope": "project",
+                "session_filter": "example",
+                "log_follow": False,
+                "log_source": "oc-box",
+                "log_query": "ready",
+            }
+            app.apply_settings(modified)
+            await pilot.pause()
+            retained = list(app.logs.search())
+            for apply in (False, True):
+                app.action_settings()
+                await pilot.pause()
+                await pilot.click("#preferences-reset")
+                await pilot.pause()
+                self.assertIsInstance(app.screen, SettingsScreen)
+                self.assertTrue(
+                    app.screen.query_one("#pref-auto-refresh", Switch).value
+                )
+                self.assertEqual(
+                    app.screen.query_one("#pref-interval", Select).value, 1
+                )
+                self.assertEqual(
+                    app.screen.query_one("#pref-theme", Select).value, "textual-dark"
+                )
+                self.assertFalse(app.screen.query_one("#pref-details", Switch).value)
+                self.assertEqual(
+                    app.screen.query_one("#pref-session-scope", Select).value, "global"
+                )
+                self.assertEqual(
+                    app.screen.query_one("#pref-session-filter", Input).value, ""
+                )
+                self.assertTrue(app.screen.query_one("#pref-log-follow", Switch).value)
+                self.assertEqual(
+                    app.screen.query_one("#pref-log-source", Select).value, "all"
+                )
+                self.assertEqual(
+                    app.screen.query_one("#pref-log-query", Input).value, ""
+                )
+                self.assertEqual(app.query_one("#refresh-interval", Select).value, 30)
+                self.assertTrue(app.read_only)
+                if apply:
+                    await pilot.click("#preferences-apply")
+                else:
+                    await pilot.press("escape")
+                await pilot.pause()
+                self.assertEqual(
+                    app.query_one("#refresh-interval", Select).value, 1 if apply else 30
+                )
+            app.action_settings()
+            await pilot.pause()
+            self.assertEqual(app.screen.values, dict(DEFAULT_SETTINGS))
+            await pilot.press("escape")
+            self.assertEqual(app.logs.search(), retained)
+            self.assertEqual(backend.calls, [])
+            self.assertTrue(app.read_only)
+            self.assertTrue(app.query_one("#delete", Button).disabled)
+
+    async def test_settings_reset_action_is_visible_in_a_small_terminal(self):
+        app = DashboardApp(DemoBackend(), read_only=True, demo=True)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.settle(app, pilot)
+            app.action_settings()
+            await pilot.pause()
+            for ident in (
+                "preferences-apply",
+                "preferences-reset",
+                "preferences-cancel",
+            ):
+                button = app.screen.query_one("#" + ident, Button)
+                geometry = app.screen.find_widget(button)
+                self.assertEqual(
+                    geometry.region.intersection(geometry.clip), geometry.region
+                )
+            await pilot.click("#preferences-reset")
+            await pilot.click("#preferences-cancel")
+            self.assertNotIsInstance(app.screen, SettingsScreen)
+
+    async def test_background_refresh_keeps_session_rows_scroll_and_cursor_static(self):
+        backend = SessionDemo()
+        template = copy.deepcopy(backend.records["ses_root"])
+        for index in range(150):
+            backend.records[f"ses_many_{index}"] = {
+                **copy.deepcopy(template),
+                "id": f"ses_many_{index}",
+                "title": f"Synthetic session {index}",
+                "time": {"created": 1, "updated": index + 10},
+            }
+        app = DashboardApp(backend)
+        async with app.run_test(size=(120, 35)) as pilot:
+            await self.settle(app, pilot)
+            app.action_tab("sessions")
+            app.connect_sessions("global", app.selected)
+            await self.settle(app, pilot)
+            table = app.query_one("#session-table", DataTable)
+            table.move_cursor(row=80)
+            table.scroll_to(y=60, animate=False, force=True)
+            await pilot.pause()
+            scroll, cursor, selected = (
+                table.scroll_offset,
+                table.cursor_row,
+                app._session()["id"],
+            )
+            self.assertGreater(scroll.y, 0)
+            count, calls = table.row_count, len(backend.calls)
+            backend.records["ses_added_later"] = {
+                **copy.deepcopy(template),
+                "id": "ses_added_later",
+            }
+            with patch.object(table, "clear", wraps=table.clear) as clear:
+                for _ in range(3):
+                    app._apply_report(backend.collect(), False)
+                app._apply_storage(backend.scan_storage(app.selected))
+                await pilot.pause(1.25)
+                await self.settle(app, pilot)
+                clear.assert_not_called()
+                self.assertEqual(table.row_count, count)
+                self.assertEqual(table.scroll_offset, scroll)
+                self.assertEqual(table.cursor_row, cursor)
+                self.assertEqual(app._session()["id"], selected)
+                self.assertEqual(len(backend.calls), calls)
+            table.focus()
+            await pilot.press("r")
+            await self.settle(app, pilot)
+            self.assertEqual(table.row_count, count + 1)
+            self.assertGreater(len(backend.calls), calls)
+
+    async def test_explicit_workspace_change_updates_the_cached_project_view(self):
+        class TwoWorkspaces(SessionDemo):
+            def collect(self, *, scan_storage=False):
+                report = super().collect(scan_storage=scan_storage)
+                other = copy.deepcopy(report["workspaces"][0])
+                other.update(workspace_id="b" * 32, project="/home/demo/projects/other")
+                report["workspaces"].append(other)
+                return report
+
+        backend = TwoWorkspaces()
+        app = DashboardApp(backend)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.settle(app, pilot)
+            app.connect_sessions("global", app.selected)
+            await self.settle(app, pilot)
+            app.query_one("#session-scope", Select).value = "project"
+            await pilot.pause()
+            self.assertEqual([s["id"] for s in app.visible_sessions], ["ses_root"])
+            calls = len(backend.calls)
+            app.query_one("#workspaces", DataTable).move_cursor(row=1)
+            await pilot.pause()
+            self.assertEqual(app.selected, "b" * 32)
+            self.assertEqual([s["id"] for s in app.visible_sessions], ["ses_child"])
+            self.assertEqual(len(backend.calls), calls)
 
 
 if __name__ == "__main__":

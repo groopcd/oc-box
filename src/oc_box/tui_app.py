@@ -35,7 +35,7 @@ if __package__:
     from .tui_sessions import FavoriteStore, SessionCatalog
     from .tui_terminal import NativeTerminal
     from .tui_status import MonitorPanel, percentage
-    from .tui_settings import SettingsScreen, REFRESH_INTERVALS
+    from .tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
 else:
     import status_report
     from tui_backend import plain
@@ -43,7 +43,7 @@ else:
     from tui_sessions import FavoriteStore, SessionCatalog
     from tui_terminal import NativeTerminal
     from tui_status import MonitorPanel, percentage
-    from tui_settings import SettingsScreen, REFRESH_INTERVALS
+    from tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
 
 
 def text(value):
@@ -196,7 +196,7 @@ class DashboardApp(App):
                         yield MonitorPanel("system", id="system-report")
                         with Collapsible(
                             title="Workspace details and mounts",
-                            collapsed=True,
+                            collapsed=not DEFAULT_SETTINGS["details"],
                             id="workspace-details",
                         ):
                             yield Static(
@@ -211,7 +211,10 @@ class DashboardApp(App):
                             yield Label(
                                 "Automatic status refresh", classes="setting-label"
                             )
-                            yield Switch(value=True, id="auto-refresh")
+                            yield Switch(
+                                value=DEFAULT_SETTINGS["auto_refresh"],
+                                id="auto-refresh",
+                            )
                         with Horizontal(classes="toolbar"):
                             yield Label("Refresh interval", classes="setting-label")
                             yield Select(
@@ -219,7 +222,7 @@ class DashboardApp(App):
                                     (f"{n} second{'s' if n != 1 else ''}", n)
                                     for n in REFRESH_INTERVALS
                                 ],
-                                value=1,
+                                value=DEFAULT_SETTINGS["interval"],
                                 allow_blank=False,
                                 id="refresh-interval",
                             )
@@ -237,7 +240,7 @@ class DashboardApp(App):
                                 ("Host · selected project", "project"),
                                 ("Live workspace sources", "workspace"),
                             ],
-                            value="global",
+                            value=DEFAULT_SETTINGS["session_scope"],
                             allow_blank=False,
                             id="session-scope",
                         )
@@ -296,12 +299,14 @@ class DashboardApp(App):
                                 ("oc-box activity", "oc-box"),
                                 ("Selected Podman container", "podman"),
                             ],
-                            value="all",
+                            value=DEFAULT_SETTINGS["log_source"],
                             allow_blank=False,
                             id="log-source",
                         )
                         yield Label("Follow")
-                        yield Switch(value=True, id="log-follow")
+                        yield Switch(
+                            value=DEFAULT_SETTINGS["log_follow"], id="log-follow"
+                        )
                         yield Button("Load Podman logs…", id="load-podman")
                     yield Static(
                         "Generated oc-box events contain fixed categories only. External container logs "
@@ -321,7 +326,7 @@ class DashboardApp(App):
                         highlight=False,
                     )
         yield Static(
-            "Synthetic demo · no host data"
+            "Synthetic demo · fixed sample readings · no host data"
             if self.demo
             else "Browsing never starts or stops a workspace.",
             id="notice",
@@ -468,6 +473,13 @@ class DashboardApp(App):
     def action_refresh(self):
         self.refresh_report()
         self.refresh_logs()
+        if (
+            self.catalog
+            and self.query_one("#content", TabbedContent).active == "sessions"
+        ):
+            self.connect_sessions(
+                self.query_one("#session-scope", Select).value, self.selected
+            )
 
     @work(thread=True, group="status", exit_on_error=False)
     def refresh_report(self, scan_storage=False):
@@ -615,7 +627,6 @@ class DashboardApp(App):
             "A CPU quota is not CPU affinity; a memory ceiling does not reserve RAM.\n"
             "No enforced workspace disk quota is configured by oc-box."
         )
-        self._render_sessions()
 
     def on_data_table_row_selected(self, event):
         if event.data_table.id == "workspaces":
@@ -624,6 +635,7 @@ class DashboardApp(App):
                 self._catalog_generation += 1
             self.selected = target
             self._render_workspace()
+            self._render_sessions()
         elif event.data_table.id == "session-table":
             self._session_details()
 
@@ -642,6 +654,7 @@ class DashboardApp(App):
                 self.selected = target
                 self._catalog_generation += 1
                 self._render_workspace()
+                self._render_sessions()
         elif event.data_table.id == "session-table":
             self._session_details()
 

@@ -1,5 +1,7 @@
 """Session-only dashboard preferences, grouped without resource mutations."""
 
+from types import MappingProxyType
+
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Button, Input, Label, Select, Static, Switch
@@ -14,6 +16,19 @@ LOG_SOURCES = (
     ("All sources", "all"),
     ("oc-box activity", "oc-box"),
     ("Selected Podman container", "podman"),
+)
+DEFAULT_SETTINGS = MappingProxyType(
+    {
+        "auto_refresh": True,
+        "interval": 1,
+        "theme": "textual-dark",
+        "details": False,
+        "session_scope": "global",
+        "session_filter": "",
+        "log_follow": True,
+        "log_source": "all",
+        "log_query": "",
+    }
 )
 
 
@@ -42,7 +57,7 @@ class SettingsScreen(ModalScreen):
     def compose(self):
         with Vertical(id="preferences-window"):
             yield Static(
-                "Dashboard settings · this session only",
+                "Dashboard settings · session only · Reset fills defaults; Apply activates them",
                 id="preferences-title",
                 markup=False,
             )
@@ -150,14 +165,42 @@ class SettingsScreen(ModalScreen):
                     )
             with Horizontal(id="preferences-actions"):
                 yield Button("Apply", id="preferences-apply", variant="primary")
+                yield Button("Reset to defaults", id="preferences-reset")
                 yield Button("Cancel", id="preferences-cancel")
 
     def action_cancel(self):
         self.dismiss(None)
 
+    def reset_defaults(self):
+        # Stage changes just like ordinary edits: Cancel still discards them.
+        # Read-only mode, resources, connections, favorites and log buffers are
+        # deliberately outside this preference schema.
+        for key, selector in (
+            ("auto_refresh", "#pref-auto-refresh"),
+            ("details", "#pref-details"),
+            ("log_follow", "#pref-log-follow"),
+        ):
+            self.query_one(selector, Switch).value = DEFAULT_SETTINGS[key]
+        for key, selector in (
+            ("interval", "#pref-interval"),
+            ("session_scope", "#pref-session-scope"),
+            ("log_source", "#pref-log-source"),
+        ):
+            self.query_one(selector, Select).value = DEFAULT_SETTINGS[key]
+        theme = DEFAULT_SETTINGS["theme"]
+        self.query_one("#pref-theme", Select).value = (
+            theme if theme in self.themes else self.values["theme"]
+        )
+        self.query_one("#pref-session-filter", Input).value = DEFAULT_SETTINGS[
+            "session_filter"
+        ]
+        self.query_one("#pref-log-query", Input).value = DEFAULT_SETTINGS["log_query"]
+
     def on_button_pressed(self, event):
         if event.button.id == "preferences-cancel":
             self.action_cancel()
+        elif event.button.id == "preferences-reset":
+            self.reset_defaults()
         elif event.button.id == "preferences-apply":
             self.dismiss(
                 {

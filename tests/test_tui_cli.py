@@ -9,6 +9,22 @@ from oc_box import activity_log, oc_box as box, tui
 
 
 class TuiCommandTests(unittest.TestCase):
+    def test_demo_readings_are_fixed_and_never_use_live_collectors(self):
+        demo = tui.DemoBackend()
+        with (
+            patch.object(box, "podman", side_effect=AssertionError("real engine")),
+            patch(
+                "oc_box.tui_backend.HostSampler.sample",
+                side_effect=AssertionError("real host"),
+            ),
+        ):
+            first, second = demo.collect(), demo.collect()
+        self.assertEqual(first["host"], second["host"])
+        self.assertEqual(
+            first["workspaces"][0]["metrics"], second["workspaces"][0]["metrics"]
+        )
+        self.assertEqual(first["host"]["cpu_percent"], 24)
+
     def test_help_requires_no_tty_optional_dependencies_or_backend(self):
         with (
             patch.object(box, "check_backend", side_effect=AssertionError("backend")),

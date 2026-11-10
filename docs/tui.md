@@ -95,8 +95,10 @@ owner. `--read-only` disables session mutation and terminal control/input; it is
 not a promise that an explicitly requested native host connection cannot start
 the native host service.
 
-`--demo` supplies synthetic workspace metrics and logs; native session and
-terminal connections are disabled.
+`--demo` supplies fixed synthetic workspace metrics and logs; native session and
+terminal connections are disabled. CPU/RAM/storage readings intentionally stay
+the same after refresh. They are sample values, not measurements of the host.
+Run normal host mode, optionally with `--read-only`, to see live measurements.
 It permits a container preview, but never contacts host services, reads the real
 workspace registry or host logs, or performs host/workspace actions. Synthetic
 entries are not evidence of live connectivity or isolation. Normal mode does
@@ -180,6 +182,14 @@ window is also usable without a current workspace:
 | Resources | Read-only saved limits and observed values. |
 | Safety/terminals | Read-only information about the CLI-selected mode and terminal safety; the `--read-only` fence cannot be weakened here. |
 
+**Reset to defaults** stages factory dashboard preferences without closing the
+window or immediately changing the active dashboard. Defaults are automatic
+one-second refresh, `textual-dark`, collapsed details, global session scope,
+following all loaded log sources, and empty session/log filters. **Apply** makes
+them active; **Esc** or **Cancel** discards the reset. No reset touches containers,
+resource limits, history, favorites or retained log entries, and it cannot weaken
+the CLI-selected read-only mode.
+
 **Esc** or **Cancel** discards pending window edits. **Apply** accepts only the
 allowlisted dashboard preferences, for **this dashboard session only**. Changes
 are neither persisted nor logged; they do not modify OpenCode `cli.json`, host
@@ -204,6 +214,12 @@ into a running workspace.
 Session discovery is an explicit **Connect**, followed by manual refresh. Merely
 visiting the tab never discovers/starts a service or synchronizes archives.
 Choose the connection before interpreting a selected session:
+
+The table is a static snapshot between explicit operations. Background status,
+log-follow and storage updates do not rebuild its rows or reset the cursor or
+scroll position. Use **Connect / refresh**, or `r` while the connected Sessions
+tab is active, to fetch new entries. Editing a filter, selecting a project or
+performing a session action updates the relevant view on demand.
 
 | Connection | Scope and side effects |
 | --- | --- |
