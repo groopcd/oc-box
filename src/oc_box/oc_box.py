@@ -554,7 +554,7 @@ def validate_resource_limits(data):
         raise BoxError("--memory must be a nonnegative size, such as 8g, 512m, or 0.")
     memory_literal = str(raw_memory)
     size = re.fullmatch(
-        r"([0-9]+(?:\.[0-9]+)?)(?: ?([kmgtpe]i?b?|b))?",
+        r"([0-9]+(?:\.[0-9]+)?)(?: ?([kmgtp](?:i?b)?|b))?",
         memory_literal,
         re.IGNORECASE | re.ASCII,
     )
@@ -563,7 +563,7 @@ def validate_resource_limits(data):
             "--memory must be an ASCII size with at most one unit separator."
         )
     unit = (size[2] or "b")[0].lower()
-    multiplier = 1024 ** "bkmgtpe".index(unit)
+    multiplier = 1024 ** "bkmgtp".index(unit)
     # Native RAMInBytes parses a float64 coefficient, applies binary units, then
     # converts to int64. Reject overflow/rounding across that boundary here; do
     # not infer a kernel/runtime minimum or available host memory from this.

@@ -558,11 +558,13 @@ class LifecycleHardeningTests(unittest.TestCase):
             ("memory tab", {}, ["--memory", "8\tg"]),
             ("memory multiple spaces", {}, ["--memory", "8  g"]),
             ("memory empty", {}, ["--memory", ""]),
+            ("memory incomplete binary suffix", {}, ["--memory", "512mi"]),
+            ("memory unsupported exabyte prefix", {}, ["--memory", "7e"]),
             ("memory boolean metadata", {"memory": True}, []),
             ("memory int64 overflow", {}, ["--memory", str(2**63)]),
             ("memory float64 rounding exceeds int64", {}, ["--memory", str(2**63 - 1)]),
             ("memory enormous coefficient", {}, ["--memory", "9" * 400 + "g"]),
-            ("memory overflowing unit", {}, ["--memory", "8e"]),
+            ("memory overflowing supported unit", {}, ["--memory", "8192p"]),
             ("pids int64 overflow", {}, ["--pids-limit", str(2**63)]),
             ("pids overflow metadata", {"pids": 2**63}, []),
             ("pids boolean metadata", {"pids": True}, []),
@@ -605,10 +607,12 @@ class LifecycleHardeningTests(unittest.TestCase):
         cases = (
             ("documented", "4", "8g", 2048, "4", "8g"),
             ("fractional", ".5", "512m", 2048, ".5", "512m"),
+            ("unit with b", "1", "512mb", 2048, "1", "512mb"),
+            ("complete binary suffix", "1", "512mib", 2048, "1", "512mib"),
             ("exponent", "1e0", "16g", 2048, "1e0", "16g"),
             ("effective zero", "0.0", "0g", 2048, "0", "0"),
             ("single separator", "1", "1 GiB", 2048, "1", "1 GiB"),
-            ("largest unit within int64", "1", "7e", 2048, "1", "7e"),
+            ("portable large unit within int64", "1", "7p", 2048, "1", "7p"),
             ("maximum pids", "4", "8g", 2**63 - 1, "4", "8g"),
         )
         for name, cpus, memory, pids, expected_cpu, expected_memory in cases:
