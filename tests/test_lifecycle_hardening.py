@@ -167,6 +167,132 @@ class LifecycleHardeningTests(unittest.TestCase):
         self.assertEqual(saved["memory"], "12g")
         self.assertEqual(saved["devices"], ["/dev/synthetic"])
 
+    def test_existing_trusted_project_refuses_before_owner_policy_or_mutations(self):
+        for action in ("start", "reset", "sync"):
+            with self.subTest(action=action):
+                before = self.path.read_bytes()
+                with (
+                    patch.object(box, "APP", self.project),
+                    patch.object(box, "check_backend"),
+                    patch.object(box, "detect_opencode_release", return_value="1.19.5"),
+                    patch.object(box, "launch_credentials") as policy,
+                    patch.object(box, "refresh_workspace_identity") as identity,
+                    patch.object(box, "check_resource_controllers"),
+                    patch.object(box, "remove_resources") as remove,
+                    patch.object(box, "launch", return_value=0) as launch,
+                    contextlib.redirect_stderr(io.StringIO()),
+                    self.assertRaises(box.BoxError),
+                ):
+                    box.main([action, "--workspace", self.data["id"]])
+                for operation in (policy, identity, remove, launch):
+                    operation.assert_not_called()
+                self.assertEqual(self.path.read_bytes(), before)
+
+    def test_fresh_under_lock_project_is_authorized_before_policy_or_persistence(self):
+        trusted = self.root / "config/opencode"
+        trusted.mkdir(parents=True)
+        (trusted / box.MARKER).write_text(self.data["id"] + "\n")
+        expected = {}
+
+        def update(data):
+            data["project"] = str(trusted)
+            box.workspace_identity.record(
+                data, *box.workspace_identity.snapshot(trusted)
+            )
+            expected.clear()
+            expected.update(copy.deepcopy(data))
+
+        for action in ("start", "reset", "sync"):
+            with self.subTest(action=action):
+                box.atomic_json(self.path, self.data)
+                with (
+                    patch.object(
+                        box, "workspace_lock", self.intervening_update(update)
+                    ),
+                    patch.object(box, "check_backend"),
+                    patch.object(box, "detect_opencode_release", return_value="1.19.5"),
+                    patch.object(box, "launch_credentials") as policy,
+                    patch.object(box, "refresh_workspace_identity") as identity,
+                    patch.object(box, "check_resource_controllers"),
+                    patch.object(box, "remove_resources") as remove,
+                    patch.object(box, "launch", return_value=0) as launch,
+                    contextlib.redirect_stderr(io.StringIO()),
+                    self.assertRaises(box.BoxError),
+                ):
+                    box.main([action, "--workspace", self.data["id"]])
+                for operation in (policy, identity, remove, launch):
+                    operation.assert_not_called()
+                self.assertEqual(
+                    self.path.read_bytes(),
+                    (json.dumps(expected, indent=2) + "\n").encode(),
+                )
+
+    def test_trusted_v2_project_refuses_before_service_discovery_or_lock(self):
+        data = {**self.data, "opencode_version": "2.2.6"}
+        box.atomic_json(self.path, data)
+        before = self.path.read_bytes()
+        with (
+            patch.object(box, "APP", self.project),
+            patch.object(box, "check_backend"),
+            patch.object(box.workspace_service, "controller_running") as discovery,
+            patch.object(box.workspace_service, "attach") as attach,
+            patch.object(box.workspace_service, "client_command"),
+            patch.object(box, "run_tui", return_value=0),
+            patch.object(box, "workspace_lock") as lock,
+            patch.object(box, "launch_credentials") as policy,
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(box.BoxError),
+        ):
+            box.main(["start", "--workspace", data["id"]])
+        for operation in (discovery, attach, lock, policy):
+            operation.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), before)
+
+    def test_existing_trusted_project_purge_refuses_before_history_or_resource_changes(
+        self,
+    ):
+        data = {**self.data, "opencode_version": "2.2.6"}
+        box.atomic_json(self.path, data)
+        box.atomic_json(
+            box.session_file(self.path),
+            {"host_sessions": {"ses_source": "ses_archive"}},
+        )
+        before = self.path.read_bytes()
+        marker = (self.project / box.MARKER).read_bytes()
+        for flags in ([], ["--all"], ["--delete-sessions"]):
+            with self.subTest(flags=flags):
+                with (
+                    patch.object(box, "APP", self.project),
+                    patch.object(box.dependencies, "require"),
+                    patch.object(box, "detect_opencode_release", return_value="2.2.6"),
+                    patch.object(box, "inspect_owned", return_value=None),
+                    patch.object(
+                        box,
+                        "run",
+                        return_value=subprocess.CompletedProcess(
+                            [], 0, '{"data":[],"cursor":{}}', ""
+                        ),
+                    ) as native,
+                    patch.object(box, "sync_sessions") as sync,
+                    patch.object(box, "stop_container") as stop,
+                    patch.object(box, "retain_archive_provenance") as provenance,
+                    patch.object(
+                        box,
+                        "remove_resources",
+                        side_effect=AssertionError("resource removal was reached"),
+                    ) as remove,
+                    self.assertRaises(box.BoxError),
+                ):
+                    box.purge(
+                        self.path,
+                        data,
+                        box.parser().parse_args(["purge", "--yes", *flags]),
+                    )
+                for operation in (native, sync, stop, provenance, remove):
+                    operation.assert_not_called()
+                self.assertEqual(self.path.read_bytes(), before)
+                self.assertEqual((self.project / box.MARKER).read_bytes(), marker)
+
     def test_credentials_mutation_reloads_other_writer_policy_and_settings(self):
         def update(data):
             data.update(

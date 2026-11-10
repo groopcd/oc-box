@@ -2847,6 +2847,10 @@ def purge(path, data, args):
         except dependencies.DependencyError as exc:
             raise BoxError(str(exc)) from exc
     project = Path(data["project"])
+    if project.exists():
+        # A once-valid project may now overlap configured trusted storage.
+        # Refuse before syncing, deleting archives, or removing its private home.
+        validate_project(project)
     marker = project / MARKER
     same = (
         project.is_dir()
@@ -3657,6 +3661,10 @@ def main(argv=None):
         stop_container(data)
         print("Container stopped; files, packages, and conversations retained.")
         return 0
+    if args.command in ("start", "reset", "sync", "terminal", "web"):
+        # Attach discovery is read-only and must not acquire the owner's lock,
+        # but even its runtime-socket setup must follow project authorization.
+        validate_project(data["project"])
     if (
         args.command in ("start", "terminal", "web")
         and opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2
@@ -3749,6 +3757,8 @@ def main(argv=None):
                 )
     with workspace_lock(path), contextlib.ExitStack() as launch_context:
         data = reload_workspace(path)
+        if args.command in ("start", "reset", "sync", "terminal", "web"):
+            validate_project(data["project"])
         if data.get("restore_incomplete") and args.command != "purge":
             raise BoxError(
                 "This workspace restore did not finish. Do not start it; inspect backup recovery staging and use plain purge by ID before retrying into a new destination."
