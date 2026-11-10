@@ -754,6 +754,24 @@ cleanup command removes only fixture-owned Podman resources, retaining files:
 python3 tools/test_v2_podman.py --cleanup /tmp/oc-box-live-v2-EXAMPLE
 ```
 
+Fresh runs record a private cleanup purpose bound to the fixture root and its
+original boot, alongside explicit private engine selectors. Cleanup first checks
+those files, the retained engine boot proof, the exact nonempty ID journal and
+complete registry, and every project/provenance record. It acquires all candidate
+lifecycle locks before any engine access, validates the actual private rootless
+store and every resource/typed mount/ownership label, then removes only that
+fully authorized set. An invalid or busy later workspace refuses the entire
+preflight without removing earlier resources.
+
+Old retained fixtures without these proofs, a changed/stale boot, redirected
+storage or incomplete/unrecorded resources are refused rather than repaired.
+Keep their evidence for operator review; never backfill a purpose/boot marker,
+rewrite the journal, move a store or run a global prune to make cleanup pass.
+An operational deletion failure can leave part of the already-authorized set
+removed; the unchanged journal supports strict retry of known remaining
+resources. This is not an engine transaction against unrelated raw Podman
+changes, so do not mutate fixture resources concurrently outside its locks.
+
 The fixture has offline unit tests for host refusal, environment isolation,
 host-executable routing, credential checks and cleanup boundaries. Native V2 CI
 also exercises its exact provider/MCP config and rotated environment without

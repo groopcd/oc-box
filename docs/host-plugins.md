@@ -45,15 +45,60 @@ From the source checkout, first run the audit:
 python3 tools/port_host_plugins.py
 ```
 
+Local personal V1 implementations are not identified by their filename or a few
+marker strings. Their canonical source bytes are not bundled with this tool.
+An audit encountering such a source refuses until you privately review its full
+contents against the proposed native implementation/retirement decision, then
+explicitly approve its relative path and exact SHA-256. A digest approval records
+your decision; it is not automatic compatibility certification. Do not approve
+custom behavior that the native replacement does not preserve.
+
+For example, after reviewing `plugins/output-clamp.ts`, obtain its digest without
+printing its source or configuration values:
+
+```sh
+sha256sum "${XDG_CONFIG_HOME:-$HOME/.config}/opencode/plugins/output-clamp.ts"
+```
+
+Use the reviewed 64-hex digest in both audit and apply, repeating
+`--reviewed-source RELATIVE_PATH=SHA256` for every reviewed local source:
+
+```sh
+python3 tools/port_host_plugins.py \
+  --reviewed-source plugins/output-clamp.ts=REVIEWED_64_HEX_SHA256
+```
+
+Missing, changed, malformed, duplicate or unused approvals refuse before any
+snapshot/install writes. Local paths are relative to the selected configuration
+root, including a root selected by `--config`; do not pass an absolute path.
+Active or nonliteral definition-audit override tables still require a manual
+port and cannot be retired just by approving their digest. The bounded audit-table
+check requires manual porting for executable identifier escapes, interpolated
+templates and regex/division syntax outside quoted or comment data, even when a
+particular use is benign. It does not evaluate JavaScript or certify arbitrary
+semantics. Recognized configured local directories that do not have a
+supported byte-bound implementation review are refused for manual porting, not
+silently replaced by their basename. Unrelated scoped packages are not
+reclassified by their basename. The explicitly supported
+sandbox package spellings remain `opencode-sandbox`, `opencode-sandbox@latest`
+and `opencode-sandbox@0.6.0`; other package versions require separate review.
+
 Exit host OpenCode clients before applying to avoid reload during the file changes.
 If using the shared service, stop it intentionally first; the tool itself never
 starts/stops services. Then explicitly apply the reviewed native replacements:
 
 ```sh
-python3 tools/port_host_plugins.py --apply
+python3 tools/port_host_plugins.py --apply \
+  --reviewed-source plugins/output-clamp.ts=REVIEWED_64_HEX_SHA256
 npm install --prefix "${XDG_CONFIG_HOME:-$HOME/.config}/opencode" \
   --no-audit --no-fund
 ```
+
+The single-source example is illustrative: supply all approvals required by your
+actual reviewed profile, or none for a recognized package-only profile with no
+local sources to replace. Digest approvals are not reused automatically from a
+previous invocation. The separate `--update-sandbox` operation below keeps its
+receipt/source-hash checks and does not accept `--reviewed-source`.
 
 The apply tool changes only recognized plugin sources, plugin entries and their
 dependency keys. Unrelated config values and dependencies remain; JSONC comments

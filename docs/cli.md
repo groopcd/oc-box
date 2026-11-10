@@ -220,6 +220,20 @@ Treat generated host conversations as archive mirrors, not bidirectional working
 copies. Do not edit them or create native children while sync runs: the child
 preflight and replacement are not an atomic transaction with unrelated host clients.
 
+V1 archives remap only known schema identity fields, never ID-looking keys inside
+tool inputs, outputs or metadata. Their native host re-export is verified before
+committing the archive/checkpoint, including when rechecking an older cached
+digest. Only the documented obsolete nonpending tool raw-buffer normalization
+and native controller-directory/project rebind are accepted. A successful import
+exit alone is not evidence that an existing conversation was replaced.
+
+After a successful V1 archive deletion, a private workspace/session/archive/digest
+record permits a matching interrupted import to be retried without guessing from
+an incomplete root-session listing. Failed deletion, mismatched recovery evidence,
+or a crash before that record was saved remains pending; private source history
+and the last verified checkpoint are retained for inspection/recovery. Do not
+reset or purge a workspace to bypass an unverified archive replacement.
+
 An active oc-box launcher holds a workspace lock, so exit it before syncing.
 Use this after an OpenCode crash, missed exit-time sync, or host restart.
 Sync failure preserves container data; retry after resolving the error.
@@ -431,6 +445,10 @@ Default purge retains project files and host archive conversations. It attempts
 a final history sync while the project and container exist. If that sync fails,
 the private volume is retained for recovery. If the project was already deleted,
 there is no final sync; the last host archives remain.
+If the registered path now identifies a different physical directory, plain
+purge refuses to start the old container or remove its private recovery state.
+Inspect the registered workspace and use explicit repair/recovery rather than
+starting it against a replacement directory.
 
 Before removing the active registry, plain purge also retains its verified
 archive JSON files and minimal workspace/project provenance privately under
@@ -447,6 +465,11 @@ identity and matching marker; if either belongs to another workspace, `--all`
 is rejected before deleting any history or resources. Extra externally supplied
 mounts/volumes are not owned resources unless they bear this workspace's
 ownership label.
+Before either session-deleting variant removes anything, every targeted V2 host
+archive is checked for native child conversations. Linked children or an invalid
+inventory refuse the operation, preserving archives and resources. Keep other
+host clients idle: this preflight and native deletion are not an atomic
+transaction with unrelated clients creating children concurrently.
 
 By default, enter the first eight characters of the workspace ID to confirm.
 `-y` or `--yes` skips this confirmation. These deletion flags apply only to purge.
@@ -827,6 +850,10 @@ subagent transcripts, snapshots, copied config/auth, and caches; registry/resume
 evidence; and a committed OCI image of the modified container OS. Mounted project
 and home are backed up separately, not folded into the image. Portable mode
 omits that OS image; system packages/SDKs must be recreated after restore.
+Capture requires the container's actual project and private-home mounts to match
+the registered sources, destinations and mount types. A labeled home volume
+existing separately is not sufficient. Missing, mismatched or ambiguous mounts
+refuse capture before the source container is stopped.
 Neither mode captures running processes, kernel state, devices, host drivers,
 the host-wide vault, host global DB/config, or arbitrary paths outside those
 components. Env files inside the selected project are project data and are
@@ -1048,8 +1075,12 @@ Select an existing project directory; relative paths resolve from the host
 working directory. Quote paths containing spaces. For lifecycle commands the
 default is the current directory. For status, omission means all workspaces.
 The project must not be the host home, `/`, `/home`, the oc-box registry, or a
-directory containing trusted launcher/state files. Colons, commas, and line
-breaks in the project path are unsupported because of Podman mount syntax.
+directory overlapping trusted launcher/state, vault, or OpenCode config/data
+directories. Both ancestors and descendants of those trusted roots are refused,
+including OpenCode's subdirectories under the effective `XDG_CONFIG_HOME` and
+`XDG_DATA_HOME` locations and symlink-resolved paths. Ordinary dedicated projects
+below the host home remain supported. Colons, commas, and line breaks in the
+project path are unsupported because of Podman mount syntax.
 
 ```sh
 oc-box --project "$HOME/devel/my project"
@@ -1280,7 +1311,10 @@ No identity text or passphrase is accepted through argv/environment. Example:
 Set the CPU quota in core units; fractions such as `2.5` are accepted by Podman.
 Default: `4`. Set at creation or reset. Existing containers, even stopped ones,
 require reset to change it; oc-box does not call `podman update`. Values are
-validated by Podman. `0` requests no CPU quota where supported.
+checked as finite, nonnegative ASCII decimal literals before credential
+preparation or container resource changes; fractional and exponent forms are supported.
+Podman still validates backend/kernel support. Effective zero forms are saved
+and forwarded as `0`, requesting no CPU quota where supported.
 
 ```sh
 oc-box reset --project ~/devel/demo --cpus 8
@@ -1293,6 +1327,15 @@ Default: `8g`. Set at creation or reset; not a live update. The value is saved
 for future launches. Limits require delegated cgroup controllers. Podman
 validates the size and kernel support. `0` requests no memory limit where
 supported. There is no automatic project/volume disk quota.
+Preflight accepts finite nonnegative ASCII sizes with portable `k`, `m`, `g`,
+`t` or `p` prefixes, optionally followed by `b` or `ib`, and plain byte counts.
+A single ASCII space before a unit is allowed (quote `"1 GiB"` in the shell).
+Incomplete `i` suffixes, unsupported `e` prefixes, tabs/multiple separators and
+counts outside the native signed-64-bit byte representation are refused before
+mutation. Values that parse to zero bytes are saved and forwarded as `0`.
+Reset checks controller delegation against the requested limits before removing
+the old container, rather than checking only its previous settings. A refused
+controller preflight retains the existing OS and saved configuration.
 
 ```sh
 oc-box reset --project ~/devel/demo --memory 16g
@@ -1300,8 +1343,9 @@ oc-box reset --project ~/devel/demo --memory 16g
 
 ### --pids-limit NUMBER
 
-Set the container's process limit; default `2048`. oc-box requires at least
-`32`. Set at creation or reset; changing an existing container requires reset.
+Set the container's process limit; default `2048`. oc-box accepts integers from
+`32` through `9223372036854775807`, matching the native signed-64-bit argument
+representation. Set at creation or reset; changing an existing container requires reset.
 Example: `oc-box reset --project ~/devel/demo --pids-limit 4096`.
 
 ### --device MAPPING
@@ -1542,7 +1586,14 @@ oc-box --project ~/devel/demo
 oc-box sync --project ~/devel/demo
 ```
 
-The source-tree diagnostic prints counts and differing field names, not text:
+The source-tree diagnostic prints counts and bounded structural differences, not
+transcript values or arbitrary dictionary keys. Operational failures use fixed
+categories rather than raw native error text. This command obtains a live export:
+it may start and stop an initially stopped container and start a private native
+service or migration. It is not a byte-preserving offline comparison.
+Difference output is capped at 20 entries using positional field/item labels;
+comparisons reject non-JSON values, non-finite numbers and nesting beyond 32
+levels instead of echoing malformed payloads.
 
 ```sh
 python3 tools/diagnose_import.py --workspace WORKSPACE_ID --session SESSION_ID
