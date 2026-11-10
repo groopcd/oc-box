@@ -95,6 +95,21 @@ owner. `--read-only` disables session mutation and terminal control/input; it is
 not a promise that an explicitly requested native host connection cannot start
 the native host service.
 
+For developing **oc-box inside its own workspace**, launch an isolated,
+non-editable copy from the checkout:
+
+```sh
+uv run --no-project --with '.[tui]' python -I -m oc_box tui --project ~/src/oc-box
+```
+
+An editable launcher (`--with-editable`) executes trusted host code from that
+same mounted project, so attachment correctly refuses it. This is the
+`trusted-path-exposure` guard, not a missing owner or terminal failure. A normal
+package keeps the launcher outside the mounted checkout; `python -I` also avoids
+source-path overrides. Do not disable validation, reset the workspace or replace
+its marker to work around an editable launch. Editable source remains suitable
+for synthetic `--demo` and isolated tests.
+
 `--demo` supplies fixed synthetic workspace metrics and logs; native session and
 terminal connections are disabled. CPU/RAM/storage readings intentionally stay
 the same after refresh. They are sample values, not measurements of the host.

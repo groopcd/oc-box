@@ -147,6 +147,16 @@ oc\-box tui \-\-demo
 .fam T
 .fi
 .PP
+When testing the manager against the **oc\-box checkout itself**, run a normal isolated package, not an editable launcher inside that workspace:
+.PP
+.nf
+.fam C
+uv run \-\-no\-project \-\-with '.[tui]' python \-I \-m oc_box tui \-\-project ~/src/oc\-box
+.fam T
+.fi
+.PP
+\fB\-\-with\-editable\fR makes the checkout trusted launcher code. Existing attachment validation then correctly refuses exposing that launcher through its own project mount (\fBtrusted\-path\-exposure\fR). The isolated package avoids this overlap without changing the workspace, its owner or the validation guard. \fB\-\-demo\fR and isolated unit tests can still use editable source because they do not attach to that mount.
+.PP
 Initially select one existing project/workspace, or omit selectors for the registered workspace overview. The sidebar still permits switching between registrations. Browsing does not create/start a workspace, take lifecycle ownership, reset, sync, refresh credentials or unlock the vault. \fB\-\-read\-only\fR disables native session mutation and terminal control/input. \fB\-\-demo\fR is a synthetic\-only preview with fixed CPU/RAM/storage readings that also permits execution inside a container: no host services, actual registry/log access or host/workspace actions. Refreshing demo data does not animate those sample values; use normal host mode (optionally \fB\-\-read\-only\fR) for live measurements.
 .PP
 The five tabs are Status, Settings, Sessions, Terminals and Logs. \fB1\fR–\fB5\fR select them; \fBr\fR refreshes and \fBq\fR quits outside a focused embedded terminal. The compact one\-line header ellipsizes long labels and keeps case\-insensitive literal log search available from every tab, including while follow is paused; \fBCtrl+L\fR opens Logs and focuses search. \fBs\fR or \fBF2\fR opens all dashboard settings outside focused text inputs or the native shell. A focused terminal keeps its keys, including \fBs\fR, \fBF2\fR and \fBCtrl+L\fR; use \fBCtrl\-]\fR to detach its client without ending the native shell before using dashboard shortcuts.

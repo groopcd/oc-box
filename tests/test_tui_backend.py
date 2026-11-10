@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -370,6 +371,53 @@ class DashboardBackendTests(unittest.TestCase):
         self.assertEqual(caught.exception.reason, "session-unavailable")
         self.assertNotIn("PRIVATE_OUTPUT", str(caught.exception))
         lease.__exit__.assert_called_once()
+
+    def test_editable_self_workspace_refuses_before_inspection_but_isolated_app_validates(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / "checkout"
+            project.mkdir()
+            application = root / "isolated-application"
+            application.mkdir()
+            with patch.dict(os.environ, {"OC_BOX_STATE_HOME": str(root / "state")}):
+                path, data = box.create_workspace(project, "debian")
+                data["opencode_version"] = "2.2.6"
+                box.atomic_json(path, data)
+                dashboard = backend.DashboardBackend(box)
+                before = path.read_bytes()
+                with (
+                    patch.object(box, "APP", project),
+                    patch.object(box, "podman") as podman,
+                ):
+                    with self.assertRaises(backend.TerminalAttachmentError) as caught:
+                        dashboard.terminal(data["id"])
+                    self.assertEqual(caught.exception.reason, "trusted-path-exposure")
+                    self.assertNotIn(str(project), str(caught.exception))
+                    podman.assert_not_called()
+                info = {
+                    "Config": {"Labels": {box.LABEL: data["id"]}},
+                    "State": {"Running": True},
+                    "Mounts": [{"Source": str(project), "Destination": str(project)}],
+                }
+                with (
+                    patch.object(box, "APP", application),
+                    patch.object(
+                        box,
+                        "podman",
+                        return_value=subprocess.CompletedProcess(
+                            [], 0, json.dumps([info]), ""
+                        ),
+                    ) as podman,
+                ):
+                    backend.workspace_service.validate_workspace(
+                        dashboard._queries, path, data
+                    )
+                    self.assertTrue(podman.call_args.kwargs["private"])
+                    self.assertEqual(podman.call_args.kwargs["timeout"], 20)
+                self.assertEqual(path.read_bytes(), before)
+                self.assertEqual((project / box.MARKER).read_text().strip(), data["id"])
 
 
 if __name__ == "__main__":

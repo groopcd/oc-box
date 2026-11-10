@@ -180,6 +180,14 @@ oc-box tui --workspace WORKSPACE_ID --read-only
 oc-box tui --demo
 @end example
 
+When testing the manager against the **oc-box checkout itself**, run a normal isolated package, not an editable launcher inside that workspace:
+
+@example
+uv run --no-project --with '.[tui]' python -I -m oc_box tui --project ~/src/oc-box
+@end example
+
+@code{--with-editable} makes the checkout trusted launcher code. Existing attachment validation then correctly refuses exposing that launcher through its own project mount (@code{trusted-path-exposure}). The isolated package avoids this overlap without changing the workspace, its owner or the validation guard. @code{--demo} and isolated unit tests can still use editable source because they do not attach to that mount.
+
 Initially select one existing project/workspace, or omit selectors for the registered workspace overview. The sidebar still permits switching between registrations. Browsing does not create/start a workspace, take lifecycle ownership, reset, sync, refresh credentials or unlock the vault. @code{--read-only} disables native session mutation and terminal control/input. @code{--demo} is a synthetic-only preview with fixed CPU/RAM/storage readings that also permits execution inside a container: no host services, actual registry/log access or host/workspace actions. Refreshing demo data does not animate those sample values; use normal host mode (optionally @code{--read-only}) for live measurements.
 
 The five tabs are Status, Settings, Sessions, Terminals and Logs. @code{1}–@code{5} select them; @code{r} refreshes and @code{q} quits outside a focused embedded terminal. The compact one-line header ellipsizes long labels and keeps case-insensitive literal log search available from every tab, including while follow is paused; @code{Ctrl+L} opens Logs and focuses search. @code{s} or @code{F2} opens all dashboard settings outside focused text inputs or the native shell. A focused terminal keeps its keys, including @code{s}, @code{F2} and @code{Ctrl+L}; use @code{Ctrl-]} to detach its client without ending the native shell before using dashboard shortcuts.

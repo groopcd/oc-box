@@ -24,6 +24,7 @@ class DashboardError(ValueError):
 
 
 TERMINAL_REFUSALS = {
+    "trusted-path-exposure": "The project contains trusted launcher or state files. For oc-box's own checkout, run an isolated non-editable package instead of --with-editable; do not disable the exposure guard.",
     "workspace-missing": "The selected workspace is no longer registered. Refresh and select it again.",
     "unsupported-version": "Live session terminals require an existing OpenCode V2 workspace.",
     "workspace-not-running": "The selected workspace container is stopped or paused. Select the running workspace; no start was attempted.",
@@ -523,7 +524,14 @@ class DashboardBackend:
             if stage == "attach":
                 # Only exact known static refusals are categorized. Arbitrary
                 # exception text/control replies are never presented or logged.
-                reason = _ATTACH_REASONS.get(str(error), "workspace-validation")
+                message = str(error)
+                reason = (
+                    "trusted-path-exposure"
+                    if message.startswith(
+                        "Project would expose trusted application/state files:"
+                    )
+                    else _ATTACH_REASONS.get(message, "workspace-validation")
+                )
             else:
                 reason = "session-unavailable" if stage == "session" else "client-build"
             raise TerminalAttachmentError(reason) from None

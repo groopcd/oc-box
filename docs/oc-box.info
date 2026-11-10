@@ -374,6 +374,18 @@ input/output.  Normal CLI commands retain their stdlib-only baseline.
      oc-box tui --workspace WORKSPACE_ID --read-only
      oc-box tui --demo
 
+When testing the manager against the **oc-box checkout itself**, run a
+normal isolated package, not an editable launcher inside that workspace:
+
+     uv run --no-project --with '.[tui]' python -I -m oc_box tui --project ~/src/oc-box
+
+‘--with-editable’ makes the checkout trusted launcher code.  Existing
+attachment validation then correctly refuses exposing that launcher
+through its own project mount (‘trusted-path-exposure’).  The isolated
+package avoids this overlap without changing the workspace, its owner or
+the validation guard.  ‘--demo’ and isolated unit tests can still use
+editable source because they do not attach to that mount.
+
 Initially select one existing project/workspace, or omit selectors for
 the registered workspace overview.  The sidebar still permits switching
 between registrations.  Browsing does not create/start a workspace, take
@@ -2907,20 +2919,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2613
 Node: Commands6118
-Node: Options67631
-Node: Lifecycle and persistence87760
-Node: Distribution images89880
-Node: Sessions and recovery94755
-Node: Devices and host permissions101340
-Node: Resource reports103686
-Node: Configuration and environment105797
-Node: Files117060
-Node: Exit status123004
-Node: Examples123857
-Node: Troubleshooting125943
-Node: Installation and manuals135271
-Node: Authors and license144491
-Node: See also145098
+Node: Options68288
+Node: Lifecycle and persistence88417
+Node: Distribution images90537
+Node: Sessions and recovery95412
+Node: Devices and host permissions101997
+Node: Resource reports104343
+Node: Configuration and environment106454
+Node: Files117717
+Node: Exit status123661
+Node: Examples124514
+Node: Troubleshooting126600
+Node: Installation and manuals135928
+Node: Authors and license145148
+Node: See also145755
 
 End Tag Table
 

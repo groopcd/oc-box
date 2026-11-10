@@ -49,6 +49,9 @@ their checkout ownership distinct from unrelated source and flat installations.
   CPU/RAM/storage edits are deferred; do not introduce resource-control RPCs.
   Host session Connect may use normal native host discovery; workspace sources
   must use an existing private owner, with explicit visible client leases.
+  To manage the oc-box checkout itself, run an isolated non-editable package,
+  not `--with-editable` launcher code inside that mount. Preserve APP/state
+  exposure validation; a self-workspace refusal is not permission to bypass it.
 - `tui_status.py` / `tui_settings.py`: cell-bounded diagnostics and session-only
   categorized preferences. Keep meter columns aligned and scales fixed; unknown
   is not zero, and container CPU bars use observed quotas. Requested refresh

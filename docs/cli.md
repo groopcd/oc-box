@@ -298,6 +298,19 @@ oc-box tui --workspace WORKSPACE_ID --read-only
 oc-box tui --demo
 ```
 
+When testing the manager against the **oc-box checkout itself**, run a normal
+isolated package, not an editable launcher inside that workspace:
+
+```sh
+uv run --no-project --with '.[tui]' python -I -m oc_box tui --project ~/src/oc-box
+```
+
+`--with-editable` makes the checkout trusted launcher code. Existing attachment
+validation then correctly refuses exposing that launcher through its own project
+mount (`trusted-path-exposure`). The isolated package avoids this overlap without
+changing the workspace, its owner or the validation guard. `--demo` and isolated
+unit tests can still use editable source because they do not attach to that mount.
+
 Initially select one existing project/workspace, or omit selectors for the registered
 workspace overview. The sidebar still permits switching between registrations.
 Browsing does not create/start a workspace, take lifecycle
