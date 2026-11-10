@@ -148,6 +148,64 @@ class GlobalPolicyTests(SyntheticFixture):
             credentials.configure(self.data, secrets=["SYNTHETIC_TOKEN"])
         self.assertEqual(self.data, before)
 
+    def test_explicit_intent_repairs_only_known_global_selection_incompatibility(self):
+        for source in ("env", "vault"):
+            for options, expected_mode in (
+                ({"clear": True}, "vault"),
+                ({"mode": "env"}, "env"),
+                ({"mode": "selected"}, "selected"),
+                ({"mode": "vault", "clear": True}, "vault"),
+            ):
+                with self.subTest(source=source, options=options):
+                    self.saved("vault")
+                    self.data["credentials"][source] = ["SYNTHETIC_TOKEN"]
+                    self.data["unrelated"] = {"keep": ["metadata"]}
+                    before = copy.deepcopy(self.data)
+                    with (
+                        patch.object(vault, "select") as selected,
+                        patch.object(vault, "select_all") as all_entries,
+                    ):
+                        result = credentials.configure(self.data, **options)
+                    self.assertEqual(result["mode"], expected_mode)
+                    self.assertEqual(
+                        result[source],
+                        [] if options.get("clear") else ["SYNTHETIC_TOKEN"],
+                    )
+                    self.assertEqual(self.data["unrelated"], before["unrelated"])
+                    selected.assert_not_called()
+                    all_entries.assert_not_called()
+
+    def test_repair_does_not_discard_unsupported_policy_or_mutate_failed_conversion(
+        self,
+    ):
+        cases = (
+            None,
+            {"mode": "unknown", "env": [], "vault": []},
+            {"mode": "vault", "env": [], "vault": [], "private": "keep"},
+            {"mode": "vault", "env": "SYNTHETIC_TOKEN", "vault": []},
+            {"mode": "vault", "env": ["invalid-private-name"], "vault": []},
+            {"mode": "vault", "env": [None], "vault": []},
+        )
+        for saved in cases:
+            for options in ({"clear": True}, {"mode": "env", "clear": True}):
+                with self.subTest(saved=saved, options=options):
+                    self.data["credentials"] = copy.deepcopy(saved)
+                    before = copy.deepcopy(self.data)
+                    with self.assertRaises(vault.VaultError):
+                        credentials.configure(self.data, **options)
+                    self.assertEqual(self.data, before)
+        for options in (
+            {},
+            {"mode": "vault"},
+            {"env": ["SECOND_TOKEN"]},
+            {"mode": "selected", "secrets": ["SYNTHETIC_TOKEN"]},
+        ):
+            self.saved("vault", env=["SYNTHETIC_TOKEN"])
+            before = copy.deepcopy(self.data)
+            with self.subTest(options=options), self.assertRaises(vault.VaultError):
+                credentials.configure(self.data, **options)
+            self.assertEqual(self.data, before)
+
     def test_invalid_explicit_policies_do_not_become_defaults(self):
         for policy in (None, {}, {"mode": "other", "env": [], "vault": []}):
             with self.subTest(policy=policy), self.assertRaises(vault.VaultError):

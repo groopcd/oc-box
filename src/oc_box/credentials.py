@@ -37,8 +37,8 @@ def _major(data, version=None):
         ) from exc
 
 
-def policy(data, *, version=None):
-    value = (
+def _policy_value(data, version=None):
+    return (
         data.get("credentials")
         if "credentials" in data
         else {
@@ -47,6 +47,9 @@ def policy(data, *, version=None):
             "vault": [],
         }
     )
+
+
+def _validated_policy(value, *, allow_global_selections=False):
     if (
         not isinstance(value, dict)
         or set(value) != {"mode", "env", "vault"}
@@ -61,7 +64,11 @@ def policy(data, *, version=None):
             or len(value[source]) > vault.MAX_ENTRIES
         ):
             raise vault.VaultError("Invalid credential selection list.")
-    if value["mode"] == "vault" and (value["env"] or value["vault"]):
+    if (
+        value["mode"] == "vault"
+        and (value["env"] or value["vault"])
+        and not allow_global_selections
+    ):
         raise vault.VaultError(
             "Global vault mode cannot contain credential selection lists. Use selected/env mode, "
             "or --clear-credentials when switching to vault mode."
@@ -79,8 +86,18 @@ def policy(data, *, version=None):
     }
 
 
+def policy(data, *, version=None):
+    return _validated_policy(_policy_value(data, version))
+
+
 def configure(data, *, mode=None, env=(), secrets=(), clear=False):
-    result = policy(data)
+    # Explicit repair may bypass only the known mode/list incompatibility.
+    # Still validate the complete saved shape, every name and source conflict
+    # before clearing anything; unknown malformed data must remain untouched.
+    result = _validated_policy(
+        _policy_value(data),
+        allow_global_selections=clear or mode in ("env", "selected"),
+    )
     if clear:
         result["env"], result["vault"] = [], []
     for source, names in (("env", env), ("vault", secrets)):
