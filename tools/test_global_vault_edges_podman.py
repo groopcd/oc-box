@@ -14,6 +14,7 @@ import argparse
 import ast
 import errno
 import fcntl
+import fnmatch
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -242,8 +243,16 @@ def parser():
 def fresh_parent(path):
     parent = interactive.fresh_parent(path)
     for ancestor in (parent, *parent.parents):
+        # Match entry names, never a marker target. Python 3.10's literal glob
+        # selector omits dangling symlinks, which still identify retained proof.
+        with os.scandir(ancestor) as entries:
+            names = tuple(entry.name for entry in entries)
         require(
-            not any(any(ancestor.glob(pattern)) for pattern in FRESH_MARKERS),
+            not any(
+                fnmatch.fnmatchcase(name, pattern)
+                for name in names
+                for pattern in FRESH_MARKERS
+            ),
             "fresh-parent-required",
         )
     return parent
@@ -1044,28 +1053,110 @@ def owner_case(root, case, password, python):
 # As before, times (including mtime), ACLs and xattrs are NOT proof fields: a
 # timestamp-only change does not waive content or any ownership/topology check.
 HOME_MANIFEST = """import hashlib,json,os,pathlib,stat,sys
-root=pathlib.Path(sys.argv[1]); result={}; heads={}
-def scan(path,relative):
-    item=path.lstat()
-    common=[stat.S_IMODE(item.st_mode),item.st_uid,item.st_gid,item.st_nlink]
-    head=heads.setdefault((item.st_dev,item.st_ino),relative)
-    if stat.S_ISLNK(item.st_mode):
-        result[relative]=['link',*common,os.readlink(path),head]
-    elif stat.S_ISREG(item.st_mode):
-        digest=hashlib.sha256()
-        with path.open('rb') as stream:
-            for content in iter(lambda:stream.read(1048576),b''): digest.update(content)
-        result[relative]=['file',*common,item.st_size,digest.hexdigest(),head]
-    elif stat.S_ISDIR(item.st_mode):
-        result[relative]=['directory',*common]
-        for child in sorted(path.iterdir()):
-            scan(child,child.name if relative=='.' else relative+'/'+child.name)
-    else:
-        result[relative]=['special',stat.S_IFMT(item.st_mode),*common,item.st_rdev,head]
-if not stat.S_ISDIR(root.lstat().st_mode): raise ValueError('home-root')
-scan(root,'.')
-payload={'contract':'oc-box-home-topology-v2','entries':result}
-print(hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':')).encode()).hexdigest())
+def need(condition):
+    if not condition: raise ValueError('home-manifest-refused')
+def identity(info):
+    return (info.st_dev,info.st_ino,stat.S_IFMT(info.st_mode))
+def stamp(info):
+    return (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid,
+            info.st_nlink,info.st_size,info.st_mtime_ns,info.st_ctime_ns,info.st_rdev)
+def inspect(parent,name):
+    return os.stat(name,dir_fd=parent,follow_symlinks=False)
+def unchanged(parent,name,info):
+    need(stamp(inspect(parent,name))==stamp(info))
+FLAGS=os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC
+DIRECTORY=FLAGS|os.O_DIRECTORY
+def snapshot(root):
+    need(root.is_absolute() and len(root.parts)>1 and '..' not in root.parts)
+    result={}; heads={}; anchors=[]; descriptors=[]; observed={}; directory_names={}
+    def fields(info):
+        return [stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid,info.st_nlink]
+    def scan_directory(fd,relative,info):
+        need(stat.S_ISDIR(info.st_mode) and stamp(os.fstat(fd))==stamp(info))
+        observed[relative]=info
+        result[relative]=['directory',*fields(info)]
+        names=sorted(os.listdir(fd))
+        directory_names[relative]=names
+        for name in names:
+            scan_entry(fd,name,name if relative=='.' else relative+'/'+name)
+        need(sorted(os.listdir(fd))==names and stamp(os.fstat(fd))==stamp(info))
+    def scan_entry(parent,name,relative):
+        info=inspect(parent,name); common=fields(info)
+        observed[relative]=info
+        head=heads.setdefault((info.st_dev,info.st_ino),relative)
+        if stat.S_ISDIR(info.st_mode):
+            fd=os.open(name,DIRECTORY,dir_fd=parent)
+            try:
+                need(stamp(os.fstat(fd))==stamp(info))
+                scan_directory(fd,relative,info)
+                unchanged(parent,name,info)
+            finally: os.close(fd)
+        elif stat.S_ISREG(info.st_mode):
+            fd=os.open(name,FLAGS,dir_fd=parent)
+            try:
+                opened=os.fstat(fd)
+                need(stat.S_ISREG(opened.st_mode) and stamp(opened)==stamp(info))
+                digest=hashlib.sha256(); count=0
+                while True:
+                    content=os.read(fd,min(1048576,info.st_size-count+1))
+                    if not content: break
+                    count+=len(content); need(count<=info.st_size); digest.update(content)
+                need(count==info.st_size and stamp(os.fstat(fd))==stamp(info))
+                unchanged(parent,name,info)
+                result[relative]=['file',*common,info.st_size,digest.hexdigest(),head]
+            finally: os.close(fd)
+        elif stat.S_ISLNK(info.st_mode):
+            target=os.readlink(name,dir_fd=parent)
+            unchanged(parent,name,info)
+            result[relative]=['link',*common,target,head]
+        else:
+            # Stable original FIFOs/sockets/devices are metadata only: no open.
+            unchanged(parent,name,info)
+            result[relative]=['special',stat.S_IFMT(info.st_mode),*common,info.st_rdev,head]
+    def verify_directory(fd,relative):
+        # A second descriptor-anchored metadata pass also detects an earlier
+        # file changing while later entries were read. Times are stability
+        # checks only, never serialized as preservation-proof fields.
+        need(stamp(os.fstat(fd))==stamp(observed[relative]))
+        need(sorted(os.listdir(fd))==directory_names[relative])
+        for name in directory_names[relative]:
+            child=name if relative=='.' else relative+'/'+name
+            info=observed[child]; unchanged(fd,name,info)
+            if stat.S_ISDIR(info.st_mode):
+                nested=os.open(name,DIRECTORY,dir_fd=fd)
+                try:
+                    need(stamp(os.fstat(nested))==stamp(info))
+                    verify_directory(nested,child)
+                    unchanged(fd,name,info)
+                finally: os.close(nested)
+        need(stamp(os.fstat(fd))==stamp(observed[relative]))
+    try:
+        parent=os.open(root.anchor,DIRECTORY); descriptors.append(parent)
+        for index,name in enumerate(root.parts[1:],1):
+            info=inspect(parent,name); need(stat.S_ISDIR(info.st_mode))
+            fd=os.open(name,DIRECTORY,dir_fd=parent); descriptors.append(fd)
+            opened=os.fstat(fd)
+            need(identity(opened)==identity(info))
+            # Ancestors are identity anchors, not snapshot contents: unrelated
+            # entries in /tmp or a parent directory may legitimately change.
+            if index==len(root.parts)-1: need(stamp(opened)==stamp(info))
+            anchors.append((parent,name,fd,info)); parent=fd
+        root_info=anchors[-1][3]
+        scan_directory(parent,'.',root_info)
+        verify_directory(parent,'.')
+        for ancestor,name,fd,info in anchors:
+            need(identity(os.fstat(fd))==identity(info))
+            need(identity(inspect(ancestor,name))==identity(info))
+        unchanged(anchors[-1][0],anchors[-1][1],root_info)
+        payload={'contract':'oc-box-home-topology-v2','entries':result}
+        return hashlib.sha256(json.dumps(payload,sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    finally:
+        for fd in reversed(descriptors): os.close(fd)
+try:
+    print(snapshot(pathlib.Path(sys.argv[1])))
+except Exception:
+    print('home-manifest-refused',file=sys.stderr)
+    raise SystemExit(1)
 """
 
 

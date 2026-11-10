@@ -411,6 +411,38 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
         self.box_run.assert_not_called()
         self.command.assert_not_called()
 
+    def test_dangling_literal_markers_refuse_both_parents_before_source_or_allocation(
+        self,
+    ):
+        for marker in ("edges.json", "home-component.json", "home-ready.json"):
+            retained = self.parent / ("dangling-" + marker)
+            retained.mkdir()
+            (retained / marker).symlink_to("missing-synthetic-evidence")
+            child = retained / "nested"
+            child.mkdir()
+            for path in (retained, child):
+                for flag in ("--work-dir", "--temp-dir"):
+                    argv = (
+                        [flag, str(path)]
+                        if flag == "--work-dir"
+                        else ["--work-dir", str(self.parent), flag, str(path)]
+                    )
+                    with (
+                        self.subTest(marker=marker, path=path.name, flag=flag),
+                        patch.object(fixture, "host_guard"),
+                        patch.object(probe.resource, "setrlimit"),
+                        patch.object(probe, "source_snapshot") as source,
+                        patch.object(probe.tempfile, "mkdtemp") as allocate,
+                    ):
+                        self.assertEqual(probe.main(argv), 1)
+                        source.assert_not_called()
+                        allocate.assert_not_called()
+                        self.assertEqual(
+                            os.readlink(retained / marker), "missing-synthetic-evidence"
+                        )
+        self.box_run.assert_not_called()
+        self.command.assert_not_called()
+
     def test_lifecycle_excludes_concurrent_run_cleanup_and_rejects_redirect(self):
         with probe.lifecycle(self.root), self.assertRaises(fixture.FixtureError):
             with probe.lifecycle(self.root):

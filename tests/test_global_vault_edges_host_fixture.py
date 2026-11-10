@@ -150,15 +150,22 @@ class GlobalVaultEdgesHostFixtureTests(unittest.TestCase):
         if metadata is not None:
             prelude = (
                 "import pathlib,os\n_original_lstat=pathlib.Path.lstat\n"
+                + "_original_stat=os.stat\n_original_fstat=os.fstat\n"
                 + "_overrides="
                 + repr(metadata)
                 + "\n"
-                + "def _lstat(path,*args,**kwargs):\n"
-                + " info=_original_lstat(path,*args,**kwargs)\n"
+                + "_by_inode={}\n"
+                + "for path,changes in _overrides.items():\n"
+                + " info=_original_stat(path,follow_symlinks=False)\n"
+                + " _by_inode[(info.st_dev,info.st_ino)]=changes\n"
+                + "def _metadata(info):\n"
                 + " values=list(info)\n"
-                + " for index,value in _overrides.get(str(path),{}).items(): values[index]=value\n"
+                + " for index,value in _by_inode.get((info.st_dev,info.st_ino),{}).items(): values[index]=value\n"
                 + " return os.stat_result(values)\n"
-                + "pathlib.Path.lstat=_lstat\n"
+                + "def _lstat(path,*args,**kwargs): return _metadata(_original_lstat(path,*args,**kwargs))\n"
+                + "def _stat(path,*args,**kwargs): return _metadata(_original_stat(path,*args,**kwargs))\n"
+                + "def _fstat(fd): return _metadata(_original_fstat(fd))\n"
+                + "pathlib.Path.lstat=_lstat\nos.stat=_stat\nos.fstat=_fstat\n"
             )
         result = subprocess.run(
             [sys.executable, "-I", "-B", "-c", prelude + edge.HOME_MANIFEST, str(home)],
@@ -170,6 +177,127 @@ class GlobalVaultEdgesHostFixtureTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, "private scanner failed")
         self.assertRegex(result.stdout.decode().strip(), r"^[0-9a-f]{64}$")
         return result.stdout.decode().strip()
+
+    def test_home_scanner_refuses_actual_path_replacements_before_read_or_descent(self):
+        for case in (
+            "file-symlink",
+            "file-fifo",
+            "directory-symlink",
+            "root-symlink",
+            "ancestor-symlink",
+            "earlier-file-mutation",
+        ):
+            with self.subTest(case=case):
+                base = self.root / ("replace-" + case)
+                home = base / "home"
+                home.mkdir(parents=True, mode=0o700)
+                outside = self.root / ("outside-" + case)
+                outside.mkdir(mode=0o700)
+                (outside / "data").write_bytes(b"NEVER_READ_OUTSIDE_SYNTHETIC_HOME\n")
+                if case.startswith("file-"):
+                    subject = home / "data"
+                    subject.write_bytes(b"ORIGINAL_SYNTHETIC_HOME\n")
+                    replacement = outside / "data"
+                elif case == "directory-symlink":
+                    subject = home / "nested"
+                    subject.mkdir()
+                    (subject / "data").write_bytes(b"ORIGINAL_SYNTHETIC_HOME\n")
+                    replacement = outside
+                elif case == "root-symlink":
+                    subject, replacement = home, outside
+                elif case == "ancestor-symlink":
+                    subject, replacement = base, outside
+                    (outside / "home").mkdir()
+                    (outside / "home/data").write_bytes(
+                        b"NEVER_READ_OUTSIDE_SYNTHETIC_ANCESTOR\n"
+                    )
+                else:
+                    subject, replacement = home / "a", outside
+                    subject.write_bytes(b"EARLIER_ORIGINAL_SYNTHETIC_BYTES\n")
+                    (home / "z").write_bytes(b"LATER_SYNTHETIC_FILE\n")
+                trigger = home if case == "ancestor-symlink" else subject
+                if case == "earlier-file-mutation":
+                    trigger = home / "z"
+                info = trigger.lstat()
+                # Trigger a real replacement immediately after classification,
+                # covering both the old Path.lstat and descriptor stat variants.
+                prelude = r"""import io,os,pathlib
+_real_stat=os.stat; _real_fstat=os.fstat; _real_lstat=pathlib.Path.lstat
+_real_open=os.open; _real_io_open=io.open
+_identity=IDENTITY; _subject=SUBJECT; _replacement=REPLACEMENT
+_staged=STAGED; _outside=OUTSIDE; _read_marker=READ_MARKER; _fired=False
+def _replace(info):
+    global _fired
+    if not _fired and (info.st_dev,info.st_ino)==_identity:
+        _fired=True
+        if MUTATION:
+            fd=_real_open(_subject,os.O_WRONLY|os.O_TRUNC|os.O_NOFOLLOW)
+            os.write(fd,b'EARLIER_MODIFIED_SYNTHETIC_BYTES\n'); os.close(fd)
+            fd=_real_open(_staged,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600)
+            os.write(fd,b'mutation-fired'); os.close(fd)
+        else:
+            os.rename(_subject,_staged)
+            if FIFO: os.mkfifo(_subject,0o600)
+            else: os.symlink(_replacement,_subject)
+    return info
+def _stat(*args,**kwargs): return _replace(_real_stat(*args,**kwargs))
+def _lstat(*args,**kwargs): return _replace(_real_lstat(*args,**kwargs))
+def _mark():
+    fd=_real_open(_read_marker,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
+    os.write(fd,b'outside-read'); os.close(fd)
+def _open(*args,**kwargs):
+    fd=_real_open(*args,**kwargs)
+    actual=os.readlink('/proc/self/fd/'+str(fd))
+    if actual==_outside or actual.startswith(_outside+'/'): _mark()
+    return fd
+def _io_open(file,*args,**kwargs):
+    if os.path.realpath(file).startswith(_outside+'/'): _mark()
+    return _real_io_open(file,*args,**kwargs)
+os.stat=_stat; pathlib.Path.lstat=_lstat; os.open=_open; io.open=_io_open
+"""
+                # Put the staged ancestor outside its own subtree.
+                staged = self.root / ("staged-" + case)
+                marker = self.root / ("outside-read-" + case)
+                replacement_values = {
+                    "IDENTITY": repr((info.st_dev, info.st_ino)),
+                    "SUBJECT": repr(str(subject)),
+                    "REPLACEMENT": repr(str(replacement)),
+                    "STAGED": repr(str(staged)),
+                    "OUTSIDE": repr(str(outside)),
+                    "READ_MARKER": repr(str(marker)),
+                    "FIFO": repr(case == "file-fifo"),
+                    "MUTATION": repr(case == "earlier-file-mutation"),
+                }
+                for token, value in replacement_values.items():
+                    prelude = prelude.replace(token, value)
+                try:
+                    result = subprocess.run(
+                        [
+                            sys.executable,
+                            "-I",
+                            "-B",
+                            "-c",
+                            prelude + edge.HOME_MANIFEST,
+                            str(home),
+                        ],
+                        env={"PATH": os.defpath},
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        timeout=3,
+                    )
+                except subprocess.TimeoutExpired:
+                    self.fail("scanner blocked after a synthetic pathname replacement")
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, b"")
+                self.assertEqual(result.stderr, b"home-manifest-refused\n")
+                self.assertFalse(marker.exists(), "outside replacement was opened")
+                self.assertTrue(staged.exists(), "replacement hook did not execute")
+
+    def test_home_scanner_stable_special_files_are_metadata_only(self):
+        home = self.root / "stable-special-home"
+        home.mkdir(mode=0o700)
+        os.mkfifo(home / "fifo", 0o600)
+        self.assertRegex(self.home_digest(home), r"^[0-9a-f]{64}$")
 
     def test_home_topology_root_and_link_metadata_independent_mutations(self):
         home = self.root / "topology-home"
@@ -491,6 +619,34 @@ class GlobalVaultEdgesHostFixtureTests(unittest.TestCase):
                         self.assertEqual(
                             (retained / marker).read_bytes(),
                             b"UNCHANGED_SYNTHETIC_FAILED_EVIDENCE\n",
+                        )
+        self.engine.assert_not_called()
+
+    def test_dangling_literal_markers_refuse_both_parents_before_source_or_allocation(
+        self,
+    ):
+        for marker in ("edges.json", "home-component.json", "home-ready.json"):
+            retained = self.parent / ("dangling-" + marker)
+            retained.mkdir()
+            (retained / marker).symlink_to("missing-synthetic-evidence")
+            child = retained / "nested"
+            child.mkdir()
+            for path in (retained, child):
+                for option in ("work-dir", "temp-dir"):
+                    with (
+                        self.subTest(marker=marker, path=path.name, option=option),
+                        patch.object(fixture, "host_guard"),
+                        patch.object(edge.interactive, "source_identity") as source,
+                        patch.object(edge.interactive, "native_binary") as native,
+                        patch.object(edge.tempfile, "mkdtemp") as allocate,
+                        patch("sys.stdout", new_callable=io.StringIO),
+                    ):
+                        self.assertEqual(edge.main(self.args(**{option: path})), 1)
+                        source.assert_not_called()
+                        native.assert_not_called()
+                        allocate.assert_not_called()
+                        self.assertEqual(
+                            os.readlink(retained / marker), "missing-synthetic-evidence"
                         )
         self.engine.assert_not_called()
 

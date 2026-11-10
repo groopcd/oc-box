@@ -10,6 +10,7 @@ import argparse
 import contextlib
 from contextvars import ContextVar
 import fcntl
+import fnmatch
 import hashlib
 import json
 import os
@@ -179,8 +180,14 @@ def invocation_source(current):
 def fresh_parent(path):
     parent = interactive.fresh_parent(path)
     for ancestor in (parent, *parent.parents):
+        with os.scandir(ancestor) as entries:
+            names = tuple(entry.name for entry in entries)
         require(
-            not any(any(ancestor.glob(pattern)) for pattern in FRESH_MARKERS),
+            not any(
+                fnmatch.fnmatchcase(name, pattern)
+                for name in names
+                for pattern in FRESH_MARKERS
+            ),
             "fresh-parent-required",
         )
     return parent
