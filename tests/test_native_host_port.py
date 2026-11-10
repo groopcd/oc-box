@@ -316,7 +316,10 @@ export default async () => ({ "tool.definition": async ({ toolID }, out) => {
             before,
         )
         self.assertFalse(list(source.glob(".native-plugin-backup-*")))
-        self.assertFalse(list((source / "plugins").glob("*/")))
+        # Python 3.10 does not restrict a trailing-slash glob to directories.
+        self.assertFalse(
+            [path for path in (source / "plugins").iterdir() if path.is_dir()]
+        )
 
     def test_retained_markers_cannot_authorize_changed_reviewed_bytes(self):
         source, file = self.isolated_source(
