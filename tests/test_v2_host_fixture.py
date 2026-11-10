@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import traceback
+from types import ModuleType
 import unittest
 from unittest.mock import Mock, patch
 
@@ -34,7 +35,7 @@ class V2HostFixtureTests(unittest.TestCase):
     def offline_binding(self):
         return Mock(report=lambda: {"offline_test": True})
 
-    def synthetic_source(self, root):
+    def synthetic_source(self, root, *, actual_application=False):
         """Finite private Git/source fixture; no native or engine subprocesses."""
         (root / "src/oc_box").mkdir(parents=True)
         (root / "tools").mkdir()
@@ -60,6 +61,16 @@ class V2HostFixtureTests(unittest.TestCase):
         (root / "tools/acceptance_guards.py").write_text(
             "# synthetic bootstrap fixture, not the shared implementation\n"
         )
+        if actual_application:
+            for name in subprocess.check_output(
+                ["git", "ls-files", "-z", "--", "src/oc_box"], cwd=APP
+            ).split(b"\0"):
+                if name:
+                    relative = name.decode()
+                    target = root / relative
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_bytes((APP / relative).read_bytes())
+                    target.chmod((APP / relative).stat().st_mode & 0o777)
         env = {
             "PATH": os.defpath,
             "GIT_CONFIG_GLOBAL": "/dev/null",
@@ -170,6 +181,37 @@ print('SOURCE_AND_ORIGIN_OK')
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(result.stdout.strip(), "SOURCE_AND_ORIGIN_OK")
 
+    def test_admission_loads_actual_candidate_package_without_native_processes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commit = self.synthetic_source(root, actual_application=True)
+            program = """import importlib.util,pathlib,subprocess,sys
+root=pathlib.Path(sys.argv[1]); spec=importlib.util.spec_from_file_location('runner',root/'tools/test_v2_podman.py')
+runner=importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
+real_popen=subprocess.Popen
+def popen(argv,*args,**kwargs):
+ assert pathlib.Path(argv[0]).name=='git', 'unexpected native/engine process'
+ return real_popen(argv,*args,**kwargs)
+subprocess.Popen=popen
+binding=runner.ExecutionBinding(root,sys.argv[2])
+assert runner.box.__file__==str(root/'src/oc_box/oc_box.py')
+assert sys.modules['tools'].__path__==[str(root/'tools')]
+from tools import test_v2_podman as donor
+donor.load_application()
+assert str(root) not in sys.path and str(root/'src') not in sys.path
+binding.checkpoint()
+print('ACTUAL_SOURCE_IMPORTS_ADMITTED')
+"""
+            result = subprocess.run(
+                [sys.executable, "-I", "-B", "-c", program, str(root), commit],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "ACTUAL_SOURCE_IMPORTS_ADMITTED")
+
     def test_expected_success_requires_exact_integer_zero_after_completed_callback(
         self,
     ):
@@ -206,6 +248,247 @@ print('SOURCE_AND_ORIGIN_OK')
             self.assertEqual(exits[0]["stage"], stage)
             self.assertEqual(exits[0]["expected"], "success")
             self.assertIs(exits[0]["exact_int"], type(code) is int)
+
+    def test_direct_nonisolated_startup_refuses_before_sibling_stdlib_traps(self):
+        for container in ("0", "1"):
+            with (
+                tempfile.TemporaryDirectory() as temporary,
+                self.subTest(container=container, uid=os.geteuid()),
+            ):
+                root = Path(temporary)
+                script = root / "test_v2_podman.py"
+                script.write_bytes((APP / "tools/test_v2_podman.py").read_bytes())
+                for module in (
+                    "argparse",
+                    "contextlib",
+                    "pathlib",
+                    "tempfile",
+                    "subprocess",
+                ):
+                    marker = root / (module + ".executed")
+                    (root / (module + ".py")).write_text(
+                        "open("
+                        + repr(str(marker))
+                        + ", 'w').write('unsafe sibling executed')\nraise RuntimeError('sibling shadow executed')\n"
+                    )
+                result = subprocess.run(
+                    [sys.executable, "-B", str(script), "--help"],
+                    env={**os.environ, "OC_BOX_CONTAINER": container},
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                self.assertEqual(result.returncode, 1)
+                self.assertEqual(result.stdout, "")
+                self.assertTrue(
+                    result.stderr.startswith("isolated-startup-required:"),
+                    result.stderr,
+                )
+                self.assertEqual(list(root.glob("*.executed")), [])
+
+    def test_expected_commit_rejects_index_and_workfile_race_before_import(self):
+        for mutation in ("bytes", "mode"):
+            with (
+                tempfile.TemporaryDirectory() as temporary,
+                self.subTest(mutation=mutation),
+            ):
+                root = Path(temporary)
+                commit = self.synthetic_source(root)
+                program = """import importlib.util,pathlib,subprocess,sys
+root=pathlib.Path(sys.argv[1]); spec=importlib.util.spec_from_file_location('runner',root/'tools/test_v2_podman.py')
+runner=importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
+real_run=subprocess.run; raced=False; imports=[]; real_load=runner.load_application
+def load(*args,**kwargs):
+ imports.append('application'); return real_load(*args,**kwargs)
+runner.load_application=load
+def run(argv,**kwargs):
+ global raced
+ assert pathlib.Path(argv[0]).name=='git', 'unexpected native/engine probe'
+ result=real_run(argv,**kwargs)
+ if 'status' in argv and not raced:
+  assert not result.stdout; raced=True; path=root/'src/oc_box/oc_box.py'
+  if sys.argv[3]=='bytes': path.write_text("VALUE='POISON'\\n")
+  else: path.chmod(0o755)
+  real_run([argv[0],'-C',str(root),'add','src/oc_box/oc_box.py'],env=kwargs['env'],stdin=subprocess.DEVNULL,capture_output=True,check=True,timeout=10)
+ return result
+runner.subprocess.run=run
+try: runner.ExecutionBinding(root,sys.argv[2])
+except ValueError as error: assert str(error) in ('source-changed','source-shadowing'), str(error)
+else: raise AssertionError('mutable index authenticated as expected commit')
+assert raced and not imports
+assert not any(name=='oc_box' or name.startswith('oc_box.') for name in sys.modules)
+print('EXPECTED_COMMIT_REFUSAL_BEFORE_IMPORT')
+"""
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-B",
+                        "-c",
+                        program,
+                        str(root),
+                        commit,
+                        mutation,
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=25,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.stdout.strip(), "EXPECTED_COMMIT_REFUSAL_BEFORE_IMPORT"
+                )
+
+    def test_commit_count_is_bound_to_expected_commit_when_head_advances_after_status(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            commit = self.synthetic_source(root)
+            real_run, changed = subprocess.run, []
+
+            def run(argv, **kwargs):
+                result = real_run(argv, **kwargs)
+                if "status" in argv and not changed:
+                    self.assertEqual(result.stdout, b"")
+                    changed.append(True)
+                    real_run(
+                        [
+                            argv[0],
+                            "-C",
+                            str(root),
+                            "-c",
+                            "user.name=Synthetic",
+                            "-c",
+                            "user.email=synthetic@example.invalid",
+                            "commit",
+                            "--allow-empty",
+                            "-qm",
+                            "advanced HEAD",
+                        ],
+                        env=kwargs["env"],
+                        stdin=subprocess.DEVNULL,
+                        capture_output=True,
+                        check=True,
+                        timeout=10,
+                    )
+                return result
+
+            with patch.object(fixture.subprocess, "run", side_effect=run):
+                identity = fixture.source_snapshot(root, commit)
+            self.assertEqual(identity["commit"], commit)
+            self.assertEqual(identity["commit_count"], 1)
+            self.assertEqual(changed, [True])
+
+    def test_import_guard_checks_file_all_package_paths_and_spec_origin(self):
+        manifest = {
+            name.decode(): "tracked"
+            for name in subprocess.check_output(
+                ["git", "ls-files", "-z"], cwd=APP
+            ).split(b"\0")
+            if name
+        }
+        filename = APP / "src/oc_box/__init__.py"
+        for mutation in ("package-path", "spec-origin", "spec-package-path"):
+            package = ModuleType("oc_box")
+            package.__file__ = str(filename)
+            package.__path__ = [str(filename.parent)]
+            package.__spec__ = importlib.util.spec_from_file_location(
+                "oc_box", filename, submodule_search_locations=[str(filename.parent)]
+            )
+            with (
+                self.subTest(mutation=mutation),
+                patch.dict(sys.modules, {"oc_box": package}),
+            ):
+                fixture.import_guard(APP, manifest)
+                if mutation == "package-path":
+                    package.__path__.append("/foreign/candidate-package")
+                elif mutation == "spec-origin":
+                    package.__spec__.origin = "/foreign/candidate-package/__init__.py"
+                else:
+                    package.__spec__.submodule_search_locations.append(
+                        "/foreign/candidate-package"
+                    )
+                with self.assertRaisesRegex(ValueError, "source-shadowing"):
+                    fixture.import_guard(APP, manifest)
+
+    def test_candidate_module_admission_rejects_foreign_preload_and_sourceless_shadows(
+        self,
+    ):
+        for mutation in (
+            "foreign-regular-package",
+            "same-path-poisoned-preload",
+            "ignored-root-pyc",
+        ):
+            with (
+                tempfile.TemporaryDirectory() as temporary,
+                self.subTest(mutation=mutation),
+            ):
+                parent = Path(temporary)
+                root = parent / "source"
+                root.mkdir()
+                commit = self.synthetic_source(root)
+                foreign = parent / "foreign"
+                (foreign / "tools").mkdir(parents=True)
+                marker = parent / "untrusted.executed"
+                (foreign / "tools/__init__.py").write_text(
+                    "open("
+                    + repr(str(marker))
+                    + ", 'w').write('foreign regular package executed')\nraise RuntimeError('foreign tools executed')\n"
+                )
+                if mutation == "ignored-root-pyc":
+                    trap = parent / "trap.py"
+                    trap.write_text(
+                        "open("
+                        + repr(str(marker))
+                        + ", 'w').write('sourceless shadow executed')\n__file__="
+                        + repr(str(root / "tools/acceptance_guards.py"))
+                        + "\nacceptance_guards=object()\n"
+                    )
+                    py_compile.compile(
+                        str(trap), cfile=str(root / "tools.pyc"), doraise=True
+                    )
+                program = """import importlib.util,pathlib,sys,types
+root=pathlib.Path(sys.argv[1]); spec=importlib.util.spec_from_file_location('runner',root/'tools/test_v2_podman.py')
+runner=importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
+kind=sys.argv[3]
+if kind=='foreign-regular-package': sys.path.insert(0,sys.argv[4])
+elif kind=='same-path-poisoned-preload':
+ name='tools.acceptance_guards'; file=root/'tools/acceptance_guards.py'; module=types.ModuleType(name)
+ module.__file__=str(file); module.__spec__=importlib.util.spec_from_file_location(name,file)
+ exec(compile('POISONED=True\\n',str(file),'exec'),module.__dict__); sys.modules[name]=module
+try: runner.ExecutionBinding(root,sys.argv[2])
+except ValueError as error: assert str(error) in ('source-shadowing','source-already-loaded'), str(error)
+else: raise AssertionError('unverified module admitted')
+assert not pathlib.Path(sys.argv[5]).exists()
+assert not any(name=='oc_box' or name.startswith('oc_box.') for name in sys.modules)
+print('UNVERIFIED_MODULE_REFUSED_BEFORE_IMPORT')
+"""
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-I",
+                        "-B",
+                        "-c",
+                        program,
+                        str(root),
+                        commit,
+                        mutation,
+                        str(foreign),
+                        str(marker),
+                    ],
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    timeout=25,
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(
+                    result.stdout.strip(), "UNVERIFIED_MODULE_REFUSED_BEFORE_IMPORT"
+                )
+                self.assertFalse(marker.exists())
 
     def assert_launcher_journal_failure(
         self,
@@ -512,6 +795,7 @@ print('NO_CANDIDATE_IMPORT')
                 {},
                 None,
             )
+            binding.admission = Mock(admitted={})
             with (
                 patch.object(fixture, "import_guard"),
                 patch.object(box, "run") as native_probe,

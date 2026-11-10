@@ -7,12 +7,26 @@ vault. The TUI exit and masked prompt input are replaced by scripted fixture
 actions; selection/decryption, service startup, tools, backup, restore, reset and
 downgrade are production paths. Never uses the operator's vault/model/history.
 Fixture resources are retained for diagnosis and removed only by --cleanup.
+Direct execution requires python3 -I -B; normal source imports are reserved for
+callers which have established their own initial trust boundary.
 """
+
+import sys
+
+# sys is built in and already initialized. Refuse before any sibling-shadowable
+# stdlib import, including argparse, can execute on a direct non-isolated start.
+if __name__ == "__main__" and not sys.flags.isolated:
+    sys.stderr.write(
+        "isolated-startup-required: run with python3 -I -B tools/test_v2_podman.py.\n"
+    )
+    raise SystemExit(1)
 
 import argparse
 import contextlib
 import hashlib
 import importlib
+import importlib.machinery
+import importlib.util
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -23,7 +37,6 @@ import shlex
 import shutil
 import stat
 import subprocess
-import sys
 import tempfile
 import threading
 from unittest.mock import patch
@@ -44,12 +57,14 @@ def host_guard():
         raise ValueError("host-only")
 
 
-def load_application():
+def load_application(*, admission=None):
     # Donor helpers may call this after their own trusted bootstrap. The CLI
     # calls it only after its stdlib source verification and cache isolation.
     if "box" in globals():
         return
-    sys.path[:0] = [str(APP / "src"), str(APP)]
+    if admission is None and "oc_box" not in sys.modules:
+        # Compatibility donor operation, not a standalone source authenticator.
+        sys.path[:0] = [str(APP / "src"), str(APP)]
     for name, module in (
         ("crypto", "backup_crypto"),
         ("backups", "backups"),
@@ -122,6 +137,9 @@ def source_snapshot(source, expected):
             "tools",
             "oc_box.py",
             "tools.py",
+            "oc_box.pyc",
+            "tools.pyc",
+            "oc_box",
         ).split(b"\0"),
     ):
         if not (
@@ -133,14 +151,18 @@ def source_snapshot(source, expected):
         ):
             raise ValueError("source-shadowing")
     hashes = {}
-    for record in filter(None, git("ls-files", "--stage", "-z").split(b"\0")):
+    for record in filter(None, git("ls-tree", "-r", "-z", expected).split(b"\0")):
         header, name = record.split(b"\t", 1)
-        mode, blob, stage = header.split()
-        if mode not in (b"100644", b"100755") or stage != b"0":
+        mode, kind, blob = header.split()
+        if mode not in (b"100644", b"100755") or kind != b"blob":
             raise ValueError("source-shadowing")
         path = source / name.decode()
         if any(item.is_symlink() for item in (path, *path.parents)):
             raise ValueError("source-shadowing")
+        info = path.lstat()
+        working_mode = b"100755" if info.st_mode & stat.S_IXUSR else b"100644"
+        if not stat.S_ISREG(info.st_mode) or working_mode != mode:
+            raise ValueError("source-changed")
         content = path.read_bytes()
         actual = (
             hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content)
@@ -161,7 +183,7 @@ def source_snapshot(source, expected):
         raise ValueError("clean-source-required")
     return {
         "commit": expected,
-        "commit_count": int(git("rev-list", "--count", "HEAD")),
+        "commit_count": int(git("rev-list", "--count", expected)),
         "dirty": False,
         "sha256": hashes,
     }
@@ -186,15 +208,60 @@ def source_head(source):
     )
 
 
-def import_guard(source, manifest):
+def import_guard(source, manifest, admitted=None):
+    """Check every origin surface; only the admission registry attests execution."""
     for name, module in tuple(sys.modules.items()):
+        related = name in ("oc_box", "tools") or name.startswith(("oc_box.", "tools."))
+        record = admitted.get(name) if related and admitted is not None else None
+        if (
+            related
+            and admitted is not None
+            and (record is None or record[0] is not module)
+        ):
+            raise ValueError("source-shadowing")
         filename = getattr(module, "__file__", None)
-        locations = [filename] if filename else list(getattr(module, "__path__", ()))
-        if name in ("oc_box", "tools") or name.startswith(("oc_box.", "tools.")):
-            if not locations or any(
-                not Path(item).resolve().is_relative_to(source) for item in locations
-            ):
+        paths = tuple(getattr(module, "__path__", ()))
+        spec = getattr(module, "__spec__", None)
+        origin = getattr(spec, "origin", None)
+        spec_paths = getattr(spec, "submodule_search_locations", None)
+        if related:
+            if spec is None or (filename is None) != (origin is None):
                 raise ValueError("source-shadowing")
+            if filename is not None:
+                file = Path(filename).absolute()
+                if (
+                    file != Path(filename).resolve()
+                    or file.suffix != ".py"
+                    or not file.is_relative_to(source)
+                    or file.relative_to(source).as_posix() not in manifest
+                    or origin != str(file)
+                ):
+                    raise ValueError("source-shadowing")
+                directory = file.parent
+            else:
+                if name != "tools":
+                    raise ValueError("source-shadowing")
+                directory = source / "tools"
+            if bool(paths) != (spec_paths is not None):
+                raise ValueError("source-shadowing")
+            if paths:
+                if any(
+                    Path(item).absolute() != directory
+                    or Path(item).resolve() != directory
+                    for item in (*paths, *spec_paths)
+                ):
+                    raise ValueError("source-shadowing")
+            elif filename is None:
+                raise ValueError("source-shadowing")
+            if admitted is not None:
+                if (
+                    record[1] is not spec
+                    or record[2] != filename
+                    or record[3] != paths
+                    or spec.loader is not record[4]
+                    or getattr(module, "__loader__", None) is not record[4]
+                ):
+                    raise ValueError("source-shadowing")
         if filename:
             path = Path(filename).resolve()
             if (
@@ -202,6 +269,113 @@ def import_guard(source, manifest):
                 and path.relative_to(source).as_posix() not in manifest
             ):
                 raise ValueError("source-shadowing")
+
+
+class _CandidateImports:
+    """Only this fixture's two namespaces; execute authenticated source bytes.
+
+    Never search the checkout root for arbitrary imports, trust cached modules,
+    or let a foreign regular tools package override our verified namespace.
+    """
+
+    def __init__(self, source, manifest):
+        self.source, self.manifest, self.admitted = source, dict(manifest), {}
+        search = [str(source / "src"), str(source), *sys.path]
+        for name, directory in (
+            ("oc_box", source / "src/oc_box"),
+            ("tools", source / "tools"),
+        ):
+            spec = importlib.machinery.PathFinder.find_spec(name, search)
+            init = directory / "__init__.py"
+            regular = init.relative_to(source).as_posix() in manifest
+            if (
+                spec is None
+                or not spec.submodule_search_locations
+                or any(
+                    Path(item).absolute() != directory
+                    for item in spec.submodule_search_locations
+                )
+                or (
+                    regular
+                    and (
+                        spec.origin != str(init)
+                        or type(spec.loader) is not importlib.machinery.SourceFileLoader
+                    )
+                )
+                or (not regular and spec.origin is not None)
+            ):
+                raise ValueError("source-shadowing")
+
+    def find_spec(self, name, path=None, target=None):
+        if not (name in ("oc_box", "tools") or name.startswith(("oc_box.", "tools."))):
+            return None
+        import_guard(self.source, self.manifest, self.admitted)
+        if target is not None or not re.fullmatch(
+            r"(?:oc_box|tools)(?:\.[A-Za-z_][A-Za-z0-9_]*)*", name
+        ):
+            raise ValueError("source-shadowing")
+        parts = name.split(".")
+        base = self.source / ("src/oc_box" if parts[0] == "oc_box" else "tools")
+        stem = base.joinpath(*parts[1:])
+        package_file = stem / "__init__.py"
+        module_file = stem.with_suffix(".py")
+        if package_file.relative_to(self.source).as_posix() in self.manifest:
+            file, package = package_file, stem
+        elif len(parts) == 1 and name == "tools":
+            file, package = None, stem
+        elif module_file.relative_to(self.source).as_posix() in self.manifest:
+            file, package = module_file, None
+        else:
+            raise ValueError("source-shadowing")
+        content = None
+        if file is not None:
+            if any(item.is_symlink() for item in (file, *file.parents)):
+                raise ValueError("source-shadowing")
+            with open(
+                file,
+                "rb",
+                opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW),
+            ) as stream:
+                if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                    raise ValueError("source-shadowing")
+                content = stream.read()
+            if (
+                hashlib.sha256(content).hexdigest()
+                != self.manifest[file.relative_to(self.source).as_posix()]
+            ):
+                raise ValueError("source-changed")
+        owner = self
+
+        class Source:
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                owner.admitted[name] = (
+                    module,
+                    module.__spec__,
+                    getattr(module, "__file__", None),
+                    tuple(getattr(module, "__path__", ())),
+                    self,
+                )
+                import_guard(owner.source, owner.manifest, owner.admitted)
+                if content is not None:
+                    exec(
+                        compile(content, str(file), "exec", dont_inherit=True),
+                        module.__dict__,
+                    )
+                import_guard(owner.source, owner.manifest, owner.admitted)
+
+        spec = importlib.machinery.ModuleSpec(
+            name,
+            Source(),
+            origin=str(file) if file is not None else None,
+            is_package=package is not None,
+        )
+        spec.has_location = file is not None
+        if package is not None:
+            spec.submodule_search_locations = [str(package)]
+        return spec
 
 
 class ExecutionBinding:
@@ -218,18 +392,27 @@ class ExecutionBinding:
         self.identity = source_snapshot(source, expected)
         # Already imported candidate code cannot retrospectively acquire a
         # bytecode-isolation proof. Fresh entrypoints have no such modules.
-        if any(name == "oc_box" or name.startswith("oc_box.") for name in sys.modules):
+        if any(
+            name in ("oc_box", "tools") or name.startswith(("oc_box.", "tools."))
+            for name in sys.modules
+        ):
             raise ValueError("source-already-loaded")
         import_guard(source, self.identity["sha256"])
         sys.dont_write_bytecode = True
         sys.pycache_prefix = "/nonexistent-oc-box-bytecode-" + secrets.token_hex(16)
-        load_application()
-        from tools import acceptance_guards
+        self.admission = _CandidateImports(source, self.identity["sha256"])
+        sys.meta_path.insert(0, self.admission)
+        try:
+            load_application(admission=self.admission)
+            from tools import acceptance_guards
 
-        self.guards = acceptance_guards
-        self.native = {}
-        self.fixture = None
-        self.checkpoint()
+            self.guards = acceptance_guards
+            self.native = {}
+            self.fixture = None
+            self.checkpoint()
+        except BaseException:
+            sys.meta_path.remove(self.admission)
+            raise
 
     def pin_native(self, **paths):
         if self.native:
@@ -245,7 +428,7 @@ class ExecutionBinding:
     def checkpoint(self):
         if source_snapshot(self.source, self.expected) != self.identity:
             raise ValueError("source-changed")
-        import_guard(self.source, self.identity["sha256"])
+        import_guard(self.source, self.identity["sha256"], self.admission.admitted)
         for identity in self.native.values():
             self.guards.check_native(identity)
         if self.fixture is not None:
