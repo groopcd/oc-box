@@ -28,6 +28,12 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
+Run acceptance fixtures without Python optimization. In particular,
+`tools/test_backup_podman.py` relies on assertion oracles and refuses `-O` and
+`-OO` before application imports, host probes or fixture allocation, including
+for `--help`. Its offline entrypoint tests verify this ordering; they do not
+execute or establish a new host backup/restore acceptance run.
+
 ### V2 session-history synchronization
 
 The changes introduced in `d638907be97f9f33d00e59da526eb046e39a3627` add paginated
