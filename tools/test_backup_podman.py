@@ -7,13 +7,24 @@ retains fixtures and prints their paths/IDs for diagnosis; --cleanup removes
 only resources with the fixture IDs recorded by this test.
 """
 
+import sys
+
+
+def require_assertion_oracles():
+    # This host fixture's acceptance checks rely on assert. Refuse before any
+    # application import, fixture allocation, probe, or credential operation.
+    if sys.flags.optimize:
+        raise SystemExit("backup fixture: category=optimization-refused")
+
+
+require_assertion_oracles()
+
 import argparse
 import hashlib
 import json
 import os
 from pathlib import Path
 import sqlite3
-import sys
 import tempfile
 
 APP = Path(__file__).resolve().parents[1]
