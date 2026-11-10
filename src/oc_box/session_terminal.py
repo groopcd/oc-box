@@ -3,6 +3,10 @@
 Standard-library HTTP/WebSocket transport. Service credentials arrive in the
 client environment only and are cleared before shell creation (which uses the
 server's environment). Ctrl-] detaches without removing the persistent terminal.
+
+A normal WebSocket 1000 close after attachment/replay ends the attachment, not
+necessarily the shell. A known shell exit retains its status. Bare EOF requires
+both completed replay and a known exit; protocol/error closes never mean success.
 """
 
 import base64
@@ -250,9 +254,10 @@ def run(address, session, cwd):
     )
     previous = None
     resized = True
+    attached = False
     ready = False
     controlling = False
-    code = 0
+    code = None
 
     def resize(*_):
         nonlocal resized
@@ -275,14 +280,17 @@ def run(address, session, cwd):
                 raise ValueError("Persistent session terminal replay timed out.")
             for opcode, payload in websocket.frames():
                 if opcode == 8:
-                    if (
-                        len(payload) >= 2
-                        and struct.unpack("!H", payload[:2])[0] >= 4000
-                    ):
+                    if len(payload) < 2 or struct.unpack("!H", payload[:2])[0] != 1000:
                         raise ValueError(
                             "Persistent session terminal became unavailable."
                         )
-                    return code
+                    if not ready:
+                        raise ValueError(
+                            "Persistent session terminal connection ended unexpectedly."
+                        )
+                    # Native 2.2.6 queues 1000 from attachment onEnd, not only
+                    # after an exited event. Preserve this normal attachment end.
+                    return code if code is not None else 0
                 if opcode == 2:
                     output(payload)
                     continue
@@ -292,17 +300,24 @@ def run(address, session, cwd):
                         raise ValueError(
                             "Unsupported persistent terminal input protocol."
                         )
+                    attached = True
                     controlling = event.get("role") == "controller"
                 elif event.get("type") == "controller_changed":
                     controlling = event.get("attachmentID") == attachment
                     if controlling:
                         resized = True
                 elif event.get("type") == "replay_complete":
+                    if not attached:
+                        raise ValueError("Invalid persistent terminal replay sequence.")
                     ready = True
                 elif event.get("type") == "resized":
                     output(base64.b64decode(event["checkpoint"]))
                 elif event.get("type") == "exited":
-                    code = event.get("exitCode") or 0
+                    code = event.get("exitCode")
+                    if code is not None and (
+                        type(code) is not int or not 0 <= code <= 255
+                    ):
+                        raise ValueError("Invalid persistent terminal exit status.")
             cols, rows = terminal_size()
             if ready and controlling and resized:
                 websocket.send(struct.pack("!BHH", 0, cols, rows))
@@ -312,20 +327,30 @@ def run(address, session, cwd):
             if websocket.socket in readable:
                 chunk = websocket.socket.recv(65536)
                 if not chunk:
-                    return code
+                    if ready and code is not None:
+                        return code
+                    raise ValueError(
+                        "Persistent session terminal connection ended unexpectedly."
+                    )
                 websocket.buffer.extend(chunk)
             if sys.stdin in readable:
                 content = os.read(sys.stdin.fileno(), 4096)
-                if not content or b"\x1d" in content:
+                prefix, detach, _ = content.partition(b"\x1d")
+                if prefix:
+                    websocket.send(struct.pack("!BHH", 1, cols, rows) + prefix)
+                if not content or detach:
                     # Detach, preserving the shell and its state in OpenCode.
                     return 0
-                websocket.send(struct.pack("!BHH", 1, cols, rows) + content)
     finally:
-        websocket.close()
-        if handler is not None:
-            signal.signal(signal.SIGWINCH, handler)
-        if previous:
-            termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, previous)
+        try:
+            websocket.close()
+        finally:
+            try:
+                if handler is not None:
+                    signal.signal(signal.SIGWINCH, handler)
+            finally:
+                if previous:
+                    termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, previous)
 
 
 if __name__ == "__main__":
