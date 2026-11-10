@@ -185,7 +185,17 @@ print(json.dumps({'exec_refused':True,'preflight_refused':True}))
         original_stack = resource.getrlimit(resource.RLIMIT_STACK)
         result = subprocess.run(
             [sys.executable, "-B", "-c", program],
-            env={**os.environ, "FIXTURE_DATA": json.dumps(self.data)},
+            # Normal source import, independent of editable installation or cwd.
+            # Keep provider/publication variables out even if fixture setup grows.
+            env={
+                "PATH": os.environ["PATH"],
+                "HOME": os.environ["HOME"],
+                "XDG_CONFIG_HOME": os.environ["XDG_CONFIG_HOME"],
+                "OC_BOX_CONTAINER": "0",
+                "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+                "FIXTURE_DATA": json.dumps(self.data),
+            },
+            cwd=self.root,
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
