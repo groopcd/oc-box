@@ -76,6 +76,7 @@ if App is not None:
             self.read_only = read_only
             self.copies = []
             self.notices = []
+            self.button_calls = []
 
         def compose(self):
             yield Static("  first row  ", id="first")
@@ -117,6 +118,7 @@ if App is not None:
             self.notices.append(message)
 
         def on_button_pressed(self, event):
+            self.button_calls.append(event.button.id)
             if event.button.id == "copy-selection":
                 self.action_copy_selection(event.button.consume_selection())
             elif event.button.id == "copy-view":
@@ -162,15 +164,18 @@ class ClipboardTests(unittest.IsolatedAsyncioTestCase):
         await pilot.pause()
 
     async def drag(self, app, pilot, first, start, last, end):
+        before = len(app.copies)
         await self.mouse(app, pilot, events.MouseDown, first, start)
+        self.assertEqual(len(app.copies), before)
         await self.mouse(app, pilot, events.MouseMove, last, end)
+        self.assertEqual(len(app.copies), before)
         await self.mouse(app, pilot, events.MouseUp, last, end)
 
     async def click(self, app, pilot, widget, offset=(1, 0)):
         await self.mouse(app, pilot, events.MouseDown, widget, offset)
         await self.mouse(app, pilot, events.MouseUp, widget, offset)
 
-    async def test_cross_widget_drag_copies_only_on_explicit_action(self):
+    async def test_cross_widget_drag_copies_on_completion_not_while_dragging(self):
         app = ClipboardFixtureApp(read_only=True)
         async with app.run_test(size=(80, 36)) as pilot:
             await self.drag(
@@ -182,9 +187,9 @@ class ClipboardTests(unittest.IsolatedAsyncioTestCase):
                 (3, 0),
             )
             self.assertEqual(app.clipboard_text_selection(), "first row  \nsec")
-            self.assertEqual(app.copies, [])
-            await pilot.press("ctrl+shift+c")
             self.assertEqual(app.copies, ["first row  \nsec"])
+            await pilot.press("ctrl+shift+c")
+            self.assertEqual(app.copies, ["first row  \nsec", "first row  \nsec"])
 
     async def test_custom_unicode_selection_has_offsets_and_highlighting(self):
         app = ClipboardFixtureApp()
@@ -204,7 +209,7 @@ class ClipboardTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             self.assertTrue(all("offset" in segment.style.meta for segment in after))
-            self.assertEqual(app.copies, [])
+            self.assertEqual(app.copies, ["界e\u0301"])
             app.action_copy_selection()
             self.assertEqual(app.clipboard, "界e\u0301")
 
@@ -247,7 +252,7 @@ class ClipboardTests(unittest.IsolatedAsyncioTestCase):
                         widget.render_line(y).cell_length,
                         widget.scrollable_content_region.width,
                     )
-            self.assertEqual(app.copies, [])
+            self.assertEqual(app.copies, ["project-"])
 
     async def test_log_eviction_empty_rows_and_stale_resize_selection_are_safe(self):
         app = ClipboardFixtureApp()
@@ -283,10 +288,10 @@ class ClipboardTests(unittest.IsolatedAsyncioTestCase):
                 (3, 0),
             )
             await self.mouse(app, pilot, events.MouseDown, button, (1, 0))
-            self.assertEqual(app.copies, [])
+            self.assertEqual(app.copies, ["first row  \nsec"])
             await self.mouse(app, pilot, events.MouseUp, button, (1, 0))
             self.assertIsNone(app.screen.get_selected_text())
-            self.assertEqual(app.copies, ["first row  \nsec"])
+            self.assertEqual(app.copies, ["first row  \nsec", "first row  \nsec"])
             self.assertIsNone(button.consume_selection())
             await pilot.pause(0.25)
             search.focus()
@@ -295,16 +300,19 @@ class ClipboardTests(unittest.IsolatedAsyncioTestCase):
             await self.click(app, pilot, button)
             self.assertEqual(app.clipboard, "search")
             self.assertIs(app.focused, search)
-            self.assertFalse(button.allow_select)
+            self.assertTrue(button.allow_select)
 
-    async def test_canceled_real_drag_and_keyboard_clear_button_candidate(self):
+    async def test_label_drag_copies_without_press_and_keyboard_clears_capture(self):
         app = ClipboardFixtureApp()
         async with app.run_test(size=(80, 36)) as pilot:
             search = app.query_one("#search", Input)
             search.selection = (0, 3)
             button = app.query_one("#copy-selection", ClipboardButton)
             await self.drag(app, pilot, button, (1, 0), button, (4, 0))
-            self.assertEqual(app.copies, [])
+            self.assertEqual(len(app.copies), 1)
+            self.assertEqual(app.clipboard, app.screen.get_selected_text())
+            self.assertNotEqual(app.clipboard, "old")
+            self.assertEqual(app.button_calls, [])
             self.assertIsNone(button.consume_selection())
             search.selection = (0, 3)
             await self.mouse(app, pilot, events.MouseDown, button, (1, 0))
@@ -314,11 +322,11 @@ class ClipboardTests(unittest.IsolatedAsyncioTestCase):
             button.post_message(events.Key("escape", None))
             await pilot.pause()
             self.assertIsNone(button.consume_selection())
-            self.assertEqual(app.copies, [])
+            self.assertEqual(len(app.copies), 1)
             view = app.query_one("#copy-view", ClipboardButton)
             await self.mouse(app, pilot, events.MouseDown, view, (1, 0), button=3)
             await self.mouse(app, pilot, events.MouseUp, view, (1, 0), button=3)
-            self.assertEqual(app.copies, [])
+            self.assertEqual(len(app.copies), 1)
 
     async def test_copy_view_includes_control_labels_but_not_hidden_model_data(self):
         app = ClipboardFixtureApp(read_only=True)
@@ -352,7 +360,7 @@ class ClipboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(app.screen.query(ClipboardButton)), 3)
             for button in app.screen.query(ClipboardButton):
                 self.assertTrue(button.tooltip)
-                self.assertFalse(button.allow_select)
+                self.assertTrue(button.allow_select)
             await self.click(app, pilot, app.screen.query_one("#copy-view"))
             self.assertIn("Synthetic modal message", app.clipboard)
             self.assertIn("Paste copied", app.clipboard)

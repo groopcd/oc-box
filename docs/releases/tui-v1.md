@@ -55,13 +55,17 @@ replace it or add another chat client.
   Selected owned Podman output is a separate explicit opt-in, bounded to tail
   500, 1 MiB and 10 seconds, with memory-only retention. Common-pattern redaction
   is best-effort, not proof of arbitrary-secret removal.
-- **Explicit copy/paste:** select visible diagnostics, table/log rows and native
-  terminal output, or copy the visible screen including control labels. Header
+- **Selection copy/paste:** drag-select visible text throughout diagnostics,
+  table/log rows, graphs, native terminal output and control labels; mouse release
+  copies immediately without activating controls. Highlights remain visible over
+  colored content, and meter bars use meaningful text glyphs. Copy view remains
+  available for the whole visible screen. Header
   and modal clipboard controls preserve text-input focus. Paste copied uses
   only the in-app clipboard; external clipboard text arrives through the host
   terminal's normal paste command. Ordinary shell Ctrl+C/Ctrl+V and read-only
   boundaries are unchanged. Copies never become journal entries or recordings,
-  and container-originated OSC clipboard requests remain blocked.
+  and container-originated OSC clipboard requests remain blocked. Programmatic
+  selection, focus and refresh never trigger auto-copy.
 
 Browsing never starts, resets, syncs or unlocks a workspace. Explicit host Connect
 may start the normal native host service; workspace Connect leases only an

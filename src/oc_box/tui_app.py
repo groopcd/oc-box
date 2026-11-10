@@ -17,7 +17,6 @@ from textual.widgets import (
     Button,
     Collapsible,
     DataTable,
-    Footer,
     Input,
     Label,
     RichLog,
@@ -39,6 +38,7 @@ if __package__:
         ClipboardBar,
         ClipboardButton,
         ClipboardInput,
+        ClipboardFooter,
         SelectableDataTable,
         SelectableRichLog,
     )
@@ -55,6 +55,7 @@ else:
         ClipboardBar,
         ClipboardButton,
         ClipboardInput,
+        ClipboardFooter,
         SelectableDataTable,
         SelectableRichLog,
     )
@@ -127,8 +128,8 @@ class DashboardApp(ClipboardActions, App):
     #status-summary, #settings-info, #terminal-info { height: auto; padding: 1; }
     MonitorPanel { height: auto; width: 1fr; padding: 0 1;
       text-wrap: nowrap; text-overflow: clip; }
-    #full-diagnostics { border: round $warning; }
-    #system-report { border: round $success; }
+    #full-diagnostics .monitor--border { color: $warning; }
+    #system-report .monitor--border { color: $success; }
     #session-table { height: 1fr; min-height: 5; }
     #session-details { height: auto; max-height: 7; }
     #log-output { height: 1fr; }
@@ -372,7 +373,7 @@ class DashboardApp(ClipboardActions, App):
             id="notice",
             markup=False,
         )
-        yield Footer()
+        yield ClipboardFooter()
 
     def on_mount(self):
         self.query_one("#workspaces", DataTable).add_columns("Project", "State")

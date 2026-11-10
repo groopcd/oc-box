@@ -864,9 +864,10 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(app.clipboard, "READY")
                 send.assert_not_called()
-                await pilot.press("ctrl+c", "ctrl+v")
+                await pilot.press("ctrl+c", "ctrl+v", "ctrl+a")
                 self.assertEqual(
-                    [call.args[0] for call in send.call_args_list], [b"\x03", b"\x16"]
+                    [call.args[0] for call in send.call_args_list],
+                    [b"\x03", b"\x16", b"\x01"],
                 )
                 app.copy_to_clipboard("copied\ncommand")
                 await pilot.press("ctrl+shift+insert")

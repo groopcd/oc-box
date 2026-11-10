@@ -73,9 +73,12 @@ their checkout ownership distinct from unrelated source and flat installations.
   client state is not proof of native readiness/controller ownership. Native
   and headless checks are not interactive/rootless-Podman acceptance.
 - `tui_clipboard.py`: explicit optional dashboard clipboard/viewport selection.
-  Never read the desktop clipboard in the background, write it on selection,
-  journal copied/pasted text or record terminal output. Only explicit UI copy
-  uses host clipboard support; container OSC clipboard requests stay stripped.
+  Never read the desktop clipboard in the background, journal copied/pasted
+  text or record terminal output. User-requested auto-copy may write only when
+  a real user selection gesture finishes, never during dragging or from
+  programmatic selection, refresh, focus or container output. Explicit UI copy
+  and completed user selections use host clipboard support; container OSC
+  clipboard requests stay stripped.
   Paste copied is the in-app cache, not the current desktop clipboard. Preserve
   focused shell control keys, byte/queue bounds and CLI read-only fences.
 - `activity_log.py` / `tui_logs.py`: private bounded fixed-category activity

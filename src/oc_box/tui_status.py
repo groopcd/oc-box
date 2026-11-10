@@ -65,6 +65,26 @@ def _lines(rows, width):
     return result
 
 
+def boxed_report(content, title, width, border_style):
+    """Draw captions as selectable content, not an unselectable CSS border."""
+    if width < 4:
+        return _lines([title, *content.split("\n")], max(1, width))
+    caption = _line(" " + title + " ", width - 4)
+    caption.stylize(border_style)
+    result = Text(no_wrap=True)
+    result.append("╭─", style=border_style)
+    result.append_text(caption)
+    result.append("─" * (width - 3 - caption.cell_len) + "╮", style=border_style)
+    for row in content.split("\n"):
+        row = _line(row, width - 2)
+        result.append("\n│", style=border_style)
+        result.append_text(row)
+        result.append(" " * (width - 2 - row.cell_len))
+        result.append("│", style=border_style)
+    result.append("\n╰" + "─" * (width - 2) + "╯", style=border_style)
+    return result
+
+
 def meters(rows, width):
     """Render equal-width bars, reserving room for each row's numeric caption.
 
@@ -89,8 +109,8 @@ def meters(rows, width):
             row.append("·" * bar_width, style="grey35 on grey15")
         else:
             filled = min(bar_width, round(min(value, 100) / 100 * bar_width))
-            row.append(" " * filled, style=f"on {color}")
-            row.append(" " * (bar_width - filled), style="on grey15")
+            row.append("█" * filled, style=f"{color} on {color}")
+            row.append("░" * (bar_width - filled), style="grey35 on grey15")
         row.append("  " + caption)
         result.append(_line(row, width))
     return result
@@ -219,13 +239,19 @@ def workspace_report(item, *, width=80):
 class MonitorPanel(Static):
     """A resize-aware panel; its meters never inherit Sparkline auto-scaling."""
 
+    COMPONENT_CLASSES = {"monitor--border"}
+    DEFAULT_CSS = """
+    MonitorPanel { border: none; }
+    MonitorPanel .monitor--border { color: $primary; }
+    """
+
     def __init__(self, kind, **kwargs):
         super().__init__("", markup=False, **kwargs)
         self.kind = kind
         self.snapshot = None
         self.cpu_history = ()
         self.ram_history = ()
-        self.border_title = (
+        self.caption = (
             "System (OS-reported)" if kind == "system" else "Full workspace diagnostics"
         )
 
@@ -237,13 +263,22 @@ class MonitorPanel(Static):
     def _render_snapshot(self):
         width = max(1, self.content_size.width)
         if self.kind == "system":
-            self.update(
-                system_report(
-                    self.snapshot or {}, self.cpu_history, self.ram_history, width=width
-                )
+            content = system_report(
+                self.snapshot or {},
+                self.cpu_history,
+                self.ram_history,
+                width=max(1, width - 2),
             )
         else:
-            self.update(workspace_report(self.snapshot, width=width))
+            content = workspace_report(self.snapshot, width=max(1, width - 2))
+        self.update(
+            boxed_report(
+                content,
+                self.caption,
+                width,
+                self.get_component_rich_style("monitor--border"),
+            )
+        )
 
     def on_resize(self):
         self._render_snapshot()

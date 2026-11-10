@@ -46,6 +46,7 @@ class SettingsScreen(ModalScreen):
     #preferences-title { height: 2; text-style: bold; }
     #preferences-topics { height: 1fr; min-height: 0; }
     .settings-topic { height: auto; border: round $primary; padding: 0 1; margin-bottom: 1; }
+    .settings-topic-title { height: 1; text-style: bold; }
     .settings-row { height: auto; min-height: 3; }
     .settings-row Label { width: 24; padding: 1 0; }
     .settings-row Select, .settings-row Input { width: 1fr; }
@@ -67,8 +68,8 @@ class SettingsScreen(ModalScreen):
                 markup=False,
             )
             with VerticalScroll(id="preferences-topics"):
-                with Vertical(classes="settings-topic") as topic:
-                    topic.border_title = "Monitoring"
+                with Vertical(classes="settings-topic"):
+                    yield Label("Monitoring", classes="settings-topic-title")
                     with Horizontal(classes="settings-row"):
                         yield Label("Automatic refresh")
                         yield Switch(
@@ -89,8 +90,8 @@ class SettingsScreen(ModalScreen):
                         "Status and followed logs use this interval. Slow queries never overlap or queue; storage scans remain manual.",
                         markup=False,
                     )
-                with Vertical(classes="settings-topic") as topic:
-                    topic.border_title = "Display"
+                with Vertical(classes="settings-topic"):
+                    yield Label("Display", classes="settings-topic-title")
                     with Horizontal(classes="settings-row"):
                         yield Label("Theme")
                         yield Select(
@@ -106,8 +107,8 @@ class SettingsScreen(ModalScreen):
                         "Meters and trends use fixed scales; missing readings are not zero.",
                         markup=False,
                     )
-                with Vertical(classes="settings-topic") as topic:
-                    topic.border_title = "Sessions"
+                with Vertical(classes="settings-topic"):
+                    yield Label("Sessions", classes="settings-topic-title")
                     with Horizontal(classes="settings-row"):
                         yield Label("Browse scope")
                         yield Select(
@@ -125,8 +126,8 @@ class SettingsScreen(ModalScreen):
                         "Changing scope never connects automatically. Existing sources close only on Disconnect or exit.",
                         markup=False,
                     )
-                with Vertical(classes="settings-topic") as topic:
-                    topic.border_title = "Logs"
+                with Vertical(classes="settings-topic"):
+                    yield Label("Logs", classes="settings-topic-title")
                     with Horizontal(classes="settings-row"):
                         yield Label("Follow new entries")
                         yield Switch(self.values["log_follow"], id="pref-log-follow")
@@ -148,8 +149,10 @@ class SettingsScreen(ModalScreen):
                         "Podman logs require explicit Load. Search text is not saved to disk.",
                         markup=False,
                     )
-                with Vertical(classes="settings-topic") as topic:
-                    topic.border_title = "Resources · information only"
+                with Vertical(classes="settings-topic"):
+                    yield Label(
+                        "Resources · information only", classes="settings-topic-title"
+                    )
                     yield Static(
                         self.resources or "No workspace selected.", markup=False
                     )
@@ -157,8 +160,8 @@ class SettingsScreen(ModalScreen):
                         "CPU/RAM/storage editing is deferred. This window never resets a container or applies resource limits.",
                         markup=False,
                     )
-                with Vertical(classes="settings-topic") as topic:
-                    topic.border_title = "Safety and terminals"
+                with Vertical(classes="settings-topic"):
+                    yield Label("Safety and terminals", classes="settings-topic-title")
                     yield Static(
                         (
                             "Read-only mode: session mutations and terminal attachment are disabled."

@@ -32,14 +32,15 @@ class StatusMeterTests(unittest.TestCase):
                 sum(
                     span.end - span.start
                     for span in row.spans
-                    if str(span.style) in ("on blue", "on green", "on yellow")
+                    if str(span.style)
+                    in ("blue on blue", "green on green", "yellow on yellow")
                 )
                 for row in rows
             ],
             [10, 20, 0],
         )
-        for row in rows:
-            self.assertEqual(row.plain[8:48], " " * 40)
+        for row, filled in zip(rows, (10, 20, 0)):
+            self.assertEqual(row.plain[8:48], "█" * filled + "░" * (40 - filled))
             self.assertEqual(row.plain[48:50], "  ")
             self.assertLessEqual(row.cell_len, 80)
 
@@ -61,7 +62,7 @@ class StatusMeterTests(unittest.TestCase):
             sum(
                 span.end - span.start
                 for span in cpu.spans
-                if str(span.style) == "on green3"
+                if str(span.style) == "green3 on green3"
             ),
             20,
         )
@@ -99,6 +100,25 @@ class StatusMeterTests(unittest.TestCase):
         )
         self.assertNotIn("unlimited", content.plain)
         self.assertIn("n/a", content.plain)
+
+    def test_selectable_panel_box_keeps_caption_body_and_cell_bounds(self):
+        from rich.style import Style
+
+        for width in (1, 3, 4, 16, 48, 80):
+            with self.subTest(width=width):
+                body = status.system_report(
+                    DemoBackend().collect()["host"], width=max(1, width - 2)
+                )
+                boxed = status.boxed_report(
+                    body, "System (OS-reported)", width, Style(color="green")
+                )
+                self.assertTrue(all(row.cell_len <= width for row in boxed.split("\n")))
+                if width >= 48:
+                    self.assertIn("System (OS-reported)", boxed.plain)
+                    self.assertIn("RAM", boxed.plain)
+                    self.assertIn("█", boxed.plain)
+                    self.assertIn("░", boxed.plain)
+                    self.assertEqual(len(boxed.split("\n")), len(body.split("\n")) + 2)
 
 
 if __name__ == "__main__":

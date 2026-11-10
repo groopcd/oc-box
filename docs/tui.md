@@ -138,6 +138,7 @@ not gain a container-mode bypass from the existence of demo mode.
 | `Ctrl-]` | Detach the focused session-terminal client |
 | `Ctrl+Shift+C` | Copy selected text, when the terminal forwards this shortcut |
 | `Ctrl+Shift+Insert` | Paste text copied inside the dashboard into the focused input or connected shell |
+| `Ctrl+A` / `Ctrl+Shift+A` in a text field | Select all field text and copy the completed selection |
 
 When terminal input is focused, ordinary keystrokes belong to the shell rather
 than dashboard shortcuts, including `s`, `F2` and the shell's `Ctrl+L`. The
@@ -155,15 +156,29 @@ normal sync/stop proceed; the shell does not survive a container stop.
 
 ### Copying and pasting
 
-Drag to select visible text in diagnostics, session/workspace tables, logs and
-the embedded terminal. Use **Copy** in the header, or `Ctrl+Shift+C` when the
-terminal forwards that key. Selection highlighting alone never writes to the
-clipboard. Text fields also retain their normal Textual selection/copy/paste
-keys. In the native shell, ordinary `Ctrl+C` still interrupts and `Ctrl+V` keeps
-its shell meaning; neither is replaced by a global clipboard shortcut.
+Drag to select visible text throughout the dashboard: diagnostics, tables,
+logs, graphs, the embedded terminal and control labels. The highlight remains
+visible over colored logs, row cursors and meters. **Releasing the mouse copies
+the completed selection immediately**; no extra Copy click is required. A label
+drag never presses its button, changes its tab/dropdown, or activates a footer
+shortcut. Normal clicks still operate those controls. Scrollbar drags still
+scroll. Panel captions and settings group titles are selectable text as well.
+Graph bars use `█`/`░` glyphs and histories use text sparklines, so their
+plain-text copies are meaningful; clipboard text does not retain graph colors.
 
-**Copy view** copies the current visible screen as plain text, including labels
-on buttons and other controls that are not drag-selectable. Settings and review
+Completed double/triple-click text selections and explicit keyboard selection
+in text fields (for example `Ctrl+A`, `Ctrl+Shift+A` or Shift+Arrow) also copy. There is no copy
+while dragging, or from programmatic selection, focus, refresh or container
+output. **Copy** and `Ctrl+Shift+C` (when forwarded by the host terminal) remain
+available for an explicit repeat copy. Text fields retain their normal Textual
+editing keys. In the native shell, ordinary `Ctrl+C` still interrupts and
+`Ctrl+V` keeps its shell meaning; neither is replaced by a clipboard shortcut.
+`Ctrl+A` selects all only in dashboard text fields; it retains its normal
+start-of-line meaning in the focused native shell. A screen change or Escape
+cancels an unfinished selection without copying or activating the old control.
+
+**Copy view** is an additional shortcut for the whole current visible screen as
+plain text; it is not required for selecting control labels. Settings and review
 dialogs have their own clipboard controls. Copying is available in read-only
 mode and never confirms a dialog, changes a session, or starts a connection.
 Table/log/terminal selections cover the displayed viewport, not offscreen
@@ -188,14 +203,14 @@ shell rather than blindly retry a possibly partially executed command.
 
 Host clipboard delivery uses Textual's OSC 52 support and depends on the terminal
 and its clipboard permissions; it is not guaranteed in every terminal, remote
-session or multiplexer. Explicit copies are bounded to 1 MiB and remain only in
+session or multiplexer. Copies are bounded to 1 MiB and remain only in
 the app's clipboard memory and the user-requested host clipboard. The dashboard
 never journals clipboard content or adds terminal recordings. Pasting into the
 native shell is still normal shell input and may enter its existing native
 session/shell history. Treat copied external logs/shell
 output as sensitive. OSC clipboard requests emitted by container applications
-remain stripped; only an explicit dashboard copy action writes to the host
-clipboard.
+remain stripped; only completed user selections or explicit dashboard copy
+actions write to the host clipboard.
 
 ## Five tabs
 

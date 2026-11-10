@@ -330,16 +330,21 @@ focused text inputs or the native shell. A focused terminal keeps its keys,
 including `s`, `F2` and `Ctrl+L`; use `Ctrl-]` to detach its client without ending
 the native shell before using dashboard shortcuts.
 
-Drag-select visible diagnostics, table/log rows and terminal output, then use
-**Copy** or `Ctrl+Shift+C` when forwarded by the host terminal. **Copy view**
-copies the visible screen, including control labels; dialogs have clipboard
-controls too. This is visible-viewport copying, not offscreen history export.
+Drag-select visible text throughout the dashboard, including logs, graphs,
+terminal output and control labels. Releasing the mouse copies immediately;
+dragging a label never activates its control. Graph bars use copyable `█`/`░`
+glyphs. Completed text double/triple-clicks and keyboard selection in text fields
+also copy (`Ctrl+A`/`Ctrl+Shift+A` select all field text). Refresh, focus,
+programmatic selection and container output never
+trigger copying. **Copy** or forwarded `Ctrl+Shift+C` can repeat a copy;
+**Copy view** copies the whole visible screen. Dialogs have clipboard controls
+too. This is visible-viewport copying, not offscreen history export.
 **Paste copied** (`Ctrl+Shift+Insert`) uses only the last text copied inside the
 dashboard and targets the focused text field or connected shell. For the desktop
 clipboard, use the host terminal's paste command, commonly `Ctrl+Shift+V` or
 `Shift+Insert`. Ordinary shell `Ctrl+C` and `Ctrl+V` remain unchanged. Clipboard
 actions cannot weaken read-only mode or start a connection. The dashboard never
-journals clipboard text or creates terminal recordings; explicit copies are
+journals clipboard text or creates terminal recordings; copies are
 bounded to 1 MiB. Terminal pastes retain the 64 KiB UTF-8/framing/queue limit:
 size/capacity refusal queues no prefix; transport errors warn that delivery may
 be partial and must be inspected before retrying.

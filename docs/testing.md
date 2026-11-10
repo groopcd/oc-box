@@ -208,10 +208,15 @@ observations include:
   background Status/log/storage updates, with explicit manual inventory refresh.
   Fixed demo data must remain clearly synthetic, not a live host measurement.
 - Visible-text selection/copy across diagnostics, table/log rows, the embedded
-  shell and modal reviews/settings, including wide/combining characters and
-  scrolled views. Copy view includes visible control labels without exporting
-  hidden/offscreen data. Selection alone never writes the clipboard; explicit
-  copying depends on actual terminal OSC 52 support/permissions. Check desktop
+  shell, graphs, control labels and modal reviews/settings, including wide/
+  combining characters and scrolled views. Verify visible highlighting over
+  colored logs/row cursors/meters and meaningful copied graph glyphs. Real
+  mouse-release selection copies once, never during the drag; double/triple-click
+  text and keyboard input selections copy too. Dragging a control/footer label
+  must not activate it. Copy view remains optional, without exporting hidden/
+  offscreen data. Programmatic selection, focus, refresh and container output
+  never trigger copies. Host delivery depends on actual terminal OSC 52 support/
+  permissions. Check desktop
   paste and the separately labelled in-app Paste copied control in text fields
   and a connected shell; preserve ordinary shell Ctrl+C/Ctrl+V, focus, UTF-8/
   framing/queue bounds, atomic size/capacity rejection, uncertainty-aware
