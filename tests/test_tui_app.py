@@ -192,6 +192,9 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             root = next(s for s in app.sessions if s["id"] == "ses_root")
             app.prepare_delete(root, app.catalog)
             await self.settle(app, pilot)
+            # Exercise wrong -> valid clicks without the purely visual button
+            # cooldown swallowing the second synthetic click on faster runners.
+            app.screen.query_one("#confirm", Button).active_effect_duration = 0
             app.screen.query_one("#confirmation", Input).value = "wrong"
             await pilot.click("#confirm")
             await pilot.pause()

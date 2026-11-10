@@ -221,6 +221,14 @@ For this first integrated manager release, repeat all three current host
 fixtures—`tools/test_session_sync_podman.py`,
 `tools/test_global_vault_podman.py` and `tools/test_v2_podman.py`—on that same
 clean candidate, in addition to the Textual/journal/archive-resume observations.
+The focused runner now requires **42 named checks**: all 33 earlier checks plus
+nine archive/resume regressions. Its ordered launcher exits must be
+`[0, 0, 0, 1, 0, 0, 0, 0]`; the single `1` remains the deliberate pending-shell
+refusal. The new stages archive every root while retaining sources/archives,
+verify no automatic resume target, observe a fresh conversation on the next
+ordinary owning start, unarchive a prior root and observe it selected on the
+following start, with unchanged inference counts. A historical 33-check pass
+does not establish these new behaviors.
 Use the [source-pinned handoff](#next-migrated-history-release-candidate) below
 and the [publication checklist](../CONTRIBUTING.md#release-gate-and-publication-checklist).
 Repeat other relevant backup/ownership checks where affected. Keep reports
@@ -376,9 +384,13 @@ candidate containing runtime, regression fixtures and final documentation, then
 run all three fixtures on that exact revision before the first stable TUI
 GitHub/PyPI publication; add the manager-specific observations above.
 
-The focused V2 runner retains its original 27 checks and adds six pending-shell
-checks: all **33** must pass, including same-pass progress on both sides of a
+For the migrated-history baseline, the focused V2 runner retained its original
+27 checks and added six pending-shell checks: all **33** were required, including
+same-pass progress on both sides of a
 pending session, exact fixed reasons and unchanged pending archives/checkpoint.
+The current Textual candidate additionally requires the nine archive/resume
+checks above (**42 total**); keep older 33-check report evidence scoped to its
+original source rather than relabelling it as a new candidate pass.
 The V1/V2 lifecycle fixture additionally records nine `superseded_history.checks`
 for a synthetic interrupted V1 transcript through native import and migration,
 the native omission/count annotation and destination round-trip, and preserved
@@ -622,10 +634,20 @@ terminals. Only the single synthetic `source-a` workspace is allowed:
 
 ```bash
 python3 -B tools/test_interactive_podman.py tui --fixture /path/to/printed-root
+uv run --isolated --no-project --with 'textual>=8.2.8,<9' --with 'pyte>=0.8.2,<0.9' \
+  python -I -B tools/test_interactive_podman.py manager --fixture /path/to/printed-root
 python3 -B tools/test_interactive_podman.py terminal --fixture /path/to/printed-root
 python3 -B tools/test_interactive_podman.py web --fixture /path/to/printed-root
 python3 -B tools/test_interactive_podman.py stop --fixture /path/to/printed-root
 ```
+
+The `manager` mode opens the actual Textual dashboard against this synthetic
+fixture's registry/native host data, not the operator's ordinary history. It
+does not acquire an outer client lease merely to monitor status. Explicit
+workspace Connect and terminal actions acquire their own leases; record their
+release and owner-wait behavior as part of the manual checklist above. Optional
+Textual/pyte dependencies must be available to this interpreter. The `tui` mode
+still means the native OpenCode conversation TUI, not the Textual manager.
 
 Secondary commands require the unchanged source, original boot, verified private
 store/resources and a live authenticated owning service; none starts a new
@@ -654,7 +676,8 @@ credentials. They explicitly leave manual observations **NOT automatically
 passed** and never write the global fixture's `result.json`. Vault rotation,
 interactive permission prompts, formatter/LSP/device checks and other lifecycle
 acceptance remain separate. Offline `test_interactive_host_fixture` checks these
-guards and native relay dispatch, not real Podman/UI acceptance.
+guards, lease-free manager dispatch and native relay dispatch, not real
+Podman/UI acceptance.
 
 ### Shared home-component ownership (fresh host only, image-free)
 

@@ -52,6 +52,11 @@ their checkout ownership distinct from unrelated source and flat installations.
   To manage the oc-box checkout itself, run an isolated non-editable package,
   not `--with-editable` launcher code inside that mount. Preserve APP/state
   exposure validation; a self-workspace refusal is not permission to bypass it.
+  The first integrated TUI release requires the current focused host runner's
+  42 checks (33 retained plus nine archived-root resume checks), not an older
+  33-check pass. Its ordered exits are [0,0,0,1,0,0,0,0]. Use the interactive
+  fixture's explicit `manager` mode for Textual observations; native `tui`
+  observations do not cover the dashboard. Manager browsing has no outer lease.
 - `tui_status.py` / `tui_settings.py`: cell-bounded diagnostics and session-only
   categorized preferences. Keep meter columns aligned and scales fixed; unknown
   is not zero, and container CPU bars use observed quotas. Requested refresh

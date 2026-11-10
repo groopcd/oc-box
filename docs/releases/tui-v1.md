@@ -106,10 +106,10 @@ versions, original report locations and actual operator observations privately.
 | Source/package/native CI | Passing exact-source checks, including native V1/V2 and the TUI contracts/native fixture; resolve any current failures and rerun. |
 | Distro checks | Review the seven-image matrix; require fresh passing runs for package-map changes. |
 | Build-only distribution | `publish.yml` with `publish=false`, wheel/sdist checks with `--with-vault --with-tui`, and a guard against automatic stable PyPI upload from GitHub prereleases. |
-| Focused host history/readiness | Fresh reviewed `tools/test_session_sync_podman.py` report on the final clean candidate. |
+| Focused host history/readiness | Fresh reviewed `tools/test_session_sync_podman.py` report on the final clean candidate: all 42 checks true, including nine archive/resume cases; ordered exits `[0,0,0,1,0,0,0,0]`. |
 | Global-vault host lifecycle | Fresh reviewed `tools/test_global_vault_podman.py` report on that same source. |
 | V1/V2 host lifecycle | Fresh reviewed `tools/test_v2_podman.py` report, including migrated-history checks, on that same source. |
-| Textual host observations | Five tabs, compact metrics/refresh/settings including staged defaults, static Sessions scrolling, source-specific actions/cascades, archived-root sync/resume, embedded PTY/focus/resize/detach, visible leases and independent native clients. |
+| Textual host observations | Use the fresh interactive fixture's `manager` mode for five tabs, compact metrics/refresh/settings including staged defaults, static Sessions scrolling, source-specific actions/cascades, embedded PTY/focus/resize/detach, visible leases and independent native clients. This mode takes no background outer lease. |
 | Journal/log/self-checkout boundaries | Private bounded fixed-category journal and rotation, no synthetic secret/raw-text leakage, owned opt-in bounded memory-only Podman output, and a non-editable self-workspace launch without weakening validation. |
 
 Run live checks only from a normal unprivileged **external host**, with fresh
