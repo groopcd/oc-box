@@ -1849,7 +1849,6 @@ class Harness:
         # These stages follow shell recovery so archiving cannot change any of
         # the pre-existing readiness, pending-export or session-order probes.
         values = self.resume_inventory(self.resume_sources, selected=selected)
-        self.resume_requests = (self.provider.requests, self.provider.errors)
         self.resume_roots = {
             ident for ident, item in values.items() if item.get("parentID") is None
         }
@@ -1978,7 +1977,6 @@ class Harness:
             preserved(before, self.snapshot(ident))
         self.check("unarchived_history_retention")
         self.resume_quiet()
-        self.check("resume_no_inference")
         return 0
 
     def run(self):
@@ -2030,9 +2028,14 @@ class Harness:
             == file_hash(self.archive_path(self.shell_id))
         )
         self.check("sync_recovery")
+        # Cover startup, callbacks, final automatic sync and shutdown for ALL
+        # three ordinary starts, not just the callback bodies.
+        self.resume_requests = (self.provider.requests, self.provider.errors)
         self.launch(self.archive_roots)
         self.launch(self.archived_restart)
         self.launch(self.unarchived_restart)
+        self.resume_quiet()
+        self.check("resume_no_inference")
         self.check("owner_cleanup")
         self.same_identity()
         self.check("unchanged_identity")

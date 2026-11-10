@@ -548,6 +548,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         harness.box.session_file = lambda _path: self.parent / "sessions.json"
         harness.archive_id = lambda ident, prefix="ses": prefix + "_copy_" + ident
         harness.provider = SimpleNamespace(requests=4, errors=0)
+        harness.resume_requests = (4, 0)
         active, target = "ses_history_active", "ses_history_archived"
         child, archived_child = "ses_history_child", "ses_history_archived_child"
         deleted = "ses_history_deleted"
@@ -701,7 +702,6 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 "unarchived_root_eligible",
                 "unarchived_next_start_resume",
                 "unarchived_history_retention",
-                "resume_no_inference",
             },
         )
         self.assertEqual(harness.provider.requests, 4)
@@ -1053,7 +1053,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         self.assertEqual(harness.exits, [0])
         harness.stopped.assert_called_once()
 
-    def test_run_preserves_old_launch_sequence_then_three_final_ordinary_starts(self):
+    def resume_run_harness(self):
         harness, _sources, _copies, _state, _calls = self.resume_harness()
         harness.validate = Mock()
         harness.stopped = Mock()
@@ -1063,6 +1063,15 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         harness.box.sync_sessions = Mock()
         harness.lease = SimpleNamespace(join=Mock())
         harness.shell_id = "ses_history_active"
+        harness.box.read_json = Mock(
+            return_value={
+                "messages": [{"type": "shell", "status": "exited", "exit": 0}]
+            }
+        )
+        return harness
+
+    def test_run_preserves_old_launch_sequence_then_three_final_ordinary_starts(self):
+        harness = self.resume_run_harness()
         stages = []
 
         def launch(callback, *, expected=0, **_options):
@@ -1070,11 +1079,6 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             harness.exits.append(expected)
 
         harness.launch = launch
-        harness.box.read_json = Mock(
-            return_value={
-                "messages": [{"type": "shell", "status": "exited", "exit": 0}]
-            }
-        )
         harness.run()
         self.assertEqual(
             stages,
@@ -1096,6 +1100,35 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         harness.box.main.assert_called_once_with(["sync", "--workspace", "fixture"])
         harness.lease.join.assert_called_once_with(5)
         self.assertEqual(harness.stage, "complete")
+        self.assertIn("resume_no_inference", harness.checks)
+
+    def test_resume_no_inference_covers_startup_and_post_callback_shutdown(self):
+        for boundary in ("startup", "shutdown"):
+            for counter in ("requests", "errors"):
+                with self.subTest(boundary=boundary, counter=counter):
+                    harness = self.resume_run_harness()
+
+                    def launch(callback, *, expected=0, **_options):
+                        if (
+                            boundary == "startup"
+                            and callback.__name__ == "archive_roots"
+                        ) or (
+                            boundary == "shutdown"
+                            and callback.__name__ == "unarchived_restart"
+                        ):
+                            setattr(
+                                harness.provider,
+                                counter,
+                                getattr(harness.provider, counter) + 1,
+                            )
+                        harness.exits.append(expected)
+
+                    harness.launch = launch
+                    with self.assertRaises(runner.Refusal) as caught:
+                        harness.run()
+                    self.assertEqual(str(caught.exception), "provider-contract")
+                    self.assertNotIn("resume_no_inference", harness.checks)
+                    self.assertNotEqual(harness.stage, "complete")
 
     def pending_harness(self):
         """Synthetic observer inputs, never a production-runtime replacement."""
