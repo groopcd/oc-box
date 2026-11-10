@@ -1603,7 +1603,7 @@ class InteractiveBootstrapTests(unittest.TestCase):
         extra_path=None,
     ):
         code = """
-import json, runpy, subprocess, sys
+import json, os, runpy, subprocess, sys
 from importlib.machinery import ModuleSpec
 from pathlib import Path
 from types import ModuleType
@@ -1612,7 +1612,9 @@ if operation == 'pre-pinned-namespace':
     # Match the independently authenticated edge/home caller ABI. Verify the
     # bootstrap Git bytes before compiling, with no candidate imports or pycs.
     content = subprocess.check_output(['git', '-C', source, 'show',
-                                      expected + ':tools/test_interactive_podman.py'])
+                                      expected + ':tools/test_interactive_podman.py'],
+                                     env={'PATH': os.defpath, 'GIT_NO_REPLACE_OBJECTS': '1',
+                                          'GIT_CONFIG_GLOBAL': '/dev/null', 'GIT_CONFIG_NOSYSTEM': '1'})
     assert Path(runner).read_bytes() == content
     package = ModuleType('tools')
     package.__package__ = 'tools'
@@ -1933,6 +1935,36 @@ except BaseException as error:
     def test_snapshot_binds_expected_commit_blobs_not_a_newer_index(self):
         self.assertEqual(self.child("index-race")["category"], "source-changed")
         self.assertFalse(self.marker.exists())
+
+    def test_replace_ref_cannot_authenticate_other_tree_under_expected_commit_label(
+        self,
+    ):
+        # Replacement B has A's parents (not A itself), retaining the ordinary
+        # clean/full-history/count checks while redirecting A's apparent tree.
+        helper = self.source / "tools/test_global_vault_podman.py"
+        helper.write_bytes(helper.read_bytes() + b"# replacement-only helper bytes\n")
+        self.git("add", "tools/test_global_vault_podman.py")
+        tree = self.git("write-tree").strip()
+        parent = self.git("rev-parse", self.commit + "^").strip()
+        replacement = self.git(
+            "commit-tree", tree, "-p", parent, "-m", "synthetic replacement"
+        ).strip()
+        self.git("replace", self.commit, replacement)
+        with patch.dict(os.environ, {"PATH": os.defpath}, clear=True):
+            self.assertEqual(self.git("rev-parse", "HEAD").strip(), self.commit)
+            self.assertEqual(self.git("status", "--porcelain"), "")
+            self.assertEqual(self.git("rev-list", "--count", "HEAD").strip(), "31")
+            self.assertEqual(
+                self.git(
+                    "show", self.commit + ":tools/test_global_vault_podman.py"
+                ).encode(),
+                helper.read_bytes(),
+            )
+        result = self.child()
+        self.assertFalse(
+            self.marker.exists(), "replacement tree initialized candidate modules"
+        )
+        self.assertEqual(result["category"], "clean-source-required")
 
     def test_matching_mtime_size_stale_cache_is_never_read_even_with_B(self):
         path = self.source / "src/oc_box/terminal_ui.py"

@@ -9,6 +9,7 @@ No replay, resume, cleanup, real credentials or automatic manual-UI acceptance.
 Acceptance entrypoints and externally authenticated bootstrap loaders require
 an isolated (-I) interpreter BEFORE executing this file. Ordinary library imports
 are permitted for unit tests, but cannot initialize host acceptance without -I.
+Caller authentication must use literal Git objects, disabling replacement refs.
 """
 
 import sys
@@ -167,6 +168,7 @@ def git(source, *arguments):
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_NO_REPLACE_OBJECTS": "1",  # Literal expected commit/tree/count.
         },
         stdin=subprocess.DEVNULL,
         capture_output=True,
