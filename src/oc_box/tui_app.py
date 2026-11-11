@@ -13,12 +13,14 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
+from textual.worker import get_current_worker
 from textual.widgets import (
     Button,
     Collapsible,
     DataTable,
     Input,
     Label,
+    LoadingIndicator,
     RichLog,
     Select,
     Static,
@@ -131,6 +133,9 @@ class DashboardApp(ClipboardActions, App):
     #full-diagnostics .monitor--border { color: $warning; }
     #system-report .monitor--border { color: $success; }
     #session-table { height: 1fr; min-height: 5; }
+    #session-progress { height: auto; min-height: 1; }
+    #session-spinner { display: none; width: 5; height: 1; }
+    #session-progress-text { width: 1fr; height: auto; }
     #session-details { height: auto; max-height: 7; }
     #log-output { height: 1fr; }
     #notice { height: auto; max-height: 3; color: $warning; }
@@ -195,6 +200,8 @@ class DashboardApp(ClipboardActions, App):
         self._pending_lock = threading.Lock()
         self._pending_cancel = None
         self._pending_connection = None
+        self._pending_generation = None
+        self._session_source = ""
         self._poll_timer = None
 
     def compose(self) -> ComposeResult:
@@ -286,6 +293,13 @@ class DashboardApp(ClipboardActions, App):
                             id="session-scope",
                         )
                         yield Button("Connect / refresh", id="connect-sessions")
+                    with Horizontal(id="session-progress"):
+                        yield LoadingIndicator(id="session-spinner")
+                        yield Static(
+                            "Not connected. Choose a source and Connect to load its inventory.",
+                            id="session-progress-text",
+                            markup=False,
+                        )
                     yield ClipboardInput(
                         placeholder="Filter title, ID or native directory",
                         id="session-search",
@@ -560,7 +574,10 @@ class DashboardApp(ClipboardActions, App):
         self.report = report
         workspaces = report["workspaces"]
         if self.selected not in {w["workspace_id"] for w in workspaces}:
-            self.selected = workspaces[0]["workspace_id"] if workspaces else None
+            selected = workspaces[0]["workspace_id"] if workspaces else None
+            if selected != self.selected:
+                self._session_source_changed()
+            self.selected = selected
         table = self.query_one("#workspaces", DataTable)
         table.clear()
         for index, item in enumerate(workspaces):
@@ -673,7 +690,7 @@ class DashboardApp(ClipboardActions, App):
         if event.data_table.id == "workspaces":
             target = str(event.row_key.value)
             if target != self.selected:
-                self._catalog_generation += 1
+                self._session_source_changed()
             self.selected = target
             self._render_workspace()
             self._render_sessions()
@@ -693,7 +710,7 @@ class DashboardApp(ClipboardActions, App):
                 return
             if target != self.selected:
                 self.selected = target
-                self._catalog_generation += 1
+                self._session_source_changed()
                 self._render_workspace()
                 self._render_sessions()
         elif event.data_table.id == "session-table":
@@ -710,7 +727,7 @@ class DashboardApp(ClipboardActions, App):
         if event.select.id == "log-source":
             self._render_logs()
         elif event.select.id == "session-scope":
-            self._catalog_generation += 1
+            self._session_source_changed()
             self._render_sessions()
 
     def on_button_pressed(self, event):
@@ -871,7 +888,17 @@ class DashboardApp(ClipboardActions, App):
             )
 
     def connect_sessions(self, scope, workspace, generation=None):
-        if self._session_busy or self.demo:
+        if self.demo:
+            self._message("Synthetic demo does not connect to native session sources.")
+            return
+        if self._session_busy:
+            with self._pending_lock:
+                cancelling = self._pending_cancel and self._pending_cancel.is_set()
+            self._message(
+                "Cancellation is still finishing the current bounded request; wait before connecting again."
+                if cancelling
+                else "Session inventory is already loading. Cancel or wait before connecting again."
+            )
             return
         self._session_busy = True
         if generation is None:
@@ -880,17 +907,93 @@ class DashboardApp(ClipboardActions, App):
         cancel = threading.Event()
         with self._pending_lock:
             self._pending_cancel = cancel
+            self._pending_generation = generation
+        self._session_source = {
+            "global": "Host · all projects",
+            "project": "Host · selected project",
+            "workspace": f"Live workspace {plain(workspace or 'not selected', 64)}",
+        }.get(scope, "Selected source")
+        self._session_loading_controls()
+        self._session_progress(generation, cancel, "Connecting to the native service")
         return self._connect_sessions(scope, workspace, generation, cancel)
+
+    def _session_loading_controls(self):
+        with self._pending_lock:
+            cancelling = self._pending_cancel and self._pending_cancel.is_set()
+        connect = self.query_one("#connect-sessions", Button)
+        connect.disabled = self._session_busy
+        connect.label = (
+            ("Cancelling..." if cancelling else "Loading...")
+            if self._session_busy
+            else "Connect / refresh"
+        )
+        self.query_one("#disconnect-sessions", Button).label = (
+            "Cancel" if self._session_busy else "Disconnect"
+        )
+        self.query_one(
+            "#session-spinner", LoadingIndicator
+        ).display = self._session_busy
+
+    def _session_progress(self, generation, cancel, stage):
+        if (
+            not self.is_running
+            or not self.is_mounted
+            or generation != self._catalog_generation
+            or generation != self._pending_generation
+            or self._pending_cancel is not cancel
+            or cancel.is_set()
+        ):
+            return
+        self.query_one("#session-progress-text", Static).update(
+            f"Loading {self._session_source}... {stage}. Previous rows remain available."
+        )
+
+    def _finish_session_request(self, generation, cancel, outcome):
+        # A cancelled request keeps its controls until its bounded call returns.
+        # Identity, not the current selection, owns that final reset: selection
+        # changes invalidate results but must not leave the spinner stuck.
+        if not self.is_running or not self.is_mounted:
+            return
+        with self._pending_lock:
+            if (
+                self._pending_cancel is not cancel
+                or self._pending_generation != generation
+            ):
+                return
+            cancelled = cancel.is_set() or outcome == "cancelled"
+            self._pending_cancel = None
+            self._pending_connection = None
+            self._pending_generation = None
+        self._session_busy = False
+        self._session_loading_controls()
+        if cancelled:
+            message = (
+                f"Cancelled {self._session_source}. The bounded request has finished. "
+                "Choose a source and Connect when ready; no replacement was connected."
+            )
+        elif outcome == "complete":
+            message = f"Loaded {self._session_source}: {len(self.sessions)} sessions."
+        else:
+            message = (
+                f"Session inventory unavailable or incomplete for {self._session_source}. "
+                "No workspace was started; previous rows are retained."
+            )
+        self.query_one("#session-progress-text", Static).update(message)
+        if outcome != "complete" or cancelled:
+            self._message(message)
 
     @work(thread=True, group="sessions", exit_on_error=False)
     def _connect_sessions(self, scope, workspace, generation, cancel):
         connection = None
+        outcome = "cancelled"
+        worker = get_current_worker()
 
         def cancelled():
             return (
                 cancel.is_set()
                 or generation != self._catalog_generation
                 or not self.is_running
+                or worker.is_cancelled
             )
 
         try:
@@ -903,6 +1006,8 @@ class DashboardApp(ClipboardActions, App):
                 directory = self.backend.box.container_project(data)
             else:
                 directory = None
+            if cancelled():
+                return
             connection = self.backend.session_connection(
                 workspace if scope == "workspace" else None
             )
@@ -910,6 +1015,11 @@ class DashboardApp(ClipboardActions, App):
                 if cancelled():
                     return
                 self._pending_connection = connection
+            self.call_from_thread(
+                self._session_progress, generation, cancel, "Fetching session inventory"
+            )
+            if cancelled():
+                return
             associations = (
                 self.backend.associations(connection.store)
                 if connection.origin == "host" and self.backend.box
@@ -923,8 +1033,10 @@ class DashboardApp(ClipboardActions, App):
                 managed_ids=[a["archive"]["id"] for a in associations],
             )
             sessions = catalog.list(directory=directory, cancelled=cancelled)
+            if cancelled():
+                return
             if self.is_running:
-                self.call_from_thread(
+                accepted = self.call_from_thread(
                     self._connected_sessions,
                     connection,
                     catalog,
@@ -934,38 +1046,51 @@ class DashboardApp(ClipboardActions, App):
                     cancel,
                 )
                 connection = None
+                outcome = "complete" if accepted else "cancelled"
         except Exception:
-            if self.is_running and not cancelled():
-                self.call_from_thread(
-                    self._message,
-                    "Session inventory unavailable or incomplete. No workspace was started; previous rows are retained.",
-                )
+            outcome = "cancelled" if cancelled() else "failed"
         finally:
-            if connection:
-                connection.close()
-            with self._pending_lock:
-                if self._pending_cancel is cancel:
-                    self._pending_cancel = None
-                    self._pending_connection = None
-            self._session_busy = False
+            try:
+                if connection:
+                    connection.close()
+            finally:
+                if self.is_running:
+                    self.call_from_thread(
+                        self._finish_session_request, generation, cancel, outcome
+                    )
 
-    def _cancel_pending_connection(self):
+    def _session_source_changed(self):
+        self._catalog_generation += 1
+        self._cancel_pending_connection(reason="Source selection changed")
+
+    def _cancel_pending_connection(self, *, reason=None):
         with self._pending_lock:
-            if self._pending_cancel:
-                self._pending_cancel.set()
+            cancel = self._pending_cancel
+            if cancel:
+                cancel.set()
             connection = self._pending_connection
+        if cancel and reason and self.is_running and self.is_mounted:
+            self._session_loading_controls()
+            self.query_one("#session-progress-text", Static).update(
+                f"Cancelling {self._session_source}... {reason}; the current bounded request "
+                "is still finishing. No replacement source will connect automatically."
+            )
         if connection:
             connection.close()
 
     def _disconnect_sessions(self):
         self._catalog_generation += 1
-        self._cancel_pending_connection()
+        self._cancel_pending_connection(reason="Disconnect requested")
         if self._session_connection:
             self._session_connection.close()
             self._session_connection = None
         self.catalog, self.sessions = None, []
         self._associations = []
         self._render_sessions()
+        if not self._session_busy:
+            self.query_one("#session-progress-text", Static).update(
+                "Session source disconnected. Choose a source and Connect to load its inventory."
+            )
         self.query_one("#session-details", Static).update(
             "Session source disconnected. Pending inventory is cancelled; its lease releases after the current bounded API request."
         )
@@ -973,21 +1098,24 @@ class DashboardApp(ClipboardActions, App):
     def _connected_sessions(
         self, connection, catalog, sessions, associations, generation, cancel=None
     ):
-        if generation != self._catalog_generation:
+        if (
+            not self.is_running
+            or not self.is_mounted
+            or generation != self._catalog_generation
+            or (cancel is not None and cancel.is_set())
+            or (cancel is not None and self._pending_cancel is not cancel)
+        ):
             connection.close()
-            self._message(
-                "Source selection changed; discarded the stale session connection."
-            )
-            return
+            return False
         with self._pending_lock:
             if self._pending_connection is connection:
                 self._pending_connection = None
-            if self._pending_cancel is cancel:
-                self._pending_cancel = None
-        self._disconnect_sessions()
+        if self._session_connection:
+            self._session_connection.close()
         self._session_connection = connection
         self._associations = associations
         self._apply_sessions(catalog, sessions)
+        return True
 
     def _apply_sessions(self, catalog, sessions):
         self.catalog, self.sessions = catalog, sessions
