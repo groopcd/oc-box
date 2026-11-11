@@ -1,5 +1,7 @@
 from dataclasses import FrozenInstanceError, replace
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -239,6 +241,142 @@ class StorageInventoryTests(StorageFixture):
         self.assertIn(
             "No whole-host database wipe or restore", storage.HOST_SCOPE_SUMMARY
         )
+
+
+class StorageActionReadTests(StorageFixture):
+    def test_oversized_action_registration_never_requests_an_unbounded_read(self):
+        self.record.write_bytes(b" " * (storage.MAX_RECORD_BYTES + 100))
+        original_fdopen = os.fdopen
+        violations = []
+
+        @contextmanager
+        def guarded_stream(descriptor, *args, **kwargs):
+            with original_fdopen(descriptor, *args, **kwargs) as stream:
+
+                def read(size=-1):
+                    if not 0 < size <= storage.MAX_RECORD_BYTES + 1:
+                        violations.append(size)
+                        raise AssertionError("unbounded metadata read")
+                    return stream.read(size)
+
+                yield SimpleNamespace(read=read)
+
+        with patch.object(storage.os, "fdopen", side_effect=guarded_stream):
+            self.expect_refusal(
+                "invalid-registration", storage.read_workspace_action, box, self.ident
+            )
+        self.assertEqual(violations, [])
+
+    def test_action_read_binds_one_open_canonical_record_without_inventory(self):
+        self.data["private_fixture"] = "PRIVATE_REGISTRATION_VALUE"
+        self.save()
+        raw = self.record.read_bytes()
+        with (
+            patch.object(
+                box, "workspace_paths", side_effect=AssertionError("scan")
+            ) as scan,
+            patch.object(
+                box, "read_json", side_effect=AssertionError("unbounded")
+            ) as unbounded,
+        ):
+            record = storage.read_workspace_action(box, self.ident)
+        scan.assert_not_called()
+        unbounded.assert_not_called()
+        self.assertEqual(record.row.workspace_id, self.ident)
+        self.assertEqual(record.row.project, str(self.project))
+        self.assertEqual(record.row.record_path, self.record)
+        self.assertEqual(record.fingerprint, hashlib.sha256(raw).hexdigest())
+        info = self.record.stat()
+        self.assertEqual(
+            record.identity,
+            (
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+            ),
+        )
+        self.assertEqual(
+            record.registry_identity,
+            tuple(
+                (path.stat().st_dev, path.stat().st_ino)
+                for path in (self.state, self.state / "workspaces", self.record.parent)
+            ),
+        )
+        self.assertEqual(record.project_condition, "present")
+        self.assertEqual(record.data["private_fixture"], "PRIVATE_REGISTRATION_VALUE")
+        self.assertNotIn("PRIVATE_REGISTRATION_VALUE", repr(record))
+        with self.assertRaises(FrozenInstanceError):
+            record.fingerprint = "forged"
+
+    def test_action_read_modes_refuse_before_all_io(self):
+        for flag, reason in (("read_only", "read-only"), ("demo", "demo")):
+            with self.subTest(flag=flag), patch.object(box, "state_root") as root:
+                self.expect_refusal(
+                    reason,
+                    storage.read_workspace_action,
+                    box,
+                    self.ident,
+                    **{flag: True},
+                )
+                root.assert_not_called()
+
+    def test_action_read_rejects_directory_id_mismatch_and_wrong_resource_names(self):
+        for changes in (
+            {"id": "f" * 32},
+            {"container": "other"},
+            {"home_volume": "other"},
+        ):
+            with self.subTest(changes=changes):
+                self.save({**self.data, **changes})
+                self.expect_refusal(
+                    "invalid-registration",
+                    storage.read_workspace_action,
+                    box,
+                    self.ident,
+                )
+
+    def test_action_read_preserves_exposure_guard_and_markerless_cleanup(self):
+        with patch.object(box, "APP", self.project):
+            self.expect_refusal(
+                "trusted-path-exposure", storage.read_workspace_action, box, self.ident
+            )
+        (self.project / box.MARKER).unlink()
+        self.assertEqual(
+            storage.read_workspace_action(box, self.ident).project_condition,
+            "marker missing",
+        )
+
+    def test_inventory_skips_group_writable_metadata_but_retains_owned_legacy_modes(
+        self,
+    ):
+        self.record.chmod(0o644)
+        self.record.parent.chmod(0o755)
+        self.state.chmod(0o755)
+        self.assertEqual(len(storage.workspace_rows(box, all_workspaces=True).rows), 1)
+        storage.read_workspace_action(box, self.ident)
+        for path in (
+            self.record,
+            self.record.parent,
+            self.state / "workspaces",
+            self.state,
+        ):
+            with self.subTest(path=path.name):
+                original = path.stat().st_mode & 0o777
+                try:
+                    path.chmod(original | 0o020)
+                    result = storage.workspace_rows(box, all_workspaces=True)
+                    self.assertEqual(result.rows, ())
+                    self.assertEqual(result.skipped, 1)
+                    self.expect_refusal(
+                        "unsafe-registry",
+                        storage.read_workspace_action,
+                        box,
+                        self.ident,
+                    )
+                finally:
+                    path.chmod(original)
 
 
 class StorageRemovalTests(StorageFixture):

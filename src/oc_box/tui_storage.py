@@ -156,6 +156,23 @@ class _RecordSnapshot:
 
 
 @dataclass(frozen=True)
+class WorkspaceActionRecord:
+    """Canonical bounded action input, not a browsing/diagnostic payload.
+
+    Raw registration data is needed by existing lifecycle validators and private
+    service attachment. Never render, journal or serialize it into an action
+    request; only the allowlisted row and immutable fingerprints leave this call.
+    """
+
+    row: StorageRecord
+    fingerprint: str
+    identity: tuple[int, ...]
+    registry_identity: tuple[tuple[int, int], ...]
+    project_condition: str
+    data: dict = field(repr=False)
+
+
+@dataclass(frozen=True)
 class _IssuedPlan:
     box: object = field(repr=False)
     plan: RemovalPlan
@@ -195,11 +212,12 @@ def _record_id(root, path):
     return ident
 
 
-def _read_record(root, ident, *, action=False):
+def _read_record(root, ident):
     """Bounded, no-follow registry read with identity from the same open fds.
 
-    Legacy owner-controlled 0755 directories are accepted; no chmod, migration,
-    marker repair, or stronger on-disk privacy claim is made by browsing.
+    Legacy owner-controlled 0755 directories and 0644 records are accepted. Both
+    actions and inventories reject foreign/group-writable metadata; no chmod,
+    migration, marker repair, or stronger privacy claim is made by browsing.
     """
     descriptors = []
     try:
@@ -219,7 +237,7 @@ def _read_record(root, ident, *, action=False):
         before = os.fstat(fd)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
             _fail("unsafe-registry")
-        if action and any(
+        if any(
             info.st_uid != os.getuid() or info.st_mode & 0o022
             for info in (*registry, before)
         ):
@@ -342,14 +360,8 @@ def _action_mode(*, read_only, demo):
 def _action_record(box, ident):
     root = _root(box)
     path = root / "workspaces" / ident / "workspace.json"
-    data, snapshot = _read_record(root, ident, action=True)
-    row = _row(root, path, data)
-    if (
-        data.get("version") != 2
-        or row.container != "oc-box-" + ident
-        or row.home_volume != "oc-box-home-" + ident
-    ):
-        _fail("invalid-registration")
+    data, snapshot = _read_record(root, ident)
+    row = _action_row(root, path, data)
     try:
         project = Path(row.project)
         if project.exists() or project.is_symlink():
@@ -369,7 +381,49 @@ def _action_record(box, ident):
         project_state = status_report.project_condition(data)
     except Exception:
         _fail("invalid-registration")
-    return row, snapshot, project_state
+    return row, snapshot, project_state, data
+
+
+def _action_row(root, path, data):
+    row = _row(root, path, data)
+    if (
+        data.get("version") != 2
+        or row.container != "oc-box-" + row.workspace_id
+        or row.home_volume != "oc-box-home-" + row.workspace_id
+    ):
+        _fail("invalid-registration")
+    return row
+
+
+def read_workspace_action(box, workspace_id, *, read_only=False, demo=False):
+    """Read exactly one canonical, bounded, owner-controlled registration.
+
+    Never scan unrelated registrations or call a native/engine/service API. The
+    directory ID must match the JSON ID and generated workspace resource names.
+    Fingerprints bind the same open record and root/workspaces/workspace directory
+    chain for review, confirmation and child revalidation. Existing projects pass
+    the unchanged common exposure validator; missing/stale markers are reported,
+    not repaired. Final lifecycle/attachment validators remain authoritative.
+
+    ``data`` is a private in-memory input solely for existing service attachment;
+    never render/journal/serialize it. Reviews and action requests may use only
+    ``row`` and the immutable fingerprint/identity/condition fields. Read-only or
+    demo explicit-action requests refuse before all I/O.
+    """
+    _action_mode(read_only=read_only, demo=demo)
+    if not _workspace_id(workspace_id):
+        _fail("invalid-workspace")
+    row, snapshot, project_state, data = _action_record(box, workspace_id)
+    return WorkspaceActionRecord(
+        row,
+        snapshot.fingerprint,
+        snapshot.identity,
+        snapshot.registry_identity,
+        project_state[0],
+        # Attachment already requires real native config/identity metadata. Do
+        # not put it into the allowlisted row or any serialized request instead.
+        data,
+    )
 
 
 def prepare_workspace_purge(box, workspace_id, *, read_only=False, demo=False):
@@ -377,7 +431,7 @@ def prepare_workspace_purge(box, workspace_id, *, read_only=False, demo=False):
     _action_mode(read_only=read_only, demo=demo)
     if not _workspace_id(workspace_id):
         _fail("invalid-workspace")
-    row, snapshot, project_state = _action_record(box, workspace_id)
+    row, snapshot, project_state, _ = _action_record(box, workspace_id)
     plan = RemovalPlan(
         workspace_id,
         row.project,
@@ -437,7 +491,7 @@ def confirm_workspace_purge(box, plan, phrase, *, read_only=False, demo=False):
     if not isinstance(phrase, str) or phrase != expected.phrase:
         _fail("confirmation-mismatch")
     try:
-        row, snapshot, project_state = _action_record(box, expected.workspace_id)
+        row, snapshot, project_state, _ = _action_record(box, expected.workspace_id)
     except StorageError as error:
         if error.reason == "trusted-path-exposure":
             raise
