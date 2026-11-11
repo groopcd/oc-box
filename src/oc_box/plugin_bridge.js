@@ -11,6 +11,57 @@ const supported = new Set([
 ])
 const alias = name => name === "shell" ? "bash" : name
 const clone = value => structuredClone(value)
+const owns = (value, key) => Object.prototype.hasOwnProperty.call(value, key)
+const object = value => {
+  if (!value || Object.prototype.toString.call(value) !== "[object Object]") return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === null || Object.getPrototypeOf(prototype) === null
+}
+// Compare the complete view, including deleted/undefined extra properties.
+// JSON.stringify alone would silently hide some unsupported hook mutations.
+function same(left, right) {
+  if (Object.is(left, right)) return true
+  if (!left || !right || typeof left !== "object" || typeof right !== "object" || Array.isArray(left) !== Array.isArray(right)) return false
+  const keys = Reflect.ownKeys(left)
+  return keys.length === Reflect.ownKeys(right).length && keys.every(key => owns(right, key) && same(left[key], right[key]))
+}
+function unchangedExcept(before, after, allowed) {
+  return object(after) && [...new Set([...Reflect.ownKeys(before), ...Reflect.ownKeys(after)])]
+    .every(key => allowed.includes(key) || (owns(before, key) === owns(after, key) && same(before[key], after[key])))
+}
+const sequence = value => Array.isArray(value) && Reflect.ownKeys(value).length === value.length + 1 &&
+  Array.from({ length: value.length }, (_, index) => owns(value, index)).every(Boolean)
+function json(value, seen = new Set()) {
+  if (value === null || typeof value === "string" || typeof value === "boolean") return true
+  if (typeof value === "number") return Number.isFinite(value)
+  if ((!object(value) && !Array.isArray(value)) || seen.has(value)) return false
+  seen.add(value)
+  const valid = Reflect.ownKeys(value).every(key => typeof key === "string" &&
+    (Array.isArray(value) && key === "length" || Object.prototype.propertyIsEnumerable.call(value, key) && json(value[key], seen))) &&
+    (!Array.isArray(value) || sequence(value))
+  seen.delete(value)
+  return valid
+}
+// Both helpers are in-memory only. Discovery overlays have no deletion meaning;
+// hook deltas delete only keys that were visible in the captured initial view.
+function overlay(current, supplied) {
+  return Object.fromEntries([...new Set([...Object.keys(current), ...Object.keys(supplied)])].map(key => [key,
+    !owns(supplied, key) ? clone(current[key]) : object(current[key]) && object(supplied[key])
+      ? overlay(current[key], supplied[key]) : clone(supplied[key])]))
+}
+function delta(current, before, after) {
+  const result = object(current) ? clone(current) : {}
+  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    if (!owns(after, key)) delete result[key]
+    else if (!owns(before, key) || !same(before[key], after[key])) {
+      // Define own data properties, including ordinary JSON "__proto__" keys.
+      Object.defineProperty(result, key, { configurable: true, enumerable: true, writable: true,
+        value: object(after[key]) && (!owns(before, key) || object(before[key]))
+          ? delta(result[key], before[key] || {}, after[key]) : clone(after[key]) })
+    }
+  }
+  return result
+}
 const expand = value => typeof value === "string" ? value.replace(/\{env:([^}]+)\}/g, (_, name) => process.env[name] || "")
   : Array.isArray(value) ? value.map(expand)
   : value && typeof value === "object" ? Object.fromEntries(Object.entries(value).map(([key, item]) => [key, expand(item)])) : value
@@ -44,43 +95,52 @@ async function transformMessages(hook, event) {
       } else {
         part = { ...identity, type: native.type, ...(typeof native.text === "string" ? { text: native.text } : {}) }
       }
-      originals.set(part.id, { native, before: JSON.stringify(part) })
+      originals.set(part.id, { native, before: clone(part) })
       return part
     }),
   }))
   const output = { messages: view }
+  const before = clone(output)
   await hook({}, output)
-  if (output.messages.length !== event.messages.length) throw new Error("oc-box V1 adapter: adding/removing whole history messages requires a native V2 port")
+  if (!unchangedExcept(before, output, ["messages"])) throw new Error("oc-box V1 adapter: unsupported history output mutation")
+  if (!sequence(output.messages) || output.messages.length !== event.messages.length) throw new Error("oc-box V1 adapter: adding/removing whole history messages requires a native V2 port")
+  const contents = []
   for (let index = 0; index < output.messages.length; index++) {
-    if (output.messages[index].info.id !== (event.messages[index].id || "msg_view_" + index) ||
-        output.messages[index].info.role !== event.messages[index].role) {
+    const message = output.messages[index]
+    if (!unchangedExcept(before.messages[index], message, ["parts"])) {
       throw new Error("oc-box V1 adapter: changing history message order/identity/role requires a native V2 port")
     }
-    const parts = output.messages[index].parts
-    if (!Array.isArray(parts) || parts.length !== event.messages[index].content.length) {
+    const parts = message.parts
+    if (!sequence(parts) || parts.length !== event.messages[index].content.length) {
       throw new Error("oc-box V1 adapter: changing history part count requires a native V2 port")
     }
-    event.messages[index].content = parts.map((part, partIndex) => {
-      if (part.id !== "prt_view_" + index + "_" + partIndex) {
+    contents.push(parts.map((part, partIndex) => {
+      if (!object(part) || part.id !== "prt_view_" + index + "_" + partIndex) {
         throw new Error("oc-box V1 adapter: changing history part order/identity requires a native V2 port")
       }
       const previous = originals.get(part.id)
       if (!previous) throw new Error("oc-box V1 adapter: invented legacy history parts require a native V2 port")
-      if (JSON.stringify(part) === previous.before) return previous.native
-      const before = JSON.parse(previous.before)
-      if (part.sessionID !== before.sessionID || part.messageID !== before.messageID) {
+      if (same(part, previous.before)) return previous.native
+      const before = previous.before
+      if (["sessionID", "messageID"].some(key => owns(part, key) !== owns(before, key) || !same(part[key], before[key]))) {
         throw new Error("oc-box V1 adapter: changing history references requires a native V2 port")
       }
       if (part.type === "text" && typeof part.text === "string" && ["text", "media"].includes(previous.native.type)) {
-        return previous.native.type === "text" ? { ...previous.native, text: part.text } : { type: "text", text: part.text }
+        const obsolete = previous.native.type === "media" ? ["mime", "filename", "url"].filter(key => !owns(part, key)) : []
+        if (unchangedExcept(before, part, ["text", ...(previous.native.type === "media" ? ["type", ...obsolete] : [])])) {
+          return previous.native.type === "text" ? { ...previous.native, text: part.text } : { type: "text", text: part.text }
+        }
       }
       if (part.type === "tool" && previous.native.type === "tool-call" &&
-          part.tool === before.tool && part.callID === before.callID && part.state?.status === before.state.status) {
-        return { ...previous.native, input: part.state.input }
+          unchangedExcept(before, part, ["state"]) && unchangedExcept(before.state, part.state, ["input"]) && owns(part.state, "input") && json(part.state.input)) {
+        return { ...previous.native, input: clone(part.state.input) }
       }
       throw new Error("oc-box V1 adapter: unsupported legacy history part mutation")
-    })
+    }))
   }
+  // Validate every message/part first; a later unsupported edit must not leave
+  // an earlier supported edit applied to the outgoing native event.
+  contents.forEach((content, index) => { event.messages[index].content = content })
 }
 
 function toolResult(value) {
@@ -125,43 +185,63 @@ async function configure(ctx, hook) {
   const launch = expand(JSON.parse(process.env.OPENCODE_CONFIG_CONTENT || "{}"))
   for (const document of [declared, launch]) {
     for (const [id, provider] of Object.entries(document.providers || document.provider || {})) {
+      const options = owns(provider, "settings") ? provider.settings : owns(provider, "options") ? provider.options : {}
+      if (!object(options) || !json(options)) throw new Error("oc-box V1 adapter: invalid provider options")
+      const { package: nativePackage, settings, options: legacyOptions, ...metadata } = provider
       config.provider[id] = {
-        ...config.provider[id], ...provider,
-        npm: (provider.package || provider.npm || config.provider[id]?.npm || "").replace(/^aisdk:/, ""),
-        options: provider.settings || provider.options || config.provider[id]?.options || {},
-        models: provider.models || {},
+        ...config.provider[id], ...metadata,
+        npm: (nativePackage || provider.npm || config.provider[id]?.npm || "").replace(/^aisdk:/, ""),
+        options: overlay(config.provider[id]?.options || {}, options),
+        models: owns(provider, "models") ? provider.models : config.provider[id]?.models || {},
       }
     }
   }
   const before = clone(config)
   await hook(config)
-  if (Object.keys(config).some(key => key !== "provider")) {
+  if (!unchangedExcept(before, config, ["provider"])) {
     throw new Error("oc-box V1 adapter: config edits outside provider discovery require a native V2 port")
   }
-  if (JSON.stringify(before) === JSON.stringify(config)) return
-  if (!config.provider || typeof config.provider !== "object") {
+  if (!object(config.provider)) {
     throw new Error("oc-box V1 adapter: invalid provider config edit")
   }
-  await ctx.provider.transform(editor => {
-    for (const id of Object.keys(before.provider)) {
-      if (!(id in config.provider)) editor.remove(id)
+  // Preflight the complete edit before registering a replayable native transform.
+  // In particular, deletions of metadata are just as unsupported as additions.
+  const edits = []
+  for (const [id, provider] of Object.entries(config.provider)) {
+    const previous = owns(before.provider, id) ? before.provider[id] : undefined
+    if (!object(provider)) throw new Error("oc-box V1 adapter: invalid provider config edit")
+    if (previous ? !unchangedExcept(previous, provider, ["options", "models"])
+      : Reflect.ownKeys(provider).some(key => !["name", "npm", "options", "models"].includes(key))) {
+      throw new Error("oc-box V1 adapter: provider metadata edits require a native V2 port")
     }
-    for (const [id, provider] of Object.entries(config.provider)) {
-      const previous = before.provider[id]
-      if (JSON.stringify(previous) === JSON.stringify(provider)) continue
-      const changed = Object.keys(provider).filter(key => JSON.stringify(provider[key]) !== JSON.stringify(previous?.[key]))
-      if (previous && changed.some(key => !["options", "models"].includes(key))) {
-        throw new Error("oc-box V1 adapter: provider metadata edits require a native V2 port")
-      }
-      const inventory = Object.entries(provider.models || {}).map(([name, model]) => toModel(id, name, model))
+    const options = owns(provider, "options") ? provider.options : {}
+    if (!object(options) || !json(options)) throw new Error("oc-box V1 adapter: invalid provider options")
+    if (!previous && (typeof provider.npm !== "string" || !provider.npm || owns(provider, "name") && typeof provider.name !== "string")) {
+      throw new Error("oc-box V1 adapter: invalid new provider metadata")
+    }
+    if (same(previous, provider)) continue
+    if (owns(provider, "models") && (!object(provider.models) || !json(provider.models))) {
+      throw new Error("oc-box V1 adapter: invalid provider model inventory")
+    }
+    const inventory = Object.entries(provider.models || {}).map(([name, model]) => {
+      if (!object(model)) throw new Error("oc-box V1 adapter: invalid provider model")
+      return toModel(id, name, model)
+    })
+    edits.push({ id, provider: clone(provider), previous, options: clone(options), inventory })
+  }
+  const removed = Object.keys(before.provider).filter(id => !owns(config.provider, id))
+  if (!edits.length && !removed.length) return
+  await ctx.provider.transform(editor => {
+    for (const id of removed) editor.remove(id)
+    for (const { id, provider, previous, options, inventory } of edits) {
       const original = editor.get(id)
       if (!original) {
-        editor.add({ info: { id, name: provider.name || id, package: "aisdk:" + provider.npm, activation: "enabled", settings: provider.options || {} }, models: inventory })
+        editor.add({ info: { id, name: provider.name || id, package: "aisdk:" + provider.npm, activation: "enabled", settings: clone(options) }, models: inventory })
       } else {
-        if (JSON.stringify(previous?.options) !== JSON.stringify(provider.options)) {
-          editor.update(id, value => { value.settings = clone(provider.options || {}) })
+        if (!same(previous?.options || {}, options)) {
+          editor.update(id, value => { value.settings = delta(value.settings, previous?.options || {}, options) })
         }
-        if (JSON.stringify(previous?.models) !== JSON.stringify(provider.models)) editor.models.set(id, inventory)
+        if (!same(previous?.models, provider.models)) editor.models.set(id, inventory)
       }
     }
   })

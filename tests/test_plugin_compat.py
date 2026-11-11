@@ -19,6 +19,25 @@ class PluginCompatibilityTests(unittest.TestCase):
     def test_bridge_native_hook_contracts_preserve_refusal_attachments_and_structured_output(
         self,
     ):
+        self.run_bridge_fixture("legacy")
+
+    @unittest.skipUnless(
+        shutil.which("node"), "Node required for provider settings deltas"
+    )
+    def test_bridge_provider_edits_preserve_effective_settings_and_refuse_invalid_changes(
+        self,
+    ):
+        self.run_bridge_fixture("settings")
+
+    @unittest.skipUnless(
+        shutil.which("node"), "Node required for history mutation contracts"
+    )
+    def test_bridge_history_allowlist_refuses_ignored_changes_without_partial_application(
+        self,
+    ):
+        self.run_bridge_fixture("history")
+
+    def run_bridge_fixture(self, mode):
         app = Path(__file__).resolve().parents[1]
         result = subprocess.run(
             [
@@ -27,6 +46,7 @@ class PluginCompatibilityTests(unittest.TestCase):
                 "--no-warnings",
                 str(app / "tests/plugin_bridge_fixture.mjs"),
                 str(box.PACKAGE / "plugin_bridge.js"),
+                mode,
             ],
             capture_output=True,
             text=True,
