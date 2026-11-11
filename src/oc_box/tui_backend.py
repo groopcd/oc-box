@@ -346,14 +346,8 @@ class DashboardBackend:
             connection = lease.__enter__()
 
             def request(method, target, value=None):
-                return workspace_service.api(
-                    self.box,
-                    data,
-                    connection,
-                    method,
-                    target,
-                    value,
-                    timeout=30,
+                return self._workspace_connection_request(
+                    data, connection, method, target, value
                 )
 
             origin, store = "workspace", workspace
@@ -438,6 +432,14 @@ class DashboardBackend:
             return "process-local" if current.get("pid") == pid else None
 
         return SessionConnection(origin, store, checked, ownership, close)
+
+    def _workspace_connection_request(
+        self, data, connection, method, target, value=None
+    ):
+        """Existing owner transport; subclasses may specialize supported imports."""
+        return workspace_service.api(
+            self.box, data, connection, method, target, value, timeout=30
+        )
 
     def workspace_request(self, workspace, method, target, value=None):
         """A short explicit client lease; never creates/refreshes a workspace."""

@@ -180,7 +180,9 @@ oc-box tui --workspace WORKSPACE_ID --read-only
 oc-box tui --demo
 ```
 
-Its five tabs are **Status, Settings, Sessions, Terminals, and Logs**. Log search
+Its seven tabs are **Status, Settings, Sessions, Terminals, Logs, Storage, and
+Backup/restore**. The first five shortcuts remain unchanged; `6` and `7` open
+the new tabs. Log search
 stays available across tabs (`Ctrl+L` opens Logs), including when follow is
 paused. Browsing never starts, resets, syncs, or unlocks a workspace. Native V2
 session connections/actions are explicit; a host Connect may start the native
@@ -189,6 +191,10 @@ Compact aligned meters and fixed-scale CPU/RAM histories distinguish unavailable
 readings from zero. Status/followed-log refresh defaults to one second, with
 1/2/5/10/30/60-second choices and no overlapping queries. Sessions stay an
 on-demand snapshot: background refresh does not reset table scrolling or selection.
+Delayed session queries show animated, source-specific progress and explicit
+cancellation; failed actions show fixed, actionable notifications rather than raw
+native errors. Lost acknowledgements leave the outcome unverified, not falsely
+reported as unchanged.
 `s` or `F2` opens grouped, **session-only** dashboard settings with Apply, Cancel
 and Reset to defaults; these preferences cannot weaken CLI `--read-only` mode.
 Visible text is drag-selectable throughout the dashboard, including logs,
@@ -198,7 +204,13 @@ and **Copy view** remain available too. **Paste copied** uses only
 text copied inside this dashboard; use your terminal's normal paste command for
 the desktop clipboard. Clipboard actions are explicit and never journal text.
 Embedded terminals are experimental and reuse the native persistent-session
-shell, not a new container shell. CPU/RAM/storage editing, quotas, resizes and
+shell, not a new container shell. Storage management distinguishes host native
+session trees, one workspace, and all registered workspaces; there is no whole-host
+database wipe or unreviewed bulk removal. Reviewed workspace removal preserves
+project files and host history. Backup/restore supports existing encrypted full/
+portable workspace archives and encrypted native session-tree history, with
+foreground masked prompts and fresh-ID restoration. Backups and restores do not
+silently overwrite existing files or start restored workspaces. CPU/RAM limit edits, quotas, resizes and
 storage moves remain deferred; resource settings are informational.
 
 For a Python release **containing this feature**, opt in to the dashboard and,

@@ -6,28 +6,34 @@ not a container shell or an alternate workspace controller.
 """
 
 import copy
-from dataclasses import dataclass
+from contextlib import contextmanager
+from dataclasses import asdict, dataclass
 import json
 import os
 from pathlib import Path
+import re
 import secrets
+import signal
 import stat
 import subprocess
 import sys
 
 if __package__:
-    from . import oc_box as box, tui_storage
+    from . import oc_box as box, opencode_compat, tui_storage, workspace_service
     from .tui_backend import DashboardBackend
 else:
     # -I deliberately removes the script directory; pin imports to this exact
     # runtime, not another installed oc-box or the current project directory.
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     import oc_box as box
+    import opencode_compat
     import tui_storage
+    import workspace_service
     from tui_backend import DashboardBackend
 
 
 MAX_REQUEST = 128 * 1024
+MAX_RESULT = 8192
 ACTIONS = frozenset(
     {
         "workspace-backup",
@@ -40,6 +46,19 @@ ACTIONS = frozenset(
     }
 )
 READ_ACTIONS = frozenset({"workspace-inspect", "session-inspect"})
+
+
+def operation_tag(action):
+    return {
+        "workspace-purge": "workspace-purge",
+        "backup-delete": "backup-file-delete",
+        "workspace-backup": "backup",
+        "session-backup": "backup",
+        "workspace-restore": "restore",
+        "session-restore": "restore",
+        "workspace-inspect": "inspection",
+        "session-inspect": "inspection",
+    }.get(action, "mutation")
 
 
 class OperationError(RuntimeError):
@@ -136,6 +155,50 @@ def _workspace_bindings(record):
     }
 
 
+def _session_import(value, executable, *, server=None):
+    """Native 2.2.6's import CLI reads stdin; generic API --data does not.
+
+    Do not put history in argv or pretend this is a generic body transport.
+    Keep the engine's GET/export/inventory verification: native import exits zero
+    for an existing-ID conflict as well as a successful import.
+    """
+    try:
+        info, location = value["info"], value["location"]
+        ident, directory = info["id"], location["directory"]
+        if not isinstance(ident, str) or not re.fullmatch(r"ses[A-Za-z0-9_-]+", ident):
+            fail("invalid-import-body")
+        if (
+            not isinstance(directory, str)
+            or not directory.startswith("/")
+            or ".." in Path(directory).parts
+            or any(ord(char) < 32 for char in directory)
+        ):
+            fail("invalid-import-directory")
+        if info.get("location") != location:
+            fail("import-directory-mismatch")
+        body = json.dumps(value, ensure_ascii=True, allow_nan=False)
+    except OperationError:
+        raise
+    except Exception:
+        fail("invalid-import-body")
+    command = [
+        executable,
+        "session",
+        "import",
+        "/proc/self/fd/0",
+        "--directory",
+        directory,
+    ]
+    if server is not None:
+        command.extend(["--server", server])
+    return command, body, ident
+
+
+def _import_acknowledged(response, ident):
+    if response.stdout.strip() != "Imported session: " + ident:
+        fail("import-acknowledgement-unverified")
+
+
 class _OperationBackend(DashboardBackend):
     """Existing native clients with canonical selections and bounded inventories.
 
@@ -148,6 +211,81 @@ class _OperationBackend(DashboardBackend):
     def __init__(self, runtime, *, request=None):
         super().__init__(runtime)
         self._operation_request = copy.deepcopy(request)
+        self._expected_host_pid = None
+        self._expected_host_version = None
+
+    def host_request(self, method, target, value=None):
+        if method.upper() == "POST" and target == "/api/experimental/session/import":
+            command, body, ident = _session_import(value, "opencode")
+            self.host_request("GET", "/api/info")
+            env = self.box.maintenance_host_env()
+            env["OPENCODE_DISABLE_AUTOUPDATE"] = "1"
+            # Native import has a stricter service resolver than generic api.
+            # Refuse a version mismatch before it can replace a healthy service.
+            version = self.box.run(
+                ["opencode", "--version"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture=True,
+                private=True,
+                timeout=15,
+            )
+            try:
+                cli_version = opencode_compat.version(version.stdout)
+            except (TypeError, ValueError):
+                fail("native-version-unverified")
+            if cli_version != self._expected_host_version:
+                fail("native-version-mismatch")
+            response = self.box.run(
+                command, input=body, env=env, capture=True, private=True, timeout=60
+            )
+            _import_acknowledged(response, ident)
+            self.host_request("GET", "/api/info")
+            return None
+        response = super().host_request(method, target, value)
+        if method.upper() == "GET" and target == "/api/info":
+            info = response.get("data", response) if isinstance(response, dict) else {}
+            pid = info.get("pid")
+            if (
+                type(pid) is not int
+                or pid <= 0
+                or not str(info.get("version", "")).lstrip("v").startswith("2.")
+            ):
+                fail("native-service-unverified")
+            try:
+                version = opencode_compat.version(info.get("version", ""))
+            except (TypeError, ValueError):
+                fail("native-service-unverified")
+            if self._expected_host_pid is not None and pid != self._expected_host_pid:
+                fail("source-changed")
+            if (
+                self._expected_host_version is not None
+                and version != self._expected_host_version
+            ):
+                fail("source-changed")
+            self._expected_host_pid = pid
+            self._expected_host_version = version
+        return response
+
+    def _workspace_connection_request(
+        self, data, connection, method, target, value=None
+    ):
+        if method.upper() == "POST" and target == "/api/experimental/session/import":
+            command, body, ident = _session_import(
+                value, self.box.CONTAINER_OPENCODE, server=connection["url"]
+            )
+            response = self.box.run(
+                workspace_service.client_command(self.box, data, connection, command),
+                input=body,
+                capture=True,
+                private=True,
+                timeout=60,
+            )
+            _import_acknowledged(response, ident)
+            return None
+        return super()._workspace_connection_request(
+            data, connection, method, target, value
+        )
 
     def selected(self, workspace):
         record = _workspace_action(self.box, workspace)
@@ -330,6 +468,12 @@ class OperationController:
             review += f"Workspace: {workspace}\nProject: {request.get('project', '')}\n"
         if origin:
             review += f"Native source: {origin}\nStore: {store}\n"
+        if origin == "host":
+            if __package__:
+                from .tui_sessions import PROCESS_LOCAL_WARNING
+            else:
+                from tui_sessions import PROCESS_LOCAL_WARNING
+            review += PROCESS_LOCAL_WARNING + "\n"
         if request["session"]:
             review += f"Session tree: {request['session']['id']} (including native children)\n"
         if request["destination"]:
@@ -377,6 +521,11 @@ class OperationController:
         if current.request != request:
             fail("selection-changed")
         return copy.deepcopy(request)
+
+    def cancel(self, plan):
+        """Discard abandoned review metadata without inspecting any target."""
+        if type(plan) is OperationPlan:
+            self._plans.pop(plan.token, None)
 
 
 def _recognized_archive(path):
@@ -451,31 +600,109 @@ def purge_request(runtime, plan, phrase, *, read_only=False, demo=False):
     }
 
 
-def handoff(runtime, request):
+def _result_notice(stream, code):
+    """Accept only a bounded static-copy result, never captured command output."""
+    if __package__:
+        from .tui_notifications import FailureNotice
+    else:
+        from tui_notifications import FailureNotice
+    try:
+        stream.seek(0)
+        content = stream.read(MAX_RESULT + 1)
+        if len(content) > MAX_RESULT:
+            return None
+        result = json.loads(content)
+        if (
+            not isinstance(result, dict)
+            or set(result) != {"code", "notice"}
+            or type(result["code"]) is not int
+            or result["code"] != code
+        ):
+            return None
+        notice = result["notice"]
+        if not isinstance(notice, dict) or set(notice) != {
+            "title",
+            "message",
+            "severity",
+            "timeout",
+        }:
+            return None
+        if not all(
+            type(notice[key]) is str
+            and 0 < len(notice[key].encode("utf-8")) <= bound
+            and all(char.isprintable() for char in notice[key])
+            for key, bound in (("title", 256), ("message", 4096))
+        ):
+            return None
+        if (
+            notice["severity"] not in {"information", "warning", "error"}
+            or type(notice["timeout"]) not in (int, float)
+            or not 0 < notice["timeout"] <= 30
+        ):
+            return None
+        return FailureNotice(**notice)
+    except Exception:
+        return None
+
+
+@contextmanager
+def _foreground_child_interrupts():
+    # Ctrl-C reaches the whole foreground process group. Catch it in the parent
+    # without raising: subprocess.call would otherwise SIGKILL the child before
+    # its streaming/image/lock cleanup finishes. A caught handler resets across
+    # exec, unlike SIG_IGN, so the child retains its normal cancellation behavior.
+    try:
+        previous = signal.signal(signal.SIGINT, lambda _number, _frame: None)
+    except ValueError:
+        fail("host-terminal-required")
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGINT, previous)
+
+
+def handoff(runtime, request, *, on_result=None):
     """Caller suspends Textual; native foreground prompts own the actual TTY."""
     value = json.dumps(request, ensure_ascii=True).encode()
     if len(value) > MAX_REQUEST:
         fail("request-too-large")
-    descriptor = os.memfd_create("oc-box-dashboard-operation", os.MFD_CLOEXEC)
-    with os.fdopen(descriptor, "w+b") as stream:
+    with (
+        os.fdopen(
+            os.memfd_create("oc-box-dashboard-operation", os.MFD_CLOEXEC), "w+b"
+        ) as stream,
+        os.fdopen(
+            os.memfd_create("oc-box-dashboard-result", os.MFD_CLOEXEC), "w+b"
+        ) as result,
+    ):
         stream.write(value)
         stream.seek(0)
-        return subprocess.call(
-            [
-                sys.executable,
-                "-I",
-                "-B",
-                str(runtime.PACKAGE / "tui_operations.py"),
-                "--request-fd",
-                str(stream.fileno()),
-            ],
-            env=environment(runtime),
-            pass_fds=(stream.fileno(),),
-            cwd=Path.home(),
-        )
+        with _foreground_child_interrupts():
+            code = subprocess.call(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    str(runtime.PACKAGE / "tui_operations.py"),
+                    "--request-fd",
+                    str(stream.fileno()),
+                    "--result-fd",
+                    str(result.fileno()),
+                ],
+                env=environment(runtime),
+                pass_fds=(stream.fileno(), result.fileno()),
+                cwd=Path.home(),
+            )
+        notice = _result_notice(result, code)
+        if notice is not None and on_result is not None:
+            on_result(notice)
+        return code
 
 
-def execute(runtime, request):
+def execute(runtime, request, *, progress=None):
+    def report(**fields):
+        if progress is not None:
+            progress(**fields)
+
     if (
         not isinstance(request, dict)
         or request.get("version") != 1
@@ -484,6 +711,7 @@ def execute(runtime, request):
         fail("invalid-request")
     if request.get("state_root") != str(runtime.state_root().resolve()):
         fail("state-root-changed")
+    report(operation=operation_tag(request["action"]))
     if request["action"] == "workspace-purge":
         if __package__:
             from . import tui_storage
@@ -504,7 +732,11 @@ def execute(runtime, request):
             tui_storage.cancel_workspace_purge(plan)
             fail("selection-changed")
         argv = tui_storage.confirm_workspace_purge(runtime, plan, plan.phrase)
-        return runtime.main(list(argv))
+        report(dispatched=True)
+        code = runtime.main(list(argv))
+        if code == 0:
+            report(completed=True)
+        return code
     controller = OperationController(runtime)
     plan = controller.prepare(
         request["action"],
@@ -522,7 +754,9 @@ def execute(runtime, request):
         fail("selection-changed")
     action, archive = request["action"], request["backup"]
     if action == "backup-delete":
+        report(dispatched=True)
         Path(archive).unlink()
+        report(completed=True)
         print(
             "Selected encrypted backup file deleted; sessions and workspace storage were not changed."
         )
@@ -542,7 +776,11 @@ def execute(runtime, request):
             )
             for identity in request["identities"]:
                 argv.extend(["--identity", identity])
-        return runtime.main(argv)
+        report(dispatched=action != "workspace-inspect")
+        code = runtime.main(argv)
+        if code == 0:
+            report(completed=True)
+        return code
     if __package__:
         from . import session_backups
         from .tui_sessions import SessionCatalog
@@ -552,6 +790,7 @@ def execute(runtime, request):
     if action == "session-inspect":
         metadata = session_backups.inspect(archive, identities=request["identities"])
         print(json.dumps(metadata, indent=2, ensure_ascii=True))
+        report(completed=True)
         return 0
     backend = _OperationBackend(runtime, request=request)
     connection = backend.session_connection(
@@ -583,67 +822,179 @@ def execute(runtime, request):
             )
             if selected != request["session"]:
                 fail("session-changed")
+            report(dispatched=True)
             session_backups.backup(
                 catalog, selected["id"], archive, recipients=request["recipients"]
             )
         else:
-            session_backups.restore(
+            restore_plan = session_backups.prepare_restore(
                 catalog,
                 archive,
                 request["destination"],
                 identities=request["identities"],
             )
+            try:
+                print(json.dumps(restore_plan.review, indent=2, ensure_ascii=True))
+                if (
+                    input(
+                        "Review the decrypted session metadata above. Type RESTORE to import fresh IDs: "
+                    )
+                    != "RESTORE"
+                ):
+                    print(
+                        "Session restore cancelled; no session imports were submitted."
+                    )
+                    report(cancelled=True)
+                    return 1
+                report(dispatched=True)
+                session_backups.restore(catalog, restore_plan)
+            finally:
+                restore_plan.close()
         print(
             "Encrypted session history operation completed; no existing session IDs were overwritten."
         )
+        report(completed=True)
         return 0
+    except session_backups.SessionBackupError as error:
+        # Native imports can commit before verification/transport fails. Show
+        # only engine-generated recovery IDs, never native errors or history.
+        import re
+
+        recovery = {}
+        for field in ("created_ids", "attempted_ids"):
+            values = getattr(error, field, ())
+            if (
+                isinstance(values, (tuple, list))
+                and len(values) <= 50
+                and all(
+                    isinstance(value, str) and re.fullmatch(r"ses_[0-9a-f]{32}", value)
+                    for value in values
+                )
+            ):
+                recovery[field] = list(values)
+        if any(recovery.values()):
+            report(uncertain=True)
+            print(
+                json.dumps(
+                    {
+                        "outcome": "session-import-unverified",
+                        "automatic_rollback": False,
+                        **recovery,
+                    },
+                    indent=2,
+                )
+            )
+        raise
     finally:
         connection.close()
 
 
+def _checked_memory_fd(descriptor, name):
+    info = os.fstat(descriptor)
+    if (
+        descriptor < 3
+        or not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 0
+        or info.st_uid != os.getuid()
+        or not os.readlink(f"/proc/self/fd/{descriptor}").startswith(
+            "/memfd:" + name + " "
+        )
+    ):
+        fail("invalid-request-descriptor")
+
+
+def _publish_result(descriptor, code, notice):
+    _checked_memory_fd(descriptor, "oc-box-dashboard-result")
+    content = json.dumps(
+        {"code": code, "notice": asdict(notice) if notice else None}, ensure_ascii=True
+    ).encode("ascii")
+    if len(content) > MAX_RESULT:
+        fail("result-too-large")
+    with os.fdopen(os.dup(descriptor), "wb") as stream:
+        stream.write(content)
+
+
+def _host_guard():
+    if (
+        os.geteuid() == 0
+        or os.environ.get("OC_BOX_CONTAINER") == "1"
+        or Path("/.dockerenv").exists()
+        or Path("/run/.containerenv").exists()
+    ):
+        fail("host-only")
+
+
 def main(argv=None):
+    if __package__:
+        from .tui_notifications import failure_notice
+    else:
+        from tui_notifications import failure_notice
     argv = sys.argv[1:] if argv is None else argv
+    state = {
+        "operation": "mutation",
+        "dispatched": False,
+        "completed": False,
+        "uncertain": False,
+        "cancelled": False,
+    }
+    result_fd, notice, error, code = None, None, None, 1
     try:
-        if len(argv) != 2 or argv[0] != "--request-fd" or not argv[1].isdigit():
-            fail("invalid-options")
         if (
-            os.geteuid() == 0
-            or os.environ.get("OC_BOX_CONTAINER") == "1"
-            or Path("/.dockerenv").exists()
-            or Path("/run/.containerenv").exists()
+            len(argv) not in (2, 4)
+            or argv[0] != "--request-fd"
+            or not argv[1].isdigit()
         ):
-            fail("host-only")
-        with os.fdopen(os.dup(int(argv[1])), "rb") as stream:
+            fail("invalid-options")
+        _host_guard()
+        request_fd = int(argv[1])
+        if len(argv) == 4:
+            if (
+                argv[2] != "--result-fd"
+                or not argv[3].isdigit()
+                or int(argv[3]) == request_fd
+            ):
+                fail("invalid-options")
+            result_fd = int(argv[3])
+            _checked_memory_fd(result_fd, "oc-box-dashboard-result")
+        _checked_memory_fd(request_fd, "oc-box-dashboard-operation")
+        with os.fdopen(os.dup(request_fd), "rb") as stream:
             content = stream.read(MAX_REQUEST + 1)
         if len(content) > MAX_REQUEST:
             fail("request-too-large")
-        code = execute(box, json.loads(content))
+        code = execute(box, json.loads(content), progress=state.update)
+        if type(code) is not int:
+            code = 0 if code is None else 1
     except KeyboardInterrupt:
-        print(
-            "Dashboard operation interrupted; inspect the explicit target before retrying."
-        )
-        return 130
-    except OperationError as error:
-        print(str(error))
-        return 1
-    except box.BoxError as error:
+        code = 130
+        state["uncertain"] = state["uncertain"] or state["dispatched"]
+        state["cancelled"] = True
+    except Exception as caught:
+        error = caught
+        code = 1
         if (
-            str(error)
+            isinstance(caught, box.BoxError)
+            and str(caught)
             == "This workspace already has an active oc-box process. Exit it before changing its environment."
         ):
-            print(
-                "The workspace has an active owner. Exit its owning launcher and attached clients before retrying this operation."
-            )
-        else:
-            print(
-                "Workspace lifecycle operation refused or failed; no automatic retry was made. Existing identity, ownership and lock checks remain enforced."
-            )
-        return 1
-    except Exception:
-        print(
-            "Dashboard operation refused or failed. Private tool output was not retained by the dashboard; no automatic retry was made."
+            notice = failure_notice(state["operation"], reason="owner-active")
+    if code != 0 and notice is None:
+        notice = failure_notice(
+            state["operation"],
+            error,
+            reason="cancelled" if state["cancelled"] else None,
+            dispatched=state["dispatched"],
+            completed=state["completed"],
+            uncertain=state["uncertain"],
         )
-        return 1
+    if notice is not None:
+        print(f"{notice.title}: {notice.message}")
+    if result_fd is not None:
+        try:
+            _publish_result(result_fd, code, notice)
+        except Exception:
+            print(
+                "Dashboard result notification unavailable; inspect the explicit target before any retry."
+            )
     return code
 
 

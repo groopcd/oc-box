@@ -47,6 +47,7 @@ if __package__:
     )
     from .tui_status import MonitorPanel, percentage
     from .tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
+    from .tui_management import ManagementActions, StoragePanel, BackupPanel
 else:
     import status_report
     from tui_backend import plain, TerminalAttachmentError
@@ -65,6 +66,7 @@ else:
     )
     from tui_status import MonitorPanel, percentage
     from tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
+    from tui_management import ManagementActions, StoragePanel, BackupPanel
 
 
 def text(value):
@@ -119,7 +121,7 @@ class Confirm(ModalScreen):
             self.dismiss(True)
 
 
-class DashboardApp(ClipboardActions, App):
+class DashboardApp(ManagementActions, ClipboardActions, App):
     TITLE = "oc-box control center"
     AUTO_FOCUS = "#workspaces"
     CSS = """
@@ -170,6 +172,8 @@ class DashboardApp(ClipboardActions, App):
         ("3", "tab('sessions')", "Sessions"),
         ("4", "tab('terminals')", "Terminals"),
         ("5", "tab('logs')", "Logs"),
+        ("6", "tab('storage')", "Storage"),
+        ("7", "tab('backups')", "Backup/restore"),
     ]
 
     def __init__(self, backend, *, read_only=False, selected=None, demo=False):
@@ -211,6 +215,7 @@ class DashboardApp(ClipboardActions, App):
         self._pending_generation = None
         self._session_source = ""
         self._poll_timer = None
+        self._management_init()
 
     def compose(self) -> ComposeResult:
         yield Static(
@@ -388,6 +393,10 @@ class DashboardApp(ClipboardActions, App):
                         markup=False,
                         highlight=False,
                     )
+                with TabPane("Storage", id="storage"):
+                    yield StoragePanel(read_only=self.read_only, demo=self.demo)
+                with TabPane("Backup/restore", id="backups"):
+                    yield BackupPanel(read_only=self.read_only, demo=self.demo)
         yield Static(
             "Synthetic demo · fixed sample readings · no host data"
             if self.demo
@@ -403,6 +412,7 @@ class DashboardApp(ClipboardActions, App):
             "★", "ID", "Title", "Kind", "Native directory"
         )
         self._poll_timer = self.set_interval(0.25, self._tick)
+        self._management_mount()
         self.action_refresh()
 
     def _message(self, value):
@@ -432,6 +442,7 @@ class DashboardApp(ClipboardActions, App):
         dispatched=False,
         completed=False,
         count=None,
+        uncertain=False,
     ):
         """UI-thread presentation of fixed copy; never render error text."""
         notice = failure_notice(
@@ -441,6 +452,7 @@ class DashboardApp(ClipboardActions, App):
             dispatched=dispatched,
             completed=completed,
             count=count,
+            uncertain=uncertain,
         )
         self._show_failure_notice(notice)
         return notice
@@ -560,7 +572,7 @@ class DashboardApp(ClipboardActions, App):
         )
 
     def _tick(self):
-        if not self.is_running or not self.is_mounted:
+        if not self.is_running or not self.is_mounted or self._maintenance_busy:
             return
         try:
             interval = self.query_one("#refresh-interval", Select).value
@@ -681,6 +693,7 @@ class DashboardApp(ClipboardActions, App):
         )
 
     def _render_workspace(self):
+        self._render_management()
         item = self._workspace()
         self.query_one("#full-diagnostics", MonitorPanel).update_snapshot(item)
         if not item:
@@ -782,6 +795,8 @@ class DashboardApp(ClipboardActions, App):
             self._render_sessions()
 
     def on_select_changed(self, event):
+        if self._management_select(event):
+            return
         if event.select.id == "log-source":
             self._render_logs()
         elif event.select.id == "session-scope":
@@ -789,6 +804,8 @@ class DashboardApp(ClipboardActions, App):
             self._render_sessions()
 
     def on_button_pressed(self, event):
+        if self._management_button(event):
+            return
         action = event.button.id
         if action == "copy-selection":
             self.action_copy_selection(event.button.consume_selection())

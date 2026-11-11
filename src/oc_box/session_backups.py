@@ -592,7 +592,7 @@ def backup(
                 _fail("ownership-changed")
         if _domain(sessions._descendants, _inventory(catalog), session_id) != selected:
             _fail("snapshot-changed")
-        for item, exported in zip(selected, payload["sessions"]):
+        for item, exported in zip(selected, payload["sessions"], strict=True):
             if _export(catalog, item["id"]) != exported:
                 _fail("snapshot-changed")
         _unchanged(catalog, selected)

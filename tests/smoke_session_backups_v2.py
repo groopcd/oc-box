@@ -17,6 +17,7 @@ from unittest.mock import patch
 
 from oc_box import backup_crypto as crypto
 from oc_box import opencode_v2_io as bridge
+from oc_box import opencode_compat
 from oc_box import session_backups as engine
 from oc_box import tui_sessions
 
@@ -138,7 +139,10 @@ def run(binary):
                 timeout=30,
                 check=False,
             )
-            require(version.returncode == 0 and b"2.2.6" in version.stdout)
+            require(
+                version.returncode == 0
+                and opencode_compat.version(version.stdout.decode("utf-8")) == "2.2.6"
+            )
             private = crypto.small(["age-keygen"])
             recipient = (
                 crypto.small(["age-keygen", "-y"], data=private).decode().strip()

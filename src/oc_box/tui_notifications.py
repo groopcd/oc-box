@@ -28,10 +28,48 @@ _OPERATIONS = {
     "storage": ("Storage action", "selected storage"),
     "workspace-purge": ("Workspace purge", "selected workspace"),
     "backup-file-delete": ("Backup file deletion", "selected backup file"),
+    "backup": ("Backup", "selected backup output"),
+    "restore": ("Restore", "selected restore target"),
+    "inspection": ("Backup inspection", "selected archive"),
     "mutation": ("Action", "selected source"),
 }
 
 _DETAILS = {
+    "host-only": "Run this operation as the regular user in a host terminal, not inside a container or with sudo.",
+    "invalid-options": "The internal operation handoff received invalid options. Open a new review through the dashboard instead of invoking it as a standalone command.",
+    "invalid-request-descriptor": "The operation handoff is not using its private in-memory channel. Return to the dashboard and open a fresh review.",
+    "host-terminal-required": "This action needs a foreground host terminal for native masked prompts. Run the dashboard in a host terminal; no password belongs in a selectable input field.",
+    "invalid-scope": "The storage scope is invalid. Choose host, selected workspace or all registered workspaces, then select one explicit target.",
+    "invalid-workspace": "Select a valid registered workspace ID before reviewing this action.",
+    "inventory-unavailable": "Registered storage metadata could not be read safely. Refresh the list and inspect read-only diagnostics; no replacement workspace will be created.",
+    "workspace-unavailable": "The reviewed workspace registration is no longer available. Refresh and select the intended registered target again.",
+    "invalid-registration": "The canonical workspace registration or its resource identities are invalid. Inspect read-only diagnostics; do not repair or replace it implicitly.",
+    "unsafe-registry": "Workspace metadata has an unsafe file type, link, ownership or write permission. Inspect it outside the dashboard; no permissions are changed automatically.",
+    "invalid-plan": "The review is missing, expired or already consumed. Refresh and open a new confirmation for the current target.",
+    "stale-plan": "Workspace identity or metadata changed after review. Refresh and open a new workspace-specific confirmation.",
+    "plan-limit": "Too many reviews are pending. Cancel old reviews or wait, then open a fresh confirmation.",
+    "invalid-backup-file": "This file does not have a supported encrypted backup envelope. Select a supported workspace or session-history archive; arbitrary files are not deletion targets.",
+    "unsupported-backup-file": "The selected archive is not a supported workspace/session encrypted backup. Choose the correct file; the dashboard does not delete arbitrary host storage.",
+    "protected-output-path": "Backup output must be outside the selected project and oc-box state. Choose a new file in a separate existing directory.",
+    "invalid-destination": "Choose an explicit valid restore directory. Workspace restore requires a new host directory; session restore uses the reviewed native source directory.",
+    "directory-unavailable": "The selected directory is unavailable. Check its presence and access before opening a new review.",
+    "directory-required": "Choose an existing real directory for the requested source or output parent.",
+    "invalid-parent": "A parent path is not a real directory. Choose a supported direct path and review again.",
+    "invalid-backup-kind": "Choose a supported full/portable workspace archive or native session-history backup kind.",
+    "invalid-recipients": "Use supported native age X25519 public recipient keys, or leave recipients empty for a masked passphrase prompt. Do not enter a password in the recipient field.",
+    "too-many-keys": "At most 16 age recipients or identity files can be selected. Review the intended keys and try again.",
+    "request-too-large": "The operation review exceeds its metadata size limit. Choose a smaller supported target; no oversized request is submitted.",
+    "state-root-changed": "The configured oc-box registry changed after review. Refresh the intended registry and open a new confirmation.",
+    "invalid-request": "The operation request could not be validated. Refresh and open a new supported action; no arbitrary command is accepted.",
+    "unsupported-action": "This action is not supported for the chosen scope. Choose a reviewed session, workspace or encrypted-backup operation.",
+    "native-service-unverified": "The native service identity or version could not be verified. Explicitly reconnect to the intended source using a compatible native client.",
+    "native-version-mismatch": "The native CLI version differs from the connected host service. Use a matching client; the dashboard will not replace that service to force an import.",
+    "native-version-unverified": "The native CLI did not report a supported version. Check the selected executable before reconnecting; no service replacement is attempted.",
+    "invalid-import-body": "The native history import body could not be validated. Inspect the encrypted archive with the supported session tools; do not force a malformed import.",
+    "invalid-import-directory": "The reviewed native import directory is invalid. Choose the intended absolute destination and review again.",
+    "import-directory-mismatch": "The imported history and reviewed destination disagree. Open a new restore review instead of redirecting an existing one.",
+    "import-acknowledgement-unverified": "Native import did not produce the expected acknowledgement. Inspect the destination history before any retry; success exit status alone is not proof of import.",
+    "session-changed": "The selected native history changed after review. Refresh the intended source and prepare a new backup.",
     "read-only": "This dashboard is read-only. Use an explicitly writable dashboard to review and confirm changes.",
     "demo": "Synthetic demo mode cannot change native sessions, workspaces or backup files. Open a non-demo dashboard to manage real state.",
     "selection-required": "Select a session from an explicitly connected source before opening this action.",
@@ -216,7 +254,14 @@ def _fixed_reason(error, reason):
 
 
 def failure_notice(
-    operation, error=None, *, reason=None, dispatched=False, completed=False, count=None
+    operation,
+    error=None,
+    *,
+    reason=None,
+    dispatched=False,
+    completed=False,
+    count=None,
+    uncertain=False,
 ):
     """Return fixed copy only; never format an exception, target, or raw reason.
 
@@ -237,12 +282,22 @@ def failure_notice(
     key = _fixed_reason(error, reason)
     # An OS error from a dispatched, possibly multi-step operation cannot prove
     # that earlier steps left the target unchanged, even for an EBUSY refusal.
-    preflight = key in _PREFLIGHT_REASONS and not isinstance(error, OSError)
-    if key == "invalid-mutation-response" or (dispatched is True and not preflight):
+    preflight = (
+        key in _PREFLIGHT_REASONS
+        and not isinstance(error, OSError)
+        and uncertain is not True
+    )
+    if (
+        uncertain is True
+        or key in {"invalid-mutation-response", "import-acknowledgement-unverified"}
+        or (dispatched is True and not preflight)
+    ):
+        detail = _DETAILS.get(key)
         return FailureNotice(
             f"{title} outcome unverified",
             f"The action may already have changed the {target}, but its outcome could not be verified. "
-            "Inspect and refresh the actual state before any retry. No automatic retry was made.",
+            "Inspect and refresh the actual state before any retry. No automatic retry was made."
+            + (" " + detail if detail else ""),
             severity="error",
         )
     message = _DETAILS.get(

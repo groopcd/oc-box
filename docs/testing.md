@@ -60,7 +60,7 @@ opt-in: require a verified owned selected container, tail 500, 1 MiB and
 redaction. Tests of known patterns are not proof that arbitrary secrets are
 removed. This stage has no native OpenCode logfile reader.
 
-**Optional headless UI layer.** Exercise all five tabs and `1`–`5`, `r`, `q`,
+**Optional headless UI layer.** Exercise all seven tabs and `1`–`7`, `r`, `q`,
 `Ctrl+L`, `s`/`F2` and focused-terminal routing with Textual's headless behavior
 tools. Check compact one-line header ellipsis at small widths without hiding log
 search. Search must stay visible and case-insensitive/literal across tabs, source
@@ -153,6 +153,22 @@ dashboard discovery path, real history, inference, Podman or interactive termina
 rendering. The UI tests also cover bounded favorites locking, malformed colors,
 stale connections, typed deletion, source identity and searchable paused logs.
 
+Run the encrypted session-history engine and actual native CLI-body transport
+fixtures separately; both require native 2.2.6 and host age tools:
+
+```bash
+python3 -B tests/smoke_session_backups_v2.py --opencode /path/to/opencode-v2
+python3 -B tests/smoke_session_backup_transport_v2.py --opencode /path/to/opencode-v2
+```
+
+They cover history above 4 MiB, encrypted envelopes, fresh IDs/cleared privileges,
+source preservation and import verification. The transport fixture uses the real
+production host/workspace stdin-import hooks and native CLI, but explicitly adapts
+discovery/environment, workspace selection/lease and the Podman exec envelope to
+a private local server. It does not establish normal-host discovery, actual
+Podman stdin delivery or interactive TTY acceptance. The ordinary native CI job
+keeps both fixtures enabled alongside V1/V2, plugin, vault and permission checks.
+
 **Packaging layer.** Verify `oc-box[tui]` in isolated uv/pipx installations and
 GitHub `--with-tui` both alone and with `--with-vault`. Check private per-release
 dependencies, running-release pinning and retained opt-ins on GitHub update;
@@ -173,7 +189,7 @@ store outside containers/sandboxes. Do not run these probes inside oc-box, use
 real workspaces, or change the candidate while its tests run. Required manual
 observations include:
 
-- Five-tab navigation, compact header and bounded diagnostics/System panels on
+- Seven-tab navigation (retaining `1`–`5`, adding Storage/Backup at `6`/`7`), compact header and bounded diagnostics/System panels on
   small terminals, readable fixed-scale histories and expandable full details/
   mounts. Log search remains available while following/paused on every tab.
   Observe default one-second and selectable shared Status/followed-log refresh,
@@ -206,7 +222,27 @@ observations include:
   for an intentional unarchive. Keep independent workspace/host copies intact.
 - A multi-page Sessions table retaining its cursor/selection/scroll during
   background Status/log/storage updates, with explicit manual inventory refresh.
+  Delayed connections visibly show source/stage and an animated wait state;
+  cancellation remains visible until its bounded call finishes, duplicate clicks
+  do not silently disappear, and stale callbacks cannot clear another request.
   Fixed demo data must remain clearly synthetic, not a live host measurement.
+- Actionable failure notifications plus persistent notices for every deletion
+  refusal category, including managed native children, running shells, active
+  work, stale reviews, unknown ownership/activity, read-only and incomplete data.
+  Transport uncertainty must not claim nothing changed; successful deletion with
+  a failed refresh must remain distinguishable. No raw private errors are shown.
+- Storage metadata across host/selected/all scopes, canonical target binding,
+  bounded nonblocking registration reads, typed one-workspace purge retaining
+  project/history, and owner/lease/exposure refusal without forced cleanup.
+  Explicit full/portable backup, inspection and new-directory restore through
+  actual foreground masked TTY prompts; no password can enter UI selection/copy,
+  argv/env, plaintext files, logs or journals. Read-only/demo gates apply again
+  at execution and source changes invalidate reviews.
+- Encrypted session-tree backup/restore to host and existing workspace sources,
+  including history above 4 MiB, fresh IDs, cleared privileges, verified import,
+  retained source/independent histories, and honest partial-failure recovery.
+  Backup-file deletion affects only the reviewed owned encrypted file. No whole
+  host database or shared-cache deletion, implicit owner launch or backup overwrite.
 - Visible-text selection/copy across diagnostics, table/log rows, the embedded
   shell, graphs, control labels and modal reviews/settings, including wide/
   combining characters and scrolled views. Verify visible highlighting over
@@ -252,6 +288,18 @@ observations separately rather than self-certifying them from scripts. Earlier s
 reports and the old native terminal pass retain their original scope; they do
 not validate the new dashboard, embedding or journal. No new host pass or stable
 publication is recorded by adding this plan.
+
+Fresh `tools/test_interactive_podman.py` fixtures now configure a source-bound
+private native host-service port before any explicit host Connect. Native 2.2.6
+rejects port zero as a saved service setting: the fixture reserves an ephemeral
+IPv4 loopback port, sets that explicit number once, and records the selector.
+Setup does not start the service. File-only validation accepts native's later
+opaque authentication addition while preserving private modes and the exact port,
+wrapper, profile and source bindings. The reservation closes after configuration;
+a later bind race fails closed with retained evidence, never automatic retry,
+default-port fallback or shutdown of an unknown listener. Old retained fixtures
+are neither migrated nor replayed with this new helper. This is a fixture change,
+not a production host-service discovery or permission-policy override.
 
 ### V2 session-history synchronization
 

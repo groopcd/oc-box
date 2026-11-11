@@ -32,7 +32,7 @@ from oc_box import oc_box as box
 from oc_box import opencode_compat as compat
 from oc_box import opencode_v2_io as bridge
 from oc_box import session_backups as engine
-from oc_box import tui_backend, tui_operations, tui_sessions, workspace_service
+from oc_box import tui_operations, tui_sessions, workspace_service
 
 
 SCOPE = "OFFLINE_NATIVE_BODY_TRANSPORT_ONLY"
@@ -371,7 +371,7 @@ def round_trip(
     }
     observed = [bridge.checked_export(native, ident) for ident in created]
     for original_id, restored in zip(
-        ("ses_fixture_root", "ses_fixture_child"), observed
+        ("ses_fixture_root", "ses_fixture_child"), observed, strict=True
     ):
         original = baseline[original_id]
         require(restored["info"]["location"] == {"directory": str(destination)})
@@ -397,7 +397,7 @@ def round_trip(
         )
         require(len(restored["messages"]) == len(original["messages"]))
         for source_message, target_message in zip(
-            original["messages"], restored["messages"]
+            original["messages"], restored["messages"], strict=True
         ):
             new_id = target_message["id"]
             require(

@@ -650,6 +650,282 @@ class OperationTests(unittest.TestCase):
             self.refusal("invalid-request", operations.execute, box, value)
         self.forbidden["main"].assert_not_called()
 
+    def import_payload(self, *, large=False):
+        location = {"directory": str(self.project)}
+        return {
+            "info": {"id": "ses_restored", "location": location},
+            "location": location,
+            "messages": [
+                {
+                    "id": "msg_restored",
+                    "type": "user",
+                    "text": "PRIVATE_TRANSCRIPT_SENTINEL"
+                    + ("x" * (4 * 1024 * 1024) if large else ""),
+                }
+            ],
+        }
+
+    def test_large_host_import_streams_history_without_argv_or_auth_changes(self):
+        payload = self.import_payload(large=True)
+        imports = []
+
+        def native(command, **kwargs):
+            if command == ["opencode", "--version"]:
+                return SimpleNamespace(stdout="opencode v2.2.6\n")
+            if command == ["opencode", "api", "get", "/api/info"]:
+                return SimpleNamespace(stdout='{"data":{"pid":42,"version":"2.2.6"}}')
+            self.assertEqual(
+                command,
+                [
+                    "opencode",
+                    "session",
+                    "import",
+                    "/proc/self/fd/0",
+                    "--directory",
+                    str(self.project),
+                ],
+            )
+            self.assertNotIn("PRIVATE_TRANSCRIPT_SENTINEL", json.dumps(command))
+            self.assertNotIn("PRIVATE_TRANSCRIPT_SENTINEL", json.dumps(kwargs["env"]))
+            self.assertEqual(json.loads(kwargs["input"]), payload)
+            self.assertGreater(len(kwargs["input"]), 4 * 1024 * 1024)
+            self.assertTrue(kwargs["private"])
+            imports.append(command)
+            return SimpleNamespace(stdout="Imported session: ses_restored\n")
+
+        self.forbidden["run"].side_effect = native
+        self.assertIsNone(
+            operations._OperationBackend(box).host_request(
+                "POST", "/api/experimental/session/import", payload
+            )
+        )
+        self.assertEqual(len(imports), 1)
+        self.assertEqual(self.forbidden["run"].call_count, 4)
+
+    def test_import_identity_or_directory_mismatch_refuses_before_native_command(self):
+        payload = self.import_payload()
+        payload["info"]["location"] = {"directory": "/foreign"}
+        self.refusal(
+            "import-directory-mismatch",
+            operations._OperationBackend(box).host_request,
+            "POST",
+            "/api/experimental/session/import",
+            payload,
+        )
+        self.forbidden["run"].assert_not_called()
+
+    def test_host_import_refuses_changed_service_pid_without_retrying_import(self):
+        self.forbidden["run"].side_effect = [
+            SimpleNamespace(stdout='{"data":{"pid":42,"version":"2.2.6"}}'),
+            SimpleNamespace(stdout="opencode v2.2.6\n"),
+            SimpleNamespace(stdout="Imported session: ses_restored\n"),
+            SimpleNamespace(stdout='{"data":{"pid":43,"version":"2.2.6"}}'),
+        ]
+        self.refusal(
+            "source-changed",
+            operations._OperationBackend(box).host_request,
+            "POST",
+            "/api/experimental/session/import",
+            self.import_payload(),
+        )
+        self.assertEqual(self.forbidden["run"].call_count, 4)
+
+    def test_import_success_exit_without_verified_acknowledgement_is_uncertain(self):
+        self.forbidden["run"].side_effect = [
+            SimpleNamespace(stdout='{"data":{"pid":42,"version":"2.2.6"}}'),
+            SimpleNamespace(stdout="opencode v2.2.6\n"),
+            SimpleNamespace(stdout="SYNTHETIC_CONFLICT_OR_MALFORMED_REPLY"),
+        ]
+        self.refusal(
+            "import-acknowledgement-unverified",
+            operations._OperationBackend(box).host_request,
+            "POST",
+            "/api/experimental/session/import",
+            self.import_payload(),
+        )
+        self.assertEqual(self.forbidden["run"].call_count, 3)
+
+    def test_host_import_version_mismatch_refuses_before_import_or_service_replacement(
+        self,
+    ):
+        self.forbidden["run"].side_effect = [
+            SimpleNamespace(stdout='{"data":{"pid":42,"version":"2.3.0"}}'),
+            SimpleNamespace(stdout="opencode v2.2.6\n"),
+        ]
+        self.refusal(
+            "native-version-mismatch",
+            operations._OperationBackend(box).host_request,
+            "POST",
+            "/api/experimental/session/import",
+            self.import_payload(),
+        )
+        self.assertEqual(self.forbidden["run"].call_count, 2)
+        self.assertEqual(
+            self.forbidden["run"].call_args.args[0], ["opencode", "--version"]
+        )
+
+    def test_malformed_native_version_is_not_echoed_or_imported(self):
+        self.forbidden["run"].side_effect = [
+            SimpleNamespace(stdout='{"data":{"pid":42,"version":"2.2.6"}}'),
+            SimpleNamespace(stdout="PRIVATE_NATIVE_VERSION_SENTINEL"),
+        ]
+        self.refusal(
+            "native-version-unverified",
+            operations._OperationBackend(box).host_request,
+            "POST",
+            "/api/experimental/session/import",
+            self.import_payload(),
+        )
+        self.assertEqual(self.forbidden["run"].call_count, 2)
+
+    def test_cancelled_operation_review_is_not_reusable(self):
+        plan = self.plan(workspace=self.ident)
+        self.controller.cancel(plan)
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, "CONFIRM")
+        self.forbidden["main"].assert_not_called()
+
+    def test_large_workspace_import_uses_existing_interactive_exec_and_private_owner(
+        self,
+    ):
+        connection = {
+            "url": "http://127.0.0.1:12345",
+            "password": "PRIVATE_CONTROL_SENTINEL",
+        }
+        payload = self.import_payload(large=True)
+        self.forbidden["run"].return_value = SimpleNamespace(
+            stdout="Imported session: ses_restored\n"
+        )
+        self.forbidden["run"].side_effect = None
+        result = operations._OperationBackend(box)._workspace_connection_request(
+            self.data, connection, "POST", "/api/experimental/session/import", payload
+        )
+        self.assertIsNone(result)
+        args, kwargs = self.forbidden["run"].call_args
+        command = args[0]
+        self.assertEqual(command[:3], ["podman", "exec", "-i"])
+        self.assertNotIn("-t", command)
+        self.assertEqual(
+            command[-8:],
+            [
+                box.CONTAINER_OPENCODE,
+                "session",
+                "import",
+                "/proc/self/fd/0",
+                "--directory",
+                str(self.project),
+                "--server",
+                connection["url"],
+            ],
+        )
+        self.assertNotIn("PRIVATE_CONTROL_SENTINEL", json.dumps(command))
+        self.assertNotIn("PRIVATE_TRANSCRIPT_SENTINEL", json.dumps(command))
+        self.assertEqual(
+            command.environment["OPENCODE_PASSWORD"], connection["password"]
+        )
+        self.assertEqual(json.loads(kwargs["input"]), payload)
+        self.assertTrue(kwargs["private"])
+
+    def test_non_import_workspace_requests_keep_existing_native_api_transport(self):
+        backend = operations._OperationBackend(box)
+        with patch.object(workspace_service, "api", return_value=None) as request:
+            self.assertIsNone(
+                backend._workspace_connection_request(
+                    self.data, {}, "DELETE", "/api/session/ses_existing"
+                )
+            )
+        request.assert_called_once_with(
+            box, self.data, {}, "DELETE", "/api/session/ses_existing", None, timeout=30
+        )
+
+    def test_session_restore_uses_same_child_review_plan_and_closes_it(self):
+        from oc_box import session_backups
+
+        self.archive(names=("key.age", "manifest.age", "sessions.age"))
+        for phrase, imported in (("RESTORE", True), ("wrong", False)):
+            with self.subTest(phrase=phrase):
+                plan = self.plan(
+                    "session-restore",
+                    origin="host",
+                    store="/synthetic/native.db",
+                    destination=self.project,
+                )
+                request = self.controller.confirm(plan, "RESTORE")
+                connection = SimpleNamespace(
+                    origin="host",
+                    store="/synthetic/native.db",
+                    close=Mock(),
+                    ownership=Mock(),
+                    request=lambda *args: {"data": [], "cursor": {"next": None}},
+                )
+                backend = SimpleNamespace(
+                    session_connection=Mock(return_value=connection),
+                    associations=Mock(return_value=[]),
+                )
+                restore_plan = SimpleNamespace(
+                    review={"session_count": 1}, close=Mock()
+                )
+                with (
+                    patch.object(operations, "_OperationBackend", return_value=backend),
+                    patch.object(
+                        session_backups, "prepare_restore", return_value=restore_plan
+                    ) as prepare,
+                    patch.object(session_backups, "restore") as restore,
+                    patch("builtins.input", return_value=phrase),
+                    patch("sys.stdout", new_callable=io.StringIO),
+                ):
+                    self.assertEqual(
+                        operations.execute(box, request), 0 if imported else 1
+                    )
+                self.assertEqual(restore.call_count, int(imported))
+                if imported:
+                    self.assertIs(restore.call_args.args[1], restore_plan)
+                self.assertEqual(
+                    prepare.call_args.args[1:], (str(self.output), str(self.project))
+                )
+                restore_plan.close.assert_called_once()
+                connection.close.assert_called_once()
+
+    def test_partial_session_restore_reports_only_fresh_recovery_ids(self):
+        from oc_box import session_backups
+
+        self.archive(names=("key.age", "manifest.age", "sessions.age"))
+        plan = self.plan(
+            "session-restore",
+            origin="host",
+            store="/synthetic/native.db",
+            destination=self.project,
+        )
+        request = self.controller.confirm(plan, "RESTORE")
+        connection = SimpleNamespace(
+            origin="host",
+            store="/synthetic/native.db",
+            close=Mock(),
+            ownership=Mock(),
+            request=lambda *args: {"data": [], "cursor": {"next": None}},
+        )
+        backend = SimpleNamespace(
+            session_connection=Mock(return_value=connection),
+            associations=Mock(return_value=[]),
+        )
+        restore_plan = SimpleNamespace(review={"session_count": 1}, close=Mock())
+        ident = "ses_" + "a" * 32
+        failure = session_backups.SessionBackupError(
+            "import-verification-failed", created_ids=(ident,), attempted_ids=(ident,)
+        )
+        with (
+            patch.object(operations, "_OperationBackend", return_value=backend),
+            patch.object(session_backups, "prepare_restore", return_value=restore_plan),
+            patch.object(session_backups, "restore", side_effect=failure),
+            patch("builtins.input", return_value="RESTORE"),
+            patch("sys.stdout", new_callable=io.StringIO) as output,
+        ):
+            with self.assertRaises(session_backups.SessionBackupError):
+                operations.execute(box, request)
+        self.assertIn(ident, output.getvalue())
+        self.assertIn('"automatic_rollback": false', output.getvalue())
+        restore_plan.close.assert_called_once()
+        connection.close.assert_called_once()
+
     def test_isolated_script_uses_its_own_flat_runtime_without_optional_ui_dependencies(
         self,
     ):
@@ -666,7 +942,7 @@ class OperationTests(unittest.TestCase):
             timeout=15,
         )
         self.assertEqual(result.returncode, 1)
-        self.assertIn(b"invalid-options", result.stdout)
+        self.assertIn(b"refused", result.stdout)
         self.assertNotIn(b"Traceback", result.stderr)
 
 
