@@ -39,7 +39,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-from types import ModuleType
 import re
 import secrets
 import shlex
@@ -156,6 +155,7 @@ RETAINED_MARKERS = (
 )
 KEY = "ACCEPTANCE_API_KEY"
 _BINDING = ContextVar("global_fixture_binding", default=None)
+_ADMISSION = ContextVar("global_fixture_admission", default=None)
 SIDE = "ACCEPTANCE_SIDE_SECRET"
 ADDED = "ACCEPTANCE_ADDED_SECRET"
 AMBIENT = "ACCEPTANCE_AMBIENT_TOKEN"
@@ -611,7 +611,7 @@ def safe_bootstrap_file(source, relative):
     return path
 
 
-def import_origins(identity):
+def import_origins(identity, admitted=None):
     for name, module in tuple(sys.modules.items()):
         filename = getattr(module, "__file__", None)
         if filename:
@@ -621,7 +621,15 @@ def import_origins(identity):
                     loaded.relative_to(APP).as_posix() in identity["sha256"],
                     "source-shadowing",
                 )
+                if admitted is not None and name != "__main__":
+                    require(
+                        name in admitted and admitted[name][0] is module,
+                        "source-shadowing",
+                    )
         if name in ("oc_box", "tools") or name.startswith(("oc_box.", "tools.")):
+            record = admitted.get(name) if admitted is not None else None
+            if admitted is not None:
+                require(record is not None and record[0] is module, "source-shadowing")
             spec = getattr(module, "__spec__", None)
             require(spec is not None and spec.name == name, "source-shadowing")
             if filename:
@@ -647,6 +655,15 @@ def import_origins(identity):
                 [filename] if filename else list(getattr(module, "__path__", ()))
             )
             require(bool(locations), "source-shadowing")
+            if record is not None:
+                require(
+                    record[1] is spec
+                    and record[2] == filename
+                    and record[3] == tuple(getattr(module, "__path__", ()))
+                    and record[4] is spec.loader
+                    and getattr(module, "__loader__", None) is record[4],
+                    "source-shadowing",
+                )
             for item in locations:
                 path = Path(item).resolve()
                 require(path.is_relative_to(APP), "source-shadowing")
@@ -657,9 +674,133 @@ def import_origins(identity):
                     )
 
 
+class _CandidateAdmission:
+    """Closed standalone admission for only tools/oc_box; never a general loader."""
+
+    def __init__(self, identity):
+        self.identity = {**identity, "sha256": dict(identity["sha256"])}
+        self.manifest = self.identity["sha256"]
+        self.admitted = {}
+        self.closed = False
+
+    def check(self):
+        require(
+            not self.closed and any(item is self for item in sys.meta_path),
+            "source-shadowing",
+        )
+        import_origins(self.identity, self.admitted)
+
+    def close(self):
+        sys.meta_path[:] = [item for item in sys.meta_path if item is not self]
+        self.closed = True
+        if _ADMISSION.get() is self:
+            _ADMISSION.set(None)
+
+    def find_spec(self, name, path=None, target=None):
+        if not (name in ("tools", "oc_box") or name.startswith(("tools.", "oc_box."))):
+            return None
+        self.check()
+        require(
+            target is None
+            and re.fullmatch(r"(?:tools|oc_box)(?:\.[A-Za-z_][A-Za-z0-9_]*)*", name),
+            "source-shadowing",
+        )
+        parts = name.split(".")
+        base = APP / ("tools" if parts[0] == "tools" else "src/oc_box")
+        stem = base.joinpath(*parts[1:])
+        no_symlinks(stem)
+        if len(parts) > 1:
+            require(list(path or ()) == [str(stem.parent)], "source-shadowing")
+        else:
+            require(path is None, "source-shadowing")
+        package_file = stem / "__init__.py"
+        module_file = stem.with_suffix(".py")
+        if package_file.relative_to(APP).as_posix() in self.manifest:
+            file, package = package_file, stem
+        elif len(parts) == 1 and name == "tools":
+            file, package = None, stem
+            require(
+                stem.is_dir()
+                and not package_file.exists()
+                and not package_file.is_symlink(),
+                "source-shadowing",
+            )
+        elif module_file.relative_to(APP).as_posix() in self.manifest:
+            file, package = module_file, None
+        else:
+            raise FixtureError("source-shadowing")
+        content = None
+        if file is not None:
+            file = safe_bootstrap_file(APP, file.relative_to(APP))
+            with open(
+                file,
+                "rb",
+                opener=lambda name, flags: os.open(name, flags | os.O_NOFOLLOW),
+            ) as stream:
+                require(
+                    stat.S_ISREG(os.fstat(stream.fileno()).st_mode), "source-shadowing"
+                )
+                content = stream.read()
+            require(
+                hashlib.sha256(content).hexdigest()
+                == self.manifest[file.relative_to(APP).as_posix()],
+                "source-changed",
+            )
+        owner = self
+
+        class CapturedSource:
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                owner.admitted[name] = (
+                    module,
+                    module.__spec__,
+                    getattr(module, "__file__", None),
+                    tuple(getattr(module, "__path__", ())),
+                    self,
+                )
+                owner.check()
+                if content is not None:
+                    exec(
+                        compile(content, str(file), "exec", dont_inherit=True),
+                        module.__dict__,
+                    )
+                owner.check()
+
+        spec = importlib.machinery.ModuleSpec(
+            name,
+            CapturedSource(),
+            origin=str(file) if file is not None else None,
+            is_package=package is not None,
+        )
+        spec.has_location = file is not None
+        if package is not None:
+            spec.submodule_search_locations = [str(package)]
+        return spec
+
+
+def check_admission(identity):
+    admission = _ADMISSION.get()
+    require(
+        admission is not None and admission.identity == identity, "source-shadowing"
+    )
+    admission.check()
+
+
+def close_admission():
+    admission = _ADMISSION.get()
+    if admission is not None:
+        admission.close()
+
+
 def capture_binding(source, expected, binaries=()):
     identity = source_snapshot(source, expected)
     if _BINDING.get() is None:
+        require(
+            not any(name in globals() for name in ("box", "crypto", "guards")),
+            "source-shadowing",
+        )
         require(
             not any(
                 name in ("oc_box", "tools") or name.startswith(("oc_box.", "tools."))
@@ -679,25 +820,34 @@ def capture_binding(source, expected, binaries=()):
     sys.dont_write_bytecode = True
     sys.pycache_prefix = "/nonexistent-oc-box-bytecode-" + secrets.token_hex(16)
     prune_candidate_roots()
-    if _BINDING.get() is None:
-        pin_candidate_packages(identity)
-    load_runtime()
-    # Older authenticated donors may add their checkout to sys.path. Packages
-    # are already pinned; remove these broad admission roots before any effects.
-    prune_candidate_roots()
-    import_origins(identity)
-    require(source_snapshot(source, expected) == identity, "source-changed")
-    native = {}
-    for role, binary in binaries:
-        pinned = guard_call(
-            guards.native_identity, Path(binary), outside=(APP,), resolve_entry=True
-        )
-        native[role] = {
-            "path": str(pinned.path),
-            "sha256": pinned.sha256,
-            "bytes": pinned.bytes,
-        }
-    return {"source": identity, "native": native}
+    initial = _BINDING.get() is None
+    if initial:
+        admission = _CandidateAdmission(identity)
+        _ADMISSION.set(admission)
+        sys.meta_path.insert(0, admission)
+    try:
+        if initial:
+            pin_candidate_packages(identity)
+        check_admission(identity)
+        load_runtime()
+        prune_candidate_roots()
+        check_admission(identity)
+        require(source_snapshot(source, expected) == identity, "source-changed")
+        native = {}
+        for role, binary in binaries:
+            pinned = guard_call(
+                guards.native_identity, Path(binary), outside=(APP,), resolve_entry=True
+            )
+            native[role] = {
+                "path": str(pinned.path),
+                "sha256": pinned.sha256,
+                "bytes": pinned.bytes,
+            }
+        return {"source": identity, "native": native}
+    except BaseException:
+        if initial:
+            close_admission()
+        raise
 
 
 def prune_candidate_roots():
@@ -713,44 +863,10 @@ def prune_candidate_roots():
 
 
 def pin_candidate_packages(identity):
-    """Pin search locations before executing any candidate package code."""
-    for name, directory in (("tools", APP / "tools"), ("oc_box", APP / "src/oc_box")):
-        directory = no_symlinks(directory)
-        require(directory.is_dir(), "source-shadowing")
-        init = directory / "__init__.py"
-        if init.exists() or init.is_symlink():
-            relative = init.relative_to(APP).as_posix()
-            require(
-                relative in identity["sha256"]
-                and hashlib.sha256(
-                    safe_bootstrap_file(APP, relative).read_bytes()
-                ).hexdigest()
-                == identity["sha256"][relative],
-                "source-shadowing",
-            )
-            spec = importlib.util.spec_from_file_location(
-                name, init, submodule_search_locations=[str(directory)]
-            )
-            require(spec is not None and spec.loader is not None, "source-shadowing")
-            require(
-                spec.origin == str(init)
-                and list(spec.submodule_search_locations or ()) == [str(directory)],
-                "source-shadowing",
-            )
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[name] = module
-            spec.loader.exec_module(module)
-        else:
-            require(name == "tools", "source-shadowing")
-            spec = importlib.machinery.ModuleSpec(name, loader=None, is_package=True)
-            spec.submodule_search_locations = [str(directory)]
-            module = ModuleType(name)
-            module.__package__, module.__path__, module.__spec__ = (
-                name,
-                [str(directory)],
-                spec,
-            )
-            sys.modules[name] = module
+    """Only the standalone captured-byte admission may initialize these names."""
+    check_admission(identity)
+    importlib.import_module("tools")
+    importlib.import_module("oc_box")
 
 
 def executing_commit():
@@ -790,7 +906,7 @@ def verify_binding(binding):
         source_snapshot(APP, binding["source"]["commit"]) == binding["source"],
         "source-changed",
     )
-    import_origins(binding["source"])
+    check_admission(binding["source"])
     for native in binding["native"].values():
         guard_call(
             guards.check_native,
@@ -3103,9 +3219,10 @@ def program_label(command):
 
 
 def safe_error_class(error):
+    box_error = getattr(globals().get("box"), "BoxError", ())
     for kind, label in (
         (FixtureError, "fixture-error"),
-        (box.BoxError, "box-error"),
+        (box_error, "box-error"),
         (subprocess.TimeoutExpired, "timeout"),
         (subprocess.CalledProcessError, "subprocess-exit"),
         (AssertionError, "assertion"),
@@ -4339,6 +4456,7 @@ def main(argv=None):
                 pass
         return 1
     finally:
+        close_admission()
         if token is not None:
             _BINDING.reset(token)
         os.umask(old_umask)

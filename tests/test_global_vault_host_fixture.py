@@ -2074,6 +2074,7 @@ runpy.run_path(sys.argv[0],run_name='__main__')
         for arguments, expected in (
             (["--help"], 0),
             (["--work-dir", str(self.parent)], 1),
+            (["--retry-source", str(self.root)], 1),
         ):
             with self.subTest(arguments=arguments):
                 result = subprocess.run(
@@ -2118,7 +2119,7 @@ runpy.run_path(sys.argv[0],run_name='__main__')
         }
         with (
             patch.object(fixture, "source_snapshot", return_value=identity),
-            patch.object(fixture, "import_origins"),
+            patch.object(fixture, "check_admission"),
         ):
             fixture.verify_binding(binding)
             with binary.open("ab") as stream:
@@ -3059,6 +3060,113 @@ print(json.dumps({'lazy':True,'exports':True}))
                 self.assertEqual(calls, ["shutdown", "close", "join", "live"])
                 self.assertNotIn("private-provider-", report_path.read_text())
                 self.assertNotIn("private-launch-primary", report_path.read_text())
+
+    def captured_bootstrap_probe(self, root, expected, mode):
+        program = r"""import contextlib,hashlib,importlib,importlib.util,io,json,os,subprocess,sys,types
+from pathlib import Path
+from unittest.mock import patch
+root=Path(sys.argv[1]); expected=sys.argv[2]; mode=sys.argv[3]
+script=root/'tools/test_global_vault_podman.py'; marker=root/'changed-code-marker'
+env={'PATH':os.defpath,'GIT_CONFIG_GLOBAL':'/dev/null','GIT_CONFIG_NOSYSTEM':'1','GIT_NO_REPLACE_OBJECTS':'1'}
+raw=subprocess.run(['git','-C',str(root),'show',expected+':tools/test_global_vault_podman.py'],env=env,capture_output=True,check=True,timeout=15).stdout
+assert hashlib.sha256(raw).digest()==hashlib.sha256(script.read_bytes()).digest()
+effects=[]
+def audit(event,args):
+    if event=='subprocess.Popen' and Path(str(args[0])).name!='git':
+        effects.append(event); raise AssertionError('non-Git subprocess forbidden')
+    if event in ('socket.__new__','socket.connect','socket.bind'):
+        effects.append(event); raise AssertionError('network forbidden')
+sys.addaudithook(audit)
+module=types.ModuleType('__main__'); module.__file__=str(script)
+sys.modules['__main__']=module; sys.argv=[str(script),'--help']
+with contextlib.redirect_stdout(io.StringIO()):
+    try: exec(compile(raw,str(script),'exec'),module.__dict__)
+    except SystemExit as error: assert error.code==0
+original_snapshot=module.source_snapshot; original_factory=importlib.util.module_from_spec
+mutated=[]
+bad="from pathlib import Path\nPath("+repr(str(marker))+ ").write_text('changed')\nraise RuntimeError('private changed code executed')\n"
+def snapshot(*args):
+    identity=original_snapshot(*args)
+    if mode=='submodule' and not mutated:
+        (root/'src/oc_box/credentials.py').write_text(bad); mutated.append(True)
+    return identity
+def factory(spec):
+    result=original_factory(spec)
+    if mode=='package' and spec.name=='oc_box' and not mutated:
+        (root/'src/oc_box/__init__.py').write_text(bad); mutated.append(True)
+    return result
+binding=None; refused=None; swapped=False; closed=False
+try:
+    with patch.object(module,'source_snapshot',side_effect=snapshot),patch.object(importlib.util,'module_from_spec',side_effect=factory),patch.object(importlib._bootstrap,'module_from_spec',side_effect=factory):
+        binding=module.capture_binding(root,expected)
+    token=module._BINDING.set(binding)
+    try:
+        module.verify_binding(binding)
+        assert module.box.PACKAGE==root/'src/oc_box'
+        if mode=='swap':
+            name='oc_box.credentials'; original=sys.modules[name]
+            replacement=types.ModuleType(name); replacement.__dict__.update(vars(original))
+            sys.modules[name]=replacement
+            try: module.verify_binding(binding)
+            except module.FixtureError as error: swapped=str(error)=='source-shadowing'
+            finally: sys.modules[name]=original
+            if hasattr(module,'close_admission'):
+                module.close_admission()
+                try: module.verify_binding(binding)
+                except module.FixtureError as error: closed=str(error)=='source-shadowing'
+    finally: module._BINDING.reset(token)
+except module.FixtureError as error:
+    refused=str(error)
+except BaseException:
+    refused='unexpected-error'
+finally:
+    if hasattr(module,'close_admission'): module.close_admission()
+print(json.dumps({'refusal':refused,'marker':marker.exists(),'mutated':bool(mutated),'loaded':binding is not None,'effects':effects,'swapped_refused':swapped,'closed_refused':closed}))
+"""
+        result = subprocess.run(
+            [sys.executable, "-I", "-B", "-c", program, str(root), expected, mode],
+            env={"PATH": os.defpath},
+            cwd=self.parent,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return json.loads(result.stdout)
+
+    def test_package_and_submodule_mutation_cannot_execute_changed_candidate_bytes(
+        self,
+    ):
+        for mode in ("package", "submodule"):
+            with self.subTest(mode=mode):
+                root, _, expected = self.private_source_repository(
+                    "captured-" + mode, actual=True
+                )
+                result = self.captured_bootstrap_probe(root, expected, mode)
+                self.assertTrue(result["mutated"])
+                self.assertFalse(result["marker"])
+                self.assertIn(
+                    result["refusal"], ("source-changed", "clean-source-required")
+                )
+                self.assertEqual(result["effects"], [])
+
+    def test_actual_package_bootstrap_is_git_only_and_retains_admitted_module_objects(
+        self,
+    ):
+        for mode in ("positive", "swap"):
+            with self.subTest(mode=mode):
+                root, _, expected = self.private_source_repository(
+                    "captured-" + mode, actual=True
+                )
+                result = self.captured_bootstrap_probe(root, expected, mode)
+                self.assertIsNone(result["refusal"])
+                self.assertTrue(result["loaded"])
+                self.assertFalse(result["marker"])
+                self.assertEqual(result["effects"], [])
+                if mode == "swap":
+                    self.assertTrue(result["swapped_refused"])
+                    self.assertTrue(result["closed_refused"])
 
 
 if __name__ == "__main__":
