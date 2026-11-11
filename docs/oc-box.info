@@ -177,13 +177,14 @@ guessing a package manager from the default workspace image or executing
 os-release text.
 
      oc-box doctor
+     oc-box doctor --feature private-output
      oc-box doctor --feature backup --feature vault
      oc-box doctor --feature backup-info --json
 
-Feature selectors: ‘launch’, ‘maintenance’, ‘history’, ‘backup’,
-‘backup-info’, ‘restore’, ‘vault’, ‘github-upgrade’, ‘bootstrap’,
-‘storage’, ‘overlay’, ‘manuals’, and ‘docs-build’.  Without selectors
-all are reported, but exit status checks only core ‘launch’
+Feature selectors: ‘launch’, ‘private-output’, ‘maintenance’, ‘history’,
+‘backup’, ‘backup-info’, ‘restore’, ‘vault’, ‘github-upgrade’,
+‘bootstrap’, ‘storage’, ‘overlay’, ‘manuals’, and ‘docs-build’.  Without
+selectors all are reported, but exit status checks only core ‘launch’
 prerequisites.  With selectors, exit 0 means every selected feature's
 prerequisites are present; exit 1 means at least one is missing or
 incompatible.  JSON schema version 1 includes scope, detected distro,
@@ -199,6 +200,13 @@ delegation, and mounts; interactive commands check terminal
 requirements.  Command presence does not establish a compatible version
 or validate every backend/driver configuration.  Normal OpenCode launch
 verifies its host/container versions separately.
+
+‘private-output’ probes actual Linux anonymous-memory file creation
+using the same native-Python/libc path as credential capture and
+backup/restore.  V2 owning launches require it even with ‘--no-vault’;
+ordinary V1 launches without vault values and attach-only clients do
+not.  It is separate from the version-neutral ‘launch’ prerequisites:
+doctor does not start OpenCode to infer its version.
 
 4.3 start
 =========
@@ -817,12 +825,14 @@ that an arbitrary Windows/shared mount enforces Unix permissions.
 Python memory is not guaranteed zeroized; core dumps are disabled on
 secret prompt entry where permitted, but host debugging/swap/hardware
 compromise and secrets delivered to container processes are outside
-at-rest encryption.  During vault-enabled launches, host captured
-subprocess output uses anonymous Linux memfd storage rather than
-disk-backed temporary files.  Launcher-generated failure messages redact
-exact active vault values.  This is not a general redaction filter for
-OpenCode, provider logs, tool output, or session archives: an agent can
-still print, save, or transmit a credential it has received.
+at-rest encryption.  During vault-enabled launches and explicit private
+captures (including V2 native saved/OAuth credential transfer with
+‘--no-vault’), host captured subprocess output uses anonymous Linux
+memfd storage rather than disk-backed temporary files.
+Launcher-generated failure messages redact exact active vault values.
+This is not a general redaction filter for OpenCode, provider logs, tool
+output, or session archives: an agent can still print, save, or transmit
+a credential it has received.
 
 4.16 credentials
 ================
@@ -2312,6 +2322,46 @@ File: oc-box.info,  Node: Troubleshooting,  Next: Installation and manuals,  Pre
 15 Troubleshooting
 ******************
 
+15.1 Private output capture and uv Python
+=========================================
+
+V2 startup copies native OpenCode saved/OAuth credentials independently
+of the oc-box vault.  ‘--no-vault’ skips vault entries, not native
+authentication or the private output capture that protects it.  There is
+currently no oc-box ‘--verbose’ flag; the final error after cleanup
+explains a failed startup stage.
+
+Some older uv-managed Python builds omit ‘os.memfd_create’ even on
+capable Linux hosts.  oc-box first uses the Python binding, or, when it
+is absent, lazily calls libc's ‘memfd_create’ with close-on-exec
+enabled.  Both paths use the same kernel facility, never disk-backed
+temporary files or architecture-specific raw syscalls.  A denied/failed
+native call is not retried through libc.  Capability checks happen
+before container startup or reset deletion; preflight failures leave the
+existing container and workspace intact.
+
+     oc-box doctor --feature private-output
+
+If the capability is still unavailable, the error identifies the Python
+running oc-box.  For a ‘uv tool install’ installation, compare it with
+system Python:
+
+     "$(uv tool dir)/oc-box/bin/python" -c 'import os,sys; print(sys.executable); print(sys.version); print("memfd_create:", hasattr(os, "memfd_create"))'
+     /usr/bin/python3 -c 'import os,sys; print(sys.version); print("memfd_create:", hasattr(os, "memfd_create"))'
+
+An absent Python attribute alone is no longer a failure if the libc path
+works.  If system Python is 3.10+ and supports private capture, recreate
+only uv's tool environment with it, retaining any extras originally
+installed:
+
+     uv tool install --force --python /usr/bin/python3 oc-box
+
+This does not install into system Python's site-packages.  Retry the
+original launch; no reset, purge, vault setup, or workspace-image change
+is needed.  A kernel or security-policy denial still fails closed;
+switching interpreters cannot bypass such restrictions.  Backup/restore
+uses the same capability helper.
+
 For a disposable host validation of V2 global-vault first-launch
 delivery, Build approvals/reload and full backup/restore, use the
 source-checkout fixture:
@@ -2333,7 +2383,7 @@ manual marker deletion.  See ‘docs/opencode-2.md’ for exact scope.  No
 new live result is accepted merely by preparing the fixture or passing
 its offline unit tests.
 
-15.1 Reboot, remount, and directory identity changes
+15.2 Reboot, remount, and directory identity changes
 ====================================================
 
 Clearing ‘~/.cache’ does not erase the oc-box registry (normally under
@@ -2422,7 +2472,7 @@ and ‘XDG_STATE_HOME’ and restore the original registry before resuming.
 The default registry is ‘~/.local/state/oc-box’, separate from
 ‘~/.cache’.
 
-15.2 Missing delegated CPU or memory controllers
+15.3 Missing delegated CPU or memory controllers
 ================================================
 
 On some openSUSE hosts a vendor user-manager drop-in clears delegation.
@@ -2445,7 +2495,7 @@ Check effective delegation in
 Retry the existing workspace without reset or purge.  Do not edit vendor
 files.
 
-15.3 Project mount denied by SELinux
+15.4 Project mount denied by SELinux
 ====================================
 
 New mounts use Podman's shared ‘:z’ project relabeling.  Older mounts
@@ -2457,7 +2507,7 @@ Resume normally; no session reimport/reset is needed.  Device-node
 labeling is separate: use the device-policy diagnostics in Devices and
 host permissions.
 
-15.4 Slow first launch or blank terminal
+15.5 Slow first launch or blank terminal
 ========================================
 
 Cold creation performs package and plugin downloads.  Timed stage output
@@ -2467,7 +2517,7 @@ runtime are normalized inside the copied config, not by modifying host
 configuration.  Preserve the environment when diagnosing a wait; reset
 discards the OS cache and can repeat cold setup.
 
-15.5 Active workspace lock or failed import
+15.6 Active workspace lock or failed import
 ===========================================
 
 Exit the active launcher before sync/reset/repair/maintenance/purge.
@@ -2479,7 +2529,7 @@ export without overwriting existing container work.  For a failed
 archive sync, use ‘sync’; the original live DB remains in its volume.  A
 deleted private volume cannot be recovered from session metadata alone.
 
-15.6 Maintenance shell environment
+15.7 Maintenance shell environment
 ==================================
 
 Use ‘oc-box terminal --maintenance’ to debug an existing container
@@ -2698,20 +2748,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2540
 Node: Commands6045
-Node: Options58786
-Node: Lifecycle and persistence78114
-Node: Distribution images80234
-Node: Sessions and recovery85109
-Node: Devices and host permissions91694
-Node: Resource reports94040
-Node: Configuration and environment96151
-Node: Files107414
-Node: Exit status112267
-Node: Examples113078
-Node: Troubleshooting115164
-Node: Installation and manuals124492
-Node: Authors and license132439
-Node: See also133046
+Node: Options59365
+Node: Lifecycle and persistence78693
+Node: Distribution images80813
+Node: Sessions and recovery85688
+Node: Devices and host permissions92273
+Node: Resource reports94619
+Node: Configuration and environment96730
+Node: Files107993
+Node: Exit status112846
+Node: Examples113657
+Node: Troubleshooting115743
+Node: Installation and manuals127095
+Node: Authors and license135042
+Node: See also135649
 
 End Tag Table
 

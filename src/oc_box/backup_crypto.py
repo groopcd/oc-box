@@ -25,11 +25,12 @@ import termios
 import time
 
 if __package__:
-    from . import dependencies, secret_prompt
+    from . import dependencies, private_memory, secret_prompt
     from .backup_archive import BoundedTarInfo
 else:
     import secret_prompt
     import dependencies
+    import private_memory
     from backup_archive import BoundedTarInfo
 
 COMPONENTS = {
@@ -78,11 +79,10 @@ def environment():
 
 @contextlib.contextmanager
 def memory_file(content=b""):
-    if not hasattr(os, "memfd_create"):
-        raise BackupError(
-            "Backup/restore requires Linux memfd support for secret keys and private subprocess output."
-        )
-    fd = os.memfd_create("oc-box-backup-memory", os.MFD_CLOEXEC)
+    try:
+        fd = private_memory.create("oc-box-backup-memory")
+    except OSError as exc:
+        raise BackupError(private_memory.error_message()) from exc
     with os.fdopen(fd, "w+b") as stream:
         stream.write(content)
         stream.seek(0)

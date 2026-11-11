@@ -14,6 +14,11 @@ import shutil
 import subprocess
 import sys
 
+if __package__:
+    from . import private_memory
+else:
+    import private_memory
+
 DISTROS = ("tumbleweed", "leap", "ubuntu", "debian", "fedora", "arch", "alpine")
 MANAGERS = {
     "tumbleweed": ("zypper", "install"),
@@ -125,6 +130,10 @@ RUNTIME = ("linux", "python", "podman", "newuidmap", "newgidmap")
 CREATE = (*RUNTIME, "pasta", "catatonit", "conmon", "oci-runtime")
 FEATURES = {
     "launch": ("OpenCode launch/reset and history sync", (*CREATE, "opencode")),
+    "private-output": (
+        "Private output capture (V2 owning launches and vault-delivered values)",
+        ("linux", "python", "memfd"),
+    ),
     "maintenance": ("Container maintenance, stop, repair and purge", RUNTIME),
     "history": (
         "History-preserving purge and session deletion",
@@ -242,14 +251,10 @@ def probe(key):
         return sys.version_info >= (3, 10), "Running Python must be 3.10 or newer"
     if key == "memfd":
         try:
-            fd = os.memfd_create("oc-box-doctor", os.MFD_CLOEXEC)
-            os.close(fd)
+            private_memory.check()
             return True, "Linux anonymous memory-file support"
-        except (AttributeError, OSError):
-            return (
-                False,
-                "Linux memfd support is required; check kernel/container restrictions",
-            )
+        except OSError:
+            return False, private_memory.error_message()
     if key == "cryptography":
         if __package__:
             from .vault import VaultError, crypto
@@ -327,6 +332,8 @@ def extra_guidance(keys):
                 "GitHub/source: rerun install.py --with-vault (or the curl installer with --with-vault)",
             ]
         )
+    if "memfd" in keys:
+        lines.append(private_memory.error_message())
     return lines
 
 
@@ -394,6 +401,7 @@ def report(selected=None):
             "Checks prerequisites only; rootless Podman, subordinate IDs, cgroup delegation, terminal access and filesystem support are checked by feature commands.",
             "Container baseline tools (Bash, certificates, curl, Git, Python, ripgrep, tar/gzip, Node/npm and PDF tools) are installed automatically inside each workspace; uv and matching OpenCode are bootstrapped there.",
             "Optional feature failures do not disable unrelated functionality; FUSE overlay is optional when kernel overlay works.",
+            "V2 owning launches require private-output even with --no-vault; ordinary V1 launches without vault values do not.",
         ],
     }
 

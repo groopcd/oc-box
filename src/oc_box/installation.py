@@ -20,6 +20,7 @@ else:
 RUNTIME_FILES = (
     "oc_box.py",
     "dependencies.py",
+    "private_memory.py",
     "opencode_compat.py",
     "opencode_v2_io.py",
     "workspace_service.py",

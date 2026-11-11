@@ -106,13 +106,16 @@ Report prerequisites by feature, missing commands, and installation commands for
 
 @example
 oc-box doctor
+oc-box doctor --feature private-output
 oc-box doctor --feature backup --feature vault
 oc-box doctor --feature backup-info --json
 @end example
 
-Feature selectors: @code{launch}, @code{maintenance}, @code{history}, @code{backup}, @code{backup-info}, @code{restore}, @code{vault}, @code{github-upgrade}, @code{bootstrap}, @code{storage}, @code{overlay}, @code{manuals}, and @code{docs-build}. Without selectors all are reported, but exit status checks only core @code{launch} prerequisites. With selectors, exit 0 means every selected feature's prerequisites are present; exit 1 means at least one is missing or incompatible. JSON schema version 1 includes scope, detected distro, feature availability, dependency details, missing providers, package names, installation commands, and notes. Missing optional features never disable unrelated commands. Feature commands check their prerequisites before secret prompts or destructive workspace changes and include OS-specific fixes.
+Feature selectors: @code{launch}, @code{private-output}, @code{maintenance}, @code{history}, @code{backup}, @code{backup-info}, @code{restore}, @code{vault}, @code{github-upgrade}, @code{bootstrap}, @code{storage}, @code{overlay}, @code{manuals}, and @code{docs-build}. Without selectors all are reported, but exit status checks only core @code{launch} prerequisites. With selectors, exit 0 means every selected feature's prerequisites are present; exit 1 means at least one is missing or incompatible. JSON schema version 1 includes scope, detected distro, feature availability, dependency details, missing providers, package names, installation commands, and notes. Missing optional features never disable unrelated commands. Feature commands check their prerequisites before secret prompts or destructive workspace changes and include OS-specific fixes.
 
 This checks installed prerequisites, not full runtime certification. Podman still checks rootless mode, subordinate IDs, controller delegation, and mounts; interactive commands check terminal requirements. Command presence does not establish a compatible version or validate every backend/driver configuration. Normal OpenCode launch verifies its host/container versions separately.
+
+@code{private-output} probes actual Linux anonymous-memory file creation using the same native-Python/libc path as credential capture and backup/restore. V2 owning launches require it even with @code{--no-vault}; ordinary V1 launches without vault values and attach-only clients do not. It is separate from the version-neutral @code{launch} prerequisites: doctor does not start OpenCode to infer its version.
 
 @section start
 
@@ -341,7 +344,7 @@ AES-256-GCM authenticates the ciphertext and format/KDF metadata; Scrypt uses a 
 
 The host vault normally resides at @code{~/.local/share/oc-box/credentials/vault.json}, or its XDG_DATA_HOME equivalent. Its directory must be owned by your user with 0700 and the regular vault file with private 0600 permissions. Symlink paths, extra hard links, wrong ownership, insecure permissions, invalid formats, and nonregular vault/lock files are rejected. Files are locked during read-modify-write. Ciphertext is written to a 0600 temporary file, fsynced, and atomically replaced; no plaintext temp file or key file is created. Do not locate the vault inside a mounted project.
 
-There is no passphrase recovery or permanent unlock/cache agent. Forgotten passphrases make the encrypted data unrecoverable. Back up ciphertext and store the passphrase separately. Removing an entry or changing a passphrase does not erase older backups/snapshots or revoke the provider token. WSL requires a host terminal and filesystem permissions such as its Linux home filesystem; this is not a promise that an arbitrary Windows/shared mount enforces Unix permissions. Python memory is not guaranteed zeroized; core dumps are disabled on secret prompt entry where permitted, but host debugging/swap/hardware compromise and secrets delivered to container processes are outside at-rest encryption. During vault-enabled launches, host captured subprocess output uses anonymous Linux memfd storage rather than disk-backed temporary files. Launcher-generated failure messages redact exact active vault values. This is not a general redaction filter for OpenCode, provider logs, tool output, or session archives: an agent can still print, save, or transmit a credential it has received.
+There is no passphrase recovery or permanent unlock/cache agent. Forgotten passphrases make the encrypted data unrecoverable. Back up ciphertext and store the passphrase separately. Removing an entry or changing a passphrase does not erase older backups/snapshots or revoke the provider token. WSL requires a host terminal and filesystem permissions such as its Linux home filesystem; this is not a promise that an arbitrary Windows/shared mount enforces Unix permissions. Python memory is not guaranteed zeroized; core dumps are disabled on secret prompt entry where permitted, but host debugging/swap/hardware compromise and secrets delivered to container processes are outside at-rest encryption. During vault-enabled launches and explicit private captures (including V2 native saved/OAuth credential transfer with @code{--no-vault}), host captured subprocess output uses anonymous Linux memfd storage rather than disk-backed temporary files. Launcher-generated failure messages redact exact active vault values. This is not a general redaction filter for OpenCode, provider logs, tool output, or session archives: an agent can still print, save, or transmit a credential it has received.
 
 @section credentials
 
@@ -1023,6 +1026,31 @@ The last command deletes its remaining managed resources and recorded host archi
 
 @node Troubleshooting
 @chapter Troubleshooting
+
+@section Private output capture and uv Python
+
+V2 startup copies native OpenCode saved/OAuth credentials independently of the oc-box vault. @code{--no-vault} skips vault entries, not native authentication or the private output capture that protects it. There is currently no oc-box @code{--verbose} flag; the final error after cleanup explains a failed startup stage.
+
+Some older uv-managed Python builds omit @code{os.memfd_create} even on capable Linux hosts. oc-box first uses the Python binding, or, when it is absent, lazily calls libc's @code{memfd_create} with close-on-exec enabled. Both paths use the same kernel facility, never disk-backed temporary files or architecture-specific raw syscalls. A denied/failed native call is not retried through libc. Capability checks happen before container startup or reset deletion; preflight failures leave the existing container and workspace intact.
+
+@example
+oc-box doctor --feature private-output
+@end example
+
+If the capability is still unavailable, the error identifies the Python running oc-box. For a @code{uv tool install} installation, compare it with system Python:
+
+@example
+"$(uv tool dir)/oc-box/bin/python" -c 'import os,sys; print(sys.executable); print(sys.version); print("memfd_create:", hasattr(os, "memfd_create"))'
+/usr/bin/python3 -c 'import os,sys; print(sys.version); print("memfd_create:", hasattr(os, "memfd_create"))'
+@end example
+
+An absent Python attribute alone is no longer a failure if the libc path works. If system Python is 3.10+ and supports private capture, recreate only uv's tool environment with it, retaining any extras originally installed:
+
+@example
+uv tool install --force --python /usr/bin/python3 oc-box
+@end example
+
+This does not install into system Python's site-packages. Retry the original launch; no reset, purge, vault setup, or workspace-image change is needed. A kernel or security-policy denial still fails closed; switching interpreters cannot bypass such restrictions. Backup/restore uses the same capability helper.
 
 For a disposable host validation of V2 global-vault first-launch delivery, Build approvals/reload and full backup/restore, use the source-checkout fixture:
 

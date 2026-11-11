@@ -57,6 +57,7 @@ Check installed tools and get feature-specific installation commands:
 
 ```sh
 oc-box doctor
+oc-box doctor --feature private-output
 oc-box doctor --feature backup --feature vault
 oc-box doctor --feature backup-info --json
 ```
@@ -73,6 +74,10 @@ for all seven distros and the distinction from automatically installed workspace
 tools. Doctor does not install packages, unlock secrets, start Podman, or change
 workspaces. Inside oc-box it reports container prerequisites only; run from the
 host terminal for host advice.
+
+V2 launches need Linux anonymous-memory file support even with `--no-vault`.
+Older uv-managed Python builds without `os.memfd_create` use a compatible libc
+fallback; see [private capture troubleshooting](docs/cli.md#private-output-capture-and-uv-python).
 
 Install on the **host as your regular user**, without sudo. Choose one channel:
 
