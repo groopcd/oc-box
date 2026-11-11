@@ -34,8 +34,11 @@ jobs:
           python-version: '3.10'
       - name: Create isolated build tools
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends age
+          apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
+          chmod 755 "$apt_root"
+          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config")
+          sudo apt-get -c "$apt_config" update
+          sudo apt-get -c "$apt_config" install -y --no-install-recommends age
           python -m venv "$RUNNER_TEMP/oc-box-build"
           "$RUNNER_TEMP/oc-box-build/bin/python" -m pip install build twine 'cryptography>=44' 'textual>=8.2.8,<9' 'pyte>=0.8.2,<0.9'
       - name: Validate source and release version
@@ -75,7 +78,7 @@ jobs:
           retention-days: 7
 
   publish:
-    # A GitHub preview must not publish the ordinary 1.6.N version to PyPI.
+    # A GitHub preview must not publish the ordinary 1.7.N version to PyPI.
     if: >-
       (github.event_name == 'release' && !github.event.release.prerelease) ||
       (github.event_name == 'workflow_dispatch' && inputs.publish)

@@ -21,6 +21,48 @@ version = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(version)
 
 
+class ReleaseVersionPolicyTests(unittest.TestCase):
+    def test_release_series_keeps_original_baseline_and_absolute_commit_count(self):
+        commit = "b" * 40
+        with tempfile.TemporaryDirectory(prefix="oc-box-version-policy-") as temporary:
+            root = Path(temporary)
+            (root / ".git").mkdir()
+            for name, count, patch_count in (
+                ("original stable baseline", 29, 0),
+                ("first later commit", 30, 1),
+                ("retained release count", 87, 58),
+            ):
+                for dirty in (False, True):
+                    outputs = {
+                        ("rev-parse", "--is-shallow-repository"): "false",
+                        ("rev-list", "--count", "HEAD"): str(count),
+                        ("rev-parse", "HEAD"): commit,
+                        ("status", "--porcelain", "--untracked-files=no"): (
+                            " M source" if dirty else ""
+                        ),
+                    }
+
+                    def git(command, **_kwargs):
+                        return subprocess.CompletedProcess(
+                            command, 0, stdout=outputs[tuple(command[3:])]
+                        )
+
+                    with (
+                        self.subTest(name=name, dirty=dirty),
+                        patch.object(version.subprocess, "run", side_effect=git),
+                    ):
+                        self.assertEqual(
+                            version.get_version_info(root),
+                            {
+                                "version": f"1.7.{patch_count}+g{commit[:7]}"
+                                + (".dirty" if dirty else ""),
+                                "commit": commit,
+                                "commit_count": count,
+                                "dirty": dirty,
+                            },
+                        )
+
+
 class VersionTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="oc-box-version-")
@@ -89,38 +131,47 @@ class VersionTests(unittest.TestCase):
         self.assertIsNone(version.get_version_info(shallow)["commit_count"])
 
     def test_legacy_embedded_metadata_retains_its_original_identity(self):
-        legacy = {
-            "version": "0.1.27+g6165105",
-            "commit": "616510567e9dc3f80945bcc0de87e27cd7361723",
-            "commit_count": 27,
-            "dirty": False,
-        }
-        (self.root / "build-info.json").write_text(json.dumps(legacy))
-        self.assertEqual(version.get_version_info(self.root), legacy)
-        self.assertEqual(version.public_version(legacy), "0.1.27")
-        legacy["version"] = "1.0.7+gfixture"
-        legacy["commit_count"] = 36
-        (self.root / "build-info.json").write_text(json.dumps(legacy))
-        self.assertEqual(version.get_version_info(self.root), legacy)
-        self.assertEqual(version.public_version(legacy), "1.0.7")
-        legacy["version"] = "1.5.39+gb9b9ec1"
-        legacy["commit_count"] = 68
-        (self.root / "build-info.json").write_text(json.dumps(legacy))
-        self.assertEqual(version.get_version_info(self.root), legacy)
-        self.assertEqual(version.public_version(legacy), "1.5.39")
+        for name, identity, count in (
+            ("pre-stable", "0.1.27+g6165105", 27),
+            ("original stable", "1.0.7+gfixture", 36),
+            ("previous minor", "1.5.39+gb9b9ec1", 68),
+            ("retained 1.6 release", "1.6.58+g3138a87", 87),
+        ):
+            legacy = {
+                "version": identity,
+                "commit": "616510567e9dc3f80945bcc0de87e27cd7361723",
+                "commit_count": count,
+                "dirty": False,
+            }
+            with self.subTest(name=name):
+                (self.root / "build-info.json").write_text(json.dumps(legacy))
+                self.assertEqual(version.get_version_info(self.root), legacy)
+                self.assertEqual(version.public_version(legacy), identity.split("+")[0])
 
     def test_minor_series_change_preserves_patch_count_and_source_provenance(self):
         self.git("init")
         (self.root / "source").write_text("fixture")
         self.git("add", "source")
         self.git("commit", "-m", "Fixture")
-        with patch.object(version, "VERSION_SERIES", "1.5"):
-            before = version.get_version_info(self.root)
-        with patch.object(version, "VERSION_SERIES", "1.6"):
-            after = version.get_version_info(self.root)
-        self.assertEqual(before["version"].replace("1.5.", "1.6.", 1), after["version"])
-        for name in ("commit", "commit_count", "dirty"):
-            self.assertEqual(before[name], after[name])
+        commit = self.git("rev-parse", "HEAD")
+        for dirty in (False, True):
+            if dirty:
+                (self.root / "source").write_text("changed fixture")
+            for previous, current in (("1.5", "1.6"), ("1.6", "1.7")):
+                with self.subTest(previous=previous, current=current, dirty=dirty):
+                    with patch.object(version, "VERSION_SERIES", previous):
+                        before = version.get_version_info(self.root)
+                    with patch.object(version, "VERSION_SERIES", current):
+                        after = version.get_version_info(self.root)
+                    self.assertEqual(
+                        before["version"].replace(previous + ".", current + ".", 1),
+                        after["version"],
+                    )
+                    self.assertEqual(after["commit"], commit)
+                    self.assertEqual(after["commit_count"], 1)
+                    self.assertIs(after["dirty"], dirty)
+                    for name in ("commit", "commit_count", "dirty"):
+                        self.assertEqual(before[name], after[name])
 
     def test_installed_copy_keeps_source_version_without_git(self):
         home = self.root / "home"

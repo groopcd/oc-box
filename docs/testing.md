@@ -202,7 +202,7 @@ and normal CLI compatibility in those environments, not just imported metadata.
 
 The build-only publication gate must check `--with-vault --with-tui`. Preserve
 the workflow guard preventing a GitHub prerelease from automatically uploading
-the ordinary stable `1.6.N` version to PyPI; manual `publish=true` is an explicit
+the ordinary stable `1.7.N` version to PyPI; manual `publish=true` is an explicit
 publication path, not a bypass of acceptance/review.
 
 **New clean-host gate before stable publication.** Freeze the fully integrated
@@ -292,6 +292,33 @@ observations separately rather than self-certifying them from scripts. Earlier s
 reports and the old native terminal pass retain their original scope; they do
 not validate the new dashboard, embedding or journal. No new host pass or stable
 publication is recorded by adding this plan.
+
+### Ubuntu CI package bootstrap
+
+`tools/ci_ubuntu_apt.py` generates a temporary, CI-only APT configuration for
+Ubuntu hosted-runner prerequisites and the Ubuntu 24.04 distro fixture. It uses
+the independently hosted HTTPS Ubuntu archive at
+`https://mirrors.edge.kernel.org/ubuntu`, including the release, updates,
+backports and security suites. Package signatures still use the image's existing
+Ubuntu archive keyring; TLS peer/hostname checks and repository freshness checks
+stay enabled. Strict update failure and bounded retries/timeouts prevent a failed
+fetch from silently reusing partial or stale indexes.
+
+The helper does not install packages, rewrite `/etc/apt`, change DNS, introduce
+signing keys, or change production dependency mappings. Runner installs pass its
+configuration explicitly with `apt-get -c`. Only the Ubuntu test container
+inherits `APT_CONFIG` for its initial Python install and subsequent real provider
+and baseline commands; the other six distro paths are unchanged. A read-only bind
+of the same generated directory carries the runner's public CA bundle into the
+minimal Ubuntu image, allowing HTTPS before `ca-certificates` is installed.
+
+The generated configuration contains only public repository/CA data. Workflows
+place it under a fresh, traversable `/tmp` directory, with directories 0755 and
+files 0644 so APT's `_apt` downloader sandbox can read it. Do not reuse a secret or
+workspace directory for this purpose. Unit tests cover generation, refusal and
+trust settings; the Ubuntu CI jobs must still demonstrate actual signed package
+downloads and complete all tests. A successful configuration step alone is not
+CI acceptance, and CI repair is not a new rootless-Podman host pass.
 
 ### V2 session-history synchronization
 

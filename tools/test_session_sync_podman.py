@@ -11,6 +11,7 @@ all roots are archived, and selection after explicit unarchive; no new inference
 """
 
 import argparse
+import ast
 import contextlib
 import hashlib
 import importlib
@@ -257,7 +258,9 @@ def git(source, *arguments):
 def source_snapshot(source, expected):
     source = safe_path(source)
     require(
-        source.is_dir() and re.fullmatch(r"[0-9a-f]{40}", expected or ""),
+        source.is_dir()
+        and isinstance(expected, str)
+        and re.fullmatch(r"[0-9a-f]{40}", expected),
         "clean-source-required",
     )
     require(
@@ -267,7 +270,12 @@ def source_snapshot(source, expected):
         and not git(source, "status", "--porcelain", "--untracked-files=all"),
         "clean-source-required",
     )
-    count = int(git(source, "rev-list", "--count", "HEAD"))
+    raw_count = git(source, "rev-list", "--count", "HEAD").strip()
+    require(re.fullmatch(rb"[1-9][0-9]*", raw_count), "clean-source-required")
+    try:
+        count = int(raw_count)
+    except ValueError:
+        raise Refusal("clean-source-required") from None
     require(count > 29, "clean-source-required")
     ignored = git(
         source,
@@ -300,6 +308,7 @@ def source_snapshot(source, expected):
         source, "ls-files", "--stage", "-z", "--", "src/oc_box", *DONORS
     ).split(b"\0")
     hashes = {}
+    version_source = None
     for record in filter(None, records):
         header, name = record.split(b"\t", 1)
         mode, blob, stage = header.split()
@@ -317,14 +326,51 @@ def source_snapshot(source, expected):
             "source-changed",
         )
         hashes[relative] = hashlib.sha256(content).hexdigest()
+        if relative == "src/oc_box/version_info.py":
+            version_source = content
     require(
-        set(DONORS) <= hashes.keys() and "src/oc_box/oc_box.py" in hashes,
+        set(DONORS) <= hashes.keys()
+        and "src/oc_box/oc_box.py" in hashes
+        and version_source is not None,
+        "clean-source-required",
+    )
+    # Parse only the already Git-verified bytes, never execute a source import or
+    # reread an unhashed version file. Unknown/dynamic declarations fail closed.
+    try:
+        tree = ast.parse(version_source)
+    except (SyntaxError, ValueError):
+        raise Refusal("clean-source-required") from None
+    names = {"VERSION_SERIES", "VERSION_BASE_COMMIT_COUNT"}
+    declarations = {
+        node.targets[0].id: node.value.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and len(node.targets) == 1
+        and isinstance(node.targets[0], ast.Name)
+        and node.targets[0].id in names
+        and isinstance(node.value, ast.Constant)
+    }
+    require(
+        declarations.keys() == names
+        and all(
+            sum(
+                isinstance(node, ast.Name)
+                and isinstance(node.ctx, ast.Store)
+                and node.id == name
+                for node in ast.walk(tree)
+            )
+            == 1
+            for name in names
+        )
+        and declarations["VERSION_SERIES"] in ("1.6", "1.7")
+        and type(declarations["VERSION_BASE_COMMIT_COUNT"]) is int
+        and declarations["VERSION_BASE_COMMIT_COUNT"] == 29,
         "clean-source-required",
     )
     return {
         "commit": expected,
         "commit_count": count,
-        "version": f"1.6.{count - 29}+g{expected[:7]}",
+        "version": f"{declarations['VERSION_SERIES']}.{count - 29}+g{expected[:7]}",
         "dirty": False,
         "sha256": hashes,
     }
@@ -485,7 +531,10 @@ def result(
     )
     require(
         identity["version"]
-        == f"1.6.{identity['commit_count'] - 29}+g{identity['commit'][:7]}",
+        in (
+            f"{series}.{identity['commit_count'] - 29}+g{identity['commit'][:7]}"
+            for series in ("1.6", "1.7")
+        ),
         "report-schema",
     )
     require(

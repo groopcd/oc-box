@@ -11,6 +11,11 @@ Copyright (C) 2026 Paulo Dias <paulo.miguel.dias@gmail.com>.
 Licensed [GPL-3.0-or-later](LICENSE); see [NOTICE](NOTICE) for attribution and
 the acknowledgment of OpenAI coding-assistant contributions through OpenCode.
 
+**1.7 release candidate:** the integrated candidate adds the optional Textual
+manager and temporary live host-file tools, and retains the private-memory and
+Ubuntu CI fixes from 1.6.60. See the [1.7 release notes and acceptance checklist](docs/releases/1.7.md).
+Preparing this candidate does not publish it or replace the required live-host checks.
+
 ## Why oc-box?
 
 oc-box grew out of wanting OpenCode to have more freedom without giving it
@@ -57,6 +62,7 @@ Check installed tools and get feature-specific installation commands:
 
 ```sh
 oc-box doctor
+oc-box doctor --feature private-output
 oc-box doctor --feature backup --feature vault
 oc-box doctor --feature backup-info --json
 ```
@@ -73,6 +79,10 @@ for all seven distros and the distinction from automatically installed workspace
 tools. Doctor does not install packages, unlock secrets, start Podman, or change
 workspaces. Inside oc-box it reports container prerequisites only; run from the
 host terminal for host advice.
+
+V2 launches need Linux anonymous-memory file support even with `--no-vault`.
+Older uv-managed Python builds without `os.memfd_create` use a compatible libc
+fallback; see [private capture troubleshooting](docs/cli.md#private-output-capture-and-uv-python).
 
 Install on the **host as your regular user**, without sudo. Choose one channel:
 
@@ -164,7 +174,7 @@ command; it does not overwrite package-managed files or create a competing
 GitHub-installed launcher. GitHub/curl installations retain `oc-box upgrade` and
 opt-in automatic GitHub updates. If both channels are installed, check
 `command -v oc-box` to select the intended launcher. PyPI package versions use
-`1.6.N`, while `oc-box --version` also records `+gHASH` for source provenance.
+`1.7.N`, while `oc-box --version` also records `+gHASH` for source provenance.
 Published PyPI releases are selected separately from ordinary GitHub commits.
 Packaged manuals are in the package's `docs/` and the tool environment's
 `share/man`/`share/info`; those directories may need explicit reader paths.
@@ -857,10 +867,10 @@ info --file "$HOME/.local/share/info/oc-box.info"
 
 Readers are host packages (`man` and `info` on openSUSE). See
 [CONTRIBUTING.md](CONTRIBUTING.md) to regenerate the manuals from `docs/cli.md`.
-`oc-box --version` uses `1.6.N+gHASH`. The 1.5 and 1.6 series retain N's original 1.0.0
+`oc-box --version` uses `1.7.N+gHASH`. The 1.5, 1.6 and 1.7 series retain N's original 1.0.0
 baseline (full-history commit count minus 29), so commits continue advancing N
 automatically rather than restarting at zero. Installed copies retain their
-source version until upgraded or reinstalled. Existing 0.1/1.0 installations
+source version until upgraded or reinstalled. Existing 0.1/1.0/1.5/1.6 installations
 upgrade through their usual channel; no workspace reset or history migration is
 needed for the version-series change.
 

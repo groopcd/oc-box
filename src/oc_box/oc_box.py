@@ -30,6 +30,7 @@ if __package__:
         opencode_v2_io,
         paths,
         plugin_compat,
+        private_memory,
         vault,
         workspace_identity,
         workspace_service,
@@ -41,6 +42,7 @@ else:
     import opencode_v2_io
     import paths
     import plugin_compat
+    import private_memory
     import vault
     import workspace_identity
     import workspace_service
@@ -224,16 +226,23 @@ def captured_output(*, private=False):
         # Captured subprocess output may contain a delivered credential. An
         # anonymous in-memory regular file preserves mainline's large-stdout
         # behavior without spilling that output to a plaintext temp file.
-        if not hasattr(os, "memfd_create"):
-            raise BoxError(
-                "Vault launches require Linux memfd support for private subprocess-output capture."
-            )
-        fd = os.memfd_create("oc-box-private-output", os.MFD_CLOEXEC)
+        try:
+            fd = private_memory.create("oc-box-private-output")
+        except OSError as exc:
+            raise BoxError(private_memory.error_message()) from exc
         with os.fdopen(fd, "w+b") as stream:
             yield stream
     else:
         with tempfile.TemporaryFile() as stream:
             yield stream
+
+
+def check_private_output():
+    """Probe private capture before an owning launch changes its environment."""
+    try:
+        private_memory.check()
+    except OSError as exc:
+        raise BoxError(private_memory.error_message()) from exc
 
 
 def run(argv, *, capture=False, check=True, private=False, **kwargs):
@@ -2426,6 +2435,14 @@ def launch_credentials(data, args):
                 version = detect_opencode_release()
             args._opencode_release = version
     try:
+        if not active and (
+            (version is not None and opencode_compat.major(version) == 2)
+            or (
+                not getattr(args, "no_vault", False)
+                and credentials.policy(data, version=version)["vault"]
+            )
+        ):
+            check_private_output()
         with credentials.unlocked(
             data, version=version, no_vault=getattr(args, "no_vault", False)
         ) as values:
@@ -2454,6 +2471,8 @@ def launch_environment(path, data, args):
     if version is None:
         with loading_stage("Checking OpenCode version"):
             version = detect_opencode_release()
+    if opencode_compat.major(version) == 2 or credentials.has_unlocked_values():
+        check_private_output()
     if data.get("opencode_version") != version:
         data["opencode_version"] = version
         atomic_json(path, data)
@@ -3436,13 +3455,15 @@ def main(argv=None):
         if args.resume:
             raise BoxError("No workspace/session exists here to resume.")
         project = validate_project(args.project)
-        if args.no_vault:
-            version = getattr(args, "_opencode_release", None)
-            if version is None:
+        version = getattr(args, "_opencode_release", None)
+        if version is None:
+            with loading_stage("Checking OpenCode version"):
                 version = detect_opencode_release()
-            if opencode_compat.major(version) != 2:
-                raise BoxError("--no-vault requires native OpenCode 2.x.")
-            args._opencode_release = version
+        if args.no_vault and opencode_compat.major(version) != 2:
+            raise BoxError("--no-vault requires native OpenCode 2.x.")
+        if opencode_compat.major(version) == 2:
+            check_private_output()
+        args._opencode_release = version
         path, data = create_workspace(
             project, distro_name(args.distro or host_default())
         )
@@ -3592,6 +3613,11 @@ def main(argv=None):
                     )
                 if getattr(args, "_opencode_release", None) is None:
                     args._opencode_release = detect_opencode_release()
+                if (
+                    opencode_compat.major(args._opencode_release) == 2
+                    or credentials.has_unlocked_values()
+                ):
+                    check_private_output()
                 check_resource_controllers(data)
                 remove_resources(data, keep_home=True)
                 data["ready"] = False

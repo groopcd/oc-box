@@ -56,6 +56,7 @@ def check_archives(directory):
         for name in (
             "oc_box.py",
             "dependencies.py",
+            "private_memory.py",
             "opencode_compat.py",
             "opencode_v2_io.py",
             "workspace_service.py",
@@ -131,6 +132,9 @@ def check_archives(directory):
             "tests/test_sharing_transport.py",
             "tests/smoke_sharing_v2.py",
             "tests/test_session_sync.py",
+            "tests/test_private_memory.py",
+            "tests/test_private_output.py",
+            "tests/test_ci_ubuntu_apt.py",
             "tests/smoke_session_sync_v2.py",
             "tests/smoke_tui_v2.py",
             "tests/test_tui_app.py",
@@ -140,6 +144,7 @@ def check_archives(directory):
             "tests/plugin_bridge_fixture.mjs",
             "tests/copied_plugin_bytes.mjs",
             "tools/check_package.py",
+            "tools/ci_ubuntu_apt.py",
             "tools/test_v2_podman.py",
             "tools/migrate_host_plugins.py",
             "tools/port_host_plugins.py",
@@ -148,6 +153,7 @@ def check_archives(directory):
             "tools/host_sandbox.js",
             "tests/test_v2_host_fixture.py",
             "src/oc_box/oc_box.py",
+            "src/oc_box/private_memory.py",
             "src/oc_box/opencode_compat.py",
             "src/oc_box/opencode_v2_io.py",
             "src/oc_box/workspace_service.py",
@@ -239,6 +245,23 @@ def check(directory, *, with_vault=False, with_tui=False):
         doctor = json.loads(run(cli, "doctor", "--feature", "github-upgrade", "--json"))
         assert doctor["schema_version"] == 1
         assert doctor["features"][0]["id"] == "github-upgrade"
+        private = json.loads(
+            run(cli, "doctor", "--feature", "private-output", "--json")
+        )
+        assert private["features"][0]["available"]
+        # Older uv-managed interpreters can omit the binding despite a capable
+        # libc/kernel. Exercise the installed package, not checkout imports.
+        run(
+            python,
+            "-c",
+            "import os,stat; from oc_box import private_memory; "
+            "os.__dict__.pop('memfd_create',None); os.__dict__.pop('MFD_CLOEXEC',None); "
+            "fd=private_memory.create('oc-box-package-check'); "
+            "assert stat.S_ISREG(os.fstat(fd).st_mode); "
+            "assert not os.get_inheritable(fd); "
+            "os.write(fd,b'synthetic-package-check'); os.lseek(fd,0,0); "
+            "assert os.read(fd,64)==b'synthetic-package-check'; os.close(fd)",
+        )
         assert "secrets" in run(cli, "--help")
         assert "--recipient" in run(cli, "backup", "--help")
         assert "--no-open" in run(cli, "web", "--help")

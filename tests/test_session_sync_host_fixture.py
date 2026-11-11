@@ -35,10 +35,15 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         self.source.mkdir()
         self.commit = "b" * 40
 
-    def source_files(self):
+    def source_files(self, version_source=None):
         self.ignored = b""
         self.files = {name: b"# audited helper\n" for name in runner.DONORS}
         self.files["src/oc_box/oc_box.py"] = b"# audited runtime\n"
+        self.files["src/oc_box/version_info.py"] = (
+            b'VERSION_SERIES = "1.7"\nVERSION_BASE_COMMIT_COUNT = 29\n'
+            if version_source is None
+            else version_source
+        )
         for name, value in self.files.items():
             path = self.source / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -129,18 +134,94 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             source.assert_not_called()
 
     def test_source_snapshot_hashes_git_owned_runtime_and_donors(self):
-        self.source_files()
+        for name, series in (("retained source", "1.6"), ("release source", "1.7")):
+            self.source_files(
+                f'VERSION_SERIES = "{series}"\nVERSION_BASE_COMMIT_COUNT = 29\n'.encode()
+            )
+            with (
+                self.subTest(name=name),
+                patch.object(runner, "git", side_effect=self.git),
+                patch.object(runner.importlib, "import_module") as imports,
+            ):
+                identity = runner.source_snapshot(self.source, self.commit)
+                self.assertEqual(
+                    identity["version"], series + ".51+g" + self.commit[:7]
+                )
+                self.assertEqual(identity["commit_count"], 80)
+                self.assertEqual(identity["commit"], self.commit)
+                self.assertFalse(identity["dirty"])
+                self.assertEqual(
+                    identity["sha256"],
+                    {
+                        name: hashlib.sha256(value).hexdigest()
+                        for name, value in self.files.items()
+                    },
+                )
+            imports.assert_not_called()
+
+    def test_source_version_declaration_matrix_refuses_before_import(self):
+        series = b'VERSION_SERIES = "1.7"\n'
+        baseline = b"VERSION_BASE_COMMIT_COUNT = 29\n"
+        cases = {
+            "missing series": baseline,
+            "missing baseline": series,
+            "unknown series": b'VERSION_SERIES = "1.8"\n' + baseline,
+            "legacy series": b'VERSION_SERIES = "1.5"\n' + baseline,
+            "patch in series": b'VERSION_SERIES = "1.7.0"\n' + baseline,
+            "numeric series": b"VERSION_SERIES = 1.7\n" + baseline,
+            "dynamic series": b'VERSION_SERIES = str("1.7")\n' + baseline,
+            "duplicate series": series + series + baseline,
+            "conditional series": series
+            + b'if True:\n VERSION_SERIES = "1.6"\n'
+            + baseline,
+            "changed baseline": series + b"VERSION_BASE_COMMIT_COUNT = 30\n",
+            "boolean baseline": series + b"VERSION_BASE_COMMIT_COUNT = True\n",
+            "float baseline": series + b"VERSION_BASE_COMMIT_COUNT = 29.0\n",
+            "dynamic baseline": series + b'VERSION_BASE_COMMIT_COUNT = int("29")\n',
+            "duplicate baseline": series + baseline + baseline,
+            "syntax error": b"VERSION_SERIES =\n",
+        }
+        for name, content in cases.items():
+            self.source_files(content)
+            with (
+                self.subTest(name=name),
+                patch.object(runner, "git", side_effect=self.git),
+                patch.object(runner.importlib, "import_module") as imports,
+                self.assertRaisesRegex(runner.Refusal, "clean-source-required"),
+            ):
+                runner.load_source(self.source, self.commit)
+            imports.assert_not_called()
+
+    def test_source_version_declarations_are_parsed_without_executing_module(self):
+        self.source_files(
+            b'VERSION_SERIES = "1.7"\nVERSION_BASE_COMMIT_COUNT = 29\n'
+            b'raise RuntimeError("must not execute source snapshot")\n'
+        )
         with patch.object(runner, "git", side_effect=self.git):
             identity = runner.source_snapshot(self.source, self.commit)
-        self.assertEqual(identity["version"], "1.6.51+g" + self.commit[:7])
-        self.assertFalse(identity["dirty"])
-        self.assertEqual(
-            identity["sha256"],
-            {
-                name: hashlib.sha256(value).hexdigest()
-                for name, value in self.files.items()
-            },
+        self.assertEqual(identity["version"], "1.7.51+g" + self.commit[:7])
+
+    def test_source_version_file_must_be_git_verified_and_present(self):
+        self.source_files()
+        path = self.source / "src/oc_box/version_info.py"
+        path.write_bytes(
+            self.files["src/oc_box/version_info.py"].replace(b"1.7", b"1.6")
         )
+        with (
+            patch.object(runner, "git", side_effect=self.git),
+            self.assertRaisesRegex(runner.Refusal, "source-changed"),
+        ):
+            runner.source_snapshot(self.source, self.commit)
+        self.stage = b"\0".join(
+            record
+            for record in self.stage.split(b"\0")
+            if not record.endswith(b"\tsrc/oc_box/version_info.py")
+        )
+        with (
+            patch.object(runner, "git", side_effect=self.git),
+            self.assertRaisesRegex(runner.Refusal, "clean-source-required"),
+        ):
+            runner.source_snapshot(self.source, self.commit)
 
     def test_source_metadata_matrix_refuses_before_import(self):
         self.source_files()
@@ -156,6 +237,11 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 b"?? helper",
             ),
             "incomplete history": (("rev-list", "--count", "HEAD"), b"29"),
+            "empty count": (("rev-list", "--count", "HEAD"), b""),
+            "negative count": (("rev-list", "--count", "HEAD"), b"-80"),
+            "float count": (("rev-list", "--count", "HEAD"), b"80.0"),
+            "non-count": (("rev-list", "--count", "HEAD"), b"private-sentinel"),
+            "noncanonical count": (("rev-list", "--count", "HEAD"), b"080"),
             "nested source": (
                 ("rev-parse", "--show-toplevel"),
                 str(self.parent).encode(),
@@ -173,6 +259,25 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 self.assertRaisesRegex(runner.Refusal, "clean-source-required"),
             ):
                 runner.load_source(self.source, self.commit)
+            imports.assert_not_called()
+
+    def test_source_expected_commit_matrix_refuses_before_git_or_import(self):
+        for name, commit in (
+            ("missing", None),
+            ("non-string", 80),
+            ("short", "b" * 7),
+            ("long", "b" * 41),
+            ("uppercase", "B" * 40),
+            ("non-hex", "z" * 40),
+        ):
+            with (
+                self.subTest(name=name),
+                patch.object(runner, "git") as git,
+                patch.object(runner.importlib, "import_module") as imports,
+                self.assertRaisesRegex(runner.Refusal, "clean-source-required"),
+            ):
+                runner.load_source(self.source, commit)
+            git.assert_not_called()
             imports.assert_not_called()
 
     def test_source_file_change_ignored_by_status_still_refuses(self):
@@ -466,6 +571,68 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 self.assertRaisesRegex(runner.Refusal, "report-schema"),
             ):
                 runner.result({}, bad, digest, native)
+
+    def test_report_source_series_matrix_preserves_exact_count_and_commit(self):
+        identity = {
+            "commit": self.commit,
+            "commit_count": 80,
+            "dirty": False,
+            "sha256": {"src/oc_box/version_info.py": "c" * 64},
+        }
+        for name, series in (("retained report", "1.6"), ("release report", "1.7")):
+            identity["version"] = series + ".51+g" + self.commit[:7]
+            with self.subTest(name=name):
+                report = runner.result(
+                    dict.fromkeys(runner.CHECKS, True),
+                    identity,
+                    "d" * 64,
+                    {"version": "2.2.6", "sha256": "e" * 64},
+                    exits=runner.EXPECTED_EXITS,
+                    stage="complete",
+                )
+                self.assertEqual(report["status"], "PASS")
+                self.assertEqual(report["source_identity"], identity)
+
+    def test_report_source_identity_refusal_matrix_is_strict_for_both_series(self):
+        for series in ("1.6", "1.7"):
+            identity = {
+                "commit": self.commit,
+                "commit_count": 80,
+                "version": series + ".51+g" + self.commit[:7],
+                "dirty": False,
+                "sha256": {"src/oc_box/version_info.py": "c" * 64},
+            }
+            cases = {
+                "unknown series": {"version": "1.8.51+g" + self.commit[:7]},
+                "legacy series": {"version": "1.5.51+g" + self.commit[:7]},
+                "missing version": {"version": None},
+                "wrong patch": {"version": series + ".50+g" + self.commit[:7]},
+                "padded patch": {"version": series + ".051+g" + self.commit[:7]},
+                "wrong short hash": {"version": series + ".51+g" + "a" * 7},
+                "dirty suffix": {"version": identity["version"] + ".dirty"},
+                "short commit": {"commit": self.commit[:7]},
+                "non-hex commit": {"commit": "z" * 40},
+                "uppercase commit": {"commit": "B" * 40},
+                "wrong count": {"commit_count": 81},
+                "baseline count": {"commit_count": 29},
+                "boolean count": {"commit_count": True},
+                "float count": {"commit_count": 80.0},
+                "dirty source": {"dirty": True},
+                "malformed audit hash": {
+                    "sha256": {"src/oc_box/version_info.py": "z" * 64}
+                },
+            }
+            for name, change in cases.items():
+                with (
+                    self.subTest(series=series, name=name),
+                    self.assertRaisesRegex(runner.Refusal, "report-schema"),
+                ):
+                    runner.result(
+                        {},
+                        {**identity, **change},
+                        "d" * 64,
+                        {"version": "2.2.6", "sha256": "e" * 64},
+                    )
 
     def test_error_categories_never_include_native_exception_contents(self):
         for error, expected in (

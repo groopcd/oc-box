@@ -1,10 +1,12 @@
-# First Textual manager — candidate release notes
+# 1.7 Textual manager — candidate release notes
 
 **Unpublished candidate / release-notes template. Host acceptance is pending.**
 The selected publication path is **stable after fresh source-pinned host checks**,
 not an early preview. This document neither publishes a version nor records a
 passing host run. The final version/hash are deliberately not fixed here:
 documentation and integration commits advance the commit-derived version.
+These are the detailed manager notes for the combined
+[1.7 manager and live-sharing candidate](1.7.md); sharing has its own host gate.
 
 Before using this text for a GitHub Release, freeze the final clean candidate,
 complete and review the gates below, then insert its actual public version, full
@@ -122,6 +124,7 @@ versions, original report locations and actual operator observations privately.
 | V1/V2 host lifecycle | Fresh reviewed `tools/test_v2_podman.py` report, including migrated-history checks, on that same source. |
 | Textual host observations | Use the fresh interactive fixture's `manager` mode for five tabs, compact metrics/refresh/settings including staged defaults, static Sessions scrolling, source-specific actions/cascades, embedded PTY/focus/resize/detach, visible leases and independent native clients. This mode takes no background outer lease. |
 | Journal/log/self-checkout boundaries | Private bounded fixed-category journal and rotation, no synthetic secret/raw-text leakage, owned opt-in bounded memory-only Podman output, and a non-editable self-workspace launch without weakening validation. |
+| Temporary host-file sharing | Fresh checks on the same candidate for explicit disclosure consent, live read/image results, confinement, ordinary-container-path isolation, lease/termination/reload behavior, no automatic regrant, backup/source preservation and enforcing SELinux without source relabeling; see [sharing validation](../testing.md#experimental-temporary-host-file-tools). |
 
 Run live checks only from a normal unprivileged **external host**, with fresh
 private synthetic state and verified isolated rootless Podman storage. Never run

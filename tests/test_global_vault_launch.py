@@ -1,6 +1,7 @@
 """Owner-only global-vault lifecycle contracts; no actual Podman or host state."""
 
 import contextlib
+import errno
 import io
 import json
 import os
@@ -206,6 +207,123 @@ class GlobalVaultLaunchTests(TestCase):
         unlock.assert_not_called()
         self.assertEqual(path.read_bytes(), before)
         self.assertEqual(credentials.policy(data)["mode"], "vault")
+
+    def test_missing_private_capture_refuses_fresh_v2_before_registration_or_unlock(
+        self,
+    ):
+        for command in ("start", "web"):
+            for no_vault in (False, True):
+                with (
+                    self.subTest(command=command, no_vault=no_vault),
+                    patch.object(
+                        box.private_memory,
+                        "create",
+                        side_effect=OSError(errno.ENOSYS, "synthetic-private-error"),
+                    ),
+                    patch.object(vault, "select_all") as unlock,
+                    patch.object(box, "create_workspace") as create,
+                    patch.object(box, "start_container") as start,
+                    patch.object(box, "remove_resources") as remove,
+                    patch.object(workspace_service, "preflight_port"),
+                    self.assertRaises(box.BoxError) as error,
+                ):
+                    box.main(
+                        [command, "--project", str(self.project)]
+                        + (["--no-vault"] if no_vault else [])
+                    )
+                for mocked in (unlock, create, start, remove):
+                    mocked.assert_not_called()
+                self.assertIn("memfd", str(error.exception))
+                self.assertNotIn("synthetic-private-error", str(error.exception))
+                self.assertFalse((self.project / box.MARKER).exists())
+
+    def test_private_capture_refusal_preserves_existing_v2_for_all_owning_paths(self):
+        path, data = self.existing()
+        before = path.read_bytes()
+        for command, no_vault in (
+            ("start", False),
+            ("start", True),
+            ("reset", False),
+            ("reset", True),
+            ("web", False),
+            ("web", True),
+            ("sync", False),
+        ):
+            with (
+                self.subTest(command=command, no_vault=no_vault),
+                patch.object(
+                    box.private_memory,
+                    "create",
+                    side_effect=PermissionError(errno.EPERM, "synthetic-private-error"),
+                ),
+                patch.object(vault, "select_all") as unlock,
+                patch.object(box, "start_container") as start,
+                patch.object(box, "remove_resources") as remove,
+                patch.object(box, "prepare_runtime") as prepare,
+                patch.object(workspace_service, "preflight_port"),
+                self.assertRaises(box.BoxError),
+            ):
+                box.main(
+                    [command, "--workspace", data["id"]]
+                    + (["--no-vault"] if no_vault else [])
+                )
+            for mocked in (unlock, start, remove, prepare):
+                mocked.assert_not_called()
+            self.assertEqual(path.read_bytes(), before)
+            self.assertFalse(credentials.is_active(data))
+
+    def test_selected_env_reset_checks_actual_v2_before_deleting_v1_container(self):
+        path, data = self.existing("1.19.5")
+        credentials.configure(data, mode="env")
+        box.atomic_json(path, data)
+        before = path.read_bytes()
+        with (
+            patch.object(
+                box.private_memory,
+                "create",
+                side_effect=OSError(errno.ENOSYS, "unavailable"),
+            ),
+            patch.object(box, "remove_resources") as remove,
+            patch.object(box, "start_container") as start,
+            self.assertRaises(box.BoxError),
+        ):
+            box.main(["reset", "--workspace", data["id"]])
+        remove.assert_not_called()
+        start.assert_not_called()
+        self.assertEqual(path.read_bytes(), before)
+
+    def test_ordinary_v1_and_v2_client_attach_do_not_require_private_output(self):
+        path, data = self.existing()
+        credentials.configure(data, mode="env")
+        box.atomic_json(path, data)
+        self.release.return_value = "1.19.5"
+        with (
+            patch.object(
+                box,
+                "check_private_output",
+                side_effect=AssertionError("private capture not needed"),
+            ),
+            patch.object(box, "start_container"),
+            patch.object(box, "prepare_runtime"),
+            patch.object(box, "launch_client", return_value=0),
+            patch.object(box, "stop_container"),
+        ):
+            self.assertEqual(box.main(["--workspace", data["id"]]), 0)
+        self.assertEqual(box.read_json(path)["opencode_version"], "1.19.5")
+        box.atomic_json(path, data)
+        with (
+            patch.object(workspace_service, "controller_running", return_value=True),
+            patch.object(workspace_service, "attach") as attach,
+            patch.object(workspace_service, "client_command", return_value=[]),
+            patch.object(box, "run_tui", return_value=0),
+            patch.object(
+                box,
+                "check_private_output",
+                side_effect=AssertionError("attach must not probe"),
+            ),
+        ):
+            self.assertEqual(box.main(["--workspace", data["id"]]), 0)
+        attach.assert_called_once()
 
     def test_v1_still_forwards_environment_and_never_unlocks_global_vault(self):
         path, data = self.existing("1.19.5")

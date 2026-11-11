@@ -73,7 +73,7 @@ Additional Podman options and devices explicitly extend these defaults.
 
 ### OpenCode versions
 
-oc-box 1.5 supports OpenCode 1.x and 2.x, tested with 1.19.5 and
+oc-box 1.7 retains OpenCode 1.x and 2.x support, tested with 1.19.5 and
 2.2.6. The host release selects the exact container package: `opencode-ai` for
 1.x, `@opencode/cli` for 2.x. V2 uses a workspace-owned private stdio server with
 native `--server` clients and current credentials at each new owning startup.
@@ -120,11 +120,12 @@ package manager from the default workspace image or executing os-release text.
 
 ```sh
 oc-box doctor
+oc-box doctor --feature private-output
 oc-box doctor --feature backup --feature vault
 oc-box doctor --feature backup-info --json
 ```
 
-Feature selectors: `launch`, `maintenance`, `history`, `backup`, `backup-info`, `restore`,
+Feature selectors: `launch`, `private-output`, `maintenance`, `history`, `backup`, `backup-info`, `restore`,
 `vault`, `github-upgrade`, `bootstrap`, `storage`, `overlay`, `manuals`, and
 `docs-build`. Without selectors all are reported, but exit status checks only
 core `launch` prerequisites. With selectors, exit 0 means every selected
@@ -140,6 +141,12 @@ still checks rootless mode, subordinate IDs, controller delegation, and mounts;
 interactive commands check terminal requirements. Command presence does not
 establish a compatible version or validate every backend/driver configuration.
 Normal OpenCode launch verifies its host/container versions separately.
+
+`private-output` probes actual Linux anonymous-memory file creation using the
+same native-Python/libc path as credential capture and backup/restore. V2 owning
+launches require it even with `--no-vault`; ordinary V1 launches without vault
+values and attach-only clients do not. It is separate from the version-neutral
+`launch` prerequisites: doctor does not start OpenCode to infer its version.
 
 ### start
 
@@ -934,8 +941,10 @@ not a promise that an arbitrary Windows/shared mount enforces Unix permissions.
 Python memory is not guaranteed zeroized; core dumps are disabled on secret
 prompt entry where permitted, but host debugging/swap/hardware compromise and
 secrets delivered to container processes are outside at-rest encryption.
-During vault-enabled launches, host captured subprocess output uses anonymous
-Linux memfd storage rather than disk-backed temporary files. Launcher-generated
+During vault-enabled launches and explicit private captures (including V2 native
+saved/OAuth credential transfer with `--no-vault`), host captured subprocess
+output uses anonymous Linux memfd storage rather than disk-backed temporary files.
+Launcher-generated
 failure messages redact exact active vault values. This is not a general
 redaction filter for OpenCode, provider logs, tool output, or session archives:
 an agent can still print, save, or transmit a credential it has received.
@@ -1336,17 +1345,18 @@ workspace is required. Use alone, without lifecycle selectors/options.
 ### --version
 
 Print oc-box's commit-derived version and exit without Podman. The format is
-`1.6.N+gHASH`, with N the full-history commit count minus 29 (the original 1.0.0
+`1.7.N+gHASH`, with N the full-history commit count minus 29 (the original 1.0.0
 baseline). Each later commit advances N; shallow history cannot supply a release
 identity. Tracked uncommitted changes add `.dirty`. Untracked files do not. Installed
 copies retain their installation-time identity in `build-info.json`; reinstall
 to update it. This is separate from the host OpenCode version matched inside
 containers. Use alone, for example: `oc-box --version`.
 
-The OpenCode V2-compatible 1.5 series and the 1.6 refactoring series retain the
-same commit-derived patch count; a first published patch is not required to be
-zero. Installed older copies keep their original 0.1/1.0/1.5 identity.
-PyPI distribution metadata uses only `1.6.N`, because public PyPI versions
+The OpenCode V2-compatible 1.5 series, 1.6 refactoring series and 1.7 manager/sharing
+series retain the same commit-derived patch count; a first published patch is
+not required to be zero. Installed older copies keep their original
+0.1/1.0/1.5/1.6 identity.
+PyPI distribution metadata uses only `1.7.N`, because public PyPI versions
 cannot contain the local `+gHASH` suffix. Its packaged build-info still includes
 the full source identity displayed by this command, so the exact Git commit is
 retained even in a wheel/source distribution installed without Git.
@@ -2315,6 +2325,46 @@ The last command deletes its remaining managed resources and recorded host
 archives; an unrelated replacement directory will not be deleted.
 
 ## Troubleshooting
+
+### Private output capture and uv Python
+
+V2 startup copies native OpenCode saved/OAuth credentials independently of the
+oc-box vault. `--no-vault` skips vault entries, not native authentication or the
+private output capture that protects it. There is currently no oc-box
+`--verbose` flag; the final error after cleanup explains a failed startup stage.
+
+Some older uv-managed Python builds omit `os.memfd_create` even on capable Linux
+hosts. oc-box first uses the Python binding, or, when it is absent, lazily calls
+libc's `memfd_create` with close-on-exec enabled. Both paths use the same kernel
+facility, never disk-backed temporary files or architecture-specific raw syscalls.
+A denied/failed native call is not retried through libc. Capability checks happen
+before container startup or reset deletion; preflight failures leave the existing
+container and workspace intact.
+
+```sh
+oc-box doctor --feature private-output
+```
+
+If the capability is still unavailable, the error identifies the Python running
+oc-box. For a `uv tool install` installation, compare it with system Python:
+
+```sh
+"$(uv tool dir)/oc-box/bin/python" -c 'import os,sys; print(sys.executable); print(sys.version); print("memfd_create:", hasattr(os, "memfd_create"))'
+/usr/bin/python3 -c 'import os,sys; print(sys.version); print("memfd_create:", hasattr(os, "memfd_create"))'
+```
+
+An absent Python attribute alone is no longer a failure if the libc path works.
+If system Python is 3.10+ and supports private capture, recreate only uv's tool
+environment with it, retaining any extras originally installed:
+
+```sh
+uv tool install --force --python /usr/bin/python3 oc-box
+```
+
+This does not install into system Python's site-packages. Retry the original
+launch; no reset, purge, vault setup, or workspace-image change is needed. A kernel
+or security-policy denial still fails closed; switching interpreters cannot
+bypass such restrictions. Backup/restore uses the same capability helper.
 
 For a disposable host validation of V2 global-vault first-launch delivery,
 Build approvals/reload and full backup/restore, use the source-checkout fixture:

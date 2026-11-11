@@ -140,3 +140,32 @@ class SourceLayoutTests(unittest.TestCase):
             self.assertIn(
                 "registry.opensuse.org/opensuse/tumbleweed:latest", output.stdout
             )
+            # Exercise the separate flat-install import path with the older
+            # standalone-Python limitation, not only the namespaced wheel.
+            output = subprocess.run(
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    "import os,sys; from pathlib import Path; "
+                    "sys.path.insert(0,sys.argv[1]); import oc_box as box; "
+                    "import private_memory,backup_crypto; "
+                    "assert Path(private_memory.__file__).parent==Path(sys.argv[1]).resolve(); "
+                    "os.__dict__.pop('memfd_create',None); os.__dict__.pop('MFD_CLOEXEC',None); "
+                    "box.check_private_output(); "
+                    'exec("with box.captured_output(private=True) as stream:\\n'
+                    " stream.write(b'synthetic-flat-capture'); stream.seek(0); "
+                    "assert stream.read()==b'synthetic-flat-capture'\\n"
+                    "with backup_crypto.memory_file(b'synthetic-flat-key') as stream:\\n"
+                    " assert stream.read()==b'synthetic-flat-key'\"); "
+                    "assert box.dependencies.probe('memfd')[0]",
+                    str(root),
+                ],
+                cwd=home,
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            self.assertEqual(output.returncode, 0, output.stderr)

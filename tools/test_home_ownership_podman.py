@@ -254,6 +254,8 @@ def validate_purpose(root, current):
         "source-compatibility",
     )
     original = source["identity"]
+    # Older evidence is compatible only with the same audited runtime/helpers;
+    # a series change never bypasses the existing source or ownership guards.
     require(
         set(original) == {"checkout", "version", "commit", "commit_count", "dirty"}
         and original["checkout"] == str(APP)
@@ -263,7 +265,10 @@ def validate_purpose(root, current):
         and type(original["commit_count"]) is int
         and original["commit_count"] > 29
         and original["version"]
-        == "1.6." + str(original["commit_count"] - 29) + "+g" + original["commit"][:7]
+        in (
+            f"{series}.{original['commit_count'] - 29}+g{original['commit'][:7]}"
+            for series in ("1.6", "1.7")
+        )
         and source["audited_sha256"] == current["audited_sha256"],
         "source-compatibility",
     )

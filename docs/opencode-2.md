@@ -687,7 +687,7 @@ auth cases remain separate. See [the edge workflow and limits](testing.md).
 
 ### Repeatable host validation
 
-Versions now use **1.6.N**, preserving the original commit-count patch baseline and
+Versions now use **1.7.N**, preserving the original commit-count patch baseline and
 upgrade ordering. Repeat relevant host validation before lifecycle/credential
 releases, using only isolated disposable resources.
 

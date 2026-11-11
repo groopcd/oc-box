@@ -53,6 +53,7 @@ class PackagingTests(unittest.TestCase):
                 ("wheel", "oc_box/" + name)
                 for name in (
                     "oc_box.py",
+                    "private_memory.py",
                     "opencode_compat.py",
                     "opencode_v2_io.py",
                     "workspace_service.py",
@@ -73,6 +74,11 @@ class PackagingTests(unittest.TestCase):
                 ("sdist", name)
                 for name in (
                     "tests/test_session_sync.py",
+                    "src/oc_box/private_memory.py",
+                    "tests/test_private_memory.py",
+                    "tests/test_private_output.py",
+                    "tools/ci_ubuntu_apt.py",
+                    "tests/test_ci_ubuntu_apt.py",
                     "tests/smoke_session_sync_v2.py",
                     "tests/smoke_v2.py",
                     "tests/smoke_tui_v2.py",

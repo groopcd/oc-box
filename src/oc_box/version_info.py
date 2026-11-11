@@ -9,7 +9,7 @@ if __package__:
 else:
     from paths import source_root
 
-VERSION_SERIES = "1.6"
+VERSION_SERIES = "1.7"
 # Retain the original stable patch-count baseline across minor-series changes.
 # Absolute counts still order upgrades from installed 0.1/1.0-series launchers.
 VERSION_BASE_COMMIT_COUNT = 29
