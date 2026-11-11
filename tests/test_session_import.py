@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 from oc_box import oc_box as box
+from oc_box import opencode_v2_io as v2
 
 APP = Path(__file__).resolve().parents[1]
 
@@ -99,6 +100,216 @@ class SessionImportTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(box.BoxError, "original project"):
                 box.export_host_session(self.path, self.data, self.ident)
+
+    def native_transcript(self):
+        value = json.loads(json.dumps(self.exported))
+        value["info"].pop("directory")
+        value["info"].update(
+            location={"directory": str(self.project)},
+            agent="plan",
+            model={"providerID": "fixture", "id": "synthetic", "variant": "small"},
+            metadata={"opaque": {"nested": [False, None, "keep"]}},
+            permissions=[
+                {"action": "shell", "resource": "*", "effect": "deny"},
+                {"action": "read", "resource": "*", "effect": "ask"},
+            ],
+            cost=3.25,
+            tokens={
+                "input": 3,
+                "output": 4,
+                "reasoning": 5,
+                "cache": {"read": 6, "write": 7},
+            },
+        )
+        value["messages"] = [
+            {
+                "id": "msg_user",
+                "type": "user",
+                "text": "history",
+                "time": {"created": 1},
+            }
+        ]
+        return value
+
+    def test_native_host_export_uses_checked_private_transport_and_fixed_errors(self):
+        self.data["opencode_version"] = "2.2.6"
+        value = self.native_transcript()
+        with patch.object(
+            box,
+            "run",
+            return_value=subprocess.CompletedProcess([], 0, json.dumps(value), ""),
+        ) as run:
+            self.assertEqual(
+                box.export_host_session(self.path, self.data, self.ident), value
+            )
+        command = run.call_args.args[0]
+        self.assertEqual(command[-2:], ["host-export", "opencode"])
+        self.assertEqual(
+            json.loads(run.call_args.kwargs["input"]), {"session": self.ident}
+        )
+        self.assertTrue(run.call_args.kwargs["private"])
+        config = json.loads(run.call_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+        self.assertIn(
+            {"action": "plugin.use", "resource": "*", "effect": "deny"},
+            config["policies"],
+        )
+        for error, expected in (
+            (v2.MARKER + v2.UNSETTLED, v2.UNSETTLED),
+            (
+                "private native error SYNTHETIC_SECRET",
+                "Host session export failed (exit 2).",
+            ),
+        ):
+            with (
+                self.subTest(error=expected),
+                patch.object(
+                    box,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 2, "", error),
+                ),
+            ):
+                with self.assertRaises(box.BoxError) as raised:
+                    box.export_host_session(self.path, self.data, self.ident)
+                self.assertEqual(str(raised.exception), expected)
+
+    def test_native_direct_import_checks_information_independently_of_messages(self):
+        original = self.native_transcript()
+        for key in (
+            "title",
+            "agent",
+            "model",
+            "metadata",
+            "permissions",
+            "cost",
+            "tokens",
+        ):
+            for operation in ("remove", "change"):
+                imported = json.loads(json.dumps(original))
+                if operation == "remove":
+                    imported["info"].pop(key)
+                else:
+                    imported["info"][key] = {"changed": True}
+                with (
+                    self.subTest(field=key, operation=operation),
+                    self.assertRaisesRegex(box.BoxError, "verification failed"),
+                ):
+                    box.verify_session_import(self.data, original, imported)
+        # Privileges are copied for a direct import, not stripped as for archives.
+        self.assertEqual(box.verify_session_import(self.data, original, original), 0)
+        self.assertEqual(original["info"]["permissions"][0]["effect"], "deny")
+
+    def test_native_host_superseded_annotation_retains_existing_user_metadata(self):
+        self.data["opencode_version"] = "2.2.6"
+        value = self.native_transcript()
+        value["info"]["metadata"]["oc-box.import"] = {"user": ["original"]}
+        value[v2.INTERRUPTED] = {"assistant": 2}
+        before = json.loads(json.dumps(value))
+        with (
+            patch.object(
+                box,
+                "run",
+                return_value=subprocess.CompletedProcess([], 0, json.dumps(value), ""),
+            ),
+            patch("sys.stdout", io.StringIO()) as output,
+        ):
+            result = box.export_host_session(self.path, self.data, self.ident)
+        self.assertNotIn(v2.INTERRUPTED, result)
+        self.assertEqual(
+            result["info"]["metadata"]["oc-box.import"],
+            {
+                "version": 1,
+                "interrupted": {"assistant": 2},
+                "sourceMetadata": {"user": ["original"]},
+            },
+        )
+        self.assertEqual(
+            result["info"]["metadata"]["opaque"], value["info"]["metadata"]["opaque"]
+        )
+        self.assertIn("omitted 2 superseded", output.getvalue())
+        self.assertEqual(value, before)
+        for count in (True, 0, -1, "2"):
+            bad = {**value, v2.INTERRUPTED: {"assistant": count}}
+            with (
+                self.subTest(count=count),
+                patch.object(
+                    box,
+                    "run",
+                    return_value=subprocess.CompletedProcess(
+                        [], 0, json.dumps(bad), ""
+                    ),
+                ),
+                self.assertRaises(box.BoxError),
+            ):
+                box.export_host_session(self.path, self.data, self.ident)
+
+    def test_native_information_mismatch_retains_recovery_without_selection(self):
+        self.data["opencode_version"] = "2.2.6"
+        value = self.native_transcript()
+        wrong = json.loads(json.dumps(value))
+        wrong["info"]["permissions"] = []
+        backup = self.path.parent / "imports-v2" / (self.ident + ".json")
+        box.atomic_json(backup, value)
+        before = backup.read_bytes()
+        with (
+            patch.object(box, "list_container_sessions", return_value=[value["info"]]),
+            patch.object(box, "export_container_session", return_value=wrong),
+            patch.object(box, "transfer_host_session") as transfer,
+            self.assertRaisesRegex(box.BoxError, "verification failed"),
+        ):
+            box.import_host_session(self.path, self.data, value)
+        transfer.assert_not_called()
+        self.assertEqual(backup.read_bytes(), before)
+        self.assertFalse(box.session_file(self.path).exists())
+
+    def test_native_direct_import_accepts_only_measured_info_normalizations(self):
+        original = self.native_transcript()
+        original["info"].update(
+            projectID="source-project",
+            subpath="source-subpath",
+            fork={
+                "sessionID": "ses_origin",
+                "boundary": {"type": "through", "messageID": "msg_origin"},
+            },
+            revert={"messageID": "msg_user"},
+            outcome="interrupted",
+            time={
+                "created": 0,
+                "updated": 2,
+                "idle": 20,
+                "busy": 30,
+                "viewed": 40,
+                "archived": 0,
+            },
+        )
+        imported = json.loads(json.dumps(original))
+        for key in ("fork", "revert", "subpath"):
+            imported["info"].pop(key)
+        imported["info"]["projectID"] = "destination-project"
+        imported["info"]["time"].update(updated=999, busy=20, viewed=20)
+        self.assertEqual(box.verify_session_import(self.data, original, imported), 0)
+        for field in ("created", "archived", "idle", "busy", "viewed"):
+            wrong = json.loads(json.dumps(imported))
+            wrong["info"]["time"][field] += 1
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(box.BoxError, "verification failed"),
+            ):
+                box.verify_session_import(self.data, original, wrong)
+        for field in ("outcome", "fork", "revert"):
+            wrong = json.loads(json.dumps(imported))
+            wrong["info"][field] = original["info"].get(field, "changed")
+            if field == "outcome":
+                wrong["info"][field] = "failed"
+            with (
+                self.subTest(field=field),
+                self.assertRaisesRegex(box.BoxError, "verification failed"),
+            ):
+                box.verify_session_import(self.data, original, wrong)
+        # Without idle, native omits outcome and both watermarks, including zero.
+        original["info"]["time"].pop("idle")
+        imported["info"]["time"] = {"created": 0, "updated": 999, "archived": 0}
+        imported["info"].pop("outcome")
+        self.assertEqual(box.verify_session_import(self.data, original, imported), 0)
 
     def archive_fixture(self):
         origin_project = self.root / "archive-origin"

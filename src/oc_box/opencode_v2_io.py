@@ -152,7 +152,37 @@ def session_inventory(request, directory):
         cursors.add(cursor)
 
 
-def checked_export(request, ident):
+def idle_info(request, ident):
+    """Host readers cannot rely on another private process's active-drain map.
+
+    The persisted busy/idle boundary also catches a drain owned by another
+    native process. This is a conservative observation, not a cross-process lock.
+    Never attach to the host shared service to inspect its in-memory activity.
+    """
+    response = request("GET", "/api/session/" + quote(ident, safe=""))
+    if (
+        not isinstance(response, dict)
+        or not isinstance(response.get("data"), dict)
+        or not isinstance(response["data"].get("time"), dict)
+    ):
+        raise FixedError(EXPORT)
+    info = response["data"]
+    busy, idle = info["time"].get("busy"), info["time"].get("idle")
+    if any(
+        value is not None and type(value) not in (int, float) for value in (busy, idle)
+    ):
+        raise FixedError(EXPORT)
+    activity = request("GET", "/api/session/active")
+    if not isinstance(activity, dict) or not isinstance(activity.get("data"), dict):
+        raise FixedError(ACTIVITY)
+    if ident in activity["data"] or (
+        busy is not None and (idle is None or busy > idle)
+    ):
+        raise FixedError(UNSETTLED)
+    return info
+
+
+def checked_export(request, ident, *, require_idle=False):
     """Native export filters unsettled messages; never accept that as full history.
 
     A running shell/compaction, or an unfinished assistant with nothing settled
@@ -160,7 +190,10 @@ def checked_export(request, ident):
     the session has already moved past (a settled message follows it and the
     session is idle) will never settle: native keeps it out of its export, so the
     archive mirrors that export and the omitted count is reported separately.
+    Host imports additionally require stable idle information on both sides of
+    the read; container owners retain their separate activity-wait contract.
     """
+    initial = idle_info(request, ident) if require_idle else None
     route = "/api/session/" + quote(ident, safe="") + "/message?limit=100"
     projected, states, identities, cursors = [], [], set(), set()
     cursor = None
@@ -214,6 +247,10 @@ def checked_export(request, ident):
     ]
     if exported.get("messages") != expected:
         raise FixedError(CHANGED)
+    if require_idle:
+        final = idle_info(request, ident)
+        if initial != final or final != exported.get("info"):
+            raise FixedError(CHANGED)
     if omitted:
         # Read activity last: a turn that started during the export is live.
         activity = request("GET", "/api/session/active")
@@ -354,7 +391,7 @@ def main(argv):
     elif action == "ready":
         with server(binary):
             pass
-    elif action in ("sessions", "export"):
+    elif action in ("sessions", "export", "host-export"):
         settings = json.load(sys.stdin)
         endpoint = settings.get("endpoint")
         with (
@@ -365,7 +402,9 @@ def main(argv):
             value = (
                 session_inventory(request, settings["directory"])
                 if action == "sessions"
-                else checked_export(request, settings["session"])
+                else checked_export(
+                    request, settings["session"], require_idle=action == "host-export"
+                )
             )
             print(json.dumps(value), flush=True)
     elif action == "lease":

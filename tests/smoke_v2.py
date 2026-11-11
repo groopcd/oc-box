@@ -229,11 +229,12 @@ def bounded(command, env, cwd, timeout=60):
     return output
 
 
-def interrupted_legacy_session(ident, project, tail):
+def interrupted_legacy_session(ident, project, tail, *, paginated=False):
     """A V1 transcript whose first assistant never completed, as after a V1 crash."""
 
     def user(number, text):
-        message = f"msg_{ident}_{number}"
+        suffix = f"{number:03}" if paginated else str(number)
+        message = f"msg_{ident}_{suffix}"
         return {
             "info": {
                 "id": message,
@@ -255,12 +256,14 @@ def interrupted_legacy_session(ident, project, tail):
         }
 
     def assistant(number, text, completed):
-        message = f"msg_{ident}_{number}"
+        suffix = f"{number:03}" if paginated else str(number)
+        previous = f"{number - 1:03}" if paginated else str(number - 1)
+        message = f"msg_{ident}_{suffix}"
         info = {
             "id": message,
             "sessionID": ident,
             "role": "assistant",
-            "parentID": f"msg_{ident}_{number - 1}",
+            "parentID": f"msg_{ident}_{previous}",
             "agent": "build",
             "mode": "build",
             "modelID": "gpt-smoke",
@@ -293,6 +296,20 @@ def interrupted_legacy_session(ident, project, tail):
     messages = [user(1, "interrupted turn"), assistant(2, "unfinished", False)]
     if not tail:
         messages += [user(3, "later turn"), assistant(4, "finished", True)]
+    if paginated:
+        # Seed once through native V1 import/migration. V2 direct import itself
+        # filters unfinished messages, so it cannot seed this projected-history
+        # regression. The unfinished pair straddles the native page boundary.
+        messages = [user(index, f"SYNTHETIC_PAGE_{index}") for index in range(99)]
+        messages += [
+            assistant(99, "unfinished first page", False),
+            assistant(100, "unfinished second page", False),
+        ]
+        if not tail:
+            messages += [
+                user(101, "later second-page turn"),
+                assistant(102, "finished second-page turn", True),
+            ]
     return {
         "info": {
             "id": ident,
@@ -469,6 +486,8 @@ export const Fixture = async () => ({
 
         target = project / "example.py"
         requests = []
+        active_seen = threading.Event()
+        active_release = threading.Event()
 
         class Model(BaseHTTPRequestHandler):
             def log_message(self, format, *args):
@@ -499,6 +518,14 @@ export const Fixture = async () => ({
             def do_POST(self):
                 assert self.headers.get("x-oc-box-chat-fixture") == "HEADERS_BRIDGE_OK"
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                active_fixture = "HOST_EXPORT_ACTIVE_FIXTURE" in str(
+                    body.get("messages")
+                )
+                if active_fixture:
+                    active_seen.set()
+                    if not active_release.wait(timeout=30):
+                        self.send_error(503)
+                        return
                 if self.path.endswith("/responses"):
                     assert body["reasoning"]["effort"] == "high", body
                     assert "reasoning.encrypted_content" in body["include"], body
@@ -575,6 +602,8 @@ export const Fixture = async () => ({
                     message.get("role") == "tool"
                     for message in body.get("messages", [])
                 )
+                if active_fixture:
+                    completed = 100
                 if "PDF_BRIDGE_FIXTURE" in str(body.get("messages")):
                     completed = 100
                 delta, finish = {"content": "Smoke complete"}, "stop"
@@ -1104,6 +1133,92 @@ export const Fixture = async () => ({
                 flush=True,
             )
 
+            # Hold a real foreground drain on an isolated synthetic provider.
+            # The host reader starts a different integration-disabled private
+            # service: its active map is empty, so persisted busy/idle information
+            # must refuse even before an unfinished assistant is projected.
+            active_env = {**env, "XDG_DATA_HOME": str(root / "active-data")}
+            with (
+                patch.dict(os.environ, active_env, clear=True),
+                bridge.server(binary) as active_source,
+                patch.object(
+                    box,
+                    "host_command",
+                    side_effect=lambda _data, *args: compat.command(
+                        release, binary, args
+                    ),
+                ),
+            ):
+                active_id = active_source(
+                    "POST",
+                    "/api/session",
+                    {
+                        "location": {"directory": str(project)},
+                        "agent": "build",
+                        "model": {"providerID": "fixture", "id": "gpt-smoke"},
+                    },
+                )["data"]["id"]
+                try:
+                    active_source(
+                        "POST",
+                        "/api/session/" + active_id + "/prompt",
+                        {"text": "HOST_EXPORT_ACTIVE_FIXTURE", "resume": True},
+                    )
+                    assert active_seen.wait(timeout=20), (
+                        "Synthetic active source did not reach its bounded hold"
+                    )
+                    assert (
+                        active_id in active_source("GET", "/api/session/active")["data"]
+                    )
+                    active_info = active_source("GET", "/api/session/" + active_id)[
+                        "data"
+                    ]
+                    assert active_info["time"]["busy"] > active_info["time"].get(
+                        "idle", -1
+                    ), "Native foreground execution did not persist its busy boundary"
+                    active_page = active_source(
+                        "GET",
+                        "/api/session/" + active_id + "/message?limit=100&order=asc",
+                    )
+                    assert all(
+                        message["type"] == "user" for message in active_page["data"]
+                    ), (
+                        "Active fixture must precede any unfinished assistant so this tests the idle guard"
+                    )
+                    try:
+                        box.export_host_session(registry, data, active_id)
+                    except box.BoxError as error:
+                        assert str(error) == bridge.UNSETTLED
+                    else:
+                        raise AssertionError(
+                            "Actual private host export accepted an active native drain"
+                        )
+                    assert (
+                        active_source(
+                            "GET",
+                            "/api/session/"
+                            + active_id
+                            + "/message?limit=100&order=asc",
+                        )
+                        == active_page
+                    )
+                finally:
+                    active_release.set()
+                    active_source(
+                        "POST", "/api/experimental/session/" + active_id + "/wait"
+                    )
+                settled_host = box.export_host_session(registry, data, active_id)
+                assert (
+                    settled_host["messages"]
+                    == active_source(
+                        "GET", "/api/experimental/session/" + active_id + "/export"
+                    )["data"]["messages"]
+                )
+            print(
+                "PASS: actual private host export refuses a different process's active native drain without changing source history, then exports after idle.",
+                flush=True,
+            )
+
             # Source V1 remains byte-identical while mainline migrates a private
             # snapshot. Resuming V1 never points at the V2 database.
             legacy_env = {
@@ -1153,13 +1268,19 @@ export const Fixture = async () => ({
             bounded(
                 ["opencode", "--pure", "import", str(legacy_file)], legacy_env, project
             )
-            for name, tail in (
-                ("ses_legacy_superseded", False),
-                ("ses_legacy_tail", True),
+            for name, tail, paginated in (
+                ("ses_legacy_superseded", False, False),
+                ("ses_legacy_tail", True, False),
+                ("ses_legacy_paged_superseded", False, True),
+                ("ses_legacy_paged_tail", True, True),
             ):
                 interrupted_file = root / (name + ".json")
                 interrupted_file.write_text(
-                    json.dumps(interrupted_legacy_session(name, project, tail))
+                    json.dumps(
+                        interrupted_legacy_session(
+                            name, project, tail, paginated=paginated
+                        )
+                    )
                 )
                 bounded(
                     ["opencode", "--pure", "import", str(interrupted_file)],
@@ -1187,14 +1308,31 @@ export const Fixture = async () => ({
                     for session, states in (
                         ("ses_legacy_superseded", [False, True, False, False]),
                         (
+                            "ses_legacy_paged_superseded",
+                            [False] * 99 + [True, True, False, False],
+                        ),
+                        (
                             killed_superseded,
                             [False, True, False, False, False, True, False, False],
                         ),
                     ):
-                        page = request(
+                        first = request(
                             "GET",
                             "/api/session/" + session + "/message?limit=100&order=asc",
-                        )["data"]
+                        )
+                        page = first["data"]
+                        if len(states) > 100:
+                            second = request(
+                                "GET",
+                                "/api/session/"
+                                + session
+                                + "/message?limit=100&cursor="
+                                + quote(first["cursor"]["next"], safe=""),
+                            )
+                            assert len(page) == 100 and len(second["data"]) == 3, (
+                                "Expected a successful second nonempty native message page"
+                            )
+                            page += second["data"]
                         assert [
                             item["type"] == "assistant"
                             and item.get("time", {}).get("completed") is None
@@ -1210,6 +1348,69 @@ export const Fixture = async () => ({
                         ], (
                             "Native export did not mirror the projection minus the assistants"
                         )
+                        with (
+                            patch.object(
+                                box, "private_host_env", return_value=migration
+                            ),
+                            patch.object(
+                                box,
+                                "host_command",
+                                side_effect=lambda _data, *args: compat.command(
+                                    release, binary, args
+                                ),
+                            ),
+                        ):
+                            checked_host = box.export_host_session(
+                                registry, data, session
+                            )
+                        assert checked_host["messages"] == superseded["messages"]
+                        assert (
+                            checked_host["info"]["metadata"]["oc-box.import"][
+                                "interrupted"
+                            ]
+                            == count
+                        )
+                        assert (
+                            request(
+                                "GET",
+                                "/api/session/"
+                                + session
+                                + "/message?limit=100&order=asc",
+                            )["data"]
+                            == first["data"][:100]
+                        )
+                        if len(states) > 100:
+                            assert (
+                                request(
+                                    "GET",
+                                    "/api/session/"
+                                    + session
+                                    + "/message?limit=100&cursor="
+                                    + quote(first["cursor"]["next"], safe=""),
+                                )["data"]
+                                == second["data"]
+                            ), "Host export changed the second source page"
+                            with (
+                                patch.object(
+                                    box, "exec_command", side_effect=local_exec
+                                ),
+                                patch.object(box, "CONTAINER_OPENCODE", binary),
+                            ):
+                                direct = box.import_host_session(
+                                    registry, data, checked_host
+                                )
+                                assert direct["last"] == session
+                                direct_export = box.export_container_session(
+                                    data, session
+                                )
+                            assert (
+                                direct_export["info"]["metadata"]["oc-box.import"][
+                                    "interrupted"
+                                ]
+                                == count
+                            ), (
+                                "Direct native import lost the counted superseded omissions"
+                            )
                         archive = box.archive_session(superseded, data)
                         assert bridge.INTERRUPTED not in archive
                         assert (
@@ -1238,7 +1439,11 @@ export const Fixture = async () => ({
                             ),
                         ):
                             box.verify_host_archive(registry, data, archive)
-                    for session in ("ses_legacy_tail", killed_tail):
+                    for session in (
+                        "ses_legacy_tail",
+                        "ses_legacy_paged_tail",
+                        killed_tail,
+                    ):
                         try:
                             bridge.checked_export(request, session)
                         except bridge.FixedError as error:
@@ -1247,6 +1452,26 @@ export const Fixture = async () => ({
                             raise AssertionError(
                                 "Unfinished tail assistant was accepted"
                             )
+                        with (
+                            patch.object(
+                                box, "private_host_env", return_value=migration
+                            ),
+                            patch.object(
+                                box,
+                                "host_command",
+                                side_effect=lambda _data, *args: compat.command(
+                                    release, binary, args
+                                ),
+                            ),
+                        ):
+                            try:
+                                box.export_host_session(registry, data, session)
+                            except box.BoxError as error:
+                                assert str(error) == bridge.UNSETTLED
+                            else:
+                                raise AssertionError(
+                                    "Actual host export accepted a native unfinished tail"
+                                )
             assert "Legacy text" in json.dumps(migrated)
             assert old_database.read_bytes() == before
             v2_database = old_database.with_name("oc-box-v2.db")

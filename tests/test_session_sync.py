@@ -445,6 +445,105 @@ class SessionSyncTests(unittest.TestCase):
         self.assertIn("cursor=last%2F%2B", calls[1])
         self.assertNotIn("order=", calls[1])
 
+    def test_checked_export_classifies_across_two_nonempty_pages(self):
+        before = self.user("msg_before")
+        first = self.stale("msg_first_page_unfinished")
+        second = self.stale("msg_second_page_unfinished")
+        after = self.user("msg_after")
+        cases = {
+            "later settled on second page": (
+                [before, first],
+                [second, after],
+                [before, after],
+                None,
+            ),
+            "unfinished tail on second page": (
+                [before, first],
+                [after, second],
+                [],
+                v2.UNSETTLED,
+            ),
+            "running second page shell": (
+                [before],
+                [{"id": "msg_shell", "type": "shell", "status": "running"}],
+                [],
+                v2.UNSETTLED,
+            ),
+        }
+        for name, (page1, page2, expected, refusal) in cases.items():
+            calls = []
+
+            def request(method, target):
+                calls.append(target)
+                if target.endswith("/export"):
+                    return {
+                        "data": {"info": self.session("ses_root"), "messages": expected}
+                    }
+                if target.endswith("/active"):
+                    return {"data": {}}
+                return (
+                    {"data": page2, "cursor": {}}
+                    if "cursor=" in target
+                    else {"data": page1, "cursor": {"next": "nonempty/+"}}
+                )
+
+            with self.subTest(case=name):
+                if refusal:
+                    with self.assertRaises(v2.FixedError) as raised:
+                        v2.checked_export(request, "ses_root")
+                    self.assertEqual(str(raised.exception), refusal)
+                else:
+                    result = v2.checked_export(request, "ses_root")
+                    self.assertEqual(result["messages"], expected)
+                    self.assertEqual(result[v2.INTERRUPTED], {"assistant": 2})
+                self.assertIn("cursor=nonempty%2F%2B", calls[1])
+
+    def test_host_checked_export_requires_idle_stable_info_even_without_omissions(self):
+        message = self.user("msg_settled")
+        cases = {
+            "foreground active": (
+                {},
+                {"ses_root": {"type": "running"}},
+                False,
+                v2.UNSETTLED,
+            ),
+            "persisted busy another server": (
+                {"busy": 30, "idle": 20},
+                {},
+                False,
+                v2.UNSETTLED,
+            ),
+            "persisted busy no idle": ({"busy": 0}, {}, False, v2.UNSETTLED),
+            "info changes during export": (
+                {"busy": 0, "idle": 0},
+                {},
+                True,
+                v2.CHANGED,
+            ),
+        }
+        for name, (timestamps, activity, change, reason) in cases.items():
+            info = self.session("ses_root")
+            info["time"].update(timestamps)
+            info_reads = []
+
+            def request(method, target):
+                if target == "/api/session/active":
+                    return {"data": activity}
+                if target == "/api/session/ses_root":
+                    info_reads.append(True)
+                    return {
+                        "data": {**info, "title": "changed"}
+                        if change and len(info_reads) > 1
+                        else info
+                    }
+                if target.endswith("/export"):
+                    return {"data": {"info": info, "messages": [message]}}
+                return {"data": [message], "cursor": {}}
+
+            with self.subTest(case=name), self.assertRaises(v2.FixedError) as raised:
+                v2.checked_export(request, "ses_root", require_idle=True)
+            self.assertEqual(str(raised.exception), reason)
+
     def test_checked_export_refuses_unsettled_or_changing_history(self):
         messages = [
             {"id": "msg_assistant", "type": "assistant", "time": {"created": 1}},

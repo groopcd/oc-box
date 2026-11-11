@@ -20,6 +20,7 @@ import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
+from urllib.parse import quote
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from oc_box import oc_box as box
@@ -137,6 +138,187 @@ def exported(request, ident):
     return request("GET", "/api/experimental/session/" + ident + "/export")["data"]
 
 
+def host_history_contract(binary, root):
+    """Real host-export entry, direct native info, and two nonempty message pages."""
+    project = root / "project"
+    project.mkdir(parents=True)
+    env = private_environment(root / "source")
+    destination_env = private_environment(root / "destination")
+    data = {"id": "c" * 32, "project": str(project), "opencode_version": "2.2.6"}
+    path = root / "registry" / "workspace.json"
+    box.atomic_json(path, data)
+    (path.parent / "controller").mkdir()
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.dict(os.environ, env, clear=True))
+        source = stack.enter_context(bridge.server(binary))
+        stack.enter_context(patch.dict(os.environ, destination_env, clear=True))
+        destination = stack.enter_context(bridge.server(binary))
+        stack.enter_context(patch.object(box, "private_host_env", return_value=env))
+        stack.enter_context(
+            patch.object(
+                box,
+                "host_command",
+                side_effect=lambda _data, *args: compat.command("2.2.6", binary, args),
+            )
+        )
+        info = {
+            "id": "ses_host_pages",
+            "projectID": "global",
+            "title": "SYNTHETIC direct history",
+            "agent": "plan",
+            "model": {"providerID": "fixture", "id": "synthetic", "variant": "small"},
+            "metadata": {
+                "opaque": {"id": "ses_host_pages", "nested": [False, None, "keep"]}
+            },
+            "permissions": [
+                {"action": "shell", "resource": "*", "effect": "deny"},
+                {"action": "read", "resource": "*", "effect": "ask"},
+            ],
+            "cost": 3.25,
+            "tokens": {
+                "input": 3,
+                "output": 4,
+                "reasoning": 5,
+                "cache": {"read": 6, "write": 7},
+            },
+            "time": {
+                "created": 0,
+                "updated": 2,
+                "idle": 20,
+                "busy": 30,
+                "viewed": 40,
+                "archived": 0,
+            },
+            "outcome": "interrupted",
+            "location": {"directory": str(project)},
+            "subpath": "source-subpath",
+            "fork": {
+                "sessionID": "ses_origin",
+                "boundary": {"type": "through", "messageID": "msg_origin"},
+            },
+            "revert": {"messageID": "msg_host_page_000"},
+        }
+        messages = []
+        for index in range(104):
+            message = {
+                "id": f"msg_host_page_{index:03}",
+                "type": "user",
+                "text": f"SYNTHETIC_PAGE_{index}",
+                "time": {"created": index},
+            }
+            messages.append(message)
+        source(
+            "POST",
+            "/api/experimental/session/import",
+            {"info": info, "messages": messages, "location": info["location"]},
+        )
+        before_info = source("GET", "/api/session/" + info["id"])["data"]
+        first = source(
+            "GET", "/api/session/" + info["id"] + "/message?limit=100&order=asc"
+        )
+        second = source(
+            "GET",
+            "/api/session/"
+            + info["id"]
+            + "/message?limit=100&cursor="
+            + quote(first["cursor"]["next"], safe=""),
+        )
+        require(
+            len(first["data"]) == 100 and len(second["data"]) == 4,
+            "Native fixture did not produce two nonempty message pages.",
+        )
+        require(
+            first["data"] + second["data"] == messages,
+            "Native bulk seed changed projected message order or content.",
+        )
+        # Assert the measured native 2.2.6 import-information contract before the
+        # production verifier: this oracle does not derive its expectations from it.
+        for field in (
+            "title",
+            "agent",
+            "model",
+            "metadata",
+            "permissions",
+            "cost",
+            "tokens",
+            "outcome",
+        ):
+            require(
+                before_info.get(field) == info[field],
+                "Native direct import lost supported session information.",
+            )
+        require(
+            before_info["time"]
+            == {
+                "created": 0,
+                "updated": before_info["time"]["updated"],
+                "idle": 20,
+                "busy": 20,
+                "viewed": 20,
+                "archived": 0,
+            },
+            "Native direct import timestamp normalization changed.",
+        )
+        require(
+            before_info["time"]["updated"] > 2
+            and not any(key in before_info for key in ("fork", "revert", "subpath")),
+            "Native direct import normalization changed.",
+        )
+        require(
+            before_info["projectID"] != info["projectID"],
+            "Native import did not bind the destination project.",
+        )
+        box.verify_session_import(
+            data,
+            {"info": info, "messages": messages},
+            {"info": before_info, "messages": first["data"] + second["data"]},
+        )
+        checked = box.export_host_session(path, data, info["id"])
+        require(
+            checked["messages"] == messages,
+            "Host export lost a settled message across the page boundary.",
+        )
+        destination(
+            "POST",
+            "/api/experimental/session/import",
+            {**checked, "location": info["location"]},
+        )
+        copied = exported(destination, info["id"])
+        box.verify_session_import(data, checked, copied)
+        require(
+            copied["info"]["permissions"] == info["permissions"]
+            and copied["info"]["metadata"] == checked["info"]["metadata"],
+            "Direct import stripped privileges or omission provenance like an archive.",
+        )
+        require(
+            source("GET", "/api/session/" + info["id"])["data"] == before_info,
+            "Host export modified source information.",
+        )
+        require(
+            source(
+                "GET", "/api/session/" + info["id"] + "/message?limit=100&order=asc"
+            )["data"]
+            == first["data"],
+            "Host export modified the first source page.",
+        )
+        require(
+            source(
+                "GET",
+                "/api/session/"
+                + info["id"]
+                + "/message?limit=100&cursor="
+                + quote(first["cursor"]["next"], safe=""),
+            )["data"]
+            == second["data"],
+            "Host export modified the second source page.",
+        )
+
+    print(
+        "PASS: actual private host export checks two nonempty native pages and direct-import information without modifying source history.",
+        flush=True,
+    )
+
+
 def rename(request, ident, title):
     request("PATCH", "/api/session/" + ident, {"title": title})
 
@@ -225,6 +407,24 @@ def unsettled_shell(source, host, root, data, path, sync, verify_archive):
         else:
             raise FixtureFailure(
                 "Production export accepted native filtered, unsettled history."
+            )
+        with (
+            patch.object(
+                box,
+                "private_host_env",
+                return_value={**os.environ, "OPENCODE_PASSWORD": ""},
+            ),
+            patch.object(
+                box,
+                "host_command",
+                side_effect=lambda _data, *args: compat.command(
+                    data["opencode_version"], box.CONTAINER_OPENCODE, args
+                ),
+            ),
+        ):
+            expect_refusal(
+                lambda: box.export_host_session(path, data, ident),
+                "Actual host-export entry accepted a native running shell.",
             )
 
         # Exercise the real sync loop on both sides of the pending session:
@@ -752,7 +952,9 @@ def main(binary):
         # Honor Python's normal tempfile/TMPDIR selection; never use real host
         # data or an inherited OpenCode service registration/environment.
         with tempfile.TemporaryDirectory(prefix="oc-box-session-sync-v2-") as temporary:
-            exercise(binary, Path(temporary))
+            root = Path(temporary)
+            host_history_contract(binary, root / "host-contract")
+            exercise(binary, root)
     except FixtureFailure:
         raise
     except Exception:  # noqa: BLE001 -- Keep private native diagnostics out of logs.

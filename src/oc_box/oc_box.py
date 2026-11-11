@@ -2027,13 +2027,29 @@ def export_host_session(path, data, ident):
     """Export only the selected host conversation; never mount the host DB."""
     if not valid_session_id(ident):
         raise BoxError("Invalid host session ID.")
+    v2 = opencode_compat.major(data.get("opencode_version", "1.0.0")) == 2
     result = run(
-        host_command(data, "--pure", "export", ident),
+        [
+            "python3",
+            "-c",
+            (PACKAGE / "opencode_v2_io.py").read_text(),
+            "host-export",
+            host_command(data)[0],
+        ]
+        if v2
+        else host_command(data, "--pure", "export", ident),
         env=private_host_env(path, data),
         cwd=path.parent / "controller",
         capture=True,
-        timeout=60,
+        private=True,
+        timeout=180 if v2 else 60,
+        **({"input": json.dumps({"session": ident}), "check": False} if v2 else {}),
     )
+    if v2 and result.returncode:
+        raise BoxError(
+            opencode_v2_io.fixed_message(result.stderr)
+            or f"Host session export failed (exit {result.returncode})."
+        )
     try:
         exported = json.loads(result.stdout)
     except ValueError as exc:
@@ -2054,6 +2070,23 @@ def export_host_session(path, data, ident):
         raise BoxError(
             f"Host session belongs to {directory!r}, not {data['project']}. Select its original project with --project. "
             "An oc-box archive also needs its original host registry and history/ export, or the retired archive provenance retained by plain purge, to verify the project."
+        )
+    interrupted = exported.pop(opencode_v2_io.INTERRUPTED, None) if v2 else None
+    if interrupted is not None:
+        count = interrupted.get("assistant") if isinstance(interrupted, dict) else None
+        if type(count) is not int or count < 1:
+            raise BoxError(opencode_v2_io.EXPORT)
+        metadata = exported["info"].setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            raise BoxError(opencode_v2_io.EXPORT)
+        annotation = {"version": 1, "interrupted": {"assistant": count}}
+        if "oc-box.import" in metadata:
+            annotation["sourceMetadata"] = metadata["oc-box.import"]
+        metadata["oc-box.import"] = annotation
+        print(
+            f"oc-box: Host export omitted {count} superseded unfinished assistant message(s); "
+            "the count is retained as import metadata and original host history is unchanged.",
+            flush=True,
         )
     return exported
 
@@ -2155,13 +2188,55 @@ def verify_session_import(data, exported, imported):
     validate_session_export(exported, ident)
     validate_session_export(imported, ident)
     if opencode_compat.native(exported):
+        # Direct 2.2.6 imports retain privileges and user metadata; unlike host
+        # archives they must not be sanitized. Native import rebinds projectID/
+        # subpath, drops fork/revert, replaces updated and clips watermarks to
+        # idle (or drops them/outcome without idle). Compare the supported info,
+        # not every native field byte-for-byte or just the message projection.
+        source, target = exported["info"], imported["info"]
+        source_time, target_time = source.get("time", {}), target.get("time", {})
+        idle = source_time.get("idle")
+        expected_time = {
+            "created": source_time.get("created"),
+            "archived": source_time.get("archived"),
+            "idle": idle,
+            **{
+                key: min(idle, source_time[key])
+                if idle is not None and source_time.get(key) is not None
+                else None
+                for key in ("busy", "viewed")
+            },
+        }
         if (
             not opencode_compat.native(imported)
             or opencode_compat.directory(imported) != container_project(data)
             or imported["messages"] != exported["messages"]
+            or any(
+                target.get(key) != source.get(key)
+                for key in (
+                    "title",
+                    "agent",
+                    "model",
+                    "metadata",
+                    "permissions",
+                    "cost",
+                    "tokens",
+                    "parentID",
+                )
+            )
+            or any(key in target for key in ("fork", "revert"))
+            or any(
+                target_time.get(key) != value for key, value in expected_time.items()
+            )
+            or (
+                "updated" in source_time
+                and type(target_time.get("updated")) not in (int, float)
+            )
+            or target.get("outcome")
+            != (source.get("outcome") if idle is not None else None)
         ):
             raise BoxError(
-                "Imported OpenCode 2.x session verification failed: project or transcript differs."
+                "Imported OpenCode 2.x session verification failed: project, information or transcript differs."
             )
         return 0
     expected = {message["info"]["id"]: message for message in exported["messages"]}
