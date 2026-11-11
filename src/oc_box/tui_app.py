@@ -34,6 +34,7 @@ if __package__:
     from .tui_backend import plain, TerminalAttachmentError
     from .tui_logs import LogBuffer, LogEntry
     from .tui_sessions import FavoriteStore, SessionCatalog
+    from .tui_notifications import failure_notice
     from .tui_terminal import NativeTerminal
     from .tui_clipboard import (
         ClipboardActions,
@@ -51,6 +52,7 @@ else:
     from tui_backend import plain, TerminalAttachmentError
     from tui_logs import LogBuffer, LogEntry
     from tui_sessions import FavoriteStore, SessionCatalog
+    from tui_notifications import failure_notice
     from tui_terminal import NativeTerminal
     from tui_clipboard import (
         ClipboardActions,
@@ -76,11 +78,13 @@ class Confirm(ModalScreen):
       padding: 1 2; border: thick $warning; background: $surface; }
     Confirm Horizontal { height: 3; }
     #confirmation-review { height: 1fr; }
+    #confirmation-error { height: auto; color: $warning; }
     """
 
-    def __init__(self, message, *, destructive=False):
+    def __init__(self, message, *, destructive=False, operation="delete"):
         super().__init__()
         self.message, self.destructive = message, destructive
+        self.operation = operation
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -90,6 +94,7 @@ class Confirm(ModalScreen):
                 yield ClipboardInput(
                     placeholder="Type DELETE to confirm", id="confirmation"
                 )
+                yield Static("", id="confirmation-error", markup=False)
             yield ClipboardBar()
             with Horizontal():
                 yield Button("Cancel", id="cancel")
@@ -107,6 +112,9 @@ class Confirm(ModalScreen):
                 self.destructive
                 and self.query_one("#confirmation", Input).value != "DELETE"
             ):
+                notice = failure_notice(self.operation, reason="confirmation-required")
+                self.query_one("#confirmation-error", Static).update(notice.message)
+                self.app._show_failure_notice(notice)
                 return
             self.dismiss(True)
 
@@ -399,6 +407,56 @@ class DashboardApp(ClipboardActions, App):
 
     def _message(self, value):
         self.query_one("#notice", Static).update(plain(value))
+
+    def _show_failure_notice(self, notice):
+        if not self.is_running or not self.is_mounted:
+            return
+        self._message(f"{notice.title}: {notice.message}")
+        self.notify(
+            notice.message,
+            title=notice.title,
+            severity=notice.severity,
+            timeout=notice.timeout,
+            markup=False,
+        )
+
+    def _notify_failure(self, operation, error=None, **context):
+        return self._operation_failure(error, operation=operation, **context)
+
+    def _operation_failure(
+        self,
+        error=None,
+        *,
+        operation="delete",
+        reason=None,
+        dispatched=False,
+        completed=False,
+        count=None,
+    ):
+        """UI-thread presentation of fixed copy; never render error text."""
+        notice = failure_notice(
+            operation,
+            error,
+            reason=reason,
+            dispatched=dispatched,
+            completed=completed,
+            count=count,
+        )
+        self._show_failure_notice(notice)
+        return notice
+
+    def _session_action_reason(self, catalog, selected):
+        if self.read_only:
+            return "read-only"
+        if self.demo:
+            return "demo"
+        if not catalog or not selected:
+            return "selection-required"
+        if catalog is not self.catalog:
+            return "source-changed"
+        if self._session_busy:
+            return "busy"
+        return None
 
     def _journal(self, event, catalog=None):
         if not self.backend.box or self.demo:
@@ -1125,8 +1183,10 @@ class DashboardApp(ClipboardActions, App):
             f"Complete {catalog.origin} inventory: {len(sessions)} sessions, including children and archived entries."
         )
 
-    def _apply_mutation_result(self, catalog, sessions, generation):
+    def _apply_mutation_result(self, catalog, sessions, generation, operation=None):
         if catalog is not self.catalog or generation != self._catalog_generation:
+            if operation:
+                self._notify_failure(operation, reason="source-changed", completed=True)
             return
         self._apply_sessions(catalog, sessions)
 
@@ -1247,7 +1307,14 @@ class DashboardApp(ClipboardActions, App):
 
     def _archive(self):
         session = self._session()
-        if self.read_only or not session or not self.catalog:
+        operation = (
+            "unarchive"
+            if session and session.get("time", {}).get("archived") is not None
+            else "archive"
+        )
+        reason = self._session_action_reason(self.catalog, session)
+        if reason or self._operation_lock.locked():
+            self._notify_failure(operation, reason=reason or "busy")
             return
         catalog, ident = self.catalog, session["id"]
         archived = session.get("time", {}).get("archived") is None
@@ -1264,46 +1331,64 @@ class DashboardApp(ClipboardActions, App):
 
     @work(thread=True, group="session-action", exit_on_error=False)
     def prepare_delete(self, session, catalog):
-        if self.read_only or not session or not catalog:
+        reason = self._session_action_reason(catalog, session)
+        if reason:
+            if self.is_running:
+                self.call_from_thread(self._notify_failure, "delete", reason=reason)
             return
         if not self._operation_lock.acquire(blocking=False):
+            if self.is_running:
+                self.call_from_thread(self._notify_failure, "delete", reason="busy")
             return
+        generation = self._catalog_generation
         try:
             preview = catalog.prepare_delete(session["id"])
             if self.is_running:
                 self.call_from_thread(
-                    self._confirm_delete, catalog, session["id"], preview
+                    self._confirm_delete, catalog, session["id"], preview, generation
                 )
-        except Exception:
+        except Exception as error:
             if self.is_running:
-                self.call_from_thread(
-                    self._message,
-                    "Deletion refused: activity, ownership or cascade could not be safely established.",
-                )
+                self.call_from_thread(self._notify_failure, "delete", error)
         finally:
             self._operation_lock.release()
 
-    def _confirm_delete(self, catalog, ident, preview):
-        if catalog is not self.catalog:
+    def _confirm_delete(self, catalog, ident, preview, generation=None):
+        reason = self._session_action_reason(catalog, ident)
+        if (
+            not reason
+            and generation is not None
+            and generation != self._catalog_generation
+        ):
+            reason = "source-changed"
+        if reason:
+            self._notify_failure("delete", reason=reason)
             return
-        if len(preview["sessions"]) > 50:
-            self._message(
-                "Deletion refused: this cascade is larger than the dashboard's 50-session review limit."
+        try:
+            selected = preview["sessions"]
+            if not isinstance(selected, list) or not selected:
+                raise ValueError("Invalid preview")
+            if len(selected) > 50:
+                self._notify_failure(
+                    "delete", reason="review-limit", count=len(selected)
+                )
+                return
+            affected = "\n".join(
+                f"  {s['id']} · {plain(s['location']['directory'], 256)}"
+                for s in selected
             )
-            return
-        affected = "\n".join(
-            f"  {s['id']} · {plain(s['location']['directory'], 256)}"
-            for s in preview["sessions"]
-        )
-        self.push_screen(
-            Confirm(
+            message = (
                 f"Delete {ident} in {catalog.origin}, including its native descendants?\n"
                 f"Descendants: {preview['descendant_count']}\n"
                 f"Affected native entries:\n{affected}\n"
                 f"{plain(preview.get('warning', ''))}\n"
-                "Other stores/copies are not deleted. A managed host copy may return after later source updates.",
-                destructive=True,
-            ),
+                "Other stores/copies are not deleted. A managed host copy may return after later source updates."
+            )
+        except Exception:
+            self._notify_failure("delete", reason="invalid-preview")
+            return
+        self.push_screen(
+            Confirm(message, destructive=True),
             lambda ok: (
                 self.mutate_session(catalog, ident, preview=preview) if ok else None
             ),
@@ -1311,30 +1396,51 @@ class DashboardApp(ClipboardActions, App):
 
     @work(thread=True, group="session-action", exit_on_error=False)
     def mutate_session(self, catalog, ident, *, archived=None, preview=None):
-        if self.read_only or catalog is not self.catalog:
+        operation = (
+            "delete" if archived is None else "archive" if archived else "unarchive"
+        )
+        reason = self._session_action_reason(catalog, ident)
+        if reason:
+            if self.is_running:
+                self.call_from_thread(self._notify_failure, operation, reason=reason)
             return
         if not self._operation_lock.acquire(blocking=False):
+            if self.is_running:
+                self.call_from_thread(self._notify_failure, operation, reason="busy")
             return
         generation = self._catalog_generation
+        dispatched = completed = False
         try:
+            # Catalog methods revalidate before dispatch. Only their known
+            # preflight reasons prove refusal; transport errors are ambiguous.
+            dispatched = True
             if archived is None:
                 catalog.delete(preview)
+                completed = True
                 self._journal("session.deleted", catalog)
             else:
                 catalog.archive(ident, archived)
+                completed = True
                 self._journal(
                     "session.archived" if archived else "session.unarchived", catalog
                 )
             sessions = catalog.list()
             if self.is_running:
                 self.call_from_thread(
-                    self._apply_mutation_result, catalog, sessions, generation
+                    self._apply_mutation_result,
+                    catalog,
+                    sessions,
+                    generation,
+                    operation,
                 )
-        except Exception:
+        except Exception as error:
             if self.is_running:
                 self.call_from_thread(
-                    self._message,
-                    "Session action refused or failed. Refresh to inspect the actual state; no automatic retry was made.",
+                    self._notify_failure,
+                    operation,
+                    error,
+                    dispatched=dispatched,
+                    completed=completed,
                 )
         finally:
             self._operation_lock.release()
