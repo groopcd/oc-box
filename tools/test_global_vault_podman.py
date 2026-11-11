@@ -577,7 +577,10 @@ def source_snapshot(source, expected):
             mode in (b"100644", b"100755") and kind == b"blob", "clean-source-required"
         )
         relative = name.decode()
-        content = safe_bootstrap_file(source, relative).read_bytes()
+        path = safe_bootstrap_file(source, relative)
+        working_mode = b"100755" if path.stat().st_mode & stat.S_IXUSR else b"100644"
+        require(working_mode == mode, "source-changed")
+        content = path.read_bytes()
         require(
             hashlib.sha1(b"blob " + str(len(content)).encode() + b"\0" + content)
             .hexdigest()
@@ -590,7 +593,7 @@ def source_snapshot(source, expected):
         set(SOURCE_DONORS) <= hashes.keys() and "src/oc_box/oc_box.py" in hashes,
         "clean-source-required",
     )
-    count = int(git("rev-list", "--count", "HEAD"))
+    count = int(git("rev-list", "--count", expected))
     require(count > 29, "clean-source-required")
     return {
         "commit": expected,
@@ -3387,7 +3390,7 @@ def validate_source_retry(root):
     """Read-only checkpoint validation. Never consult/decrypt the old vault."""
     root = validate_fixture(root)
     original = root / "source-binding.json"
-    if original.exists():
+    if evidence_present(original):
         captured = private_json(root, "source-binding.json")
         require(
             type(captured) is dict
@@ -3607,7 +3610,7 @@ def source_evidence_digests(root, path):
     )
     result = {name: crypto.digest(safe_path(root, name)) for name in files}
     for name in ("result.json", "first-launch-failure.json", "source-binding.json"):
-        if (root / name).exists():
+        if evidence_present(root / name):
             result[name] = crypto.digest(safe_path(root, name))
     for directory in (root / "config", path.parent / "imports-v2", root / "vault"):
         if directory.exists():
@@ -3615,6 +3618,11 @@ def source_evidence_digests(root, path):
             for name, digest in tree_digest(directory).items():
                 result[str(directory.relative_to(root) / name)] = digest
     return result
+
+
+def evidence_present(path):
+    """Only genuine lexical absence may use the legacy-unbound path."""
+    return path.exists() or path.is_symlink()
 
 
 def prepare_source_retry_selector(root, attempt, binary):
@@ -3681,7 +3689,7 @@ def retry_source(root, temp_parent=None):
         prior = root / "source-binding.json"
         result["original_source_identity"] = (
             private_json(root, "source-binding.json").get("source_identity")
-            if prior.exists()
+            if evidence_present(prior)
             else None
         )
         result["original_provenance"] = (
@@ -3690,7 +3698,9 @@ def retry_source(root, temp_parent=None):
             else "legacy-unbound-not-promoted"
         )
         result["original_binding"] = (
-            private_json(root, "source-binding.json") if prior.exists() else None
+            private_json(root, "source-binding.json")
+            if evidence_present(prior)
+            else None
         )
         with (
             scoped_host_environment(isolated_env(root), clear=True),

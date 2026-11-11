@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import shutil
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -2738,6 +2739,137 @@ print(json.dumps({'lazy':True,'exports':True}))
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"lazy": True, "exports": True})
+
+    def private_source_repository(self, name, *, actual=False):
+        root = self.parent / name
+        root.mkdir(mode=0o700)
+        environment = {
+            "PATH": os.defpath,
+            "HOME": str(root),
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+
+        def git(*args):
+            return subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "-c",
+                    "user.name=Synthetic Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                    *args,
+                ],
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                check=True,
+                text=True,
+                timeout=15,
+            ).stdout.strip()
+
+        git("init", "-q")
+        if actual:
+            shutil.copytree(
+                APP / "src/oc_box",
+                root / "src/oc_box",
+                ignore=shutil.ignore_patterns("__pycache__", "vault-deps"),
+            )
+            (root / "tools").mkdir()
+            for relative in fixture.SOURCE_DONORS:
+                shutil.copy2(APP / relative, root / relative)
+            shutil.copy2(APP / "pyproject.toml", root / "pyproject.toml")
+            git("add", "src", "tools", "pyproject.toml")
+        else:
+            for relative in (*fixture.SOURCE_DONORS, "src/oc_box/oc_box.py"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("# synthetic tracked source, never executed\n")
+            git("add", "src", "tools")
+        for number in range(30):
+            git("commit", "-q", "--allow-empty", "-m", "synthetic " + str(number))
+        return root, git, git("rev-parse", "HEAD")
+
+    def test_expected_tree_mode_is_checked_even_when_git_filemode_is_disabled(self):
+        root, git, expected = self.private_source_repository("mode-proof")
+        git("config", "core.fileMode", "false")
+        for relative in (*fixture.SOURCE_DONORS, "src/oc_box/oc_box.py"):
+            with self.subTest(relative=relative):
+                path = root / relative
+                mode = path.stat().st_mode
+                path.chmod(mode | 0o100)
+                self.assertEqual(git("status", "--porcelain"), "")
+                with (
+                    patch.object(fixture, "APP", root),
+                    patch.object(fixture, "load_runtime") as load,
+                ):
+                    with self.assertRaisesRegex(fixture.FixtureError, "source-changed"):
+                        fixture.source_snapshot(root, expected)
+                load.assert_not_called()
+                path.chmod(mode)
+        with patch.object(fixture, "APP", root):
+            self.assertEqual(
+                fixture.source_snapshot(root, expected)["commit_count"], 30
+            )
+
+    def test_commit_count_remains_bound_to_expected_after_head_advance(self):
+        root, git, expected = self.private_source_repository("count-proof")
+        actual_run = subprocess.run
+        advanced = []
+
+        def interleaved(argv, **kwargs):
+            result = actual_run(argv, **kwargs)
+            if "status" in argv and not advanced:
+                advanced.append(True)
+                git("commit", "-q", "--allow-empty", "-m", "advance after status")
+            return result
+
+        with (
+            patch.object(fixture, "APP", root),
+            patch.object(subprocess, "run", side_effect=interleaved),
+        ):
+            result = fixture.source_snapshot(root, expected)
+        self.assertNotEqual(git("rev-parse", "HEAD"), expected)
+        self.assertEqual(result["commit"], expected)
+        self.assertEqual(result["commit_count"], 30)
+        self.assertEqual(result["version"], "1.6.1+g" + expected[:7])
+
+    def test_dangling_original_binding_is_refused_before_retry_allocation(self):
+        path, _, _ = self.retained_source()
+        self.assertEqual(
+            fixture.validate_source_retry(self.root)[:2], (self.root, path)
+        )
+        before = fixture.source_evidence_digests(self.root, path)
+        original = self.root / "source-binding.json"
+        original.symlink_to(self.root / "missing-private-binding")
+        with (
+            patch.object(fixture, "host_guard"),
+            patch.object(fixture, "validate_store") as engine,
+            patch.object(
+                fixture.tempfile,
+                "mkdtemp",
+                side_effect=AssertionError("attempt allocated before refusal"),
+            ) as allocate,
+        ):
+            with self.assertRaises(fixture.FixtureError):
+                fixture.retry_source(self.root)
+        engine.assert_not_called()
+        allocate.assert_not_called()
+        self.assertFalse((self.root / "source-retries").exists())
+        self.assertTrue(original.is_symlink())
+        self.assertEqual(
+            os.readlink(original), str(self.root / "missing-private-binding")
+        )
+        with self.assertRaises(fixture.FixtureError):
+            fixture.source_evidence_digests(self.root, path)
+        original.unlink()  # Remove only this test's link, never an evidence target.
+        self.assertEqual(fixture.source_evidence_digests(self.root, path), before)
 
 
 if __name__ == "__main__":
