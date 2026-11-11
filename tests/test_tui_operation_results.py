@@ -91,9 +91,13 @@ signal.alarm(8)
 print("READY",flush=True)
 while True: signal.pause()
 """)
+            # CI imports from PYTHONPATH rather than an editable install. Give
+            # this isolated test driver the exact subject package parent; the
+            # production handoff and synthetic child retain their normal -I.
             controller = """import json,os,signal,sys
 from pathlib import Path
 from types import SimpleNamespace
+sys.path.insert(0,sys.argv[2])
 from oc_box import tui_operations as operations
 root=Path(sys.argv[1])
 runtime=SimpleNamespace(PACKAGE=root,state_root=lambda:root/"state",maintenance_host_env=lambda:{"PATH":os.defpath,"HOME":str(root)})
@@ -103,7 +107,15 @@ code=operations.handoff(runtime,{"version":1},on_result=notices.append)
 print(json.dumps({"code":code,"restored":signal.getsignal(signal.SIGINT) is previous,"cleanup_result":bool(notices) and notices[0].message=="Cleanup completed"}),flush=True)
 """
             process = subprocess.Popen(
-                [sys.executable, "-I", "-B", "-c", controller, str(root)],
+                [
+                    sys.executable,
+                    "-I",
+                    "-B",
+                    "-c",
+                    controller,
+                    str(root),
+                    str(Path(operations.__file__).resolve().parent.parent),
+                ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -131,6 +143,10 @@ print(json.dumps({"code":code,"restored":signal.getsignal(signal.SIGINT) is prev
                 if process.poll() is None:
                     os.killpg(process.pid, signal.SIGKILL)
                     process.communicate(timeout=3)
+                if process.stdout:
+                    process.stdout.close()
+                if process.stderr:
+                    process.stderr.close()
 
     def invoke_child(self, execute):
         output = io.StringIO()
