@@ -116,25 +116,45 @@ def write_file(path, content, mode=0o600):
 def make_profile(source, output=None):
     configs, sources, sandbox = discover(source)
     files = {}
-    excluded = {"node_modules", ".git", "package-lock.json", "bun.lock", "bun.lockb"}
+    excluded = {"node_modules", ".git"}
+    # These are profile-root control files, not reserved basenames throughout
+    # plugin packages. In particular service.js is an ordinary support module.
+    root_private = {
+        "auth.json",
+        "mcp-auth.json",
+        ".env",
+        ".npmrc",
+        "service.json",
+        "service.lock",
+        "service.log",
+        "service.pid",
+        "service.sock",
+        "package.json",
+        "package-lock.json",
+        "bun.lock",
+        "bun.lockb",
+        "oc-box-profile.json",
+        "oc-box-v1-bridge.js",
+        "oc-box-v1-provider-config.json",
+        *configs,
+    }
     for file in source.rglob("*"):
         relative = file.relative_to(source)
         if (
             set(relative.parts) & excluded
             or relative in sources
-            or relative.name.startswith("service")
-            or relative.name in ("auth.json", "mcp-auth.json", ".env", ".npmrc")
-            or (relative == Path("package.json"))
-            or relative.name in configs
+            or relative.parts[0] in root_private
         ):
             continue
-        if any(
-            part == "oc-box-build-permissions" or part.startswith("oc-box-compat-")
-            for part in relative.parts
-        ) or relative.name in (
-            "oc-box-profile.json",
-            "oc-box-v1-bridge.js",
-            "oc-box-v1-provider-config.json",
+        # Retire generated autoload registrations, not similarly named package
+        # internals that another plugin may import.
+        if (
+            len(relative.parts) > 1
+            and relative.parts[0] in ("plugin", "plugins", "custom-plugins")
+            and (
+                relative.parts[1] == "oc-box-build-permissions"
+                or re.fullmatch(r"oc-box-compat-[0-9a-f]{16}", relative.parts[1])
+            )
         ):
             continue
         if file.is_symlink():
@@ -260,8 +280,9 @@ def make_profile(source, output=None):
         b"./oc-box-v1-provider-config.json", b"./host-providers.json"
     )
     write_file(destination / "host-bridge.js", bridge)
-    # Discovery only needs endpoint/model inventory. Never duplicate provider
-    # API keys or arbitrary request headers into this helper's snapshot.
+    # Discovery is a reduced declaration view, not effective settings. Keep the
+    # intentional source config above, but never expand env/launch credentials
+    # or copy arbitrary provider/model settings, headers or variants here.
     providers = {}
     for config in configs.values():
         for ident, provider in config.get(
@@ -270,9 +291,35 @@ def make_profile(source, output=None):
             options = provider.get("settings", provider.get("options", {}))
             providers[ident] = {
                 key: provider[key]
-                for key in ("name", "package", "npm", "models")
+                for key in ("name", "package", "npm")
                 if key in provider
             }
+            if "models" in provider:
+                models = {}
+                for model_id, model in provider["models"].items():
+                    models[model_id] = {
+                        key: model[key]
+                        for key in (
+                            "name",
+                            "id",
+                            "modelID",
+                            "tool_call",
+                            "attachment",
+                            "temperature",
+                        )
+                        if key in model
+                    }
+                    for field, keys in (
+                        ("limit", ("context", "input", "output")),
+                        ("capabilities", ("tools", "input", "output", "temperature")),
+                    ):
+                        if field in model:
+                            models[model_id][field] = {
+                                key: model[field][key]
+                                for key in keys
+                                if key in model[field]
+                            }
+                providers[ident]["models"] = models
             providers[ident]["options"] = (
                 {"baseURL": options["baseURL"]} if "baseURL" in options else {}
             )
