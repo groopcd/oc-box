@@ -1143,6 +1143,151 @@ class DiagnoseImportTests(unittest.TestCase):
         self.fake.check_backend.assert_not_called()
         self.fake.find_workspace.assert_not_called()
 
+    def test_locked_freshness_distinguishes_nested_boolean_number_changes(self):
+        observations = (
+            ("false-to-zero", False, 0),
+            ("true-to-one", True, 1),
+            ("zero-to-false", 0, False),
+            ("one-to-true", 1, True),
+            ("unchanged-false", False, False),
+            ("unchanged-true", True, True),
+            ("unchanged-zero", 0, 0),
+            ("unchanged-one", 1, 1),
+        )
+        initial_snapshots = json.dumps([self.data, self.source], sort_keys=True)
+        for target in ("registration", "source"):
+            for form in ("mapping", "list"):
+                for case, before, after in observations:
+                    with (
+                        self.subTest(target=target, form=form, case=case),
+                        tempfile.TemporaryDirectory() as directory,
+                    ):
+                        registration = Path(directory) / "workspace.json"
+                        source_path = (
+                            Path(directory) / "imports" / (self.session + ".json")
+                        )
+                        source_path.parent.mkdir()
+                        old_data, old_source = (
+                            copy.deepcopy(self.data),
+                            copy.deepcopy(self.source),
+                        )
+                        fresh_data, fresh_source = (
+                            copy.deepcopy(self.data),
+                            copy.deepcopy(self.source),
+                        )
+                        for data, source, value in (
+                            (old_data, old_source, before),
+                            (fresh_data, fresh_source, after),
+                        ):
+                            nested = (
+                                {self.private[0]: value}
+                                if form == "mapping"
+                                else [value]
+                            )
+                            destination = (
+                                data
+                                if target == "registration"
+                                else source["messages"][0]["parts"][0]["state"]["input"]
+                            )
+                            destination["observation"] = {"nested": nested}
+                        registration.write_text(json.dumps(old_data), encoding="utf-8")
+                        source_path.write_text(json.dumps(old_source), encoding="utf-8")
+                        snapshot = SimpleNamespace(
+                            registration=registration,
+                            source_path=source_path,
+                            registration_text=json.dumps(
+                                fresh_data, indent=2, sort_keys=True
+                            ),
+                            source_text=json.dumps(
+                                fresh_source, indent=2, sort_keys=True
+                            ),
+                            old_registration=json.dumps(old_data, sort_keys=True),
+                            old_source=json.dumps(old_source, sort_keys=True),
+                        )
+
+                        @contextlib.contextmanager
+                        def lock(path, snapshot=snapshot):
+                            snapshot.registration.write_text(
+                                snapshot.registration_text, encoding="utf-8"
+                            )
+                            snapshot.source_path.write_text(
+                                snapshot.source_text, encoding="utf-8"
+                            )
+                            yield
+
+                        self.fake.find_workspace.side_effect = (
+                            lambda snapshot=snapshot, **options: (
+                                snapshot.registration,
+                                json.loads(
+                                    snapshot.registration.read_text(encoding="utf-8")
+                                ),
+                            )
+                        )
+                        self.fake.read_json.side_effect = lambda path: json.loads(
+                            path.read_text(encoding="utf-8")
+                        )
+                        self.fake.workspace_lock.side_effect = lock
+                        self.actual = copy.deepcopy(old_source)
+                        boundaries = (
+                            "check_backend",
+                            "inspect_owned",
+                            "podman",
+                            "export_container_session",
+                            "stop_container",
+                        )
+                        for name in boundaries:
+                            getattr(self.fake, name).reset_mock()
+                        code, output, errors = self.invoke()
+                        if case.startswith("unchanged-"):
+                            self.assertEqual(code, 0)
+                            self.assertEqual(errors, "")
+                            self.assertTrue(json.loads(output)["transcript_verified"])
+                            self.fake.check_backend.assert_called_once()
+                            self.fake.inspect_owned.assert_called_once()
+                            self.fake.export_container_session.assert_called_once()
+                        else:
+                            self.assertEqual(code, 2)
+                            self.assertEqual(output, "")
+                            self.assertEqual(
+                                json.loads(errors),
+                                {
+                                    "primary_failure": {
+                                        "stage": "freshness",
+                                        "category": "box-error",
+                                    },
+                                    "secondary_failures": [],
+                                },
+                            )
+                            for name in boundaries:
+                                getattr(self.fake, name).assert_not_called()
+                        self.assertEqual(
+                            registration.read_text(encoding="utf-8"),
+                            snapshot.registration_text,
+                        )
+                        self.assertEqual(
+                            source_path.read_text(encoding="utf-8"),
+                            snapshot.source_text,
+                        )
+                        self.assertEqual(
+                            json.dumps(old_data, sort_keys=True),
+                            snapshot.old_registration,
+                        )
+                        self.assertEqual(
+                            json.dumps(old_source, sort_keys=True), snapshot.old_source
+                        )
+                        self.assertEqual(
+                            json.dumps([self.data, self.source], sort_keys=True),
+                            initial_snapshots,
+                        )
+                        self.assertEqual(
+                            sorted(
+                                path.relative_to(directory).as_posix()
+                                for path in Path(directory).rglob("*")
+                                if path.is_file()
+                            ),
+                            ["imports/" + self.session + ".json", "workspace.json"],
+                        )
+
     def test_saved_import_major_and_path_are_bound_before_and_under_lock(self):
         for version, folder in (("1.19.5", "imports"), ("2.2.6", "imports-v2")):
             with self.subTest(version=version):

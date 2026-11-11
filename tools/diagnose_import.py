@@ -172,17 +172,38 @@ def saved_import_path(path, data, session):
     )
 
 
+def same_json_observation(expected, actual):
+    """Compare validated snapshots without Python's nested bool/number equality."""
+    # Preserve the existing plain-JSON, finite-number and MAX_DEPTH checks.
+    differences(expected, actual, limit=1)
+
+    def equal(left, right):
+        if type(left) is not type(right):
+            return False
+        if type(left) is dict:
+            return left.keys() == right.keys() and all(
+                equal(left[key], right[key]) for key in left
+            )
+        if type(left) is list:
+            return len(left) == len(right) and all(
+                equal(a, b) for a, b in zip(left, right)
+            )
+        return left == right
+
+    return equal(expected, actual)
+
+
 def live_export(path, data, session, source, state):
     state["stage"] = "workspace-lock"
     with workspace_lock(path, state):
         state["stage"] = "freshness"
         fresh_path, fresh_data = box.find_workspace(workspace_id=data["id"])
-        if fresh_path != path or differences(data, fresh_data, limit=1):
+        if fresh_path != path or not same_json_observation(data, fresh_data):
             raise box.BoxError(
                 "Diagnostic inputs changed; no native operation requested"
             )
         fresh_source = box.read_json(saved_import_path(fresh_path, fresh_data, session))
-        if differences(source, fresh_source, limit=1):
+        if not same_json_observation(source, fresh_source):
             raise box.BoxError(
                 "Diagnostic inputs changed; no native operation requested"
             )
