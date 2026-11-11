@@ -44,6 +44,7 @@ from oc_box import (
     workspace_service,
 )
 from interrupted_v1_fixture import create_interrupted_history
+from smoke_session_sync_v2 import private_environment
 
 
 def host_fixture_probe(binary):
@@ -516,7 +517,10 @@ export const Fixture = async () => ({
                 self.wfile.write(json.dumps(data).encode())
 
             def do_POST(self):
-                assert self.headers.get("x-oc-box-chat-fixture") == "HEADERS_BRIDGE_OK"
+                if not self.path.startswith("/host-active/"):
+                    assert (
+                        self.headers.get("x-oc-box-chat-fixture") == "HEADERS_BRIDGE_OK"
+                    )
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 active_fixture = "HOST_EXPORT_ACTIVE_FIXTURE" in str(
                     body.get("messages")
@@ -1137,7 +1141,30 @@ export const Fixture = async () => ({
             # The host reader starts a different integration-disabled private
             # service: its active map is empty, so persisted busy/idle information
             # must refuse even before an unfinished assistant is projected.
-            active_env = {**env, "XDG_DATA_HOME": str(root / "active-data")}
+            active_env = private_environment(root / "active-source")
+            # Use native config only: a copied V1 provider-discovery adapter is
+            # an unrelated contract and must not prevent this drain from starting.
+            active_env.pop("OPENCODE_DB")
+            active_config = json.loads(active_env["OPENCODE_CONFIG_CONTENT"])
+            active_config.update(
+                model="fixture/gpt-smoke",
+                providers={
+                    "fixture": {
+                        "package": "aisdk:@ai-sdk/openai-compatible",
+                        "settings": {
+                            "baseURL": f"http://127.0.0.1:{model.server_port}/host-active/v1",
+                            "apiKey": "synthetic",
+                        },
+                        "models": {
+                            "gpt-smoke": {
+                                "name": "Synthetic active source",
+                                "limit": {"context": 32000, "output": 2000},
+                            }
+                        },
+                    }
+                },
+            )
+            active_env["OPENCODE_CONFIG_CONTENT"] = json.dumps(active_config)
             with (
                 patch.dict(os.environ, active_env, clear=True),
                 bridge.server(binary) as active_source,
