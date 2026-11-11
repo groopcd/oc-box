@@ -15,8 +15,8 @@ add an evidence commit between acceptance and tagging the tested source.
 
 ## Candidate highlights
 
-The optional `oc-box tui` manager adds **Status, Settings, Sessions, Terminals
-and Logs**. It is separate from OpenCode's native conversation TUI and does not
+The optional `oc-box tui` manager adds **Status, Settings, Sessions, Terminals,
+Logs, Storage and Backup/restore**. It is separate from OpenCode's native conversation TUI and does not
 replace it or add another chat client.
 
 - **Compact diagnostics:** aligned single-line RAM/CPU/Home FS meters, bounded
@@ -37,6 +37,8 @@ replace it or add another chat client.
   archived sessions. The table stays a static snapshot between explicit updates;
   background monitoring does not reset rows, cursor, selection or scrolling.
   Favorites are private local UI state, not native pins.
+  Delayed connections visibly identify the source/stage and show animated progress;
+  cancellation remains visible until the bounded request finishes.
 - **Source-specific actions:** guarded native archive/unarchive and typed
   `DELETE` confirmation. Parent deletion includes native descendants across
   project filters, with a 50-session review ceiling. Managed host copies with
@@ -45,6 +47,15 @@ replace it or add another chat client.
   Host archive copies and workspace sources remain independent; later normal
   sync can replace/recreate host copies. Archived workspace roots still sync but
   are excluded from automatic resume.
+- **Actionable failures:** deletion refusals show a reason-specific toast and
+  persistent selectable notice without private native errors. Unverified mutation
+  acknowledgements and completed actions with failed refreshes remain distinct.
+- **Storage and encrypted backup/restore:** host individual session trees,
+  selected workspace and all registered workspace inventories are separate scopes.
+  Typed one-workspace removal preserves host project/history. Existing full/
+  portable `.ocbox` archives and encrypted `.ocsession` history use native masked
+  terminal prompts, no-overwrite publication and fresh-ID restores. No whole host
+  database wipe, arbitrary cache deletion or unreviewed bulk purge is offered.
 - **Experimental embedded native PTY:** an optional bounded local emulator wraps
   the existing persistent-session terminal client, not a replacement container
   shell. Creation/takeover requires confirmation; verified source membership and
@@ -75,7 +86,7 @@ existing private owner and never unlocks or refreshes credentials. Disconnect/
 quit releases manager clients, which can let an already-exiting owner proceed
 with normal sync/stop. The read-only CLI fence remains authoritative.
 
-**Not included:** CPU/RAM/storage editing, live resource-control RPCs, quotas,
+**Not included:** CPU/RAM limit editing, live resource-control RPCs, quotas,
 volume resizes or store moves. Saved/effective resource settings are informational.
 V1 launcher/history compatibility remains required; live manager session APIs
 are V2-only. The ordinary CLI still has no third-party Python baseline dependency.
@@ -122,7 +133,8 @@ versions, original report locations and actual operator observations privately.
 | Focused host history/readiness | Fresh reviewed `tools/test_session_sync_podman.py` report on the final clean candidate: all 42 checks true, including nine archive/resume cases; ordered exits `[0,0,0,1,0,0,0,0]`. |
 | Global-vault host lifecycle | Fresh reviewed `tools/test_global_vault_podman.py` report on that same source. |
 | V1/V2 host lifecycle | Fresh reviewed `tools/test_v2_podman.py` report, including migrated-history checks, on that same source. |
-| Textual host observations | Use the fresh interactive fixture's `manager` mode for five tabs, compact metrics/refresh/settings including staged defaults, static Sessions scrolling, source-specific actions/cascades, embedded PTY/focus/resize/detach, visible leases and independent native clients. This mode takes no background outer lease. |
+| Textual host observations | Use the fresh interactive fixture's `manager` mode for seven tabs, compact metrics/refresh/settings including staged defaults, static Sessions scrolling, visible connection progress/cancellation and failure notifications, source-specific actions/cascades, embedded PTY/focus/resize/detach, visible leases and independent native clients. This mode takes no background outer lease. |
+| Storage and encrypted backup UI | Guarded single-workspace removal, retained project/history, active-owner/exposure/read-only refusal, real masked foreground TTY handoff, full/portable restore to fresh directories, encrypted native session-history restore with fresh IDs, and deletion of only the reviewed owned backup file. |
 | Journal/log/self-checkout boundaries | Private bounded fixed-category journal and rotation, no synthetic secret/raw-text leakage, owned opt-in bounded memory-only Podman output, and a non-editable self-workspace launch without weakening validation. |
 | Temporary host-file sharing | Fresh checks on the same candidate for explicit disclosure consent, live read/image results, confinement, ordinary-container-path isolation, lease/termination/reload behavior, no automatic regrant, backup/source preservation and enforcing SELinux without source relabeling; see [sharing validation](../testing.md#experimental-temporary-host-file-tools). |
 

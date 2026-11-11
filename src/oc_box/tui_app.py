@@ -13,12 +13,14 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.screen import ModalScreen
+from textual.worker import get_current_worker
 from textual.widgets import (
     Button,
     Collapsible,
     DataTable,
     Input,
     Label,
+    LoadingIndicator,
     RichLog,
     Select,
     Static,
@@ -32,6 +34,7 @@ if __package__:
     from .tui_backend import plain, TerminalAttachmentError
     from .tui_logs import LogBuffer, LogEntry
     from .tui_sessions import FavoriteStore, SessionCatalog
+    from .tui_notifications import failure_notice
     from .tui_terminal import NativeTerminal
     from .tui_clipboard import (
         ClipboardActions,
@@ -44,11 +47,13 @@ if __package__:
     )
     from .tui_status import MonitorPanel, percentage
     from .tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
+    from .tui_management import ManagementActions, StoragePanel, BackupPanel
 else:
     import status_report
     from tui_backend import plain, TerminalAttachmentError
     from tui_logs import LogBuffer, LogEntry
     from tui_sessions import FavoriteStore, SessionCatalog
+    from tui_notifications import failure_notice
     from tui_terminal import NativeTerminal
     from tui_clipboard import (
         ClipboardActions,
@@ -61,6 +66,7 @@ else:
     )
     from tui_status import MonitorPanel, percentage
     from tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
+    from tui_management import ManagementActions, StoragePanel, BackupPanel
 
 
 def text(value):
@@ -74,11 +80,13 @@ class Confirm(ModalScreen):
       padding: 1 2; border: thick $warning; background: $surface; }
     Confirm Horizontal { height: 3; }
     #confirmation-review { height: 1fr; }
+    #confirmation-error { height: auto; color: $warning; }
     """
 
-    def __init__(self, message, *, destructive=False):
+    def __init__(self, message, *, destructive=False, operation="delete"):
         super().__init__()
         self.message, self.destructive = message, destructive
+        self.operation = operation
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -88,6 +96,7 @@ class Confirm(ModalScreen):
                 yield ClipboardInput(
                     placeholder="Type DELETE to confirm", id="confirmation"
                 )
+                yield Static("", id="confirmation-error", markup=False)
             yield ClipboardBar()
             with Horizontal():
                 yield Button("Cancel", id="cancel")
@@ -105,11 +114,14 @@ class Confirm(ModalScreen):
                 self.destructive
                 and self.query_one("#confirmation", Input).value != "DELETE"
             ):
+                notice = failure_notice(self.operation, reason="confirmation-required")
+                self.query_one("#confirmation-error", Static).update(notice.message)
+                self.app._show_failure_notice(notice)
                 return
             self.dismiss(True)
 
 
-class DashboardApp(ClipboardActions, App):
+class DashboardApp(ManagementActions, ClipboardActions, App):
     TITLE = "oc-box control center"
     AUTO_FOCUS = "#workspaces"
     CSS = """
@@ -131,6 +143,9 @@ class DashboardApp(ClipboardActions, App):
     #full-diagnostics .monitor--border { color: $warning; }
     #system-report .monitor--border { color: $success; }
     #session-table { height: 1fr; min-height: 5; }
+    #session-progress { height: auto; min-height: 1; }
+    #session-spinner { display: none; width: 5; height: 1; }
+    #session-progress-text { width: 1fr; height: auto; }
     #session-details { height: auto; max-height: 7; }
     #log-output { height: 1fr; }
     #notice { height: auto; max-height: 3; color: $warning; }
@@ -157,6 +172,8 @@ class DashboardApp(ClipboardActions, App):
         ("3", "tab('sessions')", "Sessions"),
         ("4", "tab('terminals')", "Terminals"),
         ("5", "tab('logs')", "Logs"),
+        ("6", "tab('storage')", "Storage"),
+        ("7", "tab('backups')", "Backup/restore"),
     ]
 
     def __init__(self, backend, *, read_only=False, selected=None, demo=False):
@@ -195,7 +212,10 @@ class DashboardApp(ClipboardActions, App):
         self._pending_lock = threading.Lock()
         self._pending_cancel = None
         self._pending_connection = None
+        self._pending_generation = None
+        self._session_source = ""
         self._poll_timer = None
+        self._management_init()
 
     def compose(self) -> ComposeResult:
         yield Static(
@@ -286,6 +306,13 @@ class DashboardApp(ClipboardActions, App):
                             id="session-scope",
                         )
                         yield Button("Connect / refresh", id="connect-sessions")
+                    with Horizontal(id="session-progress"):
+                        yield LoadingIndicator(id="session-spinner")
+                        yield Static(
+                            "Not connected. Choose a source and Connect to load its inventory.",
+                            id="session-progress-text",
+                            markup=False,
+                        )
                     yield ClipboardInput(
                         placeholder="Filter title, ID or native directory",
                         id="session-search",
@@ -366,6 +393,10 @@ class DashboardApp(ClipboardActions, App):
                         markup=False,
                         highlight=False,
                     )
+                with TabPane("Storage", id="storage"):
+                    yield StoragePanel(read_only=self.read_only, demo=self.demo)
+                with TabPane("Backup/restore", id="backups"):
+                    yield BackupPanel(read_only=self.read_only, demo=self.demo)
         yield Static(
             "Synthetic demo · fixed sample readings · no host data"
             if self.demo
@@ -381,10 +412,63 @@ class DashboardApp(ClipboardActions, App):
             "★", "ID", "Title", "Kind", "Native directory"
         )
         self._poll_timer = self.set_interval(0.25, self._tick)
+        self._management_mount()
         self.action_refresh()
 
     def _message(self, value):
         self.query_one("#notice", Static).update(plain(value))
+
+    def _show_failure_notice(self, notice):
+        if not self.is_running or not self.is_mounted:
+            return
+        self._message(f"{notice.title}: {notice.message}")
+        self.notify(
+            notice.message,
+            title=notice.title,
+            severity=notice.severity,
+            timeout=notice.timeout,
+            markup=False,
+        )
+
+    def _notify_failure(self, operation, error=None, **context):
+        return self._operation_failure(error, operation=operation, **context)
+
+    def _operation_failure(
+        self,
+        error=None,
+        *,
+        operation="delete",
+        reason=None,
+        dispatched=False,
+        completed=False,
+        count=None,
+        uncertain=False,
+    ):
+        """UI-thread presentation of fixed copy; never render error text."""
+        notice = failure_notice(
+            operation,
+            error,
+            reason=reason,
+            dispatched=dispatched,
+            completed=completed,
+            count=count,
+            uncertain=uncertain,
+        )
+        self._show_failure_notice(notice)
+        return notice
+
+    def _session_action_reason(self, catalog, selected):
+        if self.read_only:
+            return "read-only"
+        if self.demo:
+            return "demo"
+        if not catalog or not selected:
+            return "selection-required"
+        if catalog is not self.catalog:
+            return "source-changed"
+        if self._session_busy:
+            return "busy"
+        return None
 
     def _journal(self, event, catalog=None):
         if not self.backend.box or self.demo:
@@ -488,7 +572,7 @@ class DashboardApp(ClipboardActions, App):
         )
 
     def _tick(self):
-        if not self.is_running or not self.is_mounted:
+        if not self.is_running or not self.is_mounted or self._maintenance_busy:
             return
         try:
             interval = self.query_one("#refresh-interval", Select).value
@@ -560,7 +644,10 @@ class DashboardApp(ClipboardActions, App):
         self.report = report
         workspaces = report["workspaces"]
         if self.selected not in {w["workspace_id"] for w in workspaces}:
-            self.selected = workspaces[0]["workspace_id"] if workspaces else None
+            selected = workspaces[0]["workspace_id"] if workspaces else None
+            if selected != self.selected:
+                self._session_source_changed()
+            self.selected = selected
         table = self.query_one("#workspaces", DataTable)
         table.clear()
         for index, item in enumerate(workspaces):
@@ -606,6 +693,7 @@ class DashboardApp(ClipboardActions, App):
         )
 
     def _render_workspace(self):
+        self._render_management()
         item = self._workspace()
         self.query_one("#full-diagnostics", MonitorPanel).update_snapshot(item)
         if not item:
@@ -673,7 +761,7 @@ class DashboardApp(ClipboardActions, App):
         if event.data_table.id == "workspaces":
             target = str(event.row_key.value)
             if target != self.selected:
-                self._catalog_generation += 1
+                self._session_source_changed()
             self.selected = target
             self._render_workspace()
             self._render_sessions()
@@ -693,7 +781,7 @@ class DashboardApp(ClipboardActions, App):
                 return
             if target != self.selected:
                 self.selected = target
-                self._catalog_generation += 1
+                self._session_source_changed()
                 self._render_workspace()
                 self._render_sessions()
         elif event.data_table.id == "session-table":
@@ -707,13 +795,17 @@ class DashboardApp(ClipboardActions, App):
             self._render_sessions()
 
     def on_select_changed(self, event):
+        if self._management_select(event):
+            return
         if event.select.id == "log-source":
             self._render_logs()
         elif event.select.id == "session-scope":
-            self._catalog_generation += 1
+            self._session_source_changed()
             self._render_sessions()
 
     def on_button_pressed(self, event):
+        if self._management_button(event):
+            return
         action = event.button.id
         if action == "copy-selection":
             self.action_copy_selection(event.button.consume_selection())
@@ -871,7 +963,17 @@ class DashboardApp(ClipboardActions, App):
             )
 
     def connect_sessions(self, scope, workspace, generation=None):
-        if self._session_busy or self.demo:
+        if self.demo:
+            self._message("Synthetic demo does not connect to native session sources.")
+            return
+        if self._session_busy:
+            with self._pending_lock:
+                cancelling = self._pending_cancel and self._pending_cancel.is_set()
+            self._message(
+                "Cancellation is still finishing the current bounded request; wait before connecting again."
+                if cancelling
+                else "Session inventory is already loading. Cancel or wait before connecting again."
+            )
             return
         self._session_busy = True
         if generation is None:
@@ -880,17 +982,93 @@ class DashboardApp(ClipboardActions, App):
         cancel = threading.Event()
         with self._pending_lock:
             self._pending_cancel = cancel
+            self._pending_generation = generation
+        self._session_source = {
+            "global": "Host · all projects",
+            "project": "Host · selected project",
+            "workspace": f"Live workspace {plain(workspace or 'not selected', 64)}",
+        }.get(scope, "Selected source")
+        self._session_loading_controls()
+        self._session_progress(generation, cancel, "Connecting to the native service")
         return self._connect_sessions(scope, workspace, generation, cancel)
+
+    def _session_loading_controls(self):
+        with self._pending_lock:
+            cancelling = self._pending_cancel and self._pending_cancel.is_set()
+        connect = self.query_one("#connect-sessions", Button)
+        connect.disabled = self._session_busy
+        connect.label = (
+            ("Cancelling..." if cancelling else "Loading...")
+            if self._session_busy
+            else "Connect / refresh"
+        )
+        self.query_one("#disconnect-sessions", Button).label = (
+            "Cancel" if self._session_busy else "Disconnect"
+        )
+        self.query_one(
+            "#session-spinner", LoadingIndicator
+        ).display = self._session_busy
+
+    def _session_progress(self, generation, cancel, stage):
+        if (
+            not self.is_running
+            or not self.is_mounted
+            or generation != self._catalog_generation
+            or generation != self._pending_generation
+            or self._pending_cancel is not cancel
+            or cancel.is_set()
+        ):
+            return
+        self.query_one("#session-progress-text", Static).update(
+            f"Loading {self._session_source}... {stage}. Previous rows remain available."
+        )
+
+    def _finish_session_request(self, generation, cancel, outcome):
+        # A cancelled request keeps its controls until its bounded call returns.
+        # Identity, not the current selection, owns that final reset: selection
+        # changes invalidate results but must not leave the spinner stuck.
+        if not self.is_running or not self.is_mounted:
+            return
+        with self._pending_lock:
+            if (
+                self._pending_cancel is not cancel
+                or self._pending_generation != generation
+            ):
+                return
+            cancelled = cancel.is_set() or outcome == "cancelled"
+            self._pending_cancel = None
+            self._pending_connection = None
+            self._pending_generation = None
+        self._session_busy = False
+        self._session_loading_controls()
+        if cancelled:
+            message = (
+                f"Cancelled {self._session_source}. The bounded request has finished. "
+                "Choose a source and Connect when ready; no replacement was connected."
+            )
+        elif outcome == "complete":
+            message = f"Loaded {self._session_source}: {len(self.sessions)} sessions."
+        else:
+            message = (
+                f"Session inventory unavailable or incomplete for {self._session_source}. "
+                "No workspace was started; previous rows are retained."
+            )
+        self.query_one("#session-progress-text", Static).update(message)
+        if outcome != "complete" or cancelled:
+            self._message(message)
 
     @work(thread=True, group="sessions", exit_on_error=False)
     def _connect_sessions(self, scope, workspace, generation, cancel):
         connection = None
+        outcome = "cancelled"
+        worker = get_current_worker()
 
         def cancelled():
             return (
                 cancel.is_set()
                 or generation != self._catalog_generation
                 or not self.is_running
+                or worker.is_cancelled
             )
 
         try:
@@ -903,6 +1081,8 @@ class DashboardApp(ClipboardActions, App):
                 directory = self.backend.box.container_project(data)
             else:
                 directory = None
+            if cancelled():
+                return
             connection = self.backend.session_connection(
                 workspace if scope == "workspace" else None
             )
@@ -910,6 +1090,11 @@ class DashboardApp(ClipboardActions, App):
                 if cancelled():
                     return
                 self._pending_connection = connection
+            self.call_from_thread(
+                self._session_progress, generation, cancel, "Fetching session inventory"
+            )
+            if cancelled():
+                return
             associations = (
                 self.backend.associations(connection.store)
                 if connection.origin == "host" and self.backend.box
@@ -923,8 +1108,10 @@ class DashboardApp(ClipboardActions, App):
                 managed_ids=[a["archive"]["id"] for a in associations],
             )
             sessions = catalog.list(directory=directory, cancelled=cancelled)
+            if cancelled():
+                return
             if self.is_running:
-                self.call_from_thread(
+                accepted = self.call_from_thread(
                     self._connected_sessions,
                     connection,
                     catalog,
@@ -934,38 +1121,51 @@ class DashboardApp(ClipboardActions, App):
                     cancel,
                 )
                 connection = None
+                outcome = "complete" if accepted else "cancelled"
         except Exception:
-            if self.is_running and not cancelled():
-                self.call_from_thread(
-                    self._message,
-                    "Session inventory unavailable or incomplete. No workspace was started; previous rows are retained.",
-                )
+            outcome = "cancelled" if cancelled() else "failed"
         finally:
-            if connection:
-                connection.close()
-            with self._pending_lock:
-                if self._pending_cancel is cancel:
-                    self._pending_cancel = None
-                    self._pending_connection = None
-            self._session_busy = False
+            try:
+                if connection:
+                    connection.close()
+            finally:
+                if self.is_running:
+                    self.call_from_thread(
+                        self._finish_session_request, generation, cancel, outcome
+                    )
 
-    def _cancel_pending_connection(self):
+    def _session_source_changed(self):
+        self._catalog_generation += 1
+        self._cancel_pending_connection(reason="Source selection changed")
+
+    def _cancel_pending_connection(self, *, reason=None):
         with self._pending_lock:
-            if self._pending_cancel:
-                self._pending_cancel.set()
+            cancel = self._pending_cancel
+            if cancel:
+                cancel.set()
             connection = self._pending_connection
+        if cancel and reason and self.is_running and self.is_mounted:
+            self._session_loading_controls()
+            self.query_one("#session-progress-text", Static).update(
+                f"Cancelling {self._session_source}... {reason}; the current bounded request "
+                "is still finishing. No replacement source will connect automatically."
+            )
         if connection:
             connection.close()
 
     def _disconnect_sessions(self):
         self._catalog_generation += 1
-        self._cancel_pending_connection()
+        self._cancel_pending_connection(reason="Disconnect requested")
         if self._session_connection:
             self._session_connection.close()
             self._session_connection = None
         self.catalog, self.sessions = None, []
         self._associations = []
         self._render_sessions()
+        if not self._session_busy:
+            self.query_one("#session-progress-text", Static).update(
+                "Session source disconnected. Choose a source and Connect to load its inventory."
+            )
         self.query_one("#session-details", Static).update(
             "Session source disconnected. Pending inventory is cancelled; its lease releases after the current bounded API request."
         )
@@ -973,21 +1173,24 @@ class DashboardApp(ClipboardActions, App):
     def _connected_sessions(
         self, connection, catalog, sessions, associations, generation, cancel=None
     ):
-        if generation != self._catalog_generation:
+        if (
+            not self.is_running
+            or not self.is_mounted
+            or generation != self._catalog_generation
+            or (cancel is not None and cancel.is_set())
+            or (cancel is not None and self._pending_cancel is not cancel)
+        ):
             connection.close()
-            self._message(
-                "Source selection changed; discarded the stale session connection."
-            )
-            return
+            return False
         with self._pending_lock:
             if self._pending_connection is connection:
                 self._pending_connection = None
-            if self._pending_cancel is cancel:
-                self._pending_cancel = None
-        self._disconnect_sessions()
+        if self._session_connection:
+            self._session_connection.close()
         self._session_connection = connection
         self._associations = associations
         self._apply_sessions(catalog, sessions)
+        return True
 
     def _apply_sessions(self, catalog, sessions):
         self.catalog, self.sessions = catalog, sessions
@@ -997,8 +1200,10 @@ class DashboardApp(ClipboardActions, App):
             f"Complete {catalog.origin} inventory: {len(sessions)} sessions, including children and archived entries."
         )
 
-    def _apply_mutation_result(self, catalog, sessions, generation):
+    def _apply_mutation_result(self, catalog, sessions, generation, operation=None):
         if catalog is not self.catalog or generation != self._catalog_generation:
+            if operation:
+                self._notify_failure(operation, reason="source-changed", completed=True)
             return
         self._apply_sessions(catalog, sessions)
 
@@ -1119,7 +1324,14 @@ class DashboardApp(ClipboardActions, App):
 
     def _archive(self):
         session = self._session()
-        if self.read_only or not session or not self.catalog:
+        operation = (
+            "unarchive"
+            if session and session.get("time", {}).get("archived") is not None
+            else "archive"
+        )
+        reason = self._session_action_reason(self.catalog, session)
+        if reason or self._operation_lock.locked():
+            self._notify_failure(operation, reason=reason or "busy")
             return
         catalog, ident = self.catalog, session["id"]
         archived = session.get("time", {}).get("archived") is None
@@ -1136,46 +1348,64 @@ class DashboardApp(ClipboardActions, App):
 
     @work(thread=True, group="session-action", exit_on_error=False)
     def prepare_delete(self, session, catalog):
-        if self.read_only or not session or not catalog:
+        reason = self._session_action_reason(catalog, session)
+        if reason:
+            if self.is_running:
+                self.call_from_thread(self._notify_failure, "delete", reason=reason)
             return
         if not self._operation_lock.acquire(blocking=False):
+            if self.is_running:
+                self.call_from_thread(self._notify_failure, "delete", reason="busy")
             return
+        generation = self._catalog_generation
         try:
             preview = catalog.prepare_delete(session["id"])
             if self.is_running:
                 self.call_from_thread(
-                    self._confirm_delete, catalog, session["id"], preview
+                    self._confirm_delete, catalog, session["id"], preview, generation
                 )
-        except Exception:
+        except Exception as error:
             if self.is_running:
-                self.call_from_thread(
-                    self._message,
-                    "Deletion refused: activity, ownership or cascade could not be safely established.",
-                )
+                self.call_from_thread(self._notify_failure, "delete", error)
         finally:
             self._operation_lock.release()
 
-    def _confirm_delete(self, catalog, ident, preview):
-        if catalog is not self.catalog:
+    def _confirm_delete(self, catalog, ident, preview, generation=None):
+        reason = self._session_action_reason(catalog, ident)
+        if (
+            not reason
+            and generation is not None
+            and generation != self._catalog_generation
+        ):
+            reason = "source-changed"
+        if reason:
+            self._notify_failure("delete", reason=reason)
             return
-        if len(preview["sessions"]) > 50:
-            self._message(
-                "Deletion refused: this cascade is larger than the dashboard's 50-session review limit."
+        try:
+            selected = preview["sessions"]
+            if not isinstance(selected, list) or not selected:
+                raise ValueError("Invalid preview")
+            if len(selected) > 50:
+                self._notify_failure(
+                    "delete", reason="review-limit", count=len(selected)
+                )
+                return
+            affected = "\n".join(
+                f"  {s['id']} · {plain(s['location']['directory'], 256)}"
+                for s in selected
             )
-            return
-        affected = "\n".join(
-            f"  {s['id']} · {plain(s['location']['directory'], 256)}"
-            for s in preview["sessions"]
-        )
-        self.push_screen(
-            Confirm(
+            message = (
                 f"Delete {ident} in {catalog.origin}, including its native descendants?\n"
                 f"Descendants: {preview['descendant_count']}\n"
                 f"Affected native entries:\n{affected}\n"
                 f"{plain(preview.get('warning', ''))}\n"
-                "Other stores/copies are not deleted. A managed host copy may return after later source updates.",
-                destructive=True,
-            ),
+                "Other stores/copies are not deleted. A managed host copy may return after later source updates."
+            )
+        except Exception:
+            self._notify_failure("delete", reason="invalid-preview")
+            return
+        self.push_screen(
+            Confirm(message, destructive=True),
             lambda ok: (
                 self.mutate_session(catalog, ident, preview=preview) if ok else None
             ),
@@ -1183,30 +1413,51 @@ class DashboardApp(ClipboardActions, App):
 
     @work(thread=True, group="session-action", exit_on_error=False)
     def mutate_session(self, catalog, ident, *, archived=None, preview=None):
-        if self.read_only or catalog is not self.catalog:
+        operation = (
+            "delete" if archived is None else "archive" if archived else "unarchive"
+        )
+        reason = self._session_action_reason(catalog, ident)
+        if reason:
+            if self.is_running:
+                self.call_from_thread(self._notify_failure, operation, reason=reason)
             return
         if not self._operation_lock.acquire(blocking=False):
+            if self.is_running:
+                self.call_from_thread(self._notify_failure, operation, reason="busy")
             return
         generation = self._catalog_generation
+        dispatched = completed = False
         try:
+            # Catalog methods revalidate before dispatch. Only their known
+            # preflight reasons prove refusal; transport errors are ambiguous.
+            dispatched = True
             if archived is None:
                 catalog.delete(preview)
+                completed = True
                 self._journal("session.deleted", catalog)
             else:
                 catalog.archive(ident, archived)
+                completed = True
                 self._journal(
                     "session.archived" if archived else "session.unarchived", catalog
                 )
             sessions = catalog.list()
             if self.is_running:
                 self.call_from_thread(
-                    self._apply_mutation_result, catalog, sessions, generation
+                    self._apply_mutation_result,
+                    catalog,
+                    sessions,
+                    generation,
+                    operation,
                 )
-        except Exception:
+        except Exception as error:
             if self.is_running:
                 self.call_from_thread(
-                    self._message,
-                    "Session action refused or failed. Refresh to inspect the actual state; no automatic retry was made.",
+                    self._notify_failure,
+                    operation,
+                    error,
+                    dispatched=dispatched,
+                    completed=completed,
                 )
         finally:
             self._operation_lock.release()

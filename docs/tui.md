@@ -32,9 +32,12 @@ The first manager is deliberately bounded:
   creating a replacement container shell.
 - Keep log search available throughout the dashboard, not only while following
   new entries.
+- Review one explicit workspace-storage removal or encrypted backup/restore
+  operation, preserving normal lifecycle validators and native masked prompts.
 
-**All on-the-fly CPU, RAM, and storage changes are deferred to a separate
-project.** There are no live resource edits, storage quotas, volume resizes, or
+**Live CPU/RAM limit edits, quotas and storage resizes remain deferred.** The
+explicit reviewed removal/backup workflows below are not resource-limit edits.
+There are no live resource edits, storage quotas, volume resizes, or
 Podman graphroot/runroot moves here. The existing explicit CLI `reset` workflow
 remains outside the dashboard; browsing never resets, syncs, starts, or unlocks
 a workspace automatically. There is no `podman update` action or resource-edit
@@ -100,7 +103,9 @@ TTY input/output. A selector initially focuses the chosen existing
 project/workspace; the sidebar still permits switching registrations.
 Without one it offers the registered workspace overview.
 Opening the manager does not create an environment or become its lifecycle
-owner. `--read-only` disables session mutation and terminal control/input; it is
+owner. `--read-only` disables session mutation, backup creation/restoration/deletion,
+workspace removal and terminal control/input. Explicit encrypted-backup inspection
+remains available. Read-only mode is
 not a promise that an explicitly requested native host connection cannot start
 the native host service.
 
@@ -131,6 +136,7 @@ not gain a container-mode bypass from the existence of demo mode.
 | Key | Action |
 | --- | --- |
 | `1`–`5` | Status, Settings, Sessions, Terminals, Logs |
+| `6`, `7` | Storage, Backup/restore |
 | `r` | Refresh the current view |
 | `s` or `F2` | Open all dashboard settings outside focused text inputs or the native shell |
 | `Ctrl+L` | Open Logs and focus the log search |
@@ -213,7 +219,7 @@ output as sensitive. OSC clipboard requests emitted by container applications
 remain stripped; only completed user selections or explicit dashboard copy
 actions write to the host clipboard.
 
-## Five tabs
+## Seven tabs
 
 ### 1. Status
 
@@ -395,7 +401,7 @@ the earlier native terminal tests are not an embedded-dashboard host pass.
 
 ### 5. Logs
 
-The case-insensitive **literal** log search stays visible across all five tabs.
+The case-insensitive **literal** log search stays visible across all seven tabs.
 `Ctrl+L` opens Logs and focuses it. Search applies to retained entries and can be
 changed at any time, including while follow is paused. Source filtering and
 follow/pause controls never disable search; it is not a regular-expression or
@@ -430,16 +436,86 @@ that display as sensitive; do not share screenshots or terminal recordings
 without your own review. Opting in is not permission to read unrelated
 containers or unlimited historical output.
 
+### 6. Storage
+
+Choose **Host OpenCode**, **Selected workspace**, or **All registered workspaces**.
+These are different scopes, not aliases for a database or filesystem directory.
+Host storage management is limited to individual session trees selected through
+the verified Sessions connection. It never offers a whole-host database wipe.
+Selected/all workspace lists read bounded registration metadata without starting
+services or workspaces. All-workspaces offers individual targets, not a bulk wipe.
+Sizes remain unknown until a manual scan; shared/reflink accounting is not
+exclusive physical usage or quota headroom.
+
+**Remove workspace storage** reviews one canonical workspace ID, registry and
+project identity. Type the full workspace-specific confirmation. The same pinned
+runtime then uses normal CLI purge checks and its exclusive lock. Existing owners
+and attached clients must exit first; no forced shutdown or lock bypass is added.
+Plain purge can briefly start the existing container for final history sync.
+Project files, host conversations and verified archive recovery provenance are
+retained; the UI never adds the project/history deletion flags. It does not prune
+shared images, caches, global vaults or retired provenance.
+
+**Delete selected session** reuses the Sessions cascade/activity/ownership review
+for the chosen source. Host archive copies are not workspace-source deletion
+targets, and a source switch cannot redirect a previously reviewed action.
+
+### 7. Backup/restore
+
+The three scopes remain explicit here. Choose one workspace from the selected/all
+inventory for a full or portable encrypted `.ocbox` backup. The ordinary
+[backup/restore contract](cli.md#backup) remains authoritative:
+no overwrite, no in-place restore, fresh workspace/resource IDs, private rootless
+ownership transport, no privilege reactivation, and stopped restored workspaces.
+Whole-workspace archives can contain copied config/auth and native history, but
+exclude the global host vault and normal host database. Protect the encrypted file.
+
+For host or workspace **session-tree history**, select that verified native source
+and root in Sessions, then choose the `.ocsession` kind. This is not a storage or
+process checkpoint. The encrypted version-1 envelope has exactly `key.age`,
+`manifest.age` and `sessions.age`; only ciphertext is staged on disk. Limits are
+50 sessions, 100,000 messages and 64 MiB encoded history. Complete inventories,
+quiet source ownership and checked native exports are required; process-local
+checks do not eliminate races with other host processes.
+
+Session restore decrypts and validates before a metadata-only review in the
+foreground terminal. Type `RESTORE` there to authorize the fresh IDs shown in
+that review. Permissions and privileged configuration are cleared; parent links
+refer only to newly restored sessions. Existing history is not overwritten and
+restored work is not run. Native import success alone is not accepted: history
+and inventory are verified afterward. A partial failure reports observed new and
+attempted IDs for explicit recovery, not an atomic rollback or automatic delete.
+
+Age recipients and private identity-file paths are optional. Without a recipient,
+the dashboard suspends and the existing native host terminal prompts for a masked
+password. No password widget is added to the selectable/copyable dashboard, and
+no password enters argv, environment, plaintext staging, the clipboard cache or
+the journal. Host terminal recording can still capture deliberately displayed
+metadata. The dashboard resumes after the foreground command; raw command output
+is not recorded in its Logs tab.
+
+Ctrl-C is delivered to the foreground operation child, while the manager waits
+for that child's normal cleanup before resuming. Interrupting a multi-step
+operation is not an atomic rollback: inspect its explicit target before any retry.
+
+**Inspect backup** is explicit and available in CLI read-only mode. **Delete backup
+file** is a distinct typed operation on one owned, private, regular supported
+encrypted archive; deleting it does not remove any live session or storage.
+Cancel, stale selection and read-only checks apply again at execution time.
+Backup file paths and decrypted transcript text never enter the activity journal.
+
 ## Stable-release validation gate
 
 This document describes the candidate contract, not a completed host acceptance
 or publication. Its bounded implementation/validation layers are:
 
 1. Transport-free session domain, private favorites and fixed-category logging.
-2. Optional installation, five-tab UI, cheap metrics and synthetic-only demo.
+2. Optional installation, seven-tab UI, cheap metrics and synthetic-only demo.
 3. Explicit native host/workspace connections and guarded V2 session actions.
 4. Existing-client PTY embedding, interactive behavior and lease cleanup.
-5. Clean-candidate host acceptance and review before any stable publication.
+5. Reviewed storage deletion and encrypted workspace/session backup/restore,
+   including foreground TTY prompts and privacy-safe failure notifications.
+6. Clean-candidate host acceptance and review before any stable publication.
 
 Each integrated layer needs behavior-focused tests; declaring a phase does not
 mark it passed. See the [manager test plan](testing.md#experimental-workspace-manager)
@@ -447,7 +523,7 @@ and [publication checklist](../CONTRIBUTING.md#release-gate-and-publication-chec
 Keep the tested full commit, clean/dirty state, native executable identities and
 manual observations with the evidence. Existing stable host reports validate
 their own earlier source and scope, not this new dashboard. No resource-editing
-phase is included: CPU/RAM/storage updates, quotas, resizes and store moves remain
+phase is included: CPU/RAM limit edits, quotas, resizes and store moves remain
 separate work.
 
 Do not advance `master` (the curl/self-update source), create the stable tag or

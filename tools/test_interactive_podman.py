@@ -13,12 +13,15 @@ No replay, resume, cleanup, real credentials or automatic manual-UI acceptance.
 import argparse
 import contextlib
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import secrets
 import shlex
 import shutil
+import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -37,6 +40,11 @@ MODES = ("start", "manager", "tui", "terminal", "web", "stop")
 FIXTURE_PREFIXES = (fixture.PREFIX, "oc-box-live-v2-", "oc-box-live-backup-")
 FIXTURE_MARKERS = ("fixture.json", "interactive.json", "fixture-ids.json")
 MARKERS = frozenset((fixture.SHELL_MARKER, fixture.MCP_MARKER, fixture.TOOL_MARKER))
+HOST_SERVICE_FORMAT = "oc-box-interactive-private-host-service-port"
+HOST_SERVICE_MARKER = "host-service-port.json"
+HOST_SERVICE_CONFIG = "host-config-2/opencode/service.json"
+HOST_SERVICE_REGISTRATION = "host-state-2/opencode/service.json"
+HOST_SERVICE_MAX_BYTES = 65536
 ERROR_CATEGORIES = frozenset(
     {
         "host-only",
@@ -75,6 +83,14 @@ ERROR_CATEGORIES = frozenset(
         "published-ports",
         "resource-mounts",
         "interactive-config",
+        "host-service-existing",
+        "host-service-selector",
+        "host-service-environment",
+        "host-service-port",
+        "host-service-setter",
+        "host-service-marker",
+        "host-service-config",
+        "host-service-registration",
     }
 )
 
@@ -233,6 +249,186 @@ def write_metadata(root, source, binary):
     )
 
 
+def private_host_service_json(root, relative):
+    """Bounded private metadata only; never return it to reports or diagnostics."""
+    path = fixture.safe_path(root, relative)
+    with os.fdopen(
+        os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb"
+    ) as stream:
+        info = os.fstat(stream.fileno())
+        fixture.require(
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == os.getuid()
+            and stat.S_IMODE(info.st_mode) == 0o600
+            and info.st_nlink == 1
+            and info.st_size <= HOST_SERVICE_MAX_BYTES,
+            "unsafe-metadata",
+        )
+        content = stream.read(HOST_SERVICE_MAX_BYTES + 1)
+    fixture.require(len(content) <= HOST_SERVICE_MAX_BYTES, "unsafe-metadata")
+    try:
+        return json.loads(content)
+    except (ValueError, UnicodeError):
+        raise fixture.FixtureError("unsafe-metadata") from None
+
+
+def private_host_service_roots(root):
+    for relative in (
+        "",
+        "bin",
+        "host-home",
+        *("host-" + n + "-2" for n in ("config", "data", "state", "cache")),
+    ):
+        path = fixture.no_symlinks(root / relative)
+        info = path.stat()
+        fixture.require(
+            stat.S_ISDIR(info.st_mode)
+            and info.st_uid == os.getuid()
+            and stat.S_IMODE(info.st_mode) == 0o700,
+            "unsafe-metadata",
+        )
+
+
+def host_service_port_valid(port):
+    # Kernel-selected ephemeral ports must not fall back to native's default.
+    return type(port) is int and 1024 <= port <= 65535 and port != 49374
+
+
+def host_service_metadata(root, source, binary, port):
+    return {
+        "format": HOST_SERVICE_FORMAT,
+        "version": 1,
+        "source": source,
+        "hostname": "127.0.0.1",
+        "port": port,
+        "native_version": fixture.NATIVE_VERSION,
+        "native_sha256": file_hash(binary),
+        "wrapper_sha256": file_hash(root / "bin/opencode"),
+        "profile": {
+            "home": "host-home",
+            "data": "host-data-2",
+            "config": HOST_SERVICE_CONFIG,
+            "registration": HOST_SERVICE_REGISTRATION,
+        },
+    }
+
+
+def validate_host_service_port(root, source, binary):
+    """File-only selector validation; no discovery, repair or service shutdown.
+
+    Native 2.2.6's service schema has hostname/remote/env/cors/disabled controls;
+    none belongs in this fixture profile. With hostname omitted, native binds
+    127.0.0.1. Only its automatic opaque authentication addition is tolerated.
+    """
+    private_host_service_roots(root)
+    marker = private_host_service_json(root, HOST_SERVICE_MARKER)
+    port = marker.get("port") if isinstance(marker, dict) else None
+    fixture.require(host_service_port_valid(port), "host-service-port")
+    fixture.require(
+        type(marker.get("version")) is int
+        and marker == host_service_metadata(root, source, binary, port),
+        "host-service-marker",
+    )
+    config = private_host_service_json(root, HOST_SERVICE_CONFIG)
+    fixture.require(
+        isinstance(config, dict)
+        and set(config) in ({"port"}, {"port", "password"})
+        and type(config.get("port")) is int
+        and config["port"] == port
+        and (
+            "password" not in config
+            or isinstance(config["password"], str)
+            and 0 < len(config["password"]) <= 4096
+        ),
+        "host-service-config",
+    )
+    registration = fixture.no_symlinks(root / HOST_SERVICE_REGISTRATION)
+    if registration.exists():
+        record = private_host_service_json(root, HOST_SERVICE_REGISTRATION)
+        fixture.require(
+            isinstance(record, dict)
+            and set(record) == {"id", "pid", "url", "version", "password"}
+            and isinstance(record.get("id"), str)
+            and 0 < len(record["id"]) <= 256
+            and type(record.get("pid")) is int
+            and record["pid"] > 1
+            and record.get("url") == "http://127.0.0.1:" + str(port)
+            and record.get("version") == fixture.NATIVE_VERSION
+            and isinstance(record.get("password"), str)
+            and 0 < len(record["password"]) <= 4096,
+            "host-service-registration",
+        )
+    return port
+
+
+def prepare_host_service_port(root, source, binary):
+    """Set one fresh profile's supported native port; never start its service.
+
+    The reservation closes after configuration, before any future UI Connect.
+    A later release-to-bind collision must fail, not retry another port, fall
+    back to 49374 or stop an unknown listener. No existing profile is reused.
+    """
+    private_host_service_roots(root)
+    for relative in (
+        HOST_SERVICE_CONFIG,
+        HOST_SERVICE_REGISTRATION,
+        HOST_SERVICE_MARKER,
+    ):
+        path = fixture.no_symlinks(root / relative)
+        fixture.require(not path.exists(), "host-service-existing")
+    wrapper = fixture.safe_path(root, "bin/opencode")
+    info = wrapper.stat()
+    fixture.require(
+        info.st_uid == os.getuid()
+        and info.st_nlink == 1
+        and stat.S_IMODE(info.st_mode) == 0o700
+        and wrapper.read_text() == fixture.native_wrapper_source()
+        and private_host_service_json(root, "executables.json") == {"2": str(binary)},
+        "host-service-selector",
+    )
+    # Same positive maintenance allowlist used by host catalog discovery, from
+    # the existing isolated fixture context (including its temporary placement).
+    env = box.maintenance_host_env()
+    fixture.require(
+        env.get("HOME") == str(root / "host-home")
+        and all(
+            env.get("XDG_" + n.upper() + "_HOME") == str(root / n)
+            for n in ("config", "data", "state", "cache")
+        )
+        and env.get("PATH", "").startswith(str(root / "bin") + ":"),
+        "host-service-environment",
+    )
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as reservation:
+        reservation.set_inheritable(False)
+        reservation.bind(("127.0.0.1", 0))
+        address, port = reservation.getsockname()
+        fixture.require(
+            address == "127.0.0.1" and host_service_port_valid(port),
+            "host-service-port",
+        )
+        try:
+            box.run(
+                [str(wrapper), "service", "set", "port", str(port)],
+                env=env,
+                cwd=root / "source-a",
+                stdin=subprocess.DEVNULL,
+                capture=True,
+                private=True,
+                timeout=15,
+            )
+        except (box.BoxError, OSError, subprocess.SubprocessError):
+            raise fixture.FixtureError("host-service-setter") from None
+        fixture.require(
+            not fixture.no_symlinks(root / HOST_SERVICE_REGISTRATION).exists(),
+            "host-service-registration",
+        )
+        fixture.write_json_new(
+            root / HOST_SERVICE_MARKER,
+            host_service_metadata(root, source, binary, port),
+        )
+        return validate_host_service_port(root, source, binary)
+
+
 def validate_interactive(root, source):
     """File-only validation, including the full helper's selector/registry guards."""
     fixture.require(root.is_absolute(), "fixture-root")
@@ -278,6 +474,7 @@ def validate_interactive(root, source):
         and os.access(wrapper, os.X_OK),
         "native-selector",
     )
+    validate_host_service_port(root, source, binary)
     records = fixture.workspace_records(root)
     fixture.require(set(records) == {"source-a"}, "workspace-allowlist")
     for name in ("config", "data", "state", "cache"):
@@ -407,6 +604,7 @@ def print_commands(root):
         "Ctrl-] detaches the persistent shell; close attached clients before the owner. "
         "Manager needs optional textual/pyte dependencies; monitoring takes no client lease. "
         "Use explicit workspace Connect/terminal actions for leases; host sessions use only this fixture's private store. "
+        "Its host catalog port is reserved only during setup; later bind collisions fail without port retry or default fallback. "
         "Web prints a private one-use pairing URL: open it manually, never share/record it. "
         "No vault prompt or operator credentials are needed. Manual UI observations are NOT automatically passed.",
         flush=True,
@@ -452,6 +650,7 @@ def own(args, source):
                     fixture.validate_store(root)
                     fixture.prepare_native_cli(root, binary)
                     write_metadata(root, source, binary)
+                    prepare_host_service_port(root, source, binary)
                     port = stack.enter_context(provider(state))
                     fixture.write_json_new(
                         root / "config/opencode/opencode.json",

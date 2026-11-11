@@ -86,6 +86,24 @@ their checkout ownership distinct from unrelated source and flat installations.
   env, errors, prompts or stdout/stderr. Preserve legitimate owned legacy state
   permissions while keeping log directories/files private. External-log
   redaction is best-effort, not a guarantee of arbitrary-secret removal.
+- `tui_storage.py` / `tui_operations.py` / `tui_management.py`: three distinct
+  host/selected/all-workspace scopes, canonical bounded registry reads and explicit
+  typed operation reviews. Host operations target individual session trees, never
+  a whole database. Workspace removal retains project/history and uses normal
+  locks/validators; no bulk wipe, shared-cache pruning or resource-limit edits.
+  Hand secrets to existing masked foreground TTY prompts in the same pinned runtime,
+  not selectable dashboard inputs or recorded output. Recheck review bindings in
+  the child; ordinary CLI imports remain stdlib-only.
+- `session_backups.py`: encrypted bounded native V2 history, separate from full/
+  portable workspace archives. Plaintext/key material stays in memory; no-overwrite
+  age envelopes, quiet source checks, fresh IDs and cleared privileges on restore.
+  Verify native GET/export/inventory, report honest partial-import recovery IDs,
+  and never infer success from native conflict exit zero or automatically roll back
+  by deleting unknown sessions. Session import transcripts must use native stdin,
+  not argv; retain the explicit source/service and process-local ownership checks.
+- `tui_notifications.py`: allowlisted actionable toasts plus persistent notices.
+  Never show raw errors or journal them. Distinguish preflight refusal, unverified
+  mutation acknowledgement and completed mutation followed by failed refresh.
 - `dependencies.py`: read-only feature-scoped doctor, OS package providers and
   early preflight guidance. Keep host and workspace-container scopes distinct;
   never install packages automatically from diagnostics.

@@ -207,6 +207,10 @@ class ClipboardActions:
         self.enable_text_selection()
 
     def on_idle(self):
+        # A queued Idle may arrive after the final screen was removed. Native
+        # TTY handoff/refresh teardown must not turn it into a fatal-error loop.
+        if not self.is_running or not self.is_mounted or not self.screen_stack:
+            return
         if getattr(self, "_selection_adapted_screen", None) is not self.screen:
             self.enable_text_selection()
 

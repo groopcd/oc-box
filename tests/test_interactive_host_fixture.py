@@ -64,6 +64,7 @@ class InteractiveHostFixtureTests(unittest.TestCase):
         fixture.prepare_podman_cli(self.root, self.binary)  # file-only ELF mapping
         self.prepare_native(self.root, self.binary)
         ui.write_metadata(self.root, self.source, self.binary)
+        self.prepare_host_port(self.root, self.source, self.binary)
         fixture.write_json_new(
             self.root / "config/opencode/opencode.json",
             fixture.fixture_config(12345, self.root),
@@ -94,6 +95,16 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             data.update(opencode_version=fixture.NATIVE_VERSION, ready=True)
             box.atomic_json(path, data)
         return path, data
+
+    def prepare_host_port(self, root, source, binary):
+        """New-format fixture metadata, without invoking any native command."""
+        (root / "host-config-2/opencode").mkdir(mode=0o700)
+        fixture.write_json_new(root / ui.HOST_SERVICE_CONFIG, {"port": 40001})
+        fixture.write_json_new(
+            root / ui.HOST_SERVICE_MARKER,
+            ui.host_service_metadata(root, source, binary, 40001),
+        )
+        return 40001
 
     def args(self, mode="tui"):
         return ui.parser().parse_args([mode, "--fixture", str(self.root)])
@@ -1309,6 +1320,13 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             order.append("native")
             self.prepare_native(root, binary)
 
+        def host_port(root, source, binary):
+            order.append("host-port")
+            self.assertGreater(private_depth[0], 0)
+            self.assertFalse(live[0])
+            self.assertNotIn(fixture.KEY, os.environ)
+            return self.prepare_host_port(root, source, binary)
+
         def store(root):
             order.append("store")
             self.assertEqual(os.environ["OC_BOX_STATE_HOME"], str(root / "registry"))
@@ -1347,6 +1365,7 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             patch.object(fixture, "prepare_podman_cli", side_effect=podman),
             patch.object(fixture, "validate_store", side_effect=store),
             patch.object(fixture, "prepare_native_cli", side_effect=native),
+            patch.object(ui, "prepare_host_service_port", side_effect=host_port),
             patch.object(ui, "provider", side_effect=synthetic_provider),
             patch.object(box, "main", side_effect=launch),
             patch.object(fixture, "verify_owned_resources"),
@@ -1360,6 +1379,7 @@ class InteractiveHostFixtureTests(unittest.TestCase):
                 "podman",
                 "store",
                 "native",
+                "host-port",
                 "provider",
                 "launch",
                 "provider-exit",
@@ -1385,6 +1405,7 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             patch.object(fixture, "prepare_podman_cli", side_effect=podman),
             patch.object(fixture, "validate_store", side_effect=store),
             patch.object(fixture, "prepare_native_cli", side_effect=native),
+            patch.object(ui, "prepare_host_service_port", side_effect=host_port),
             patch.object(ui, "provider", side_effect=synthetic_provider),
             patch.object(box, "main", side_effect=launch),
             patch.object(fixture, "verify_owned_resources"),
@@ -1465,6 +1486,9 @@ class InteractiveHostFixtureTests(unittest.TestCase):
                 patch.object(fixture, "validate_store"),
                 patch.object(
                     fixture, "prepare_native_cli", side_effect=self.prepare_native
+                ),
+                patch.object(
+                    ui, "prepare_host_service_port", side_effect=self.prepare_host_port
                 ),
                 patch.object(ui, "provider", side_effect=provider),
                 patch.object(box, "main", side_effect=launch),
