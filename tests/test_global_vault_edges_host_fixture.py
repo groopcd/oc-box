@@ -452,6 +452,167 @@ print(json.dumps({'category':category,'candidate':(root/'candidate-imported').ex
                         )
                         self.assertFalse((root / "candidate-imported").exists())
 
+    def test_home_generic_created_marker_refuses_before_imports_or_allocation(self):
+        # This child has no unit-injected runtime globals. The only replaced
+        # host boundary permits file-only main routing in this container; the
+        # private bootstrap/app traps make an ordering regression observable.
+        program = """import contextlib,io,json,os,pathlib,runpy,shutil,sys,tempfile
+root=pathlib.Path(sys.argv[2]); path=pathlib.Path(sys.argv[4])
+namespace=runpy.run_path(sys.argv[1],run_name='home_created_marker_probe')
+g=namespace['main'].__globals__; counters={'bootstrap_calls':0,'allocations':0,'engine_processes':0,'sockets':0}
+original_load=g['load_source']; git=shutil.which('git',path=os.defpath)
+def load(*args,**kwargs):
+    counters['bootstrap_calls']+=1
+    return original_load(*args,**kwargs)
+def allocate(*args,**kwargs):
+    counters['allocations']+=1
+    raise RuntimeError('allocation-refused')
+def audit(event,args):
+    if event=='subprocess.Popen':
+        executable,argv,cwd,env=args
+        if executable!=git or argv[:3]!=[git,'-C',str(root)] or argv[3] not in ('rev-parse','cat-file') or env.get('GIT_NO_REPLACE_OBJECTS')!='1':
+            counters['engine_processes']+=1
+            raise RuntimeError('engine-refused')
+    elif event in ('os.exec','os.posix_spawn'):
+        if args[0]!=git or args[1][:3]!=[git,'-C',str(root)] or args[1][3] not in ('rev-parse','cat-file') or args[2].get('GIT_NO_REPLACE_OBJECTS')!='1':
+            counters['engine_processes']+=1
+            raise RuntimeError('engine-refused')
+    elif event in ('os.system','os.spawn'):
+        counters['engine_processes']+=1
+        raise RuntimeError('engine-refused')
+    elif event.startswith('socket.'):
+        counters['sockets']+=1
+        raise RuntimeError('socket-refused')
+g['host_guard']=lambda:None; g['load_source']=load; tempfile.mkdtemp=allocate
+sys.addaudithook(audit); fixed=False; code=None; output=io.StringIO()
+with contextlib.redirect_stdout(output),contextlib.redirect_stderr(output):
+    if sys.argv[6]=='pure':
+        try: namespace['fresh_parent'](path)
+        except BaseException as error: fixed=str(error)=='fresh-parent-required'
+    else:
+        argv=['--expect-commit',sys.argv[3],'--work-dir',str(path)] if sys.argv[5]=='work' else ['--expect-commit',sys.argv[3],'--work-dir',str(root),'--temp-dir',str(path)]
+        code=namespace['main'](argv)
+        fixed='category=fresh-parent-required' in output.getvalue()
+print(json.dumps({'fixed_refusal':fixed,'exit':code,'covers_verified_marker_union':set(json.loads(sys.argv[7]))<=set(namespace['FRESH_MARKERS']),'bootstrap_marker':(root/'authenticated-bootstrap-ran').exists(),'candidate_marker':(root/'candidate-imported').exists(),'candidate_modules':any(n=='oc_box' or n.startswith(('oc_box.','tools.')) for n in sys.modules),**counters},sort_keys=True))
+"""
+
+        def retained_snapshot(path):
+            result = {}
+            for entry in (path, *sorted(path.rglob("*"))):
+                info = entry.lstat()
+                result[str(entry.relative_to(path))] = (
+                    info.st_mode,
+                    info.st_uid,
+                    info.st_gid,
+                    info.st_nlink,
+                    info.st_size,
+                    info.st_mtime_ns,
+                    os.readlink(entry)
+                    if entry.is_symlink()
+                    else entry.read_bytes()
+                    if entry.is_file()
+                    else None,
+                )
+            return result
+
+        for mode in ("pure", "main"):
+            for kind in ("regular", "dangling"):
+                for position in ("ancestor", "descendant"):
+                    for option in ("work", "temp"):
+                        case = "-".join((mode, kind, position, option))
+                        with self.subTest(case=case):
+                            root, entry, bootstrap, _ = self.repository(
+                                "test_home_ownership_podman.py", "-" + case
+                            )
+                            bootstrap.write_text(
+                                bootstrap.read_text().replace(
+                                    "raise ValueError('authenticated-probe-only')",
+                                    "import importlib; importlib.import_module('tools.test_global_vault_podman')",
+                                )
+                            )
+                            subprocess.run(
+                                ["git", "-C", str(root), "add", str(bootstrap)],
+                                check=True,
+                                capture_output=True,
+                                timeout=10,
+                            )
+                            subprocess.run(
+                                [
+                                    "git",
+                                    "-C",
+                                    str(root),
+                                    "-c",
+                                    "user.name=Synthetic",
+                                    "-c",
+                                    "user.email=synthetic@example.invalid",
+                                    "commit",
+                                    "-qm",
+                                    "private import trap",
+                                ],
+                                check=True,
+                                capture_output=True,
+                                timeout=10,
+                            )
+                            commit = (
+                                subprocess.check_output(
+                                    ["git", "-C", str(root), "rev-parse", "HEAD"]
+                                )
+                                .decode()
+                                .strip()
+                            )
+                            retained = self.parent / ("renamed-retained-" + case)
+                            nested = retained / "nested"
+                            nested.mkdir(parents=True)
+                            marker = retained / "home-created-other.json"
+                            if kind == "dangling":
+                                marker.symlink_to("missing-synthetic-evidence")
+                            else:
+                                marker.write_bytes(
+                                    b"UNCHANGED_SYNTHETIC_RETAINED_CREATION\n"
+                                )
+                            before = retained_snapshot(retained)
+                            requested = retained if position == "ancestor" else nested
+                            result = subprocess.run(
+                                [
+                                    sys.executable,
+                                    "-I",
+                                    "-B",
+                                    "-c",
+                                    program,
+                                    str(entry),
+                                    str(root),
+                                    commit,
+                                    str(requested),
+                                    option,
+                                    mode,
+                                    json.dumps(interactive.FIXTURE_MARKERS),
+                                ],
+                                env={"PATH": os.defpath},
+                                stdin=subprocess.DEVNULL,
+                                capture_output=True,
+                                timeout=20,
+                            )
+                            self.assertEqual(result.returncode, 0)
+                            self.assertEqual(result.stderr, b"")
+                            observed = json.loads(result.stdout)
+                            self.assertTrue(observed["fixed_refusal"], observed)
+                            self.assertTrue(
+                                observed["covers_verified_marker_union"], observed
+                            )
+                            if mode == "main":
+                                self.assertEqual(observed["exit"], 1)
+                            for field in (
+                                "bootstrap_calls",
+                                "allocations",
+                                "engine_processes",
+                                "sockets",
+                                "bootstrap_marker",
+                                "candidate_marker",
+                                "candidate_modules",
+                            ):
+                                self.assertEqual(observed[field], 0, (field, observed))
+                            self.assertEqual(retained_snapshot(retained), before)
+
 
 class GlobalVaultEdgesHostFixtureTests(unittest.TestCase):
     def setUp(self):

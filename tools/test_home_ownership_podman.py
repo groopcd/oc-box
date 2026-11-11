@@ -53,6 +53,7 @@ HOME_MARKERS = (
 )
 FRESH_MARKERS = (
     *HOME_MARKERS,
+    "home-created-*.json",
     "fixture.json",
     "fixture-ids.json",
     "interactive.json",
