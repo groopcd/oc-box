@@ -80,7 +80,8 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
             )
         )
         fixture.prepare_root(self.root, "tumbleweed")
-        fixture.prepare_podman_cli(self.root, Path(sys.executable).resolve())
+        self.native_podman = Path(sys.executable).resolve()
+        fixture.prepare_podman_cli(self.root, self.native_podman)
         self.enter(patch.dict(os.environ, fixture.isolated_env(self.root), clear=True))
         (self.root / "podman-tmp/alive").write_bytes(self.boot)
         self.current = {
@@ -779,6 +780,13 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
         calls = []
 
         def info(command, **kwargs):
+            self.assertEqual(
+                command, [str(self.native_podman), "info", "--format", "json"]
+            )
+            self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+            self.assertIs(kwargs["capture"], True)
+            self.assertIs(kwargs["private"], True)
+            self.assertEqual(kwargs["timeout"], 30)
             calls.append(kwargs["env"])
             marker.write_bytes(self.boot)
             store = {
@@ -807,8 +815,26 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
         with patch.object(box, "run", side_effect=info):
             probe.validate_private_store(self.root, initial=True)
         self.assertEqual(len(calls), 3)
-        self.assertIn("CONTAINERS_STORAGE_CONF", calls[0])
-        self.assertNotIn("CONTAINERS_STORAGE_CONF", calls[2])
+        self.assertEqual(
+            self.purpose["native_sha256"]["podman"],
+            hashlib.sha256(self.native_podman.read_bytes()).hexdigest(),
+        )
+        for environment in calls:
+            self.assertEqual(
+                environment["CONTAINERS_STORAGE_CONF"],
+                str(self.root / "config/containers/storage.conf"),
+            )
+            self.assertEqual(
+                environment["CONTAINERS_CONF"],
+                str(self.root / "config/containers/containers.conf"),
+            )
+            self.assertEqual(environment["HOME"], str(self.root / "host-home"))
+            self.assertEqual(environment["TMPDIR"], str(self.root / "temporary"))
+        self.assertIn("OC_BOX_STATE_HOME", calls[0])
+        self.assertNotIn("OC_BOX_STATE_HOME", calls[1])
+        self.assertNotIn("OC_BOX_STATE_HOME", calls[2])
+        self.assertIn("XDG_CACHE_HOME", calls[1])
+        self.assertNotIn("XDG_CACHE_HOME", calls[2])
         self.assertEqual(
             [env["PATH"].split(":")[0] for env in calls], [str(self.root / "bin")] * 3
         )
@@ -821,6 +847,117 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
                 with self.assertRaises(fixture.FixtureError):
                     probe.validate_private_store(self.root, initial=True)
             self.assertEqual(native.call_count, 1)
+
+    def test_store_command_admission_requires_the_bound_absolute_native_info(self):
+        expected = [str(self.native_podman), "info", "--format", "json"]
+        foreign = self.parent / "foreign-native"
+        foreign.write_bytes(b"\x7fELFsynthetic-foreign-native")
+        foreign.chmod(0o700)
+        for name, command in (
+            ("bound-native", expected),
+            ("PATH-fallback", ["podman", *expected[1:]]),
+            ("private-wrapper", [str(self.root / "bin/podman"), *expected[1:]]),
+            ("foreign-ELF", [str(foreign), *expected[1:]]),
+            ("different-operation", [str(self.native_podman), "ps"]),
+            ("different-format", [*expected[:-1], "{{json .}}"]),
+            ("extra-option", [*expected, "--remote"]),
+            ("command-string", " ".join(expected)),
+        ):
+            with (
+                self.subTest(command=name),
+                patch.object(
+                    fixture,
+                    "validate_store",
+                    side_effect=lambda root: box.run(
+                        command,
+                        stdin=subprocess.DEVNULL,
+                        capture=True,
+                        private=True,
+                        timeout=30,
+                    ),
+                ),
+                patch.object(
+                    box, "run", return_value=SimpleNamespace(stdout="{}")
+                ) as native,
+            ):
+                if name == "bound-native":
+                    probe.validate_private_store(self.root)
+                    native.assert_called_once_with(
+                        expected,
+                        stdin=subprocess.DEVNULL,
+                        capture=True,
+                        private=True,
+                        timeout=30,
+                    )
+                else:
+                    with self.assertRaisesRegex(
+                        fixture.FixtureError, "^engine-command$"
+                    ):
+                        probe.validate_private_store(self.root)
+                    native.assert_not_called()
+        self.command.assert_not_called()
+
+    def test_store_native_changes_refuse_before_first_or_next_engine_query(self):
+        original_mapping = fixture.private_json(self.root, "podman-executable.json")
+        payload = b"\x7fELFsynthetic-bound-native"
+        for name in (
+            "bytes-before",
+            "symlink-before",
+            "non-ELF-before",
+            "missing-before",
+            "bytes-between",
+            "mapping-between",
+        ):
+            path = self.parent / ("native-" + name)
+            path.write_bytes(payload)
+            path.chmod(0o700)
+            purpose = copy.deepcopy(self.purpose)
+            purpose["native_sha256"]["podman"] = hashlib.sha256(payload).hexdigest()
+            self.rewrite("home-component.json", purpose)
+            mapping = {**original_mapping, "podman": str(path)}
+            self.rewrite("podman-executable.json", mapping)
+            calls = []
+
+            def info(command, **kwargs):
+                self.assertEqual(command, [str(path), "info", "--format", "json"])
+                calls.append(command)
+                if name == "bytes-between":
+                    path.write_bytes(b"\x7fELFchanged-bound-native")
+                elif name == "mapping-between":
+                    replacement = self.parent / "same-bytes-other-path"
+                    replacement.write_bytes(payload)
+                    replacement.chmod(0o700)
+                    self.rewrite(
+                        "podman-executable.json",
+                        {**mapping, "podman": str(replacement)},
+                    )
+                return SimpleNamespace(stdout="{}")
+
+            if name == "bytes-before":
+                path.write_bytes(b"\x7fELFchanged-bound-native")
+            elif name == "symlink-before":
+                saved = self.parent / "saved-native"
+                path.rename(saved)
+                path.symlink_to(saved)
+            elif name == "non-ELF-before":
+                path.write_bytes(b"not-native-ELF")
+            elif name == "missing-before":
+                path.unlink()
+            with (
+                self.subTest(change=name),
+                patch.object(fixture, "validate_store_info"),
+                patch.object(box, "run", side_effect=info),
+            ):
+                if name in ("bytes-before", "bytes-between", "mapping-between"):
+                    with self.assertRaisesRegex(
+                        fixture.FixtureError, "^native-changed$"
+                    ):
+                        probe.validate_private_store(self.root)
+                else:
+                    with self.assertRaises((fixture.FixtureError, OSError)):
+                        probe.validate_private_store(self.root)
+                self.assertEqual(len(calls), int(name.endswith("between")))
+        self.command.assert_not_called()
 
     def test_command_allowlist_has_exact_local_volume_and_fixed_unshare_commands_only(
         self,

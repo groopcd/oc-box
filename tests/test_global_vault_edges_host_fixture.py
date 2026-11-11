@@ -1596,6 +1596,25 @@ os.stat=_stat; pathlib.Path.lstat=_lstat; os.open=_open; io.open=_io_open
         process = unittest.mock.Mock(returncode=0)
         process.poll.return_value = 0
         process.wait.return_value = 0
+        real_read = os.read
+        pending_terminal = []
+        terminal_reads, other_reads = [], []
+
+        def terminal_ready(readers, writers, errors, timeout):
+            self.assertEqual(len(readers), 1)
+            self.assertEqual((writers, errors, timeout), ([], [], 0.1))
+            pending_terminal[:] = readers
+            return readers, [], []
+
+        def terminal_read(descriptor, size):
+            if pending_terminal and descriptor == pending_terminal[0]:
+                self.assertEqual(size, 65536)
+                pending_terminal.clear()
+                terminal_reads.append(descriptor)
+                return b"\r\n" + marker + b"\r\n"
+            other_reads.append(descriptor)
+            return real_read(descriptor, size)
+
         with (
             patch.object(fixture, "host_guard"),
             patch.object(edge, "checkpoint"),
@@ -1618,8 +1637,8 @@ os.stat=_stat; pathlib.Path.lstat=_lstat; os.open=_open; io.open=_io_open
             patch.object(edge, "install_cipher") as install,
             patch.object(edge.secrets, "token_hex", return_value="unit-salt"),
             patch.object(edge.subprocess, "Popen", return_value=process),
-            patch.object(edge.select, "select", return_value=([0], [], [])),
-            patch.object(edge.os, "read", return_value=b"\r\n" + marker + b"\r\n"),
+            patch.object(edge.select, "select", side_effect=terminal_ready),
+            patch.object(edge.os, "read", side_effect=terminal_read),
             patch.object(edge.os, "write"),
             patch.object(
                 box,
@@ -1631,6 +1650,8 @@ os.stat=_stat; pathlib.Path.lstat=_lstat; os.open=_open; io.open=_io_open
         ):
             result = edge.owner_worker(self.root, edge.OWNERS[0])
         self.assertEqual(observed, [314, 314, 315, 315])
+        self.assertEqual(len(terminal_reads), 2)
+        self.assertTrue(other_reads)  # Strict private JSON reads use real stdlib IO.
         self.assertEqual(result["primary"], "native-context")
         self.assertTrue(result["checks"]["native_shell"])
         self.assertNotIn("live_snapshot_after_removal", result["checks"])

@@ -527,19 +527,35 @@ def lifecycle(root):
 def validate_private_store(root, *, initial=False):
     # validate_store deliberately permits an uninitialized empty registry. Limit
     # that exception to the FIRST fresh info call, not its later sanitized calls.
+    engine_entry(root, initial=initial)
+    # Bind the direct native command to HOME's retained bytes before any info
+    # call; never infer authority from PATH or recapture after an observation.
+    purpose = validate_purpose(root, INVOCATION_SOURCE.get())
+    mapping = global_fixture.private_json(root, "podman-executable.json")
+    native = guarded(
+        guards.native_identity, Path(mapping["podman"]), outside=(APP, root)
+    )
+    require(native.sha256 == purpose["native_sha256"]["podman"], "native-changed")
+    command_expected = [str(native.path), "info", "--format", "json"]
     original = box.run
     first = initial
 
-    def guarded(command, **kwargs):
+    def checked_run(command, **kwargs):
         nonlocal first
-        require(command == ["podman", "info", "--format", "json"], "engine-command")
         engine_entry(root, initial=first)
+        require(
+            global_fixture.private_json(root, "podman-executable.json")["podman"]
+            == str(native.path),
+            "native-changed",
+        )
+        guarded(guards.check_native, native)
+        require(command == command_expected, "engine-command")
         first = False
         return original(command, **kwargs)
 
     if not initial:
         global_fixture.require_runtime_boot(root)
-    with patch.object(box, "run", guarded):
+    with patch.object(box, "run", checked_run):
         global_fixture.validate_store(root)
     global_fixture.require_runtime_boot(root)
 
