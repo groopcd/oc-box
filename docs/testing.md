@@ -28,6 +28,46 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
+### Experimental temporary host-file tools
+
+`oc-box share PATH` uses native V2 experimental client-MCP, not a filesystem
+mount or periodic snapshot. Keep its validation separate from TUI acceptance.
+The feature branch is not publication or live host evidence.
+
+```sh
+uv run --no-project --with-editable . --with cryptography python -B -m unittest discover -s tests -p 'test_sharing*.py' -v
+python3 -B tests/smoke_sharing_v2.py --opencode /path/to/opencode-v2
+```
+
+Unit/real-local-process checks must exercise live edits, child atomic replacement,
+new/hidden files, root replacement/removal/close refusal, protected source roots
+and ancestors/descendants, symlink/magic-link/traversal/hardlink/special-file
+refusals, no-mount-crossing resolution without fallback, bounded text/image reads
+and directories, malformed protocol/arguments, private-error suppression,
+noninteractive acknowledgement and cancellation before backend work. Check
+repeated reads, image MIME/content round-trips, no source modification, malformed
+or oversized pipe traffic, receiver backpressure and startup disconnect/timeout.
+
+Native offline checks require a private synthetic V2 server with no inherited
+config, saved credentials, provider inference or normal shared service. Verify
+real client-MCP handshake/catalog, actual text/image tool results, live reads,
+unrelated MCP/config preservation, and tool removal/disconnect on close/reload.
+Record the native version; an unsupported experimental API must refuse without
+writing configuration. These checks do not prove host file/container isolation.
+
+Before publication, run on the **host**, outside this container, using a clean
+source-pinned candidate and synthetic files only. Check a running workspace can
+share outside-root text and screenshots with no reset, host listener, mount,
+credential refresh or saved MCP entry; ordinary container file/shell access must
+still fail. Verify read-only/source preservation, scoped traversal/symlink/mount
+denials, native permission denials, disclosure confirmation, two simultaneous
+shares/workspaces, owner waiting for the explicit share lease, Ctrl-C and abnormal
+host-client termination, explicit workspace stop, native reload, no automatic
+regrant after resume/reset/restore, and backup exclusion of external source trees
+while acknowledging retained tool results/history. Verify on an enforcing SELinux
+host without relabeling original sources or disabling labeling. Preserve failed
+reports and do not infer acceptance from unit/native or earlier TUI/vault passes.
+
 ### Experimental workspace manager
 
 The [Textual manager](tui.md) adds a separate validation surface from the native

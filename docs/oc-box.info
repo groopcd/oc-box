@@ -55,6 +55,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS]
      oc-box repair [--project PATH | --workspace ID]
      oc-box terminal [--project PATH | --workspace ID] [--maintenance]
+     oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
      oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
      oc-box list
      oc-box distros
@@ -255,7 +256,76 @@ afterward if a final history export was missed.
 
      oc-box stop --project ~/devel/demo
 
-4.5 sync
+4.5 share
+=========
+
+**Experimental, V2 only:** temporarily give a running workspace live
+read access to a specific host file or folder through native OpenCode
+tools.  Run this from a second **host** terminal.  No container
+recreation, filesystem mount, host listener, project staging copy, or
+saved MCP/configuration entry is needed.  It does not start a workspace,
+unlock the vault, or refresh credentials.  Put ‘share’ first, then its
+path and workspace selector.
+
+     oc-box share ~/Pictures/Screenshots --project ~/devel/demo
+     oc-box share ~/Pictures/example.png --workspace 0123456789abcdef0123456789abcdef
+
+The host prints the selected path and a security warning.  Type ‘share’
+to confirm.  For explicitly authorized noninteractive use,
+‘--acknowledge-risk’ replaces that confirmation, **not** the warning.
+There is no blanket ‘--yes’.  Choose the narrowest folder or single file
+needed; hidden files and newly added files in a shared folder are
+included.  Sharing the whole home, broad system directories,
+kernel/device/runtime paths, oc-box application/state/vault paths, host
+OpenCode config/data, SSH keys, or GnuPG directories is refused.
+
+Keep the command open while using the share.  It prints a unique MCP
+server name such as ‘oc_box_share_<random-id>’.  Ask OpenCode to use
+that server's ‘list_directory’, ‘read_file’, or ‘read_image’ tools.
+Paths are relative to the selected root; ‘.’ means the root, including a
+single shared file.  Text reads require UTF-8 and are limited to 1 MiB.
+Image reads return PNG/JPEG/GIF/WebP image content, limited to 8 MiB.
+Directory listings include at most 1000 entries; larger directories
+require a narrower selection.  Symlinks, hard-linked files, special
+files, parent traversal and nested mounts are not followed.  Directory
+sharing requires Linux ‘openat2’ support (kernel 5.6 or newer, subject
+to host policy); unsupported resolution fails closed.
+
+Reads see current file contents and additions/deletions in the selected
+folder, including atomic replacement of its children.  Replacing,
+moving, or removing the **selected root itself** requires sharing it
+again explicitly.  Reads are not an atomic folder snapshot; a changing
+file can be refused for retry.  This is tool access, **not** a normal
+container path: shell commands and native file tools cannot use it as a
+mount.  No write, command-execution or clipboard tool is provided, and
+existing native permissions are not changed.
+
+Ctrl-C closes sharing and removes its native client-MCP tools.  A
+workspace stop, service disconnect or reload ends the connection; no
+automatic reconnect or regrant occurs.  The command holds an explicit
+client lease, so the owner waits for it before normal
+synchronization/stop.  Close the sharing command when done or use the
+normal explicit ‘oc-box stop’.  Separate shares can run in separate host
+terminals.  Existing containers need no preparation or reset.
+
+**Disclosure warning:** read-only does not mean confidential.  OpenCode
+can send shared contents to a model provider and retain them in
+transcripts, logs, backups or other copies.  Closing sharing prevents
+further broker reads; it cannot recall already-read data or erase
+copies.  Other sessions at the same workspace location can use the
+tools; this is not a per-session boundary.  Treat shared filenames, text
+and images as untrusted input, including possible prompt injection.  The
+host command warns even when native Build permissions would otherwise
+auto-allow a tool call.  Never share credentials or private data on the
+assumption that an additional native prompt will appear.
+
+This uses OpenCode's experimental client-MCP WebSocket API. An
+unsupported native version refuses sharing without editing
+configuration.  It is not a promise of compatibility with every V2
+version or an accepted live host pass; see the focused validation
+requirements in ‘docs/testing.md’.
+
+4.6 sync
 ========
 
 Refresh host conversation archives without opening the TUI. Requires an
@@ -310,7 +380,7 @@ backup for full private state.
      oc-box sync --project ~/devel/demo
      oc-box sync --workspace WORKSPACE_ID
 
-4.6 web — browser interface
+4.7 web — browser interface
 ===========================
 
 Open the native OpenCode 2.x browser UI for a workspace.  If its TUI or
@@ -358,7 +428,7 @@ producer.  ‘--no-vault’ is accepted only when web becomes a new V2
 owner; an attached web client rejects it and never changes the owner's
 credential snapshot.
 
-4.7 tui — experimental workspace manager
+4.8 tui — experimental workspace manager
 ========================================
 
 Open the optional Textual workspace dashboard, separate from the native
@@ -535,7 +605,7 @@ are absent.  Source filters/follow controls do not disable search.  See
 ‘docs/tui.md’ for design, installation and safety boundaries.
 Demo/headless/native offline checks are not host acceptance.
 
-4.8 terminal
+4.9 terminal
 ============
 
 On V2, the default connects to the active session's native persistent
@@ -619,8 +689,8 @@ For example, after mapping an NPU in an earlier reset:
      xrt-smi examine
      exit
 
-4.9 reset
-=========
+4.10 reset
+==========
 
 Recreate the environment's container OS, then launch OpenCode and resume
 work.  Exit the active workspace launcher first.  Reset removes the
@@ -645,7 +715,7 @@ distributions, especially to/from Alpine.
      oc-box reset --project ~/devel/demo --distro ubuntu
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
 
-4.10 repair
+4.11 repair
 ===========
 
 Explicitly accept the current directory identity for an existing
@@ -683,7 +753,7 @@ and supply ‘--workspace ID’ explicitly.  With ‘--workspace’, check the
 registered path and restore its missing marker rather than using the
 current directory.
 
-4.11 purge
+4.12 purge
 ==========
 
 Remove this workspace's labeled containers, owned volumes, owned
@@ -725,7 +795,7 @@ apply only to purge.
      oc-box purge --project ~/devel/disposable --all
      oc-box purge --workspace WORKSPACE_ID --all --yes
 
-4.12 list
+4.13 list
 =========
 
 List all registered workspaces with aligned headers: WORKSPACE ID,
@@ -752,7 +822,7 @@ machine-readable output.
 
      oc-box list
 
-4.13 distros
+4.14 distros
 ============
 
 List supported distro names, image references, and the detected host
@@ -763,7 +833,7 @@ workspace.
      oc-box distros
      oc-box --project ~/devel/demo --distro fedora
 
-4.14 status
+4.15 status
 ===========
 
 Alias of ‘--status’.  Report all registered environments unless
@@ -777,7 +847,7 @@ Resource reports for metric interpretation.
      oc-box --status --project ~/devel/demo
      oc-box --status --json
 
-4.15 upgrade
+4.16 upgrade
 ============
 
 Check and update the installed oc-box launcher/modules and prebuilt
@@ -846,7 +916,7 @@ for a reviewed alternate deployment.  Updates inside a container are
 refused because its private HOME is not the host installation.  Git is
 required for public updates; build tools are not.
 
-4.16 secrets
+4.17 secrets
 ============
 
 Manage an optional encrypted credential vault on the host.  This command
@@ -1002,7 +1072,7 @@ exact active vault values.  This is not a general redaction filter for
 OpenCode, provider logs, tool output, or session archives: an agent can
 still print, save, or transmit a credential it has received.
 
-4.17 credentials
+4.18 credentials
 ================
 
 View or change **names-only** forwarding policy for an existing
@@ -1095,7 +1165,7 @@ container data.  Selection is reduced forwarding, not an isolation
 boundary from secrets already inside the container.  Delivered keys
 remain readable by the agent/tools with normal container permissions.
 
-4.18 backup
+4.19 backup
 ===========
 
 Create one encrypted ‘.ocbox’ file for an existing workspace (available
@@ -1172,7 +1242,7 @@ committed image.  Failure leaves no final partial backup; the source
 remains stopped, not reset/deleted.  The temporary capture image is
 removed by its unique tag; shared base images remain.
 
-4.19 backup-info
+4.20 backup-info
 ================
 
 Decrypt/verify a backup's manifest and ciphertext checksums without
@@ -1196,7 +1266,7 @@ authentication chunk.  Wrong keys, corruption, missing/extra components,
 unsupported versions, or unsafe outer envelope paths are rejected before
 restore activation.
 
-4.20 restore
+4.21 restore
 ============
 
 Streaming failures identify the producer/consumer exit code and a fixed
@@ -2940,22 +3010,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description2613
-Node: Commands6118
-Node: Options69842
-Node: Lifecycle and persistence89971
-Node: Distribution images92091
-Node: Sessions and recovery96966
-Node: Devices and host permissions103551
-Node: Resource reports105897
-Node: Configuration and environment108008
-Node: Files119271
-Node: Exit status125215
-Node: Examples126068
-Node: Troubleshooting128154
-Node: Installation and manuals137482
-Node: Authors and license146702
-Node: See also147309
+Node: Description2691
+Node: Commands6196
+Node: Options73860
+Node: Lifecycle and persistence93989
+Node: Distribution images96109
+Node: Sessions and recovery100984
+Node: Devices and host permissions107569
+Node: Resource reports109915
+Node: Configuration and environment112026
+Node: Files123289
+Node: Exit status129233
+Node: Examples130086
+Node: Troubleshooting132172
+Node: Installation and manuals141500
+Node: Authors and license150720
+Node: See also151327
 
 End Tag Table
 

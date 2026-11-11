@@ -24,6 +24,7 @@ RUNTIME_FILES = (
     "opencode_v2_io.py",
     "workspace_service.py",
     "session_terminal.py",
+    "sharing.py",
     "plugin_compat.py",
     "plugin_bridge.js",
     "backups.py",

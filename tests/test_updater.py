@@ -567,6 +567,17 @@ class UpdateTests(unittest.TestCase):
         )
         fake_id.chmod(0o755)
         fake_git = binary / "git"
+        # A clone contains project source, not arbitrary local evidence or
+        # private/unreadable untracked files in the developer's checkout.
+        source_files = {
+            str(installation.source_file(APP, name).relative_to(APP))
+            for name in installation.PROGRAM_FILES
+        } | {
+            *("docs/" + name for name in installation.MANUAL_FILES),
+            installation.COMPLETION_FILE,
+            "install.py",
+            "pyproject.toml",
+        }
         fake_git.write_text(
             "#!"
             + sys.executable
@@ -576,9 +587,13 @@ class UpdateTests(unittest.TestCase):
             + " pathlib.Path("
             + repr(str(record))
             + ").write_text(json.dumps({'argv':sys.argv[1:],'env':dict(os.environ)}))\n"
-            + " shutil.copytree("
+            + " source=pathlib.Path("
             + repr(str(APP))
-            + ",sys.argv[-1],ignore=shutil.ignore_patterns('.git','__pycache__','.ruff_cache','.oc-box-id','.venv','build','dist','*.egg-info'))\n"
+            + ")\n"
+            + " for name in "
+            + repr(sorted(source_files))
+            + ":\n"
+            + "  target=pathlib.Path(sys.argv[-1],name); target.parent.mkdir(parents=True,exist_ok=True); shutil.copyfile(source/name,target)\n"
             + " pathlib.Path(sys.argv[-1],'build-info.json').write_text(json.dumps({'version':'0.1.1+gfixture','commit':'"
             + "a" * 40
             + "','commit_count':1,'dirty':False}))\n"

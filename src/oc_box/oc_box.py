@@ -2771,6 +2771,7 @@ def parser():
             "doctor",
             "completion",
             "tui",
+            "share",
         ),
         default="start",
     )
@@ -3038,6 +3039,12 @@ def completion_parser():
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "share":
+        if __package__:
+            from .sharing import cli
+        else:
+            from sharing import cli
+        return cli(sys.modules[__name__], arguments[1:])
     if arguments and arguments[0] == "tui":
         if __package__:
             from .tui import cli
@@ -3088,6 +3095,10 @@ def main(argv=None):
     if args.command == "tui":
         raise BoxError(
             "Use 'oc-box tui' first, followed by its workspace selectors/options; see 'oc-box tui --help'."
+        )
+    if args.command == "share":
+        raise BoxError(
+            "Use 'oc-box share PATH' first, followed by its workspace selector; see --help."
         )
     if args.command == "web" and not hasattr(args, "port"):
         raise BoxError(

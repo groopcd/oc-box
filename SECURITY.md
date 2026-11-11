@@ -60,6 +60,50 @@ oc-box vault; treat its host authority separately. The separate scripted
 global-vault host fixture has passed native tool/permission/reload checks, not
 interactive TUI permission-prompt/reload acceptance or security certification.
 
+## Explicit temporary host-file sharing
+
+Experimental `oc-box share PATH` deliberately extends read access beyond the
+project for a running V2 workspace. It is an explicit host action with a printed
+disclosure warning and typed confirmation (or `--acknowledge-risk`). No share is
+created automatically by a tool call, startup, configuration refresh or dashboard
+browsing. There is no write, command-execution or clipboard operation.
+
+The host broker keeps a pinned source root and handles bounded MCP requests over
+the existing private authenticated workspace transport. It opens no host TCP
+listener, adds no mount/capability, stages no plaintext files and writes no
+permanent MCP configuration or source-path registry. The selected path is printed
+only in the requesting host terminal, escaped with Python `repr`; filesystem and
+native errors are not forwarded verbatim. Source paths and read results are not
+written to the oc-box activity journal. Native OpenCode history/logging, tool
+results, provider submissions and agent-created copies are separate retention.
+
+Only regular single-link files and directories are readable. Kernel-confined
+directory lookup uses Linux `openat2` with beneath/no-symlink/no-magic-link/no-mount
+crossing constraints, with no weaker fallback. Special files are classified
+through `O_PATH` before opening for I/O. Source ancestors cannot be symlinks.
+Broad roots, kernel/device/runtime trees, application/registry/vault state, host
+OpenCode directories and SSH/GnuPG directories are refused, including their
+parents and descendants. This is not a scanner for arbitrary credentials:
+`.env`, hidden files or sensitive images inside an otherwise selected folder
+remain disclosed. Host root and malicious same-user host processes are not an
+isolation boundary; source files can change while shared. Use narrow roots on
+trusted local filesystems, not potentially unresponsive remote filesystems.
+
+Native client-MCP tools exist while the sharing connection is open. They are
+location/workspace-scoped, not a per-session permission boundary. Closing the
+foreground command, stopping the workspace or losing the connection ends further
+broker reads; no reconnect/regrant is automatic. Explicit client leases prevent
+normal owner stop/sync from racing a connected broker. Replacing the selected
+root requires fresh host consent. Already-read data, completed results or copies
+cannot be recalled or erased by disconnect. Shared text/images may contain prompt
+injection; neither read-only annotations nor the instructions to treat content as
+untrusted guarantee that a model will ignore it. Existing native permission rules
+and Build behavior remain unchanged; host confirmation is the disclosure fence.
+
+Unit/process/native tests are not rootless-Podman or interactive host acceptance.
+Keep this feature unpublished until the TUI and regression work and the focused
+host checks in `docs/testing.md` are complete.
+
 ## Global V2 host credential vault and policy overrides
 
 With OpenCode 2.x, workspace clients use native private

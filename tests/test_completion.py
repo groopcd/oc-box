@@ -17,6 +17,7 @@ from oc_box import (
     dependencies,
     installation,
     oc_box as box,
+    sharing,
     vault,
     workspace_service,
 )
@@ -89,6 +90,7 @@ fi
             ("doctor", dependencies.parser()),
             ("web", workspace_service.web_parser()),
             ("completion", box.completion_parser()),
+            ("share", sharing.parser()),
         ):
             with self.subTest(command=name):
                 expected = {
@@ -150,6 +152,7 @@ fi
             "sync",
             "repair",
             "terminal",
+            "share",
             "upgrade",
             "secrets",
             "credentials",
@@ -236,6 +239,8 @@ fi
         )
         self.assertEqual(self.complete("backup", "--output", "backup"), [archive.name])
         self.assertEqual(self.complete("restore", "$("), [literal.name])
+        self.assertEqual(self.complete("share", "project"), [directory.name + "/"])
+        self.assertEqual(self.complete("share", "backup"), [archive.name])
         self.assertFalse((self.root / "NOT_EXECUTED").exists())
         self.assertEqual(
             self.complete("--project", "~/project"), [str(directory) + "/"]

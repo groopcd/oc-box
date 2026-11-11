@@ -60,6 +60,7 @@ def check_archives(directory):
             "opencode_v2_io.py",
             "workspace_service.py",
             "session_terminal.py",
+            "sharing.py",
             "plugin_compat.py",
             "plugin_bridge.js",
             "backups.py",
@@ -126,6 +127,9 @@ def check_archives(directory):
             "src/_oc_box_build.py",
             "tests/test_updater.py",
             "tests/test_session_terminal.py",
+            "tests/test_sharing.py",
+            "tests/test_sharing_transport.py",
+            "tests/smoke_sharing_v2.py",
             "tests/test_session_sync.py",
             "tests/smoke_session_sync_v2.py",
             "tests/smoke_tui_v2.py",
@@ -148,6 +152,7 @@ def check_archives(directory):
             "src/oc_box/opencode_v2_io.py",
             "src/oc_box/workspace_service.py",
             "src/oc_box/session_terminal.py",
+            "src/oc_box/sharing.py",
             "src/oc_box/plugin_compat.py",
             "src/oc_box/plugin_bridge.js",
             "src/oc_box/paths.py",
@@ -238,6 +243,7 @@ def check(directory, *, with_vault=False, with_tui=False):
         assert "--recipient" in run(cli, "backup", "--help")
         assert "--no-open" in run(cli, "web", "--help")
         assert "--read-only" in run(cli, "tui", "--help")
+        assert "--acknowledge-risk" in run(cli, "share", "--help")
         assert "textual" not in run(
             python, "-c", "import sys,oc_box.tui; print(' '.join(sys.modules))"
         )

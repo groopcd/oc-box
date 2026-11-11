@@ -56,6 +56,7 @@ class PackagingTests(unittest.TestCase):
                     "opencode_compat.py",
                     "opencode_v2_io.py",
                     "workspace_service.py",
+                    "sharing.py",
                     "activity_log.py",
                     "tui_app.py",
                     "tui_terminal.py",
@@ -75,6 +76,9 @@ class PackagingTests(unittest.TestCase):
                     "tests/smoke_session_sync_v2.py",
                     "tests/smoke_v2.py",
                     "tests/smoke_tui_v2.py",
+                    "tests/test_sharing.py",
+                    "tests/test_sharing_transport.py",
+                    "tests/smoke_sharing_v2.py",
                 )
             ),
         )

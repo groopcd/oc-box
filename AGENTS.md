@@ -107,6 +107,14 @@ their checkout ownership distinct from unrelated source and flat installations.
 - `session_terminal.py`: native persistent V2 session shell PTY client with
   authenticated WebSocket framing, resize/checkpoint replay and Ctrl-] detach.
   Reuse the session terminal, never replace it with the mini chat interface.
+- `sharing.py`: experimental host-only foreground live read/list/image tools
+  through native V2 client-MCP. Require explicit disclosure consent and a verified
+  existing workspace lease; no mounts, listener, staging copies, saved MCP config,
+  credential refresh or automatic regrant. Keep pinned-root/openat2 confinement,
+  special/link/protected-path refusals, bounded private pipe/WebSocket I/O and
+  fixed errors. Disconnect is not recall of disclosed data. Native/offline checks
+  are not host acceptance; defer publication until TUI/regression and focused host
+  sharing checks are complete.
 - `plugin_compat.py` / `plugin_bridge.js`: bounded copied-V1-plugin adapters on
   native V2 plugin APIs. Keep host originals and V1 behavior intact, propagate
   refusal errors and preserve attachments/structured output; reject unsupported

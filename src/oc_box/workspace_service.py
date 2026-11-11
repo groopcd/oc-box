@@ -453,7 +453,7 @@ class Owner:
         with self.condition:
             if self.clients:
                 print(
-                    "oc-box: Attached web/terminal clients are still active; waiting before history sync and container stop. Close those clients or use 'oc-box stop'.",
+                    "oc-box: Attached web/terminal/file-sharing clients are still active; waiting before history sync and container stop. Close those clients or use 'oc-box stop'.",
                     flush=True,
                 )
             while self.clients and self.child.poll() is None:

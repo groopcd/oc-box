@@ -261,6 +261,28 @@ preserving it for reattachment; `exit` closes that shell. `terminal --maintenanc
 retains the restricted shell, and 1.x retains its previous terminal behavior. See the
 [V2 client guide](docs/opencode-2.md#concurrent-web-terminal-and-full-tui-clients).
 
+### Temporary live host-file access (experimental)
+
+Share a specific outside folder or screenshot from a second host terminal:
+
+```sh
+oc-box share ~/Pictures/Screenshots --project ~/devel/demo
+```
+
+Read the disclosure warning and type `share`. OpenCode gets temporary
+`list_directory`, `read_file`, and `read_image` tools with a unique server name
+printed by the command. Reads are live and read-only; there is no mount,
+container restart, saved configuration, or clipboard access. Keep the command
+open; Ctrl-C ends further reads. This requires a running V2 workspace and its
+experimental client-MCP API. It does not expose a path to shell commands.
+
+**Shared data may be sent to a model provider or retained in history/copies.**
+Read-only and later disconnect do not undo disclosure. Hidden files and future
+additions to a shared folder are included; prefer a single file when possible.
+See [share](docs/cli.md#share) for confirmation, protected-path refusals, size
+limits and lifecycle details. This feature is pending live host acceptance and
+publication after the TUI/regression work.
+
 ### V2 conversation archives
 
 History synchronization includes paginated root, fork, archived, and child/subagent

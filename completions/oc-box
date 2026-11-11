@@ -28,7 +28,7 @@ _oc_box()
 {
     local cur=${COMP_WORDS[COMP_CWORD]} prev='' prefix='' option=''
     local command='' action='' word skip=0 positional=0 ended=0 i
-    local commands='start stop sync reset repair terminal web tui upgrade secrets credentials backup backup-info restore purge list distros status doctor completion'
+    local commands='start stop sync reset repair terminal web tui share upgrade secrets credentials backup backup-info restore purge list distros status doctor completion'
     local selectors='--project --workspace'
     local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault'
     local help='-h --help' options
@@ -105,6 +105,7 @@ _oc_box()
         terminal) options="$help $selectors --maintenance" ;;
         web) options="$help $selectors --port --no-open --no-vault" ;;
         tui) options="$help $selectors --read-only --demo" ;;
+        share) options="$help $selectors --acknowledge-risk" ;;
         status) options="$help $selectors --json" ;;
         purge) options="$help $selectors --delete-sessions --all -y --yes" ;;
         credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;
@@ -130,7 +131,7 @@ _oc_box()
         _oc_box_words "$options"
         [[ $cur == -* ]] && return 0
     fi
-    if [[ $command == backup-info || $command == restore ]] && (( positional == 0 )); then
+    if [[ $command == backup-info || $command == restore || $command == share ]] && (( positional == 0 )); then
         _oc_box_paths -f
     fi
     return 0

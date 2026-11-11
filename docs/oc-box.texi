@@ -50,6 +50,7 @@ oc-box sync [--project PATH | --workspace ID]
 oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS]
 oc-box repair [--project PATH | --workspace ID]
 oc-box terminal [--project PATH | --workspace ID] [--maintenance]
+oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
 oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
 oc-box list
 oc-box distros
@@ -138,6 +139,27 @@ Stop a registered container without deleting the project, container OS, private 
 @example
 oc-box stop --project ~/devel/demo
 @end example
+
+@section share
+
+**Experimental, V2 only:** temporarily give a running workspace live read access to a specific host file or folder through native OpenCode tools. Run this from a second **host** terminal. No container recreation, filesystem mount, host listener, project staging copy, or saved MCP/configuration entry is needed. It does not start a workspace, unlock the vault, or refresh credentials. Put @code{share} first, then its path and workspace selector.
+
+@example
+oc-box share ~/Pictures/Screenshots --project ~/devel/demo
+oc-box share ~/Pictures/example.png --workspace 0123456789abcdef0123456789abcdef
+@end example
+
+The host prints the selected path and a security warning. Type @code{share} to confirm. For explicitly authorized noninteractive use, @code{--acknowledge-risk} replaces that confirmation, **not** the warning. There is no blanket @code{--yes}. Choose the narrowest folder or single file needed; hidden files and newly added files in a shared folder are included. Sharing the whole home, broad system directories, kernel/device/runtime paths, oc-box application/state/vault paths, host OpenCode config/data, SSH keys, or GnuPG directories is refused.
+
+Keep the command open while using the share. It prints a unique MCP server name such as @code{oc_box_share_<random-id>}. Ask OpenCode to use that server's @code{list_directory}, @code{read_file}, or @code{read_image} tools. Paths are relative to the selected root; @code{.} means the root, including a single shared file. Text reads require UTF-8 and are limited to 1 MiB. Image reads return PNG/JPEG/GIF/WebP image content, limited to 8 MiB. Directory listings include at most 1000 entries; larger directories require a narrower selection. Symlinks, hard-linked files, special files, parent traversal and nested mounts are not followed. Directory sharing requires Linux @code{openat2} support (kernel 5.6 or newer, subject to host policy); unsupported resolution fails closed.
+
+Reads see current file contents and additions/deletions in the selected folder, including atomic replacement of its children. Replacing, moving, or removing the **selected root itself** requires sharing it again explicitly. Reads are not an atomic folder snapshot; a changing file can be refused for retry. This is tool access, **not** a normal container path: shell commands and native file tools cannot use it as a mount. No write, command-execution or clipboard tool is provided, and existing native permissions are not changed.
+
+Ctrl-C closes sharing and removes its native client-MCP tools. A workspace stop, service disconnect or reload ends the connection; no automatic reconnect or regrant occurs. The command holds an explicit client lease, so the owner waits for it before normal synchronization/stop. Close the sharing command when done or use the normal explicit @code{oc-box stop}. Separate shares can run in separate host terminals. Existing containers need no preparation or reset.
+
+**Disclosure warning:** read-only does not mean confidential. OpenCode can send shared contents to a model provider and retain them in transcripts, logs, backups or other copies. Closing sharing prevents further broker reads; it cannot recall already-read data or erase copies. Other sessions at the same workspace location can use the tools; this is not a per-session boundary. Treat shared filenames, text and images as untrusted input, including possible prompt injection. The host command warns even when native Build permissions would otherwise auto-allow a tool call. Never share credentials or private data on the assumption that an additional native prompt will appear.
+
+This uses OpenCode's experimental client-MCP WebSocket API. An unsupported native version refuses sharing without editing configuration. It is not a promise of compatibility with every V2 version or an accepted live host pass; see the focused validation requirements in @code{docs/testing.md}.
 
 @section sync
 
