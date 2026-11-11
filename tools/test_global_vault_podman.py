@@ -126,6 +126,7 @@ PREFIX = "oc-box-gv-host-"
 FORMAT = "oc-box-global-vault-host-acceptance"
 NATIVE_VERSION = "2.2.6"
 PODMAN_CONFIGFILE_OMISSIONS = frozenset({"6.1.4"})
+PROVIDER_STAGES = frozenset(("provider-shutdown", "provider-close", "provider-join"))
 PROJECTS = ("source-a", "source-b", "restored-full")
 SOURCE_DONORS = (
     "tools/test_global_vault_podman.py",
@@ -2077,6 +2078,8 @@ def host_cache_retained():
 def record_secondary(primary, stage, error):
     """Keep the original exception object; persist only fixed diagnostics."""
     entry = {"stage": stage, "error_class": safe_error_class(error)}
+    if getattr(error, "fixture_check", None) in ("join", "liveness"):
+        entry["check"] = error.fixture_check
     if isinstance(error, FixtureError) and str(error) in {
         "host-environment-changed",
         "host-restoration-changed",
@@ -2148,18 +2151,20 @@ def finish_provider(server, worker, *, primary):
     """Attempt every mandatory finalizer using this invocation's explicit primary."""
     failure = primary
 
-    def joined():
-        worker.join(timeout=3)
+    def liveness():
         require(not worker.is_alive(), "provider-cleanup-timeout")
 
-    for stage, action in (
-        ("provider-shutdown", server.shutdown),
-        ("provider-close", server.server_close),
-        ("provider-join", joined),
+    for stage, check, action in (
+        ("provider-shutdown", None, server.shutdown),
+        ("provider-close", None, server.server_close),
+        ("provider-join", "join", lambda: worker.join(timeout=3)),
+        ("provider-join", "liveness", liveness),
     ):
         try:
             action()
         except BaseException as error:
+            if check is not None:
+                error.fixture_check = check
             if failure is None:
                 error.fixture_stage = stage
                 failure = error
@@ -2200,6 +2205,8 @@ def terminal_report(root, checks, *, result=None, primary=None, identity=None):
         diagnostic = primary.diagnostic
     elif primary is not None:
         diagnostic = {"error_class": safe_error_class(primary)}
+        if getattr(primary, "fixture_check", None) in ("join", "liveness"):
+            diagnostic["check"] = primary.fixture_check
         stage = getattr(primary, "fixture_stage", None)
         if stage in {
             "host-scoped-clean",
@@ -3046,6 +3053,7 @@ SOURCE_LOADING_STAGES = {
 SOURCE_STAGES = (
     frozenset(SOURCE_LOADING_STAGES.values())
     | PROBE_STAGES
+    | PROVIDER_STAGES
     | {
         "source-validation",
         "source-resources",
@@ -3218,6 +3226,8 @@ class SourceRetryTrace:
             "exit_code": None,
             "stderr_category": "empty",
         }
+        if getattr(error, "fixture_check", None) in ("join", "liveness"):
+            diagnostic["check"] = error.fixture_check
         if self.subprocess_failure is not None:
             diagnostic.update(self.subprocess_failure)
         for step in reversed(self.steps):
@@ -3230,6 +3240,8 @@ class SourceRetryTrace:
             "container-stop",
             "history-sync",
             "provider-shutdown",
+            "provider-close",
+            "provider-join",
             "evidence-preservation",
             "host-clean",
             "private-owner-stop",
@@ -3296,31 +3308,48 @@ class SourceRetryTrace:
                 raise
 
         def owner_shutdown(owner, *args, **kwargs):
+            observation_cancel = None
             if not owner.ready and hasattr(owner, "error_file"):
                 try:
                     code = (
                         None
-                        if owner.child_owner is None
+                        if owner.child is None
+                        or owner.child_owner is None
+                        or getattr(owner.child_owner, "process", owner.child) is None
                         else owner.child_owner.status()
                     )
-                except OSError:
+                except BaseException as error:
                     # A lost anchor has no trustworthy exit code. Observation
                     # must not suppress the real owner's cleanup/refusal path.
                     code = None
-                self.observe(
-                    ["opencode"],
-                    code,
-                    private_stderr(owner.error_file),
-                )
-                original_error = kwargs.get("primary")
-                if original_error is not None:
-                    self.fail(original_error)
+                    if (
+                        isinstance(error, (KeyboardInterrupt, SystemExit))
+                        and kwargs.get("primary") is None
+                    ):
+                        observation_cancel = error
+                try:
+                    self.observe(["opencode"], code, private_stderr(owner.error_file))
+                    original_error = kwargs.get("primary")
+                    if original_error is not None:
+                        self.fail(original_error)
+                except BaseException as error:
+                    if (
+                        isinstance(error, (KeyboardInterrupt, SystemExit))
+                        and kwargs.get("primary") is None
+                    ):
+                        observation_cancel = error
             try:
-                return actual_shutdown(owner, *args, **kwargs)
+                result = actual_shutdown(owner, *args, **kwargs)
             except BaseException as error:
                 self("private-owner-stop")
                 self.fail(error)
+                if observation_cancel is not None:
+                    record_secondary(observation_cancel, "private-owner-stop", error)
+                    raise observation_cancel
                 raise
+            if observation_cancel is not None:
+                raise observation_cancel
+            return result
 
         with (
             patch.object(subprocess, "run", side_effect=observed_run),
@@ -3903,6 +3932,10 @@ def retry_source(root, temp_parent=None):
                 finish_provider(server, worker, primary=None)
                 trace.completed()
             except BaseException as error:
+                stage = getattr(error, "fixture_stage", None)
+                if stage in PROVIDER_STAGES and stage != "provider-shutdown":
+                    trace.completed("provider-shutdown")
+                    trace(stage)
                 trace.fail(error)
                 trace.cleanup_errors.extend(getattr(error, "fixture_secondary", ()))
         try:

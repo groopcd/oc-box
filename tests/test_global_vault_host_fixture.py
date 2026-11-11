@@ -2871,6 +2871,195 @@ print(json.dumps({'lazy':True,'exports':True}))
         original.unlink()  # Remove only this test's link, never an evidence target.
         self.assertEqual(fixture.source_evidence_digests(self.root, path), before)
 
+    def test_trace_popen_failure_always_forwards_real_shutdown_and_closes_output(self):
+        service = fixture.workspace_service
+        for primary in (
+            OSError("private-before-child"),
+            KeyboardInterrupt("private-before-child"),
+        ):
+            with self.subTest(kind=type(primary).__name__):
+                with patch.dict(os.environ, {"XDG_RUNTIME_DIR": str(self.parent)}):
+                    owner = service.Owner(
+                        box, self.root / "workspace.json", {"id": "synthetic-trace"}
+                    )
+                calls = []
+                actual_shutdown = service.Owner.shutdown
+
+                def shutdown(current, *args, **kwargs):
+                    calls.append((current, args, kwargs))
+                    return actual_shutdown(current, *args, **kwargs)
+
+                trace = fixture.SourceRetryTrace()
+                previous = service.live_connection()
+                with (
+                    patch.object(service.Owner, "shutdown", shutdown),
+                    patch.object(
+                        box,
+                        "exec_command",
+                        return_value=box.ContainerCommand(["synthetic-no-process"], {}),
+                    ),
+                    patch.object(service.subprocess, "Popen", side_effect=primary),
+                    trace.installed(),
+                    self.assertRaises(BaseException) as raised,
+                ):
+                    owner.__enter__()
+                self.assertIs(raised.exception, primary)
+                self.assertEqual(len(calls), 1)
+                self.assertIs(calls[0][0], owner)
+                self.assertEqual(calls[0][1], ())
+                self.assertIs(calls[0][2]["primary"], primary)
+                self.assertTrue(owner.error_file.closed)
+                self.assertFalse(owner.errors_entered)
+                self.assertIsNone(owner.errors)
+                self.assertIsNone(owner.child)
+                self.assertIsNone(owner.token)
+                self.assertIs(service.live_connection(), previous)
+                self.assertNotIn(
+                    "private-before-child",
+                    json.dumps(
+                        {"failure": trace.failure, "cleanup": trace.cleanup_errors}
+                    ),
+                )
+
+    def test_observer_status_failures_never_bypass_owned_shutdown(self):
+        for error in (
+            AttributeError("private-observer"),
+            ValueError("private-observer"),
+            KeyboardInterrupt("private-observer"),
+        ):
+            with self.subTest(kind=type(error).__name__):
+                owner_class, owner, calls = self.trace_owner(code=None)
+                owner.child_owner.status.side_effect = error
+                primary = OSError("private-startup-primary")
+                trace = fixture.SourceRetryTrace()
+                with (
+                    patch.object(fixture.workspace_service, "Owner", owner_class),
+                    trace.installed(),
+                ):
+                    try:
+                        result = owner.shutdown(primary=primary)
+                    except BaseException as observed:
+                        self.fail(
+                            "observer prevented shutdown: " + type(observed).__name__
+                        )
+                    self.assertEqual(result, "synthetic cleanup completed")
+                self.assertEqual(calls, [((), {"primary": primary})])
+                owner.child.poll.assert_not_called()
+                self.assertNotIn(
+                    "private-observer",
+                    json.dumps(
+                        {"failure": trace.failure, "cleanup": trace.cleanup_errors}
+                    ),
+                )
+
+    def test_provider_join_and_liveness_are_independent_under_errors_and_cancellation(
+        self,
+    ):
+        for primary_kind, join_kind in product(
+            (None, "body", "cancel"), ("error", "cancel")
+        ):
+            with self.subTest(primary=primary_kind, join=join_kind):
+                calls = []
+                primary = (
+                    None
+                    if primary_kind is None
+                    else OSError("private-body")
+                    if primary_kind == "body"
+                    else KeyboardInterrupt("private-body")
+                )
+                join_error = (
+                    OSError("private-join")
+                    if join_kind == "error"
+                    else KeyboardInterrupt("private-join")
+                )
+
+                def join(**kwargs):
+                    calls.append("join")
+                    raise join_error
+
+                def live():
+                    calls.append("live")
+                    return True
+
+                server = SimpleNamespace(
+                    shutdown=lambda: calls.append("shutdown"),
+                    server_close=lambda: calls.append("close"),
+                )
+                worker = SimpleNamespace(join=join, is_alive=live)
+                if primary is None:
+                    with self.assertRaises(BaseException) as raised:
+                        fixture.finish_provider(server, worker, primary=None)
+                    self.assertIs(raised.exception, join_error)
+                    notes = join_error.fixture_secondary
+                else:
+                    fixture.finish_provider(server, worker, primary=primary)
+                    notes = primary.fixture_secondary
+                self.assertEqual(calls, ["shutdown", "close", "join", "live"])
+                self.assertTrue(any(note.get("check") == "liveness" for note in notes))
+                self.assertNotIn("private-", json.dumps(notes))
+
+    def test_retry_preserves_each_first_provider_failure_action_and_all_secondaries(
+        self,
+    ):
+        self.retained_source()
+        for first, body_fails in product(("shutdown", "close", "join"), (False, True)):
+            with self.subTest(first=first, body_fails=body_fails):
+                calls = []
+
+                def action(name):
+                    calls.append(name)
+                    if ("shutdown", "close", "join").index(name) >= (
+                        "shutdown",
+                        "close",
+                        "join",
+                    ).index(first):
+                        raise OSError("private-provider-" + name)
+
+                def launch(arguments):
+                    vault.hidden()
+                    if body_fails:
+                        raise box.BoxError("private-launch-primary")
+                    return 0
+
+                server = SimpleNamespace(
+                    server_port=12345,
+                    shutdown=lambda: action("shutdown"),
+                    server_close=lambda: action("close"),
+                )
+                worker = SimpleNamespace(
+                    join=lambda **kw: action("join"),
+                    is_alive=lambda: calls.append("live") or False,
+                )
+                with contextlib.ExitStack() as stack:
+                    for target, name, options in (
+                        (fixture, "host_guard", {}),
+                        (fixture, "validate_store", {}),
+                        (fixture, "check_native_version", {}),
+                        (fixture, "verify_stopped_source", {}),
+                        (box, "check_backend", {}),
+                        (fixture, "make_provider", {"return_value": (server, worker)}),
+                        (fixture, "launcher", {"side_effect": launch}),
+                    ):
+                        stack.enter_context(patch.object(target, name, **options))
+                    report_path, result = fixture.retry_source(self.root)
+                self.assertEqual(result["status"], "failed")
+                records = [result["error"], *result["cleanup_errors"]]
+                expected = {
+                    "provider-" + name
+                    for name in ("shutdown", "close", "join")[
+                        ("shutdown", "close", "join").index(first) :
+                    ]
+                }
+                self.assertTrue(expected <= {item["stage"] for item in records})
+                if not body_fails:
+                    self.assertEqual(result["error"]["stage"], "provider-" + first)
+                else:
+                    self.assertEqual(result["error"]["stage"], "owning-launch")
+                    self.assertEqual(result["error"]["error_class"], "box-error")
+                self.assertEqual(calls, ["shutdown", "close", "join", "live"])
+                self.assertNotIn("private-provider-", report_path.read_text())
+                self.assertNotIn("private-launch-primary", report_path.read_text())
+
 
 if __name__ == "__main__":
     unittest.main()
