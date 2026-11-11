@@ -71,6 +71,8 @@ class PackagingTests(unittest.TestCase):
                     "src/oc_box/private_memory.py",
                     "tests/test_private_memory.py",
                     "tests/test_private_output.py",
+                    "tools/ci_ubuntu_apt.py",
+                    "tests/test_ci_ubuntu_apt.py",
                     "tests/smoke_session_sync_v2.py",
                     "tests/smoke_v2.py",
                 )

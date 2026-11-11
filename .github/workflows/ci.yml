@@ -28,8 +28,11 @@ jobs:
           python-version: ${{ matrix.python }}
       - name: Unit and documentation coverage checks
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends age shellcheck
+          apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
+          chmod 755 "$apt_root"
+          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config")
+          sudo apt-get -c "$apt_config" update
+          sudo apt-get -c "$apt_config" install -y --no-install-recommends age shellcheck
           bash -n completions/oc-box
           shellcheck --shell=bash completions/oc-box
           python -m venv "$RUNNER_TEMP/tests"
@@ -56,8 +59,11 @@ jobs:
           python-version: '3.13'
       - name: Install separate unmodified OpenCode versions in temporary storage
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends poppler-utils
+          apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
+          chmod 755 "$apt_root"
+          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config")
+          sudo apt-get -c "$apt_config" update
+          sudo apt-get -c "$apt_config" install -y --no-install-recommends poppler-utils
           npm install --prefix "$RUNNER_TEMP/opencode-v1" --no-audit --no-fund opencode-ai@1.19.5
           npm install --prefix "$RUNNER_TEMP/opencode-v2" --no-audit --no-fund @opencode/cli@2.2.6
       - name: Offline V1 and V2 native integration
