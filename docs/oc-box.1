@@ -739,13 +739,28 @@ oc\-box sync \-\-project ~/devel/demo
 .fam T
 .fi
 .PP
-The source\-tree diagnostic prints counts and bounded structural differences, not transcript values or arbitrary dictionary keys. Operational failures use fixed categories rather than raw native error text. This command obtains a live export: it may start and stop an initially stopped container and start a private native service or migration. It is not a byte\-preserving offline comparison. Difference output is capped at 20 entries using positional field/item labels; comparisons reject non\-JSON values, non\-finite numbers and nesting beyond 32 levels instead of echoing malformed payloads.
+The source\-tree diagnostic compares **two explicitly supplied exports offline by default**. It reads those files without looking up a workspace, probing an engine, starting OpenCode or requesting migration, import, history synchronization or credential unlock/refresh. Supply the selected session ID explicitly. The source export's directory is the expected directory; offline mode does not infer a host\-to\-container path rewrite from a registry.
 .PP
 .nf
 .fam C
-python3 tools/diagnose_import.py \-\-workspace WORKSPACE_ID \-\-session SESSION_ID
+python3 \-I \-B tools/diagnose_import.py \e
+  \-\-source\-export /path/to/source\-export.json \e
+  \-\-container\-export /path/to/observed\-export.json \-\-session SESSION_ID
 .fam T
 .fi
+.PP
+Reports contain the explicit selectors, counts and bounded structural differences, not transcript values, implicit message/part IDs or arbitrary dictionary keys. Difference output is capped at 20 entries using positional field/item labels; comparisons reject non\-JSON values, non\-finite numbers and nesting beyond 32 levels instead of echoing malformed payloads. Matching uses the supported import verifier, not raw export\-file byte equality: the existing narrow obsolete V1 tool raw\-buffer omission can verify while the exact\-match field remains false.
+.PP
+Production export requires an explicit **\fB\-\-live\fR** opt\-in. This mode reads the workspace's saved source export and obtains a current container export under its workspace lock. It may start an initially stopped container and attempts to stop it again, including after a partial start/export failure; an initially running container is left running. Native export can initialize, write or migrate native state and use/start/stop a private native history service. It does not request session import, host\-history synchronization or oc\-box credential unlock/refresh. Running\-state restoration is best effort, not data rollback. The old workspace invocation without \fB\-\-live\fR refuses rather than silently retaining live effects.
+.PP
+.nf
+.fam C
+python3 \-I \-B tools/diagnose_import.py \-\-live \e
+  \-\-workspace WORKSPACE_ID \-\-session SESSION_ID
+.fam T
+.fi
+.PP
+Exit statuses are **0** for a verified match after mandatory cleanup, **1** for a valid comparison mismatch, **2** for invalid options/data or an operational/ mandatory\-finalizer failure, and **130** for keyboard interruption. Operational errors emit fixed\-schema JSON on stderr: \fBprimary_failure\fR contains only a fixed \fBstage\fR and \fBcategory\fR, and \fBsecondary_failures\fR records cleanup categories separately. A cleanup failure cannot turn an operation into success or replace its original failure/interruption. No raw native output or private exception message is printed; help remains a harmless status\-0 operation.
 .SS Recover history after replacing a workspace marker
 .PP
 Older launchers allowed removing \fB\&.oc\-box\-id\fR and starting again to create a fresh environment. Current launchers detect the registered path and refuse to create a duplicate; run \fBrepair\fR to reconnect the existing environment instead. Removing the marker does not delete the old private volume, registry, or host archives. If an older launcher already created a replacement, to continue a previously synced conversation in the new environment, exit its active client, find the host archive title prefixed \fB[oc\-box project\-name]\fR, and import its ID:

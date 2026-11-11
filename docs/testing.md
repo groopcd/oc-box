@@ -34,6 +34,38 @@ Run acceptance fixtures without Python optimization. In particular,
 for `--help`. Its offline entrypoint tests verify this ordering; they do not
 execute or establish a new host backup/restore acceptance run.
 
+### Current hardening-candidate source and retry contracts
+
+Source-bound host acceptance starts with isolated, unoptimized Python; use
+`python3 -I -B` for the supported direct-entry commands. Fresh self-hosted runs
+bind `--source` to that script's checkout and require the full reviewed
+`--expect-commit`. Do not substitute a moving branch or silently select its
+current HEAD. The focused external history runner retains its separate
+outside-candidate placement and independent bootstrap contract below.
+
+Initial source authentication uses literal expected Git objects, not a mutable
+index or replacement-ref view. Candidate imports follow bytecode isolation and
+verified package/origin admission; a later refusal does not authorize executing
+shadow code first. Shared read-only predicates do not replace each caller's
+purpose, journal, registry, ownership, boot, selector and lock authorization.
+Keep the source/helpers and pinned native executables unchanged during a run.
+
+The lifecycle fixture's version-2 reports separate original evidence from the
+executing retry. Original project/config/execution inputs are validated rather
+than repaired or rebaselined; authorized vault rotation has a separate bounded
+proof and cannot bless unrelated changes. Narrow retries distinguish inherited
+preconditions from stages actually rerun. Older reports are not rewritten or
+promoted to these stronger proofs; legacy cleanup authority remains separately
+limited by its existing authorization checks.
+
+Every expected-success launcher result must be the integer zero, not `None` or
+a boolean, even if an observation callback already completed. Terminal success
+follows mandatory finalization and evidence persistence. Secondary cleanup or
+journal failures cannot replace the original primary interruption/failure, and
+cleanup-only failure cannot be reported as a successful acceptance. These are
+candidate implementation contracts, not new host passes or security certificates.
+All previously accepted and failed evidence retains its original source and scope.
+
 ### V2 session-history synchronization
 
 The changes introduced in `d638907be97f9f33d00e59da526eb046e39a3627` add paginated
