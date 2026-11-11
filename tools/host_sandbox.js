@@ -17,7 +17,7 @@ function reserve(policy, signature) {
   if (lease && (lease.version !== 2 || lease.manager !== SandboxManager)) throw failure("lease-generation")
   if (!lease) {
     if (SandboxManager.getConfig() !== undefined) throw failure("unowned-runtime")
-    lease = { version: 2, manager: SandboxManager, references: 0, available: false, backgrounds: new Set(), policy: undefined, resetting: Promise.resolve() }
+    lease = { version: 2, manager: SandboxManager, references: 0, pending: 0, available: false, backgrounds: new Set(), policy: undefined, resetting: Promise.resolve() }
     globalThis[runtimeLease] = lease
   }
   if (lease.references && lease.signature !== signature) throw failure("in-use-policy")
@@ -38,16 +38,19 @@ function reserve(policy, signature) {
       lease.available = true
     })()
   }
+  lease.pending ??= 0
   lease.references++
   return lease
 }
 
-async function release(lease) {
+async function release(lease, generation, signature) {
+  if (globalThis[runtimeLease] !== lease || lease.ready !== generation || lease.signature !== signature) throw failure("runtime-owner-mismatch")
   if (--lease.references) return
   lease.available = false
   const ready = lease.ready
   lease.resetting = (async () => {
     await ready.catch(() => {})
+    if (globalThis[runtimeLease] !== lease) throw failure("runtime-owner-mismatch")
     const current = SandboxManager.getConfig()
     if (current !== undefined && current !== lease.policy) throw failure("runtime-owner-mismatch")
     await SandboxManager.reset()
@@ -115,8 +118,16 @@ export default {
     const backgrounds = new Set()
     const exited = new Set()
     const subscription = new AbortController()
+    const generation = lease?.ready
+    let pending = 0
+    let drained
+    const ownsRuntime = () => ownsLease && globalThis[runtimeLease] === lease && lease.ready === generation && lease.signature === signature && SandboxManager.getConfig() === lease.policy
     const cleanup = () => {
-      if (!commands.size && !backgrounds.size && !globalThis[originalCommands]?.size && !lease?.backgrounds?.size) SandboxManager.cleanupAfterCommand()
+      try {
+        if (!ownsRuntime() || !lease.available || lease.pending || commands.size || backgrounds.size || globalThis[originalCommands]?.size || lease.backgrounds.size) return
+        SandboxManager.cleanupAfterCommand()
+      }
+      catch { console.error("Host sandbox cleanup failed [runtime-cleanup]; command outcome preserved") }
     }
     globalThis[originalCommands] ??= new Map()
     if (ctx.event?.subscribe) {
@@ -141,37 +152,57 @@ export default {
       })()
     }
     let closed = false
-    const close = async () => {
-      if (closed) return
+    let closing
+    const close = () => {
+      if (closing) return closing
       closed = true
       subscription.abort()
       for (const id of commands.keys()) globalThis[originalCommands].delete(id)
       commands.clear()
       for (const id of backgrounds) lease.backgrounds.delete(id)
       backgrounds.clear()
-      if (ownsLease) {
-        try { await release(lease) }
-        catch (error) { console.error("Host sandbox cleanup failed [" + category(error, "runtime-reset") + "]; future initialization remains blocked") }
-      }
+      closing = (async () => {
+        // A wrap may still be allocating runtime resources. Retain this
+        // instance's lease until its finally block has released pending work.
+        if (pending) await new Promise(resolve => { drained = resolve })
+        if (ownsLease) {
+          ownsLease = false
+          try { await release(lease, generation, signature) }
+          catch (error) { console.error("Host sandbox cleanup failed [" + category(error, "runtime-reset") + "]; future initialization remains blocked") }
+        }
+      })()
+      return closing
     }
     try {
       await ctx.tool.hook("execute.before", async event => {
         if (event.tool !== "shell") return
         if (typeof event.input?.command !== "string") throw new Error("Host sandbox: unsupported shell input; command blocked")
-        if (closed || !available || !lease?.available || lease.signature !== signature || SandboxManager.getConfig() !== lease.policy) {
+        if (closed || !available || !lease?.available || !ownsRuntime()) {
           if (!permissive) throw new Error("Host sandbox unavailable in enforce mode [" + unavailable + "]; command blocked")
           return
         }
         const command = event.input.command
+        // Lease-wide accounting precedes the await: completions/cancellations
+        // in another instance must not clean temporary mounts during this wrap.
+        pending++
+        lease.pending++
+        let published = false
         try {
           const wrapped = await SandboxManager.wrapWithSandbox(command, undefined, undefined, undefined, { commandId: event.id, commandText: command })
+          if (closed || !available || !lease.available || !ownsRuntime()) throw failure("runtime-owner-mismatch")
           commands.set(event.id, { command, input: event.input })
           globalThis[originalCommands].set(event.id, { command, cancel: () => { commands.delete(event.id); globalThis[originalCommands].delete(event.id); cleanup() } })
           event.input = { ...event.input, command: wrapped }
+          published = true
         } catch {
           if (!permissive) throw new Error("Host sandbox could not wrap command in enforce mode; command blocked")
           if (!warned) console.error("Host sandbox wrapping failed; explicit permissive policy allows unsandboxed shell")
           warned = true
+        } finally {
+          pending--
+          lease.pending--
+          if (!pending) drained?.()
+          if (!published) cleanup()
         }
       })
       await ctx.tool.hook("execute.after", event => {
