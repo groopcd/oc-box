@@ -77,6 +77,7 @@ def activation_inventory_contract(binary, root):
     (source / "opencode.json").write_text(
         json.dumps(
             {
+                "plugin": ["./custom-plugins/dormant"],
                 "plugins": [
                     "./vendor/retained",
                     "-fixture.disabled",
@@ -87,6 +88,10 @@ def activation_inventory_contract(binary, root):
             }
         )
     )
+    legacy_config = (
+        b'{"plugins":["./custom-plugins/dormant","./custom-plugins/pdf-to-text.ts"]}\n'
+    )
+    (source / "config.json").write_bytes(legacy_config)
     reviews = {
         relative: hashlib.sha256(content).hexdigest()
         for relative, content in literal.items()
@@ -100,6 +105,7 @@ def activation_inventory_contract(binary, root):
         if relative != "plugins/output-clamp.ts":
             assert (source / relative).read_bytes() == content, relative
     assert not (source / "plugins/pdf-to-text").exists()
+    assert (source / "config.json").read_bytes() == legacy_config
     env = {
         "PATH": os.environ["PATH"],
         "HOME": str(root / "activation-home"),

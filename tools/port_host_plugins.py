@@ -440,7 +440,12 @@ def inspect(source, *, reviewed_sources=None):
                         raise ValueError(
                             "Ambiguous plugin removal entry requires manual review; use a string selector"
                         )
-                    effective = key == ("plugins" if "plugins" in value else "plugin")
+                    # V2 2.2.6 loads opencode.json(c), not legacy config.json.
+                    # Retain the latter's source/dependency inventory for V1,
+                    # but never turn its dormant registrations into activation.
+                    effective = filename != "config.json" and key == (
+                        "plugins" if "plugins" in value else "plugin"
+                    )
                     target = spec(entry)
                     name = name_for(target, source)
                     package = plugin_compat.package_target(target.removeprefix("-"))
@@ -676,12 +681,17 @@ def apply(source, *, reviewed_sources=None):
     configs, files, names, unknown = (
         plan[key] for key in ("config", "files", "names", "unknown")
     )
+    active_configs = {
+        filename: value
+        for filename, value in configs.items()
+        if filename != "config.json"
+    }
     if unknown:
         raise ValueError(
             "Unknown V1 sources or ambiguous retained code requires review before any migration writes: "
             + ", ".join(unknown)
         )
-    if not configs:
+    if not active_configs:
         raise ValueError(
             "No global configuration found; refusing to invent a replacement"
         )
@@ -707,7 +717,7 @@ def apply(source, *, reviewed_sources=None):
     # Construct config changes before moving any sources. Preserve unrelated
     # settings and the relative order/options of unrelated plugin entries.
     merged = {}
-    for _, config in configs.values():
+    for _, config in active_configs.values():
         merged.update(config)
     local = {**merged.get("provider", {}), **merged.get("providers", {})}.get(
         "lemonade"
@@ -715,7 +725,7 @@ def apply(source, *, reviewed_sources=None):
     entries = []
     for name in kept:
         entry = {"package": str(source / "plugins" / name)}
-        for _, document in configs.values():
+        for _, document in active_configs.values():
             for item in document.get("plugins", document.get("plugin", [])):
                 if (
                     replacing(item)
@@ -739,7 +749,7 @@ def apply(source, *, reviewed_sources=None):
             }
         entries.append(entry)
     replacements = {}
-    for filename, (_, original) in configs.items():
+    for filename, (_, original) in active_configs.items():
         config = json.loads(json.dumps(original))
         remaining = [
             entry
@@ -760,7 +770,7 @@ def apply(source, *, reviewed_sources=None):
                 if removal_before_selection
                 else [*entries, *remaining]
             )
-            if filename == list(configs)[-1]
+            if filename == list(active_configs)[-1]
             else remaining
         )
         replacements[Path(filename)] = (json.dumps(config, indent=2) + "\n").encode()

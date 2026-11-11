@@ -334,6 +334,24 @@ class NativeHostPortTests(unittest.TestCase):
         self.assertEqual(result["native_plugins"], ["output-clamp"])
         self.assertEqual(dormant.read_text(), SYNTHETIC_LEGACY_SOURCES["pdf-to-text"])
 
+    def test_v2_ignored_legacy_config_is_inventory_not_activation_or_rewrite(self):
+        source, selected = self.isolated_source()
+        dormant = source / "custom-plugins/pdf-to-text.ts"
+        dormant.parent.mkdir()
+        dormant.write_text(SYNTHETIC_LEGACY_SOURCES["pdf-to-text"])
+        legacy = source / "config.json"
+        original = b'{"plugin":["./custom-plugins/pdf-to-text.ts"],"unrelated":"preserve exact bytes"}\n'
+        legacy.write_bytes(original)
+        reviews = {
+            file.relative_to(source): hashlib.sha256(file.read_bytes()).hexdigest()
+            for file in (selected, dormant)
+        }
+        result = port.apply(source, reviewed_sources=reviews)
+        self.assertEqual(result["native_plugins"], ["output-clamp"])
+        self.assertEqual(legacy.read_bytes(), original)
+        self.assertEqual(dormant.read_text(), SYNTHETIC_LEGACY_SOURCES["pdf-to-text"])
+        self.assertFalse((source / "plugins/pdf-to-text").exists())
+
     def test_preserved_source_importing_selected_source_requires_manual_port(self):
         source, selected = self.isolated_source()
         retained = source / "custom-plugins/retained.mjs"
