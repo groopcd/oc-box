@@ -4,8 +4,10 @@
 No V1 SDK/bridge/profile launcher is installed. Default is a read-only audit;
 --apply installs native entrypoint directories and retires obsolete sources to
 one private safety snapshot. It changes only plugin entries/dependencies and
-recognized source files; no auth/DB/env/service operation runs. Unknown plugins
-are left alone, not classified as safe to delete.
+selected source files; no auth/DB/env/service operation runs. Dormant/disabled
+and unrelated sources are preserved. Unknown local implementations and their
+support/manifest inventory require exact-byte review before any migration writes.
+Legacy dependencies are retained conservatively whenever local code is preserved.
 
 Canonical personal V1 sources are not distributed with this utility. Before a
 local source can be replaced, review its full contents against the proposed
@@ -26,6 +28,7 @@ import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 APP = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(APP))
@@ -47,6 +50,12 @@ RETIRE = {
     "copilot-gpt6-effort": "Retire: V2 Copilot builds reasoning variants and sends selected reasoningEffort natively.",
 }
 MAX_FILE = 8 * 1024 * 1024
+MAX_INVENTORY_FILES = 2048
+MAX_INVENTORY_BYTES = 32 * 1024 * 1024
+MAX_INVENTORY_DEPTH = 16
+CODE_SUFFIXES = {".ts", ".js", ".mts", ".mjs", ".cts", ".cjs", ".tsx", ".jsx"}
+NATIVE_IDS = {name: name for name in KEEP}
+NATIVE_IDS["opencode-sandbox"] = "oc-box.host-sandbox"
 # Exact previously-generated native sandbox sources, not arbitrary user code.
 PREVIOUS_SANDBOX_HASHES = {
     "4659614bbc1048d385647937d617fa24bfaa1f7f0341a9a2041ef67eaa90bf7a",
@@ -154,7 +163,6 @@ def validate_reviews(reviewed_sources):
             relative.is_absolute()
             or not relative.parts
             or ".." in relative.parts
-            or source_name(relative.name) is None
             or not isinstance(digest, str)
             or re.fullmatch(r"[0-9a-fA-F]{64}", digest) is None
         ):
@@ -249,14 +257,171 @@ def require_empty_audit_overrides(content):
         )
 
 
-def audit(source, *, reviewed_sources=None):
+def local_path(value, source):
+    """Resolve a configured local file/directory, never a package basename."""
+    plain = value.removeprefix("-")
+    if nonlocal_spec(plain):
+        return None
+    if plain.startswith("file://"):
+        parsed = urlparse(plain)
+        if parsed.netloc not in ("", "localhost") or parsed.query or parsed.fragment:
+            raise ValueError("Unsupported local plugin URL; manual port required")
+        candidate = Path(unquote(parsed.path))
+    elif plain.startswith(("/", "./", "../", "~/")) or (source / plain).exists():
+        candidate = Path(plain).expanduser()
+        if not candidate.is_absolute():
+            candidate = source / candidate
+    else:
+        return None
+    # Check the literal traversal as well as the normalized path: link/../file
+    # must not hide a symlink in a configured path or an imported dependency.
+    if any(parent.is_symlink() for parent in (candidate, *candidate.parents)):
+        raise ValueError("Plugin source must be owned and not symlinked")
+    # Normalize dot components without resolving away a symlink.
+    candidate = Path(os.path.abspath(candidate))
+    try:
+        relative = candidate.relative_to(source)
+    except ValueError:
+        raise ValueError(
+            "Local plugin is outside the reviewed config root; manual port required"
+        ) from None
+    if not relative.parts or any(
+        part in ("node_modules", ".git") for part in relative.parts
+    ):
+        raise ValueError("Local plugin requires a bounded manual port")
+    for parent in reversed(candidate.parents):
+        if parent == source or source in parent.parents:
+            safe_directory(parent)
+    if candidate.is_symlink():
+        raise ValueError("Plugin source must not be symlinked")
+    if not candidate.exists():
+        raise ValueError("Local plugin source is missing; manual port required")
+    return candidate
+
+
+def import_targets(content):
+    """Conservative literal import inventory, NOT a JavaScript safety parser.
+
+    No code is certified native or SDK-free by this scan. Every preserved code
+    file needs byte-bound admission and keeps legacy dependencies, including
+    computed imports that this bounded literal inventory cannot resolve.
+    """
+    tokens = re.findall(
+        r"""//[^\r\n\u2028\u2029]*|/\*[\s\S]*?\*/|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|[A-Za-z_$][\w$]*|[^\s]""",
+        content.decode(),
+    )
+    tokens = [token for token in tokens if not token.startswith(("//", "/*"))]
+    for index, token in enumerate(tokens):
+        rest = tokens[index + 1 : index + 3]
+        literal = None
+        if token in ("from", "import") and rest:
+            literal = rest[0]
+        if token in ("import", "require") and rest[:1] == ["("] and len(rest) > 1:
+            literal = rest[1]
+        if (
+            literal
+            and literal.startswith(("'", '"', "`"))
+            and literal[-1:] == literal[:1]
+        ):
+            value = literal[1:-1]
+            if value.startswith(("./", "../", "/", "file:")):
+                if "\\" in value or "${" in value or "?" in value or "#" in value:
+                    raise ValueError("Ambiguous local import requires a manual port")
+                yield value
+
+
+def inspect(source, *, reviewed_sources=None):
     safe_directory(source)
     if (source / "host-bridge.js").exists():
         raise ValueError(
             "This is the old alternate compatibility profile; use the original normal host config directory"
         )
     reviews = validate_reviews(reviewed_sources)
-    config, files, names, unknown = {}, {}, set(), []
+    config, files, unknown = {}, {}, []
+    tree, imports, candidates, operations = {}, {}, {}, []
+    active_sources, active_packages = set(), set()
+    total_bytes = 0
+
+    def include(path, depth=0):
+        nonlocal total_bytes
+        relative = path.relative_to(source)
+        if depth > MAX_INVENTORY_DEPTH or len(relative.parts) > MAX_INVENTORY_DEPTH:
+            raise ValueError(
+                "Plugin inventory depth limit exceeded; manual port required"
+            )
+        if relative in tree:
+            return
+        if len(tree) >= MAX_INVENTORY_FILES:
+            raise ValueError(
+                "Plugin inventory file limit exceeded; manual port required"
+            )
+        if path.is_dir() and not path.is_symlink():
+            safe_directory(path)
+            children = sorted(path.iterdir())
+            tree[relative] = tuple(child.name for child in children)
+            for child in children:
+                if child.name in ("node_modules", ".git"):
+                    raise ValueError(
+                        "Nested dependency/checkouts require a manual plugin port"
+                    )
+                include(child, depth + 1)
+            return
+        if path.is_symlink():
+            raise ValueError("Plugin inventory must be owned and not symlinked")
+        tree[relative] = None
+        if path.suffix not in CODE_SUFFIXES and path.name != "package.json":
+            return
+        content = read(path)
+        total_bytes += len(content)
+        if total_bytes > MAX_INVENTORY_BYTES:
+            raise ValueError(
+                "Plugin inventory byte limit exceeded; manual port required"
+            )
+        files[relative] = content
+        imports[relative] = set()
+        if path.suffix not in CODE_SUFFIXES:
+            return
+        for target in import_targets(content):
+            plain = target.removeprefix("file://")
+            candidate = Path(plain)
+            if not candidate.is_absolute():
+                candidate = path.parent / candidate
+            choices = [candidate]
+            if not candidate.suffix:
+                choices.extend(
+                    candidate.with_suffix(suffix) for suffix in sorted(CODE_SUFFIXES)
+                )
+            dependency = next(
+                (
+                    choice
+                    for choice in choices
+                    if choice.exists() or choice.is_symlink()
+                ),
+                None,
+            )
+            if dependency is None:
+                raise ValueError(
+                    "Unresolved local plugin import requires a manual port"
+                )
+            dependency = local_path(str(dependency), source)
+            include(dependency, depth + 1)
+            owner = dependency.relative_to(source)
+            imports[relative].update(
+                item for item in files if item == owner or owner in item.parents
+            )
+
+    # Only plugin/ and plugins/ autoload. custom-plugins/ is inventory, not an
+    # activation instruction. Nested directories are retained as complete units.
+    for folder in ("plugin", "plugins", "custom-plugins"):
+        directory = source / folder
+        if directory.exists() or directory.is_symlink():
+            include(directory)
+            if folder != "custom-plugins":
+                for child in sorted(directory.iterdir()):
+                    name = source_name(child.name)
+                    if child.is_file() and child.suffix in (".ts", ".js") and name:
+                        candidates[child.relative_to(source)] = name
+                        active_sources.add(child.relative_to(source))
     for filename in ("opencode.json", "opencode.jsonc", "config.json"):
         file = source / filename
         if file.is_file():
@@ -269,6 +434,11 @@ def audit(source, *, reviewed_sources=None):
                 if not isinstance(value.get(key, []), list):
                     raise ValueError("Plugin configuration must be an array")
                 for entry in value.get(key, []):
+                    if spec(entry).startswith("-") and not isinstance(entry, str):
+                        raise ValueError(
+                            "Ambiguous plugin removal entry requires manual review; use a string selector"
+                        )
+                    effective = key == ("plugins" if "plugins" in value else "plugin")
                     target = spec(entry)
                     name = name_for(target, source)
                     package = plugin_compat.package_target(target.removeprefix("-"))
@@ -277,17 +447,21 @@ def audit(source, *, reviewed_sources=None):
                             "This sandbox package version needs review before replacing its implementation: "
                             + target
                         )
-                    if name and not target.startswith("-"):
-                        names.add(name)
-                    local = configured_local_source(target, source)
+                    local = local_path(target, source)
                     if local:
-                        files[local.relative_to(source)] = read(local)
+                        if local.is_dir() and name:
+                            raise ValueError(
+                                "Known configured directory requires a manual port, not a file approval: "
+                                + target
+                            )
+                        include(local)
                         if (
-                            source_name(local.name) is None
-                            and "@opencode-ai/plugin"
-                            in files[local.relative_to(source)].decode()
+                            local.is_file()
+                            and name
+                            and effective
+                            and not target.startswith("-")
                         ):
-                            unknown.append(str(local.relative_to(source)))
+                            candidates[local.relative_to(source)] = name
                     elif name and not package:
                         # A directory basename is not implementation identity.
                         # Only bounded standalone files enter files/reviews;
@@ -296,36 +470,107 @@ def audit(source, *, reviewed_sources=None):
                             "Known plugin source is outside the reviewed config root, missing, or a configured directory requiring a manual port: "
                             + target
                         )
-    for folder in ("plugins", "plugin", "custom-plugins"):
-        directory = source / folder
-        if directory.exists() or directory.is_symlink():
-            safe_directory(directory)
-        for file in (source / folder).glob("*"):
-            if file.is_file() and file.suffix in (".ts", ".js", ".mts", ".mjs"):
-                name = source_name(file.name)
-                if name:
-                    names.add(name)
-                    files[file.relative_to(source)] = read(file)
-                elif "@opencode-ai/plugin" in read(file).decode():
-                    unknown.append(str(file.relative_to(source)))
+                    if effective:
+                        operations.append(
+                            (
+                                target,
+                                name,
+                                local.relative_to(source) if local else None,
+                                bool(package),
+                            )
+                        )
+    for target, name, relative, package in operations:
+        plain = target.removeprefix("-")
+        if target.startswith("-"):
+            if relative is not None:
+                active_sources.discard(relative)
+            elif package:
+                active_packages.discard(name)
+                if plain == name:
+                    active_sources.difference_update(
+                        path
+                        for path in list(active_sources)
+                        if candidates[path] == name
+                    )
+            else:
+                active_sources.difference_update(
+                    path
+                    for path in list(active_sources)
+                    if selector_matches(plain, candidates[path])
+                )
+                active_packages.difference_update(
+                    candidate
+                    for candidate in list(active_packages)
+                    if selector_matches(plain, candidate)
+                )
+        elif name and relative is not None:
+            active_sources.add(relative)
+        elif name and package:
+            active_packages.add(name)
+        else:
+            active_sources.update(
+                path
+                for path, candidate in candidates.items()
+                if selector_matches(plain, candidate)
+            )
+    selected = active_sources
+    names = {candidates[path] for path in selected} | active_packages
     reviewed = set()
     for relative, content in files.items():
-        name = source_name(relative.name)
-        if name == "tool-definition-audit":
+        digest = hashlib.sha256(content).hexdigest()
+        if (
+            relative in selected
+            and source_name(relative.name) == "tool-definition-audit"
+        ):
             require_empty_audit_overrides(content)
-        if name and reviews.get(relative) != hashlib.sha256(content).hexdigest():
+        if relative in selected and reviews.get(relative) != digest:
             raise ValueError(
                 "Unrecognized or customized plugin implementation requires review before replacement: "
                 + str(relative)
                 + "; compare the full source with the native replacement, then pass --reviewed-source RELATIVE_PATH=SHA256 for the reviewed bytes"
             )
-        if name:
+        if relative in reviews and reviews[relative] != digest:
+            raise ValueError(
+                "Source requires review of changed exact bytes: " + str(relative)
+            )
+        if reviews.get(relative) == digest:
             reviewed.add(relative)
+        elif relative not in selected:
+            unknown.append(str(relative))
     if set(reviews) - reviewed:
         raise ValueError(
-            "Source review approval does not match a recognized local source"
+            "Source review approval does not match an inventoried local source"
         )
-    return config, files, names, unknown
+    preserved = set(files) - selected
+    for owner in preserved:
+        if imports.get(owner, set()) & selected:
+            raise ValueError(
+                "Retained plugin code imports a source selected for replacement; manual port required"
+            )
+    return {
+        "config": config,
+        "files": files,
+        "names": names,
+        "unknown": unknown,
+        "selected": selected,
+        "preserved": preserved,
+        "tree": tree,
+        "packages": active_packages,
+    }
+
+
+def selector_matches(selector, name):
+    ids = {name, NATIVE_IDS.get(name, name)}
+    return selector == "*" or any(
+        selector == identity
+        or (selector.endswith(".*") and identity.startswith(selector[:-1]))
+        for identity in ids
+    )
+
+
+def audit(source, *, reviewed_sources=None):
+    plan = inspect(source, reviewed_sources=reviewed_sources)
+    return tuple(plan[key] for key in ("config", "files", "names", "unknown"))
 
 
 def atomic(path, content):
@@ -351,7 +596,10 @@ def update_sandbox(source, *, apply_change=False):
     receipt = json.loads(receipt_bytes)
     if (
         not isinstance(receipt, dict)
-        or receipt.get("no_v1_sdk_or_bridge") is not True
+        or not (
+            receipt.get("no_v1_sdk_or_bridge") is True
+            or receipt.get("legacy_dependencies_retained") is True
+        )
         or "opencode-sandbox" not in receipt.get("native_plugins", [])
     ):
         raise ValueError("A recognized completed native host migration is required")
@@ -402,10 +650,13 @@ def apply(source, *, reviewed_sources=None):
         raise ValueError(
             "Native migration receipt already exists; do not overwrite a completed migration"
         )
-    configs, files, names, unknown = audit(source, reviewed_sources=reviewed_sources)
+    plan = inspect(source, reviewed_sources=reviewed_sources)
+    configs, files, names, unknown = (
+        plan[key] for key in ("config", "files", "names", "unknown")
+    )
     if unknown:
         raise ValueError(
-            "Unknown V1 sources require manual review before SDK removal: "
+            "Unknown V1 sources or ambiguous retained code requires review before any migration writes: "
             + ", ".join(unknown)
         )
     if not configs:
@@ -414,12 +665,23 @@ def apply(source, *, reviewed_sources=None):
         )
     kept = [name for name in KEEP if name in names]
     if not kept and not (names & set(RETIRE)):
-        raise ValueError("No recognized plugins found; nothing to port")
+        raise ValueError("No active recognized plugins found; nothing to port")
     for name in kept:
         if (source / "plugins" / name).exists() or (
             source / "plugins" / name
         ).is_symlink():
             raise ValueError("Native plugin destination already exists: " + name)
+
+    def replacing(item):
+        target = spec(item)
+        local = local_path(target, source)
+        return (
+            local.relative_to(source) in plan["selected"]
+            if local
+            else bool(plugin_compat.package_target(target.removeprefix("-")))
+            and "opencode-sandbox" in plan["packages"]
+        )
+
     # Construct config changes before moving any sources. Preserve unrelated
     # settings and the relative order/options of unrelated plugin entries.
     merged = {}
@@ -433,8 +695,10 @@ def apply(source, *, reviewed_sources=None):
         entry = {"package": str(source / "plugins" / name)}
         for _, document in configs.values():
             for item in document.get("plugins", document.get("plugin", [])):
-                if name_for(spec(item), source) == name and not spec(item).startswith(
-                    "-"
+                if (
+                    replacing(item)
+                    and name_for(spec(item), source) == name
+                    and not spec(item).startswith("-")
                 ):
                     if isinstance(item, list):
                         entry["options"] = item[1]
@@ -458,18 +722,24 @@ def apply(source, *, reviewed_sources=None):
         remaining = [
             entry
             for entry in config.get("plugins", config.get("plugin", []))
-            if name_for(spec(entry), source) is None
-        ]
-        disabled = [
-            "-" + str(source / "plugins" / name_for(spec(item), source))
-            for item in config.get("plugins", config.get("plugin", []))
-            if spec(item).startswith("-") and name_for(spec(item), source) in kept
+            if not replacing(entry)
         ]
         config.pop("plugin", None)
+        # A final explicit add must follow wildcard/ID removals that were
+        # superseded by a later selection. Disabled sources are never installed.
+        removal_before_selection = any(
+            spec(item).startswith("-")
+            and any(selector_matches(spec(item)[1:], name) for name in kept)
+            for item in remaining
+        )
         config["plugins"] = (
-            [*entries, *remaining, *disabled]
+            (
+                [*remaining, *entries]
+                if removal_before_selection
+                else [*entries, *remaining]
+            )
             if filename == list(configs)[-1]
-            else [*remaining, *disabled]
+            else remaining
         )
         replacements[Path(filename)] = (json.dumps(config, indent=2) + "\n").encode()
     manifest = source / "package.json"
@@ -480,12 +750,31 @@ def apply(source, *, reviewed_sources=None):
         else {"private": True}
     )
     dependencies = value.setdefault("dependencies", {})
-    dependencies.pop("@opencode-ai/plugin", None)
-    dependencies.pop("opencode-sandbox", None)
+    # Even SDK-free factories and computed imports can need the V1 SDK. Do not
+    # infer their safety from substring absence: preserve dependencies whenever
+    # any admitted local code/support/manifest remains outside this replacement.
+    if not plan["preserved"]:
+        dependencies.pop("@opencode-ai/plugin", None)
+        dependencies.pop("opencode-sandbox", None)
     dependencies["@opencode/plugin"] = "2.2.6"
     if "opencode-sandbox" in kept:
         dependencies["@anthropic-ai/sandbox-runtime"] = "0.0.76"
+    no_legacy_code = not plan["preserved"] and not any(
+        "@opencode-ai/plugin" in value.get(section, {})
+        for section in (
+            "dependencies",
+            "devDependencies",
+            "optionalDependencies",
+            "peerDependencies",
+        )
+    )
     replacements[Path("package.json")] = (json.dumps(value, indent=2) + "\n").encode()
+    # Bind the entire bounded inventory (including additions/removals), exact
+    # config and dependency bytes before creating even the safety snapshot.
+    if inspect(source, reviewed_sources=reviewed_sources) != plan:
+        raise ValueError("Plugin inventory changed before migration; no writes applied")
+    if (read(manifest) if manifest.exists() else None) != original_manifest:
+        raise ValueError("Dependencies changed before migration; no writes applied")
     backup = source / (
         ".native-plugin-backup-"
         + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
@@ -531,9 +820,8 @@ def apply(source, *, reviewed_sources=None):
                 raise ValueError("Config changed during migration: " + filename)
         if original_manifest is not None and read(manifest) != original_manifest:
             raise ValueError("Dependencies changed during migration")
-        for relative in files:
-            if source_name(relative.name):
-                (source / relative).unlink()
+        for relative in plan["selected"]:
+            (source / relative).unlink()
         for relative, content in replacements.items():
             atomic(source / relative, content)
         receipt = {
@@ -541,11 +829,14 @@ def apply(source, *, reviewed_sources=None):
             "retired": sorted(names & set(RETIRE)),
             "safety_backup": str(backup),
             "version": "2.2.6",
-            "no_v1_sdk_or_bridge": True,
+            "no_v1_sdk_or_bridge": no_legacy_code,
+            "preserved_sources": sorted(
+                str(relative) for relative in plan["preserved"]
+            ),
+            "legacy_dependencies_retained": not no_legacy_code,
             "reviewed_source_sha256": {
                 str(relative): hashlib.sha256(content).hexdigest()
                 for relative, content in files.items()
-                if source_name(relative.name)
             },
         }
         if "opencode-sandbox" in kept:
@@ -589,7 +880,7 @@ def main(argv=None):
         action="append",
         default=[],
         metavar="RELATIVE_PATH=SHA256",
-        help="after reviewing the full local V1 source against its native replacement, approve one relative source path and exact SHA-256; repeat per file (never an automatic compatibility certification)",
+        help="admit exact reviewed source/manifest bytes (RELATIVE_PATH=SHA256); selected known sources may be replaced, all other inventoried code stays untouched. Review never activates dormant code or certifies compatibility; repeat per file",
     )
     args = parser.parse_args(argv)
     if os.environ.get("OC_BOX_CONTAINER") == "1":
@@ -633,6 +924,10 @@ def main(argv=None):
         return 0
     result = apply(source, reviewed_sources=reviews)
     print("Native V2 plugins installed; safety snapshot: " + result["safety_backup"])
+    if result["legacy_dependencies_retained"]:
+        print(
+            "Other local sources/dependencies were preserved; byte-bound review is not a V2 compatibility certification."
+        )
     print(
         "Refresh host dependencies: npm install --prefix "
         + shlex.quote(str(source))

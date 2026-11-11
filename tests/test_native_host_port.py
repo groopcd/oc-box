@@ -124,6 +124,336 @@ class NativeHostPortTests(unittest.TestCase):
         file.write_text(content or SYNTHETIC_LEGACY_SOURCES[name])
         return source, file
 
+    def test_activation_inventory_matrix_does_not_select_dormant_or_disabled_sources(
+        self,
+    ):
+        cases = {
+            "configured custom": (
+                "custom-plugins",
+                ["./custom-plugins/output-clamp.ts"],
+                True,
+            ),
+            "autoload plural": ("plugins", [], True),
+            "autoload singular": ("plugin", [], True),
+            "dormant reviewed custom": ("custom-plugins", [], False),
+            "disabled custom path": (
+                "custom-plugins",
+                ["-./custom-plugins/output-clamp.ts"],
+                False,
+            ),
+            "removed autoload id": ("plugins", ["-output-clamp"], False),
+            "removed autoload path": ("plugins", ["-./plugins/output-clamp.ts"], False),
+            "removed wildcard": ("plugins", ["-*"], False),
+            "removed then selected": (
+                "plugins",
+                ["-*", "./plugins/output-clamp.ts"],
+                True,
+            ),
+        }
+        for index, (label, (folder, entries, active)) in enumerate(cases.items()):
+            with self.subTest(case=label):
+                source = self.root / ("activation-" + str(index))
+                (source / folder).mkdir(parents=True)
+                file = source / folder / "output-clamp.ts"
+                content = SYNTHETIC_LEGACY_SOURCES["output-clamp"].encode()
+                file.write_bytes(content)
+                (source / "opencode.json").write_text(json.dumps({"plugins": entries}))
+                reviews = {
+                    file.relative_to(source): hashlib.sha256(content).hexdigest()
+                }
+                self.assertEqual(
+                    port.audit(source, reviewed_sources=reviews)[2],
+                    {"output-clamp"} if active else set(),
+                )
+                if active:
+                    result = port.apply(source, reviewed_sources=reviews)
+                    self.assertEqual(result["native_plugins"], ["output-clamp"])
+                    self.assertFalse(file.exists())
+                else:
+                    self.assert_refused_unchanged("nothing to port", source, reviews)
+                    self.assertEqual(file.read_bytes(), content)
+
+    def test_preserved_entrypoint_and_support_matrix_requires_exact_review_and_keeps_sdk(
+        self,
+    ):
+        cases = {
+            "SDK free V1 factory": (
+                "plugins/mystery.ts",
+                'export default async () => ({ "shell.env": async () => {} })',
+            ),
+            "dormant custom factory": (
+                "custom-plugins/mystery.ts",
+                "export default async () => ({})",
+            ),
+            "disabled factory": (
+                "plugins/mystery.ts",
+                "export default async () => ({})",
+            ),
+            "local directory": (
+                "vendor/custom/index.js",
+                'export default { id: "custom", setup() {} }',
+            ),
+            "nested support": (
+                "plugins/custom/support/deep.js",
+                'import { tool } from "@opencode-ai/plugin"; export { tool }',
+            ),
+            "ambiguous native marker": (
+                "plugins/mystery.ts",
+                '// Plugin.define({ id: "safe" })\nexport default async () => ({})',
+            ),
+        }
+        for index, (label, (relative, text)) in enumerate(cases.items()):
+            with self.subTest(case=label):
+                source = self.root / ("ownership-" + str(index))
+                (source / "plugins").mkdir(parents=True)
+                selected = source / "plugins/output-clamp.ts"
+                selected.write_text(SYNTHETIC_LEGACY_SOURCES["output-clamp"])
+                file = source / relative
+                file.parent.mkdir(parents=True, exist_ok=True)
+                file.write_text(text)
+                entries = (
+                    ["./vendor/custom"]
+                    if label == "local directory"
+                    else ["-mystery"]
+                    if label == "disabled factory"
+                    else []
+                )
+                (source / "opencode.json").write_text(
+                    json.dumps(
+                        {
+                            "plugins": entries,
+                            "permissions": [
+                                {"action": "shell", "resource": "*", "effect": "deny"}
+                            ],
+                        }
+                    )
+                )
+                (source / "package.json").write_text(
+                    '{"dependencies":{"@opencode-ai/plugin":"1.19.5","unrelated":"unchanged"}}'
+                )
+                reviews = {
+                    Path("plugins/output-clamp.ts"): hashlib.sha256(
+                        selected.read_bytes()
+                    ).hexdigest()
+                }
+                self.assert_refused_unchanged(
+                    "Unknown V1 sources|requires review", source, reviews
+                )
+                reviews[Path(relative)] = hashlib.sha256(file.read_bytes()).hexdigest()
+                if label == "local directory":
+                    metadata = source / "vendor/custom/package.json"
+                    metadata.write_text(
+                        '{"name":"custom","exports":"./index.js","type":"module"}'
+                    )
+                    self.assert_refused_unchanged(
+                        "requires review|Unknown V1 sources", source, reviews
+                    )
+                    reviews[metadata.relative_to(source)] = hashlib.sha256(
+                        metadata.read_bytes()
+                    ).hexdigest()
+                original = file.read_bytes()
+                receipt = port.apply(source, reviewed_sources=reviews)
+                self.assertEqual(receipt["native_plugins"], ["output-clamp"])
+                self.assertEqual(file.read_bytes(), original)
+                dependencies = json.loads((source / "package.json").read_bytes())[
+                    "dependencies"
+                ]
+                self.assertEqual(dependencies["@opencode-ai/plugin"], "1.19.5")
+                self.assertEqual(dependencies["unrelated"], "unchanged")
+                self.assertFalse(receipt["no_v1_sdk_or_bridge"])
+                self.assertEqual(
+                    json.loads((source / "opencode.json").read_bytes())["permissions"],
+                    [{"action": "shell", "resource": "*", "effect": "deny"}],
+                )
+
+    def test_reviewed_dormant_known_source_is_preserved_during_other_plugin_migration(
+        self,
+    ):
+        source, selected = self.isolated_source()
+        dormant = source / "custom-plugins/pdf-to-text.ts"
+        dormant.parent.mkdir()
+        dormant.write_text(SYNTHETIC_LEGACY_SOURCES["pdf-to-text"])
+        reviews = {
+            file.relative_to(source): hashlib.sha256(file.read_bytes()).hexdigest()
+            for file in (selected, dormant)
+        }
+        result = port.apply(source, reviewed_sources=reviews)
+        self.assertEqual(result["native_plugins"], ["output-clamp"])
+        self.assertEqual(dormant.read_text(), SYNTHETIC_LEGACY_SOURCES["pdf-to-text"])
+        self.assertFalse((source / "plugins/pdf-to-text").exists())
+
+    def test_relative_import_ownership_inventory_preserves_nested_sdk_dependency(self):
+        source, selected = self.isolated_source()
+        entry = source / "custom-plugins/retained.mjs"
+        entry.parent.mkdir()
+        entry.write_text('export { default } from "../shared/nested/factory.mjs"')
+        support = source / "shared/nested/factory.mjs"
+        support.parent.mkdir(parents=True)
+        support.write_text(
+            'import { tool } from "@opencode-ai/plugin"; export default async () => ({ tool: { tool } })'
+        )
+        (source / "package.json").write_text(
+            '{"dependencies":{"@opencode-ai/plugin":"1.19.5"}}'
+        )
+        reviews = {
+            file.relative_to(source): hashlib.sha256(file.read_bytes()).hexdigest()
+            for file in (selected, entry)
+        }
+        self.assert_refused_unchanged(
+            "requires review|Unknown V1 sources", source, reviews
+        )
+        reviews[support.relative_to(source)] = hashlib.sha256(
+            support.read_bytes()
+        ).hexdigest()
+        result = port.apply(source, reviewed_sources=reviews)
+        self.assertEqual(
+            entry.read_text(), 'export { default } from "../shared/nested/factory.mjs"'
+        )
+        self.assertTrue(support.exists())
+        self.assertEqual(
+            json.loads((source / "package.json").read_bytes())["dependencies"][
+                "@opencode-ai/plugin"
+            ],
+            "1.19.5",
+        )
+        self.assertFalse(result["no_v1_sdk_or_bridge"])
+
+    def test_native_plugin_key_does_not_activate_overridden_legacy_entries(self):
+        source, selected = self.isolated_source()
+        dormant = source / "custom-plugins/pdf-to-text.ts"
+        dormant.parent.mkdir()
+        dormant.write_text(SYNTHETIC_LEGACY_SOURCES["pdf-to-text"])
+        (source / "opencode.json").write_text(
+            json.dumps({"plugin": ["./custom-plugins/pdf-to-text.ts"], "plugins": []})
+        )
+        reviews = {
+            file.relative_to(source): hashlib.sha256(file.read_bytes()).hexdigest()
+            for file in (selected, dormant)
+        }
+        result = port.apply(source, reviewed_sources=reviews)
+        self.assertEqual(result["native_plugins"], ["output-clamp"])
+        self.assertEqual(dormant.read_text(), SYNTHETIC_LEGACY_SOURCES["pdf-to-text"])
+
+    def test_preserved_source_importing_selected_source_requires_manual_port(self):
+        source, selected = self.isolated_source()
+        retained = source / "custom-plugins/retained.mjs"
+        retained.parent.mkdir()
+        retained.write_text('export { default } from "../plugins/output-clamp.ts"')
+        reviews = {
+            file.relative_to(source): hashlib.sha256(file.read_bytes()).hexdigest()
+            for file in (selected, retained)
+        }
+        self.assert_refused_unchanged("Retained plugin code imports", source, reviews)
+
+    def test_bounded_inventory_refusals_precede_snapshot_and_source_writes(self):
+        source, selected = self.isolated_source()
+        reviews = {
+            selected.relative_to(source): hashlib.sha256(
+                selected.read_bytes()
+            ).hexdigest()
+        }
+        for label, limit, value in (
+            ("count", "MAX_INVENTORY_FILES", 1),
+            ("bytes", "MAX_INVENTORY_BYTES", 1),
+            ("depth", "MAX_INVENTORY_DEPTH", 1),
+        ):
+            with self.subTest(case=label), patch.object(port, limit, value):
+                self.assert_refused_unchanged("inventory .*limit", source, reviews)
+
+    def test_new_inventory_source_between_inspection_and_snapshot_is_not_overwritten(
+        self,
+    ):
+        source, selected = self.isolated_source()
+        reviews = {
+            selected.relative_to(source): hashlib.sha256(
+                selected.read_bytes()
+            ).hexdigest()
+        }
+        original_inspect = port.inspect
+        calls = []
+        original = selected.read_bytes()
+        extra = source / "plugins/late.mjs"
+
+        def inspecting(*args, **kwargs):
+            plan = original_inspect(*args, **kwargs)
+            calls.append(True)
+            if len(calls) == 1:
+                extra.write_text("export default async () => ({})")
+            return plan
+
+        with (
+            patch.object(port, "inspect", side_effect=inspecting),
+            self.assertRaisesRegex(ValueError, "inventory changed"),
+        ):
+            port.apply(source, reviewed_sources=reviews)
+        self.assertEqual(selected.read_bytes(), original)
+        self.assertEqual(extra.read_text(), "export default async () => ({})")
+        self.assertFalse(list(source.glob(".native-plugin-backup-*")))
+        self.assertFalse((source / "plugins/output-clamp").exists())
+
+    def test_dormant_review_bytes_are_admission_not_activation_or_future_approval(self):
+        source, selected = self.isolated_source()
+        dormant = source / "custom-plugins/pdf-to-text.ts"
+        dormant.parent.mkdir()
+        dormant.write_text(SYNTHETIC_LEGACY_SOURCES["pdf-to-text"])
+        reviews = {
+            file.relative_to(source): hashlib.sha256(file.read_bytes()).hexdigest()
+            for file in (selected, dormant)
+        }
+        dormant.write_text(dormant.read_text() + "// changed after review\n")
+        self.assert_refused_unchanged("requires review", source, reviews)
+
+    def test_same_name_disabled_source_is_not_retired_by_other_source_selection(self):
+        source, disabled = self.isolated_source()
+        active = source / "custom-plugins/output-clamp.ts"
+        active.parent.mkdir()
+        active.write_text(
+            SYNTHETIC_LEGACY_SOURCES["output-clamp"]
+            + "// separately selected implementation\n"
+        )
+        entries = [
+            "-./plugins/output-clamp.ts",
+            ["./custom-plugins/output-clamp.ts", {"chosen": True}],
+        ]
+        (source / "opencode.json").write_text(json.dumps({"plugins": entries}))
+        reviews = {
+            file.relative_to(source): hashlib.sha256(file.read_bytes()).hexdigest()
+            for file in (active, disabled)
+        }
+        result = port.apply(source, reviewed_sources=reviews)
+        self.assertEqual(result["native_plugins"], ["output-clamp"])
+        self.assertFalse(active.exists())
+        self.assertEqual(disabled.read_text(), SYNTHETIC_LEGACY_SOURCES["output-clamp"])
+        plugins = json.loads((source / "opencode.json").read_bytes())["plugins"]
+        self.assertIn(entries[0], plugins)
+        self.assertIn(
+            {
+                "package": str(source / "plugins/output-clamp"),
+                "options": {"chosen": True},
+            },
+            plugins,
+        )
+        self.assertFalse(result["no_v1_sdk_or_bridge"])
+
+    def test_only_ts_js_immediate_files_autoload_not_mts_or_mjs_or_nested_files(self):
+        for index, (folder, suffix) in enumerate(
+            (("plugins", ".mts"), ("plugin", ".mjs"), ("plugins/support", ".ts"))
+        ):
+            with self.subTest(folder=folder, suffix=suffix):
+                source = self.root / ("not-autoload-" + str(index))
+                directory = source / folder
+                directory.mkdir(parents=True)
+                file = directory / ("output-clamp" + suffix)
+                file.write_text(SYNTHETIC_LEGACY_SOURCES["output-clamp"])
+                (source / "opencode.json").write_text('{"plugins":[]}')
+                reviews = {
+                    file.relative_to(source): hashlib.sha256(
+                        file.read_bytes()
+                    ).hexdigest()
+                }
+                self.assertEqual(port.audit(source, reviewed_sources=reviews)[2], set())
+                self.assert_refused_unchanged("nothing to port", source, reviews)
+
     def test_exact_package_identities_preserve_unrelated_packages_and_options(self):
         source = self.root / "package-identities"
         source.mkdir()
@@ -195,9 +525,7 @@ class NativeHostPortTests(unittest.TestCase):
             ):
                 with self.subTest(extension=extension, target=target):
                     config.write_text(
-                        json.dumps(
-                            {"plugins": [[target, {"keep": True}], "-" + target]}
-                        )
+                        json.dumps({"plugins": [[target, {"keep": True}]]})
                     )
                     before = config.read_bytes()
                     _, files, names, unknown = port.audit(
@@ -207,6 +535,18 @@ class NativeHostPortTests(unittest.TestCase):
                     self.assertEqual(files, {relative: content})
                     self.assertEqual(unknown, [])
                     self.assertEqual(config.read_bytes(), before)
+                    self.assertEqual(file.read_bytes(), content)
+                    config.write_text(
+                        json.dumps(
+                            {"plugins": [[target, {"keep": True}], "-" + target]}
+                        )
+                    )
+                    _, disabled_files, disabled_names, disabled_unknown = port.audit(
+                        source, reviewed_sources=approved
+                    )
+                    self.assertEqual(disabled_names, set())
+                    self.assertEqual(disabled_files, {relative: content})
+                    self.assertEqual(disabled_unknown, [])
                     self.assertEqual(file.read_bytes(), content)
         self.assertFalse(list(source.glob(".native-plugin-backup-*")))
 
@@ -492,6 +832,34 @@ export default async () => ({ "tool.definition": async ({ toolID }, out) => {
             )
         self.assertEqual(len(list(self.source.glob(".native-plugin-backup-*"))), 1)
 
+    def test_plugin_migration_does_not_inspect_or_snapshot_unrelated_auth_data_or_cli(
+        self,
+    ):
+        protected = {
+            "auth.json": b'{"synthetic-private":"unchanged"}',
+            "cli.json": b'{"synthetic-cli-preference":true}',
+            "storage/database.bin": b"synthetic-database-bytes\x00\xff",
+            "unrelated.env": b"SYNTHETIC_KEEP=unchanged\n",
+        }
+        for relative, content in protected.items():
+            file = self.source / relative
+            file.parent.mkdir(parents=True, exist_ok=True)
+            file.write_bytes(content)
+            file.chmod(0o640)
+        original_read = port.read
+
+        def guarded_read(path):
+            self.assertNotIn(str(path.relative_to(self.source)), protected)
+            return original_read(path)
+
+        with patch.object(port, "read", side_effect=guarded_read):
+            receipt = self.apply_reviewed()
+        for relative, content in protected.items():
+            file = self.source / relative
+            self.assertEqual(file.read_bytes(), content)
+            self.assertEqual(file.stat().st_mode & 0o777, 0o640)
+            self.assertFalse((Path(receipt["safety_backup"]) / relative).exists())
+
     def test_unknown_sources_custom_audit_and_existing_destination_refuse_before_changes(
         self,
     ):
@@ -576,6 +944,20 @@ export default async () => ({ "tool.definition": async ({ toolID }, out) => {
         ):
             port.update_sandbox(self.source, apply_change=True)
         self.assertFalse(list(self.source.glob(".native-sandbox-update-*")))
+
+    def test_sandbox_update_receipt_accepts_reviewed_preserved_sources_without_sdk_free_claim(
+        self,
+    ):
+        retained = self.source / "custom-plugins/dormant.mjs"
+        retained.write_text("export default async () => ({})")
+        self.reviewed_sources[retained.relative_to(self.source)] = hashlib.sha256(
+            retained.read_bytes()
+        ).hexdigest()
+        receipt = self.apply_reviewed()
+        self.assertFalse(receipt["no_v1_sdk_or_bridge"])
+        self.assertTrue(receipt["legacy_dependencies_retained"])
+        self.assertEqual(port.update_sandbox(self.source)["status"], "current")
+        self.assertEqual(retained.read_text(), "export default async () => ({})")
 
     def test_unrecognized_implementation_or_container_cannot_be_replaced(self):
         (self.source / "plugins/output-clamp.ts").write_text("custom unrelated code")

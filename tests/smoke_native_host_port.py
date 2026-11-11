@@ -52,6 +52,93 @@ LEGACY_FIXTURES = {
 }
 
 
+def activation_inventory_contract(binary, root):
+    """Provider-free pinned-runtime check; every profile byte is synthetic."""
+    source = root / "activation-config/opencode"
+    project = root / "activation-project"
+    source.mkdir(parents=True)
+    project.mkdir()
+    literal = {
+        "plugins/output-clamp.ts": LEGACY_FIXTURES["plugins/output-clamp.ts"],
+        "plugins/unloaded.mjs": b'export default { id: "fixture.extension", setup() {} }\n',
+        "custom-plugins/pdf-to-text.ts": LEGACY_FIXTURES[
+            "custom-plugins/pdf-to-text.ts"
+        ],
+        "custom-plugins/dormant/index.js": b'export default { id: "fixture.dormant", setup() {} }\n',
+        "plugin/disabled/index.js": b'export default { id: "fixture.disabled", setup() {} }\n',
+        "vendor/retained/package.json": b'{"name":"fixture-retained","type":"module","exports":"./src/index.js"}\n',
+        "vendor/retained/src/index.js": b'import { id } from "./support/deep.mjs"; export default { id, setup() {} }\n',
+        "vendor/retained/src/support/deep.mjs": b'export const id = "fixture.retained"\n',
+    }
+    for relative, content in literal.items():
+        file = source / relative
+        file.parent.mkdir(parents=True, exist_ok=True)
+        file.write_bytes(content)
+    (source / "opencode.json").write_text(
+        json.dumps(
+            {
+                "plugins": [
+                    "./vendor/retained",
+                    "-fixture.disabled",
+                    "-output-clamp",
+                    "./plugins/output-clamp.ts",
+                ],
+                "permissions": [{"action": "shell", "resource": "*", "effect": "deny"}],
+            }
+        )
+    )
+    reviews = {
+        relative: hashlib.sha256(content).hexdigest()
+        for relative, content in literal.items()
+    }
+    receipt = port.apply(source, reviewed_sources=reviews)
+    assert receipt["native_plugins"] == ["output-clamp"]
+    assert (
+        receipt["legacy_dependencies_retained"] and not receipt["no_v1_sdk_or_bridge"]
+    )
+    for relative, content in literal.items():
+        if relative != "plugins/output-clamp.ts":
+            assert (source / relative).read_bytes() == content, relative
+    assert not (source / "plugins/pdf-to-text").exists()
+    env = {
+        "PATH": os.environ["PATH"],
+        "HOME": str(root / "activation-home"),
+        "XDG_CONFIG_HOME": str(source.parent),
+        "XDG_DATA_HOME": str(root / "activation-data"),
+        "XDG_STATE_HOME": str(root / "activation-state"),
+        "XDG_CACHE_HOME": str(root / "activation-cache"),
+        "TMPDIR": str(root / "tmp"),
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+        "LANG": "C.UTF-8",
+    }
+    old_cwd = Path.cwd()
+    try:
+        os.chdir(project)
+        with patch.dict(os.environ, env, clear=True), bridge.server(binary) as request:
+            request("GET", "/api/model/default")
+            plugins = request("GET", "/api/plugin")["data"]
+            active = {
+                item.get("id")
+                for item in plugins
+                if item["state"]["status"] == "active"
+            }
+            assert {"output-clamp", "fixture.retained"}.issubset(active), plugins
+            assert {
+                "fixture.disabled",
+                "fixture.dormant",
+                "fixture.extension",
+                "pdf-to-text",
+            }.isdisjoint(active), plugins
+            assert not [
+                item for item in plugins if item["state"]["status"] == "failed"
+            ], plugins
+    finally:
+        os.chdir(old_cwd)
+    print(
+        "PASS: native 2.2.6 autoload/configured directory and nested support load; removals stay disabled and reviewed custom sources stay dormant."
+    )
+
+
 def main(binary):
     binary = str(Path(binary).resolve(strict=True))
     with tempfile.TemporaryDirectory(prefix="oc-box-native-host-") as temporary:
@@ -62,6 +149,7 @@ def main(binary):
         (source / "custom-plugins").mkdir()
         project.mkdir()
         (root / "tmp").mkdir(mode=0o700)
+        activation_inventory_contract(binary, root)
         reviewed = {}
         review_arguments = []
         for relative, content in LEGACY_FIXTURES.items():
