@@ -7,7 +7,8 @@ one private safety snapshot. It changes only plugin entries/dependencies and
 selected source files; no auth/DB/env/service operation runs. Dormant/disabled
 and unrelated sources are preserved. Unknown local implementations and their
 support/manifest inventory require exact-byte review before any migration writes.
-Legacy dependencies are retained conservatively whenever local code is preserved.
+Legacy dependencies are retained conservatively whenever local code or
+uninspected package references are preserved.
 
 Canonical personal V1 sources are not distributed with this utility. Before a
 local source can be replaced, review its full contents against the proposed
@@ -340,6 +341,7 @@ def inspect(source, *, reviewed_sources=None):
     config, files, unknown = {}, {}, []
     tree, imports, candidates, operations = {}, {}, {}, []
     active_sources, active_packages = set(), set()
+    package_references = []
     total_bytes = 0
 
     def include(path, depth=0):
@@ -470,6 +472,10 @@ def inspect(source, *, reviewed_sources=None):
                             "Known plugin source is outside the reviewed config root, missing, or a configured directory requiring a manual port: "
                             + target
                         )
+                    if local is None:
+                        package_references.append(
+                            (target.removeprefix("-"), name, bool(package))
+                        )
                     if effective:
                         operations.append(
                             (
@@ -515,6 +521,21 @@ def inspect(source, *, reviewed_sources=None):
             )
     selected = active_sources
     names = {candidates[path] for path in selected} | active_packages
+    preserved_packages = {
+        target
+        for target, name, package in package_references
+        if (package and name not in active_packages)
+        or (
+            not package
+            and target != "*"
+            and not target.endswith(".*")
+            and not target.startswith("opencode.")
+            and not any(
+                selector_matches(target, candidate)
+                for candidate in set(candidates.values()) | active_packages
+            )
+        )
+    }
     reviewed = set()
     for relative, content in files.items():
         digest = hashlib.sha256(content).hexdigest()
@@ -556,6 +577,7 @@ def inspect(source, *, reviewed_sources=None):
         "preserved": preserved,
         "tree": tree,
         "packages": active_packages,
+        "preserved_packages": preserved_packages,
     }
 
 
@@ -753,19 +775,23 @@ def apply(source, *, reviewed_sources=None):
     # Even SDK-free factories and computed imports can need the V1 SDK. Do not
     # infer their safety from substring absence: preserve dependencies whenever
     # any admitted local code/support/manifest remains outside this replacement.
-    if not plan["preserved"]:
+    if not plan["preserved"] and not plan["preserved_packages"]:
         dependencies.pop("@opencode-ai/plugin", None)
         dependencies.pop("opencode-sandbox", None)
     dependencies["@opencode/plugin"] = "2.2.6"
     if "opencode-sandbox" in kept:
         dependencies["@anthropic-ai/sandbox-runtime"] = "0.0.76"
-    no_legacy_code = not plan["preserved"] and not any(
-        "@opencode-ai/plugin" in value.get(section, {})
-        for section in (
-            "dependencies",
-            "devDependencies",
-            "optionalDependencies",
-            "peerDependencies",
+    no_legacy_code = (
+        not plan["preserved"]
+        and not plan["preserved_packages"]
+        and not any(
+            "@opencode-ai/plugin" in value.get(section, {})
+            for section in (
+                "dependencies",
+                "devDependencies",
+                "optionalDependencies",
+                "peerDependencies",
+            )
         )
     )
     replacements[Path("package.json")] = (json.dumps(value, indent=2) + "\n").encode()
@@ -833,6 +859,7 @@ def apply(source, *, reviewed_sources=None):
             "preserved_sources": sorted(
                 str(relative) for relative in plan["preserved"]
             ),
+            "preserved_packages": sorted(plan["preserved_packages"]),
             "legacy_dependencies_retained": not no_legacy_code,
             "reviewed_source_sha256": {
                 str(relative): hashlib.sha256(content).hexdigest()

@@ -435,6 +435,59 @@ class NativeHostPortTests(unittest.TestCase):
         )
         self.assertFalse(result["no_v1_sdk_or_bridge"])
 
+    def test_preserved_package_entries_cannot_certify_legacy_sdk_removal(self):
+        for index, entry in enumerate(
+            (
+                "@unrelated/legacy",
+                "-@unrelated/legacy",
+                {"package": "@unrelated/legacy", "options": {"keep": True}},
+                ["@unrelated/legacy", {"keep": True}],
+            )
+        ):
+            with self.subTest(entry=entry):
+                source = self.root / ("retained-package-" + str(index))
+                (source / "plugins").mkdir(parents=True)
+                selected = source / "plugins/output-clamp.ts"
+                selected.write_text(SYNTHETIC_LEGACY_SOURCES["output-clamp"])
+                (source / "opencode.json").write_text(json.dumps({"plugins": [entry]}))
+                (source / "package.json").write_text(
+                    '{"dependencies":{"@opencode-ai/plugin":"1.19.5","opencode-sandbox":"0.6.0"}}'
+                )
+                reviews = {
+                    selected.relative_to(source): hashlib.sha256(
+                        selected.read_bytes()
+                    ).hexdigest()
+                }
+                result = port.apply(source, reviewed_sources=reviews)
+                dependencies = json.loads((source / "package.json").read_bytes())[
+                    "dependencies"
+                ]
+                self.assertEqual(dependencies.get("@opencode-ai/plugin"), "1.19.5")
+                self.assertEqual(dependencies.get("opencode-sandbox"), "0.6.0")
+                self.assertIn(
+                    entry,
+                    json.loads((source / "opencode.json").read_bytes())["plugins"],
+                )
+                self.assertFalse(result["no_v1_sdk_or_bridge"])
+
+    def test_fully_selected_local_inventory_can_remove_unused_legacy_sdk(self):
+        source, selected = self.isolated_source()
+        (source / "package.json").write_text(
+            '{"dependencies":{"@opencode-ai/plugin":"1.19.5","opencode-sandbox":"0.6.0"}}'
+        )
+        reviews = {
+            selected.relative_to(source): hashlib.sha256(
+                selected.read_bytes()
+            ).hexdigest()
+        }
+        result = port.apply(source, reviewed_sources=reviews)
+        dependencies = json.loads((source / "package.json").read_bytes())[
+            "dependencies"
+        ]
+        self.assertNotIn("@opencode-ai/plugin", dependencies)
+        self.assertNotIn("opencode-sandbox", dependencies)
+        self.assertTrue(result["no_v1_sdk_or_bridge"])
+
     def test_only_ts_js_immediate_files_autoload_not_mts_or_mjs_or_nested_files(self):
         for index, (folder, suffix) in enumerate(
             (("plugins", ".mts"), ("plugin", ".mjs"), ("plugins/support", ".ts"))
@@ -817,15 +870,17 @@ export default async () => ({ "tool.definition": async ({ toolID }, out) => {
         dependencies = json.loads((self.source / "package.json").read_text())[
             "dependencies"
         ]
-        self.assertNotIn("@opencode-ai/plugin", dependencies)
-        self.assertNotIn("opencode-sandbox", dependencies)
+        # The uninspected retained package must not be certified SDK-free.
+        self.assertEqual(dependencies["@opencode-ai/plugin"], "1.19.5")
+        self.assertEqual(dependencies["opencode-sandbox"], "0.6.0")
         self.assertEqual(dependencies["unrelated-library"], "1")
         self.assertEqual(dependencies["@opencode/plugin"], "2.2.6")
         backup = Path(receipt["safety_backup"])
         self.assertEqual((backup / "opencode.jsonc").read_bytes(), before)
         self.assertFalse(list((self.source / "custom-plugins").glob("*.ts")))
         self.assertEqual(backup.stat().st_mode & 0o777, 0o700)
-        self.assertTrue(receipt["no_v1_sdk_or_bridge"])
+        self.assertFalse(receipt["no_v1_sdk_or_bridge"])
+        self.assertEqual(receipt["preserved_packages"], ["native-unrelated-package"])
         for relative, digest in self.reviewed_sources.items():
             self.assertEqual(
                 hashlib.sha256((backup / relative).read_bytes()).hexdigest(), digest
