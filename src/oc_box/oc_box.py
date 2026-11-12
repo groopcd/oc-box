@@ -98,6 +98,14 @@ class HistoryPending(BoxError):
     """A session's history is not settled right now; others may still sync."""
 
 
+class HistoryWaitTimeout(BoxError):
+    """Keep the fixed refusal separate from count-only readiness diagnostics."""
+
+    def __init__(self, diagnostic):
+        super().__init__("OpenCode 2.x history wait failed (activity-timeout).")
+        self.diagnostic = diagnostic
+
+
 @contextlib.contextmanager
 def loading_stage(label, *, interval=5.0, stream=None):
     stream = sys.stderr if stream is None else stream
@@ -2581,6 +2589,8 @@ def launch_client(path, data, args, version, exported, owner=None):
                 )
             sync_sessions(path, data)
     except (BoxError, ValueError, KeyError) as exc:
+        if isinstance(exc, HistoryWaitTimeout):
+            print(f"oc-box: {exc.diagnostic}", file=sys.stderr)
         print(
             f"oc-box: history sync pending: {exc}\nContainer data retained. Retry with 'oc-box sync'.",
             file=sys.stderr,

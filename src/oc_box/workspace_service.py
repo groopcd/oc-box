@@ -223,9 +223,19 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
     accepting a single observation across that handoff. This does not certify
     transcript completeness: user shell fibers and unsettled projected messages
     need a separate check in the export path. Persistent PTYs are not activity.
+    Timeout diagnostics contain only the phase and the last fully validated pair
+    of inventory counts, never native identifiers, commands, responses or errors.
     """
 
+    phase = "foreground-query"
+    observation = "unavailable"
+
     def fail(category):
+        if category == "activity-timeout":
+            raise box.HistoryWaitTimeout(
+                f"History wait timeout: phase={phase}; "
+                f"last complete observation: {observation}."
+            ) from None
         raise box.BoxError(f"OpenCode 2.x history wait failed ({category}).") from None
 
     if (
@@ -246,7 +256,13 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
         return budget
 
     def request(target):
+        nonlocal phase
         budget = remaining()
+        phase = (
+            "foreground-query"
+            if target == "/api/session/active"
+            else "background-query"
+        )
         try:
             result = api(
                 box,
@@ -288,9 +304,20 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             for job in jobs
         ):
             fail("invalid-jobs-response")
+        # A terminal job can still have an unconsumed completion notice. Native
+        # reload can also retain cancelled shell jobs indefinitely. Neither age
+        # nor status proves it safe to ignore one: report counts, do not waive it.
+        counts = {"foreground": len(active)}
+        for status in ("running", "completed", "error", "cancelled"):
+            counts["jobs-" + status] = sum(job["status"] == status for job in jobs)
+        observation = ", ".join(
+            f"{name}={value if value < 10000 else '9999+'}"
+            for name, value in counts.items()
+        )
         quiet = quiet + 1 if not active and not jobs else 0
         if quiet == 2:
             return
+        phase = "poll-delay"
         time.sleep(min(interval, remaining()))
 
 

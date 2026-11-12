@@ -57,6 +57,34 @@ CI acceptance, and CI repair is not a new rootless-Podman host pass.
 
 ### V2 session-history synchronization
 
+#### Exit-timeout investigation (2026-11-12)
+
+A synthetic native investigation reproduced a retained-job exit timeout on
+unmodified OpenCode 2.2.6 and 2.2.7: reloading a location while a background shell
+is held can leave zero foreground sessions and one cancelled shell job. Releasing
+the shell did not consume the job or produce its completion notice; a real
+30-second production waiter still refused. Reopening could hydrate the row as
+running, while checked native export remained acceptable. Explicit sync bypasses
+the original owner's global readiness wait, so its success does not establish
+that the original or reopened job inventory was empty. This is a plausible
+mechanism for the reported all-day exit failure, not proof of that user's trigger.
+
+The diagnostic change preserves the 30-second budget, two quiet pairs, all job
+statuses, pending-export checks and nonzero cleanup behavior. Unit matrices cover
+retained jobs, partial/slow observations, API failure at deadline, capped count-only
+diagnostics and unchanged client exit codes/no export after refusal. It adds no
+automatic fallback, job deletion or special exemption for cancelled jobs.
+
+Idle query timing and held-stdin native checks did not reproduce a transport or
+stdin-induced timeout. Ordinary interrupted foreground/background jobs recovered
+after their synthetic work completed. These observations and native regression
+fixtures are offline/process evidence, not a live rootless-Podman pass, an all-day
+soak or acceptance of a repair. Native job cleanup and automatic recovery remain
+open; any recovery must first establish safe teardown rather than assuming a
+reaped host-side Podman wrapper proves the remote service stopped.
+
+#### History and interrupted-export contracts
+
 The changes introduced in `d638907be97f9f33d00e59da526eb046e39a3627` add paginated
 root/child discovery, independent host archives with relationship provenance,
 missing-source reconciliation, verified native imports, and refusal of incomplete

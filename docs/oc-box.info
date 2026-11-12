@@ -361,9 +361,29 @@ does not block this wait.  Timeout or an invalid activity response
 leaves history sync pending and returns nonzero; normal cleanup still
 stops the container, so running work is not promised to continue.  This
 is bounded checking, not an atomic freeze of every possible history
-producer.  ‘--no-vault’ is accepted only when web becomes a new V2
-owner; an attached web client rejects it and never changes the owner's
-credential snapshot.
+producer.  On timeout, a separate diagnostic reports the wait phase
+(‘foreground-query’, ‘background-query’ or ‘poll-delay’) and counts from
+the last complete, validated activity/job observation.  Job counts
+distinguish running, completed, error and cancelled entries; counts
+above 9999 appear as ‘9999+’.  If no complete pair was validated, the
+observation is ‘unavailable’, not zero.  These are previous
+observations, not proof of the current state or that a native request
+succeeded: a request failure at the deadline also retains the
+‘activity-timeout’ category.  No session/job identifiers, commands,
+transcript text or native errors are printed.
+
+Native OpenCode 2.2.6/2.2.7 can retain a cancelled background-shell job
+after a location reload, even with no foreground activity.  Such a row
+still blocks the wait; it is not safe to ignore terminal-status jobs
+generally because their completion notices can restart foreground work.
+A successful later ‘oc-box sync’ checks native exports without the
+original owner's activity wait and does not prove that its retained job
+disappeared.  This diagnostic does not repair native job cleanup,
+increase the timeout or automatically restart/delete work.
+
+‘--no-vault’ is accepted only when web becomes a new V2 owner; an
+attached web client rejects it and never changes the owner's credential
+snapshot.
 
 4.7 terminal
 ============
@@ -2748,20 +2768,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2540
 Node: Commands6045
-Node: Options59365
-Node: Lifecycle and persistence78693
-Node: Distribution images80813
-Node: Sessions and recovery85688
-Node: Devices and host permissions92273
-Node: Resource reports94619
-Node: Configuration and environment96730
-Node: Files107993
-Node: Exit status112846
-Node: Examples113657
-Node: Troubleshooting115743
-Node: Installation and manuals127095
-Node: Authors and license135042
-Node: See also135649
+Node: Options60584
+Node: Lifecycle and persistence79912
+Node: Distribution images82032
+Node: Sessions and recovery86907
+Node: Devices and host permissions93492
+Node: Resource reports95838
+Node: Configuration and environment97949
+Node: Files109212
+Node: Exit status114065
+Node: Examples114876
+Node: Troubleshooting116962
+Node: Installation and manuals128314
+Node: Authors and license136261
+Node: See also136868
 
 End Tag Table
 
