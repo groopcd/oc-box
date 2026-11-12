@@ -144,6 +144,12 @@ their checkout ownership distinct from unrelated source and flat installations.
   fixed errors. Disconnect is not recall of disclosed data. Native/offline checks
   are not host acceptance; defer publication until TUI/regression and focused host
   sharing checks are complete.
+- `tools/test_sharing_podman.py` and its provider/archive helpers are a separate
+  source-pinned host harness, not a change to an already frozen release candidate.
+  Keep host guards, verified fresh private stores, controlling-PTY consent,
+  unmodified production sharing/native transport, strict PASS/INCOMPLETE scopes,
+  streaming encrypted-backup inspection and original failure evidence. Never run
+  it inside oc-box or substitute its local/native preparation for host acceptance.
 - `plugin_compat.py` / `plugin_bridge.js`: bounded copied-V1-plugin adapters on
   native V2 plugin APIs. Keep host originals and V1 behavior intact, propagate
   refusal errors and preserve attachments/structured output; reject unsupported
