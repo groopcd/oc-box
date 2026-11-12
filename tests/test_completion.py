@@ -121,6 +121,51 @@ fi
             set(actions),
         )
 
+    def test_shared_parser_command_option_subsets_include_supported_aliases(self):
+        # These commands share a parser, not the same supported option set.
+        selectors = "project workspace"
+        launch = (
+            "distro new resume model cpus memory pids_limit device podman_arg "
+            "clear_devices clear_podman_args no_vault"
+        )
+        actions = {action.dest: action for action in box.parser()._actions}
+        for command, destinations in (
+            ("start", f"{selectors} {launch} import_session"),
+            ("reset", f"{selectors} {launch}"),
+            ("stop", selectors),
+            ("sync", selectors),
+            ("repair", selectors),
+            ("terminal", f"{selectors} maintenance"),
+            ("upgrade", "check auto_update"),
+            (
+                "credentials",
+                f"{selectors} credential_mode env_secret vault_secret clear_credentials",
+            ),
+            ("purge", f"{selectors} delete_sessions all yes"),
+            ("list", ""),
+            ("distros", ""),
+            ("status", f"{selectors} json"),
+            ("--status", f"{selectors} json"),
+        ):
+            with self.subTest(command=command):
+                expected = {
+                    option
+                    for destination in ("help " + destinations).split()
+                    for option in actions[destination].option_strings
+                }
+                self.assertEqual(set(self.complete(command, "-")), expected)
+
+    def test_reset_session_selection_flags_match_shared_parser(self):
+        for name, flag, destination in (
+            ("new-conversation", "--new", "new"),
+            ("resume-conversation", "--resume", "resume"),
+        ):
+            with self.subTest(case=name):
+                args = box.parser().parse_args(["reset", flag])
+                self.assertEqual(args.command, "reset")
+                self.assertTrue(getattr(args, destination))
+                self.assertEqual(self.complete("reset", flag), [flag])
+
     def test_options_are_scoped_to_the_command_or_vault_action(self):
         self.assertEqual(self.complete("backup", "--p"), ["--project", "--portable"])
         self.assertEqual(self.complete("upgrade", "--a"), ["--auto-update"])
@@ -339,6 +384,19 @@ fi
 
 
 class CompletionInstallationTests(unittest.TestCase):
+    def test_reset_import_session_is_refused_before_host_lifecycle(self):
+        with (
+            patch.object(box, "check_backend") as backend,
+            patch.object(box, "find_workspace") as workspace,
+            patch.object(vault, "hidden") as prompt,
+            self.assertRaisesRegex(
+                box.BoxError, "^--import-session applies only to start\\.$"
+            ),
+        ):
+            box.main(["reset", "--import-session", "ses_completion_fixture"])
+        for mock in (backend, workspace, prompt):
+            mock.assert_not_called()
+
     def test_print_completion_is_informational_and_does_not_require_host_tools_or_secrets(
         self,
     ):

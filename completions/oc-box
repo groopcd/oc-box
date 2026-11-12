@@ -99,7 +99,7 @@ _oc_box()
 
     case $command in
         start) options="$help $selectors $launch" ;;
-        reset) options="$help $selectors --distro --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault" ;;
+        reset) options="$help $selectors --distro --new --resume --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault" ;;
         sync) options="$help $selectors" ;;
         stop|repair) options="$help $selectors" ;;
         terminal) options="$help $selectors --maintenance" ;;
