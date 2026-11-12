@@ -239,6 +239,116 @@ class HostPluginMigrationTests(unittest.TestCase):
     @unittest.skipUnless(
         shutil.which("node"), "Node required for supporting-module imports"
     )
+    def test_native_root_service_config_families_excluded_not_nested_support(self):
+        # Literal native 2.2.6 filename/legacyFilename results, not the copier's
+        # matcher: custom channels sanitize to ASCII, legacy channels use SHA-1.
+        names = {
+            "shared_release_channels": "service.json",
+            "local_channel": "service-local.json",
+            "sanitized_custom_channel": "service-review-feature_2.2-rc.json",
+            "empty_channel": "service-.json",
+            "punctuation_channel": "service-._-.json",
+            "legacy_dev_sha1": "service-34c6fceca75e456f25e7e99531e2425c6c1de443.json",
+            "legacy_beta_sha1": "service-a295e0bdde1938d1fbfd343e5a3e569e868e1465.json",
+        }
+        password = "synthetic-root-service-password-private"
+        env_value = "synthetic-root-service-env-private"
+        payload = json.dumps({"password": password, "env": {"FIXTURE": env_value}})
+        directory = self.source / "custom-plugins/channel-support"
+        directory.mkdir()
+        (directory / "package.json").write_text('{"type":"module","main":"index.js"}')
+        expected = []
+        for case, name in names.items():
+            root_file = self.source / name
+            root_file.write_text(payload)
+            root_file.chmod(0o600)
+            (directory / name).write_text(json.dumps({"support": case}))
+            nested_directory = directory / "directories" / name
+            nested_directory.mkdir(parents=True)
+            (nested_directory / "index.js").write_text(
+                "export default " + json.dumps(case + "-directory")
+            )
+            expected.append([case, case + "-directory"])
+        ordinary = {
+            "service.js": b'export const marker = "root-service-module-known"\n',
+            "service-local.js": b"ordinary same-prefix module\n",
+            "service-local.json.backup": b"ordinary suffix support\n",
+            "service-feature+topic.json": b"not a sanitized native channel\n",
+            "services.json": b"ordinary plural support\n",
+        }
+        for name, content in ordinary.items():
+            (self.source / name).write_bytes(content)
+        (directory / "index.js").write_text(
+            'import { readFileSync } from "node:fs"\n'
+            'import { marker } from "../../service.js"\n'
+            "export const observed = []\n"
+            + "\n".join(
+                "observed.push([JSON.parse(readFileSync(new URL("
+                + json.dumps("./" + name)
+                + ", import.meta.url))).support, (await import("
+                + json.dumps("./directories/" + name + "/index.js")
+                + ")).default])"
+                for name in names.values()
+            )
+            + '\nexport { marker }\nexport default { id: "channel-support", setup() {} }\n'
+        )
+        self.config["plugin"].append(str(directory))
+        (self.source / "opencode.jsonc").write_text(json.dumps(self.config))
+        before = self.originals()
+        modes = {
+            path.relative_to(self.source): path.stat().st_mode & 0o777
+            for path in self.source.rglob("*")
+        }
+        profile = migration.make_profile(self.source)
+        copied = profile / "opencode"
+        for case, name in names.items():
+            with self.subTest(root_private=case):
+                self.assertFalse((copied / name).exists())
+        for path in copied.rglob("*"):
+            if path.is_file():
+                with self.subTest(non_disclosure=str(path.relative_to(copied))):
+                    self.assertFalse(password.encode() in path.read_bytes())
+                    self.assertFalse(env_value.encode() in path.read_bytes())
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        for name, content in ordinary.items():
+            self.assertEqual((copied / name).read_bytes(), content)
+        config = json.loads((copied / "opencode.jsonc").read_text())
+        entry = Path(config["plugins"][-1]) / "index.js"
+        result = subprocess.run(
+            [
+                "node",
+                "--input-type=module",
+                "-e",
+                "const plugin = await import(process.argv[1]); console.log(JSON.stringify({ observed: plugin.observed, marker: plugin.marker }))",
+                entry.as_uri(),
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(result.stdout),
+            {
+                "observed": expected,
+                "marker": "root-service-module-known",
+            },
+        )
+        self.assertTrue(self.originals() == before, "Source bytes unchanged")
+        self.assertEqual(
+            {
+                path.relative_to(self.source): path.stat().st_mode & 0o777
+                for path in self.source.rglob("*")
+            },
+            modes,
+        )
+        self.assertEqual(profile.stat().st_mode & 0o777, 0o700)
+        self.assertEqual(copied.stat().st_mode & 0o777, 0o700)
+
+    @unittest.skipUnless(
+        shutil.which("node"), "Node required for supporting-module imports"
+    )
     def test_migrated_plugin_required_service_and_config_imports_succeed(self):
         directory = self.source / "custom-plugins/required"
         (directory / "support/service").mkdir(parents=True)

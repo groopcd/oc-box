@@ -144,6 +144,10 @@ def make_profile(source, output=None):
             set(relative.parts) & excluded
             or relative in sources
             or relative.parts[0] in root_private
+            # Native 2.2.6 service-config.filename sanitizes channel names to
+            # this alphabet; legacyFilename's SHA-1 names are a subset. Match
+            # only root names, never plugin-owned same-name files/directories.
+            or re.fullmatch(r"service-[A-Za-z0-9._-]*\.json", relative.parts[0])
         ):
             continue
         # Retire generated autoload registrations, not similarly named package
