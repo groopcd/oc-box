@@ -329,6 +329,20 @@ automatic-resume changes. Freeze their integrated candidate and repeat relevant
 host validation before the next stable release; do not infer acceptance from the
 v1.6.58 tag or a successful real-project terminal attachment alone.
 
+Focused post-stop snapshot/stop-cancellation host acceptance is now reviewed on
+clean d736bc1bb33ffeedee65ad3ec281de77c1e31847 (1.7.86+gd736bc1, count 115),
+native 2.2.6. The external 60df669 v2 runner (SHA-256 56668d84...356d20) passed
+all 18 checks across two fresh roots; all 44 audited runtime/donor hashes match
+Git. Owner exits are [0,1] in each case, explicit stop 0; snapshot restart/reader/
+completion are 1/1/1, cancellation 0/0/0, with no preparation/auth calls or extra
+synthetic provider/shell execution. See docs/testing.md for exact evidence hashes.
+This is focused scripted synthetic host acceptance only, not native job cleanup,
+the baseline 42 checks, lifecycle/vault/UI, real inference, exhaustive fault/race
+or native 2.2.7 host acceptance. The earlier v1 oracle attempt remains failed;
+its later fixture-only correction and fresh successes do not relabel it. Keep raw
+reports private and retain every store; repeat remaining relevant integrated
+candidate gates before stable publication.
+
 The global-vault fixture's initial host run failed during the first owning
 launch, not an accepted pass.
 Use --diagnose for validated read-only checkpoints; never print raw errors/env
