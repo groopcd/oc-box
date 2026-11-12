@@ -171,12 +171,50 @@ def render_texinfo(content):
     return "\n".join(output) + "\n"
 
 
+def render_info(texinfo, makeinfo):
+    # Stable basenames keep checkout and temporary paths out of the Info header.
+    with tempfile.TemporaryDirectory(prefix="oc-box-docs-") as temporary:
+        work = Path(temporary)
+        (work / "oc-box.texi").write_text(texinfo)
+        subprocess.run(
+            [makeinfo, "--no-split", "--output=oc-box.info", "oc-box.texi"],
+            cwd=work,
+            check=True,
+            timeout=30,
+        )
+        return (work / "oc-box.info").read_bytes()
+
+
+def info_content(text):
+    """Compare all Info text across GNU versions, not just its node inventory.
+
+    Ignore the renderer banner, byte-offset tag table, whitespace wrapping and
+    GNU's ASCII/Unicode single-quote typography. Keep body words, punctuation,
+    examples, directory entries, headings and node/navigation text in order.
+    Within the same renderer version the caller requires exact bytes instead.
+    """
+    text = re.sub(
+        r"\AThis is oc-box\.info, produced by makeinfo version [0-9.]+ from oc-box\.texi\.\n",
+        "",
+        text,
+        count=1,
+    )
+    text = text.split("\x1f\nTag Table:\n", 1)[0]
+    text = text.translate(str.maketrans({"‘": "`", "’": "'"}))
+    return " ".join(text.split())
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--check",
         action="store_true",
         help="verify generated man and Texinfo sources without writing files",
+    )
+    parser.add_argument(
+        "--check-info-content",
+        action="store_true",
+        help="also require GNU makeinfo and compare the complete rendered Info content",
     )
     parser.add_argument("--output-dir", type=Path, default=ROOT / "docs")
     args = parser.parse_args(argv)
@@ -185,7 +223,7 @@ def main(argv=None):
         "oc-box.1": render_man(content),
         "oc-box.texi": render_texinfo(content),
     }
-    if args.check:
+    if args.check or args.check_info_content:
         stale = [
             name
             for name, value in generated.items()
@@ -200,25 +238,71 @@ def main(argv=None):
                 + "\nRun python3 tools/build_docs.py\n",
             )
         print("Generated man and Texinfo sources are current.")
-        return 0
+        if not args.check_info_content:
+            return 0
     makeinfo = shutil.which("makeinfo")
     if makeinfo is None:
         parser.exit(
             1,
             "Building Info requires GNU makeinfo; prebuilt manuals need no build tools to install.\n",
         )
-    # Compile before updating any generated files, with stable basenames in the
-    # Info header independent of source-checkout or temporary-directory paths.
-    with tempfile.TemporaryDirectory(prefix="oc-box-docs-") as temporary:
-        work = Path(temporary)
-        (work / "oc-box.texi").write_text(generated["oc-box.texi"])
-        subprocess.run(
-            [makeinfo, "--no-split", "--output=oc-box.info", "oc-box.texi"],
-            cwd=work,
-            check=True,
-            timeout=30,
+    if args.check_info_content:
+        try:
+            version_output = subprocess.run(
+                [makeinfo, "--version"],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=10,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            parser.exit(
+                1, "Cannot verify GNU makeinfo version for Info content check.\n"
+            )
+        version = re.match(
+            r"(?:texi2any|makeinfo) \(GNU texinfo\) ([0-9]+(?:\.[0-9]+)+)\n",
+            version_output,
         )
-        info = (work / "oc-box.info").read_bytes()
+        if version is None:
+            parser.exit(
+                1, "Info content check requires an identified GNU makeinfo version.\n"
+            )
+    # Compile before updating any generated files. Check mode never writes to the
+    # selected output directory, even when the committed artifact is stale.
+    info = render_info(generated["oc-box.texi"], makeinfo)
+    if args.check_info_content:
+        banner = (
+            "This is oc-box.info, produced by makeinfo version "
+            + version[1]
+            + " from oc-box.texi."
+        ).encode()
+        if info.splitlines()[0] != banner:
+            parser.exit(
+                1, "GNU makeinfo version disagrees with rendered Info header.\n"
+            )
+        path = args.output_dir / "oc-box.info"
+        committed = path.read_bytes() if path.is_file() else b""
+        if committed.splitlines()[:1] == info.splitlines()[:1]:
+            current = committed == info
+            comparison = "exact bytes"
+        else:
+            current = info_content(committed.decode("utf-8")) == info_content(
+                info.decode("utf-8")
+            )
+            comparison = "normalized cross-version content"
+        if not current:
+            parser.exit(
+                1,
+                "Out-of-date generated manual: oc-box.info\nRun python3 tools/build_docs.py\n",
+            )
+        print(
+            "Info content is current (GNU makeinfo "
+            + version[1]
+            + "; "
+            + comparison
+            + ")."
+        )
+        return 0
     args.output_dir.mkdir(parents=True, exist_ok=True)
     for name, value in generated.items():
         (args.output_dir / name).write_text(value)

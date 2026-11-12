@@ -94,6 +94,107 @@ class DocumentationTests(unittest.TestCase):
         with contextlib.redirect_stdout(io.StringIO()):
             self.assertEqual(build.main(["--check"]), 0)
 
+    def test_source_only_check_needs_no_renderer_but_info_content_check_does(self):
+        with (
+            patch.object(build.shutil, "which", return_value=None),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+        ):
+            self.assertEqual(build.main(["--check"]), 0)
+            with self.assertRaises(SystemExit) as refused:
+                build.main(["--check-info-content"])
+        self.assertEqual(refused.exception.code, 1)
+        self.assertIn("GNU makeinfo", errors.getvalue())
+
+    def test_info_content_check_refuses_unidentified_renderer(self):
+        with (
+            patch.object(build.shutil, "which", return_value="/synthetic/makeinfo"),
+            patch.object(
+                build.subprocess,
+                "run",
+                return_value=subprocess.CompletedProcess(
+                    [], 0, stdout="Other renderer\n"
+                ),
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+            self.assertRaises(SystemExit) as refused,
+        ):
+            build.main(["--check-info-content"])
+        self.assertEqual(refused.exception.code, 1)
+        self.assertIn("identified GNU makeinfo version", errors.getvalue())
+
+    @unittest.skipUnless(shutil.which("makeinfo"), "GNU makeinfo not installed")
+    def test_info_content_check_rejects_changed_body_with_unchanged_headings(self):
+        original = "# Synthetic reference\n\n## Records\n\nKeep synthetic records.\n"
+        changed = original.replace("Keep synthetic records.", "Drop synthetic records.")
+        with (
+            tempfile.TemporaryDirectory(prefix="oc-box-info-freshness-") as temporary,
+            contextlib.redirect_stdout(io.StringIO()),
+            patch.object(build, "ROOT", Path(temporary)),
+        ):
+            docs = Path(temporary) / "docs"
+            docs.mkdir()
+            (docs / "cli.md").write_text(original)
+            output = ["--output-dir", str(docs)]
+            self.assertEqual(build.main(output), 0)
+            info = (docs / "oc-box.info").read_bytes()
+            self.assertIn(b"Keep synthetic records.", info)
+            self.assertNotIn(b"Drop synthetic records.", info)
+            self.assertEqual(build.main(["--check-info-content", *output]), 0)
+            other_renderer = re.sub(
+                rb"makeinfo version [0-9.]+", b"makeinfo version 0.0", info
+            )
+            (docs / "oc-box.info").write_bytes(other_renderer)
+            self.assertEqual(build.main(["--check-info-content", *output]), 0)
+
+            # Only the body changed. Refresh the two sources, deliberately leaving
+            # the previously rendered Info untouched: headings alone cannot tell.
+            (docs / "cli.md").write_text(changed)
+            (docs / "oc-box.1").write_text(build.render_man(changed))
+            (docs / "oc-box.texi").write_text(build.render_texinfo(changed))
+            self.assertEqual(build.main(["--check", *output]), 0)
+            for name, artifact in (
+                ("same-renderer", info),
+                ("different-renderer", other_renderer),
+            ):
+                with self.subTest(name=name):
+                    (docs / "oc-box.info").write_bytes(artifact)
+                    with (
+                        contextlib.redirect_stderr(io.StringIO()) as errors,
+                        self.assertRaises(SystemExit) as refused,
+                    ):
+                        build.main(["--check-info-content", *output])
+                    self.assertEqual(refused.exception.code, 1)
+                    self.assertIn("oc-box.info", errors.getvalue())
+                    self.assertEqual((docs / "oc-box.info").read_bytes(), artifact)
+
+    def test_info_content_normalization_preserves_body_and_navigation(self):
+        # Independently specified tiny Info documents, not snapshots of prose in
+        # the public manual. GNU releases may rewrap and requote the same text.
+        first = (
+            "This is oc-box.info, produced by makeinfo version 7.1 from oc-box.texi.\n\n"
+            "\x1f\nFile: oc-box.info,  Node: Top,  Up: (dir)\n\n"
+            "Records\n*******\n\nKeep `synthetic' records.\n\n"
+            "\x1f\nTag Table:\nNode: Top\x7f100\n\x1f\nEnd Tag Table\n"
+        )
+        second = (
+            first.replace("version 7.1", "version 7.3")
+            .replace("Keep `synthetic' records.", "Keep ‘synthetic’\nrecords.")
+            .replace("Top\x7f100", "Top\x7f104")
+        )
+        self.assertEqual(build.info_content(first), build.info_content(second))
+        for name, changed in (
+            ("body", second.replace("Keep", "Drop")),
+            ("navigation", second.replace("Up: (dir)", "Up: Elsewhere")),
+            ("missing-body", second.replace("Keep ‘synthetic’\nrecords.", "")),
+            ("shell-backticks", second.replace("‘synthetic’", "`synthetic`")),
+        ):
+            with self.subTest(name=name):
+                self.assertNotEqual(
+                    build.info_content(first), build.info_content(changed)
+                )
+
     def test_public_examples_do_not_publish_development_session_ids_or_home_paths(self):
         for name in (
             "README.md",
@@ -159,6 +260,8 @@ class DocumentationTests(unittest.TestCase):
             self.assertIn("oc-box upgrade --check", generated)
             if generated.splitlines()[0] == committed.splitlines()[0]:
                 self.assertEqual(generated, committed)
+            # Cross-version checks must compare body content too, not just nodes.
+            self.assertEqual(build.main(["--check-info-content"]), 0)
 
     @unittest.skipUnless(shutil.which("info"), "GNU Info reader not installed")
     def test_info_reader_can_load_the_options_node(self):

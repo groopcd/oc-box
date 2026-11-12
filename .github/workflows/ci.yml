@@ -29,13 +29,16 @@ jobs:
       - name: Unit and documentation coverage checks
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends age shellcheck
+          sudo apt-get install -y --no-install-recommends age shellcheck texinfo
           bash -n completions/oc-box
           shellcheck --shell=bash completions/oc-box
           python -m venv "$RUNNER_TEMP/tests"
           "$RUNNER_TEMP/tests/bin/python" -m pip install 'cryptography>=44'
           "$RUNNER_TEMP/tests/bin/python" -B -m unittest discover -s tests -v
-          python tools/build_docs.py --check
+          # Required renderer gate: no skip/fallback when GNU makeinfo is absent.
+          # Compare exact bytes for its recorded version, all normalized content otherwise.
+          makeinfo --version
+          python tools/build_docs.py --check-info-content
           git diff --check
       - name: Build Python distributions
         run: |
