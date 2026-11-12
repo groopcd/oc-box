@@ -249,7 +249,25 @@ run remains failed; no native job is repaired and interrupted execution is not
 declared successful. Raw reports remain private/untracked. The runtime bytes are
 unchanged by the subsequent harness correction and this evidence note.
 
-The next host regression gate is the retained default 42-check history/readiness
-run on the same frozen source, with exits `[0,0,0,1,0,0,0,0]`. Broader lifecycle,
+The next host regression gate at that stage was the retained default 42-check
+history/readiness run on the same frozen source, with exits `[0,0,0,1,0,0,0,0]`. Broader lifecycle,
 vault, additional fault/race and integrated release gates remain separate before
 stable publication; native 2.2.7 currently has offline reader coverage only.
+
+## Reviewed baseline and fix-branch handoff
+
+The separate baseline report is now reviewed: all 42 expected checks are true,
+ordered owner exits are `[0,0,0,1,0,0,0,0]`, no primary/secondary failure or trace,
+and source/runner/native identities exactly match the two focused reports. Its
+byte hash and bounded scope are recorded in `docs/testing.md`.
+
+The fix branch therefore has 60 reviewed scripted synthetic host checks on the
+frozen `d736bc1` runtime with native 2.2.6. Runtime/donor bytes remain unchanged
+through the subsequent fixture and evidence-only commits. The original failed
+recovery attempt remains failed and every raw report/store remains private.
+
+The requested fix-branch implementation and focused regression validation are
+complete. Integration into `feature/release-1.7` needs explicit approval beyond
+this branch's scope; do not merge into `master`, tag or publish a stable release
+on this evidence alone. Lifecycle/vault/backup, interactive/integrated release,
+additional fault/race and native 2.2.7 host validation retain their own gates.

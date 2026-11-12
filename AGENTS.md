@@ -281,6 +281,16 @@ its later fixture-only correction and fresh successes do not relabel it. Keep ra
 reports private and retain every store; repeat remaining relevant integrated
 candidate gates before stable publication.
 
+The separate default history/readiness report is also now reviewed on that same
+clean d736bc1 runtime, all 44 identical audited hashes, external 60df669 runner
+and native 2.2.6: all 42 checks true, ordered exits [0,0,0,1,0,0,0,0], no primary/
+secondary failures or trace. Report SHA-256 9c94916f...49619 is recorded fully in
+docs/testing.md. Combined accepted scope is 60 scripted synthetic host checks
+(42 baseline + 18 focused recovery), not lifecycle/vault/backup, interactive UI,
+real-provider, network-containment, exhaustive fault/race or native 2.2.7 host
+acceptance. Preserve the earlier failure; fix-branch integration and stable
+publication remain separately authorized/gated.
+
 The global-vault fixture's initial host run failed during the first owning
 launch, not an accepted pass.
 Use --diagnose for validated read-only checkpoints; never print raw errors/env
