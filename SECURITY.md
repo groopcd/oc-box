@@ -188,9 +188,13 @@ project or assume Windows-shared mounts have the same permission behavior.
 GitHub installs can opt into private crypto wheels using `--with-vault`, staged
 before launcher activation without modifying system/user site-packages. Python
 tool installs use the `vault` extra; default installs remain dependency-free.
-The earlier selected-vault host probes are accepted; global defaults and
-`--no-vault` have no accepted new live Podman lifecycle pass. Unit/native offline
-checks do not establish that host acceptance.
+Selected-vault, global-default and `--no-vault` host probes have historical
+acceptance on their recorded source revisions. That evidence does not validate
+later hardening changes automatically. The authoritative
+[source-bound evidence index](docs/testing.md#source-bound-evidence-index)
+separates those reports, the published release notes and current offline checks.
+Fresh applicable host acceptance is still required for a changed candidate;
+unit/native offline checks do not establish it.
 
 ## Host-side operations
 

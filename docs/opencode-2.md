@@ -412,14 +412,17 @@ error text. This is not an atomic history freeze or a backup of pending input
 and live execution. Persistent terminal sessions do not themselves block the wait.
 
 **Release evidence boundary:** native multi-session checks are offline integration,
-not host-Podman acceptance. Clean `1.6.51+gb5d1ea8` passed the focused
-history/readiness, global-vault and V1/V2 lifecycle fixtures before publication.
-That published version nevertheless refused a migrated V1 session with a
-superseded unfinished assistant. The correction described above has unit and
-native crash/migration coverage, but still needs fresh host acceptance on its
-clean integrated candidate before the next stable release. Older accepted
-reports retain their original identities and scopes; building candidate
-wheels/sdists is not acceptance. See the [release gates](testing.md#v2-session-history-synchronization).
+not host-Podman acceptance. Clean `1.6.51+gb5d1ea8` passed the earlier focused,
+global-vault and lifecycle fixtures, but later refused a real migrated session
+with a superseded unfinished assistant. The correction subsequently passed
+reviewed external-host fixtures on exact `1.6.58+g3138a87`; its published
+[release notes](https://github.com/groopcd/oc-box/releases/tag/v1.6.58) record
+that acceptance without rewriting the frozen checkout's pre-acceptance handoff.
+Later hardening changes are a new candidate and need fresh applicable host checks
+before stable publication. Older passed and failed reports keep their identities
+and scopes; building wheels/sdists is not acceptance. Use the authoritative
+[source-bound evidence index](testing.md#source-bound-evidence-index) and
+[release gates](testing.md#v2-session-history-synchronization).
 
 Switching the host executable to 1.x reinstalls its exact container runtime and
 V1 overlay, selecting retained V1 history. Returning to 2.x resumes existing V2
@@ -722,7 +725,8 @@ git pull --ff-only
 fixture_tools=$(mktemp -d /tmp/oc-box-v2-tools-XXXXXXXX)
 npm install --prefix "$fixture_tools/v1" --no-audit --no-fund opencode-ai@1.19.5
 npm install --prefix "$fixture_tools/v2" --no-audit --no-fund @opencode/cli@2.2.6
-uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
+uv run --no-project --with cryptography python -I -B tools/test_v2_podman.py \
+  --expect-commit FULL_REVIEWED_CANDIDATE_COMMIT \
   --opencode-v1 "$fixture_tools/v1/node_modules/.bin/opencode" \
   --opencode-v2 "$fixture_tools/v2/node_modules/.bin/opencode"
 ```
@@ -737,14 +741,18 @@ Both options accept any existing parent suitable for the host filesystem/quota.
 For example, use the same native executables above:
 
 ```sh
-uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
+uv run --no-project --with cryptography python -I -B tools/test_v2_podman.py \
+  --expect-commit FULL_REVIEWED_CANDIDATE_COMMIT \
   --opencode-v1 "$fixture_tools/v1/node_modules/.bin/opencode" \
   --opencode-v2 "$fixture_tools/v2/node_modules/.bin/opencode" \
   --work-dir /var/tmp --temp-dir /var/tmp
 ```
 
 Requires host rootless Podman prerequisites, age/age-keygen, Git, npm and uv for
-these setup commands; see `oc-box doctor`. The default test distro is Tumbleweed
+these setup commands; see `oc-box doctor`. Substitute the full reviewed clean
+candidate commit in fresh-run examples; never repin a changed checkout to pass
+an acceptance check. Direct source-bound fixtures require isolated, unoptimized
+Python (`-I -B`). The default test distro is Tumbleweed
 (`--distro NAME` selects another catalog distro). Expect image/package downloads,
 separate exact-version runtime installs and full encrypted image transfers;
 the run can take several minutes and needs room for three temporary workspaces
@@ -767,7 +775,7 @@ are synthetic test data; do not publish the fixture directory. The printed
 cleanup command removes only fixture-owned Podman resources, retaining files:
 
 ```sh
-python3 tools/test_v2_podman.py --cleanup /tmp/oc-box-live-v2-EXAMPLE
+python3 -I -B tools/test_v2_podman.py --cleanup /tmp/oc-box-live-v2-EXAMPLE
 ```
 
 Fresh runs record a private cleanup purpose bound to the fixture root and its
@@ -818,7 +826,7 @@ container/runtime cache without repeating setup downloads:
 
 ```sh
 git pull --ff-only
-uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
+uv run --no-project --with cryptography python -I -B tools/test_v2_podman.py \
   --resume /tmp/oc-box-live-v2-EXAMPLE
 ```
 
@@ -843,7 +851,7 @@ preserve its encrypted archive and retry only that restore:
 
 ```sh
 git pull --ff-only
-uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
+uv run --no-project --with cryptography python -I -B tools/test_v2_podman.py \
   --retry-full-restore /tmp/oc-box-live-v2-EXAMPLE
 ```
 
@@ -861,7 +869,7 @@ stderr or decrypted image bytes.
 To retry only the old backup with temporary files on another filesystem:
 
 ```sh
-uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
+uv run --no-project --with cryptography python -I -B tools/test_v2_podman.py \
   --retry-full-restore /tmp/oc-box-live-v2-EXAMPLE --temp-dir /var/tmp
 ```
 
@@ -882,7 +890,7 @@ at downgrade, complete only the version transitions while preserving its backups
 
 ```sh
 git pull --ff-only
-uv run --no-project --with cryptography python -B tools/test_v2_podman.py \
+uv run --no-project --with cryptography python -I -B tools/test_v2_podman.py \
   --retry-downgrade /var/tmp/oc-box-live-v2-EXAMPLE --temp-dir /var/tmp
 ```
 

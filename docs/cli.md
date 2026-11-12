@@ -236,6 +236,10 @@ committing the archive/checkpoint, including when rechecking an older cached
 digest. Only the documented obsolete nonpending tool raw-buffer normalization
 and native controller-directory/project rebind are accepted. A successful import
 exit alone is not evidence that an existing conversation was replaced.
+V1 discovery is limited to root conversations exposed by its supported CLI;
+do not infer the V2 paginated linked-child archive scope for V1. Conversely,
+root-only automatic resume on V2 is a selection rule, not a limit on its
+independent child-session archive discovery.
 
 After a successful V1 archive deletion, a private workspace/session/archive/digest
 record permits a matching interrupted import to be retried without guessing from
@@ -1538,6 +1542,11 @@ purge --all            deleted   deleted                deleted
 
 Default purge retains host archive copies; `--delete-sessions` and `--all`
 remove recorded host archive copies. Imported source host conversations remain.
+On V2, each discovered child archive is an independent recorded host root, not
+a live native child of its parent archive. Purge still refuses an observed
+unrecorded native host child before archive deletion; it must not rely on native
+cascade deletion to remove unrelated conversations. V1's root-only discovery
+does not provide this V2 child-inventory contract.
 Shared base images are retained by all operations. Stop/reset do not checkpoint
 running processes. Packages installed in the private home survive reset;
 system-wide packages do not. No command currently manages Btrfs snapshots.

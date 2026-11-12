@@ -52,6 +52,15 @@ python3 -B tools/build_docs.py --check
 git diff --check
 ```
 
+`--check` verifies generated man/Texinfo sources without requiring GNU makeinfo.
+When GNU Texinfo is installed, also run
+`python3 -B tools/build_docs.py --check-info-content`. CI installs the renderer
+and requires this full-content Info check; equal headings/navigation alone are
+not freshness. Same-renderer output is exact, while supported differing GNU
+layouts normalize only bounded presentation details, preserving literal examples
+and validating the terminal table/footer. Unknown layouts fail closed. End-user
+installation still uses prebuilt manuals and needs no documentation toolchain.
+
 Tests use isolated temporary app data. Mainline model/MCP/LSP/formatter fixtures
 are local and bounded. These checks do not replace live host-side Podman tests.
 Do not run host lifecycle tests from inside the project's running container.
@@ -101,6 +110,7 @@ Use the focused V2-only host fixture before important project imports:
 
 ```sh
 uv run --isolated --no-project --with cryptography python -I -B tools/test_global_vault_podman.py \
+  --expect-commit FULL_REVIEWED_CANDIDATE_COMMIT \
   --opencode-v2 "$(command -v opencode)" \
   --distro tumbleweed --work-dir /var/tmp --temp-dir /var/tmp
 ```
@@ -116,6 +126,10 @@ and quota. Keep reports/evidence until reviewed; the printed cleanup command
 only removes validated fixture-owned resources, retaining its files/archives.
 See `docs/opencode-2.md` for precise scope. Preparing this fixture is not a live
 host pass and does not repeat the older V1/selected-vault acceptance stages.
+Replace the example commit with the full reviewed clean checkout identity;
+do not use a moving branch or silently choose the latest HEAD. For historical
+report identities and current acceptance limits, start with the
+[source-bound evidence index](docs/testing.md#source-bound-evidence-index).
 
 V1 keeps legacy env-file defaults. V2 without an explicit policy is global
 vault-first; saved env/selected policies remain intentional overrides. Unit and

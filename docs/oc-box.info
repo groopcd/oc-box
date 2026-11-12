@@ -311,6 +311,10 @@ including when rechecking an older cached digest.  Only the documented
 obsolete nonpending tool raw-buffer normalization and native
 controller-directory/project rebind are accepted.  A successful import
 exit alone is not evidence that an existing conversation was replaced.
+V1 discovery is limited to root conversations exposed by its supported
+CLI; do not infer the V2 paginated linked-child archive scope for V1.
+Conversely, root-only automatic resume on V2 is a selection rule, not a
+limit on its independent child-session archive discovery.
 
 After a successful V1 archive deletion, a private
 workspace/session/archive/digest record permits a matching interrupted
@@ -1742,10 +1746,16 @@ File: oc-box.info,  Node: Lifecycle and persistence,  Next: Distribution images,
 
 Default purge retains host archive copies; ‘--delete-sessions’ and
 ‘--all’ remove recorded host archive copies.  Imported source host
-conversations remain.  Shared base images are retained by all
-operations.  Stop/reset do not checkpoint running processes.  Packages
-installed in the private home survive reset; system-wide packages do
-not.  No command currently manages Btrfs snapshots.
+conversations remain.  On V2, each discovered child archive is an
+independent recorded host root, not a live native child of its parent
+archive.  Purge still refuses an observed unrecorded native host child
+before archive deletion; it must not rely on native cascade deletion to
+remove unrelated conversations.  V1's root-only discovery does not
+provide this V2 child-inventory contract.  Shared base images are
+retained by all operations.  Stop/reset do not checkpoint running
+processes.  Packages installed in the private home survive reset;
+system-wide packages do not.  No command currently manages Btrfs
+snapshots.
 
 CPU, RAM, process, distro, and mapping changes require reset for
 existing containers.  A stop/start alone reuses the old create-time
@@ -2902,20 +2912,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2540
 Node: Commands6474
-Node: Options66933
-Node: Lifecycle and persistence88041
-Node: Distribution images90161
-Node: Sessions and recovery95036
-Node: Devices and host permissions104123
-Node: Resource reports106469
-Node: Configuration and environment108580
-Node: Files120331
-Node: Exit status125184
-Node: Examples125995
-Node: Troubleshooting128081
-Node: Installation and manuals137409
-Node: Authors and license145356
-Node: See also145963
+Node: Options67204
+Node: Lifecycle and persistence88312
+Node: Distribution images90798
+Node: Sessions and recovery95673
+Node: Devices and host permissions104760
+Node: Resource reports107106
+Node: Configuration and environment109217
+Node: Files120968
+Node: Exit status125821
+Node: Examples126632
+Node: Troubleshooting128718
+Node: Installation and manuals138046
+Node: Authors and license145993
+Node: See also146600
 
 End Tag Table
 

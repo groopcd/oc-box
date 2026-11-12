@@ -201,13 +201,16 @@ attempt. An offline rehearsal against real native 2.2.6 with substituted local
 Podman/transport layers reproduced it and passed all 27 checks after the fix; that
 rehearsal is not host acceptance.
 
-### Next migrated-history release candidate
+### Migrated-history release gate and later candidates
 
 Published `v1.6.51` remains unchanged. Its accepted host reports predate the
-superseded-assistant correction; the correction's native/offline pass is not new
-host acceptance. Freeze a clean candidate containing the runtime fix, regression
-fixtures and documentation, then run all three host fixtures on that exact
-revision before the next stable GitHub/PyPI publication.
+superseded-assistant correction. The frozen `v1.6.58` checkout described a
+pre-acceptance handoff; its subsequent reviewed host acceptance is recorded in
+the [published release notes](https://github.com/groopcd/oc-box/releases/tag/v1.6.58),
+without changing that tested source. The correction's offline pass alone was
+never host acceptance. For later runtime changes, freeze a new clean candidate
+and repeat the applicable three host fixtures before stable publication. Do not
+reuse the old source identity or promote a narrow retry into a fresh full run.
 
 The focused V2 runner retains its original 27 checks and adds six pending-shell
 checks: all **33** must pass, including same-pass progress on both sides of a
@@ -286,6 +289,33 @@ fast-forward the accepted commit without changing its identity, publish the
 matching GitHub Release/PyPI version, and compare the public artifacts' hashes.
 No new host pass or release is recorded by preparing this handoff.
 
+### Source-bound evidence index
+
+This is the authoritative entry point for validation claims. Detailed workflows
+below and linked historical records retain their original scope; they are not
+current-candidate certificates. Private reports/transcripts are not published in
+the repository. Where a release was accepted after its source freeze, its public
+release notes record that later review without retroactively editing the source.
+
+| Source identity / evidence | Accepted scope and detailed record |
+| --- | --- |
+| 1.0.0 backup/restore | Historical full/portable rootless backup acceptance; later lifecycle changes require repetition. See [backup limits](../SECURITY.md#backup-and-restore). |
+| 1.5 selected-vault and UI | Earlier scripted/native and separately observed terminal workflows; not the new global-default edge matrix. See [1.5 host coverage](opencode-2.md#verification). |
+| `1.5.38+g0611104` | Scripted global-vault/Build/opt-out/full restore; not interactive UI or every vault edge. See [full global-vault result](opencode-2.md#isolated-global-vault-and-build-approval-host-validation). |
+| `1.6.42+ge66fb39` / reported `1.6.43+ge06896f` | Separate new-layout global-vault and V1/V2 lifecycle/restore runs; keep execution identities distinct. See [reviewed reports](#reviewed-host-reports--2026-11-09). |
+| `1.6.44+ga043049` | Operator-observed disposable UI/resize/web/shell coexistence; manual fields remain `NOT_AUTOMATICALLY_PASSED`. See [reviewed reports](#reviewed-host-reports--2026-11-09). |
+| `1.6.46+gacddbd8` | Provider-free removal/empty/absent/wrong/corrupt/missing-crypto vault cases; no inference or new backup pass. See [vault edges](#fresh-provider-free-vault-edges-host-only). |
+| `1.6.48+g7df5074` | Image-free common home-component ownership transport only; not every full/portable first mount. See [home-component scope](#shared-home-component-ownership-fresh-host-only-image-free). |
+| `1.6.51+gb5d1ea8` | Earlier focused history/readiness, global-vault and lifecycle reports; predates superseded-assistant correction. See [reviewed reports](#reviewed-host-reports--2026-11-09). |
+| `1.6.58+g3138a87` (`3138a8727c3638983a8b9d19b1cb93a83d94a027`) | Published correction: focused 33-check, global-vault 13-stage and lifecycle six-stage host reports, with the lifecycle superseded-history checks. See [release acceptance and exact identity](https://github.com/groopcd/oc-box/releases/tag/v1.6.58). Scripted synthetic scope, not interactive UI, real-provider, network or security certification. |
+| Historical normal-host sandbox foreground/reload probes | Shell-tool allow/deny evidence for the tested generation/policy, not file tools, MCPs or PTYs. New in-flight lifecycle changes require a fresh normal-host check, including separate background cleanup. See [host evidence](host-plugins.md#accepted-native-host-foreground-and-reload-smoke-results). |
+| Later hardening candidates | Unit, native JS/API/CLI, process/TTY, docs and package/CI checks are offline/development evidence. They do not inherit any earlier host pass. Fresh exact-candidate host history/readiness, global-vault, lifecycle/backup and affected normal-host sandbox checks remain release gates. |
+
+All earlier failed fixtures/rehearsals stay failed evidence. Expected refusal
+exits are accepted only within a reviewed negative case, not as a way to turn an
+incomplete run green. A retry covers only its reported stages. A version number
+without the full source/harness/native identity is not interchangeable evidence.
+
 ### Reviewed host reports — 2026-11-09
 
 These are user-supplied reports reviewed here, **not executions from this
@@ -355,7 +385,8 @@ formatter/LSP/devices, real-provider inference or security certification.
 `tools/test_global_vault_edges_podman.py` is a separate fresh-only fixture:
 
 ```bash
-python3 -B tools/test_global_vault_edges_podman.py \
+python3 -I -B tools/test_global_vault_edges_podman.py \
+  --expect-commit FULL_REVIEWED_CANDIDATE_COMMIT \
   --work-dir /path/to/fixtures --opencode-v2 /path/to/opencode-2.2.6
 ```
 
@@ -412,7 +443,8 @@ fixture roots. No real project, operator credentials or vault unlock is needed:
 the owning start explicitly uses `--no-vault` and a synthetic `_API_KEY`.
 
 ```bash
-python3 -B tools/test_interactive_podman.py start \
+python3 -I -B tools/test_interactive_podman.py start \
+  --expect-commit FULL_REVIEWED_CANDIDATE_COMMIT \
   --work-dir /path/to/fixtures --opencode-v2 /path/to/opencode-2.2.6
 ```
 
@@ -425,10 +457,10 @@ wait until its TUI is ready, then use those commands in other host
 terminals. Only the single synthetic `source-a` workspace is allowed:
 
 ```bash
-python3 -B tools/test_interactive_podman.py tui --fixture /path/to/printed-root
-python3 -B tools/test_interactive_podman.py terminal --fixture /path/to/printed-root
-python3 -B tools/test_interactive_podman.py web --fixture /path/to/printed-root
-python3 -B tools/test_interactive_podman.py stop --fixture /path/to/printed-root
+python3 -I -B tools/test_interactive_podman.py tui --fixture /path/to/printed-root
+python3 -I -B tools/test_interactive_podman.py terminal --fixture /path/to/printed-root
+python3 -I -B tools/test_interactive_podman.py web --fixture /path/to/printed-root
+python3 -I -B tools/test_interactive_podman.py stop --fixture /path/to/printed-root
 ```
 
 Secondary commands require the unchanged source, original boot, verified private
@@ -465,9 +497,11 @@ guards and native relay dispatch, not real Podman/UI acceptance.
 `tools/test_home_ownership_podman.py` is a separate **component-only** probe:
 
 ```bash
-python3 -B tools/test_home_ownership_podman.py --work-dir /path/to/fixtures
+python3 -I -B tools/test_home_ownership_podman.py \
+  --expect-commit FULL_REVIEWED_CANDIDATE_COMMIT --work-dir /path/to/fixtures
 # After reviewing the new evidence, separately:
-python3 -B tools/test_home_ownership_podman.py --cleanup /path/to/exact-printed-root
+python3 -I -B tools/test_home_ownership_podman.py \
+  --expect-commit FULL_REVIEWED_CLEANUP_COMMIT --cleanup /path/to/exact-printed-root
 ```
 
 Use a clean full-history checkout, unprivileged Linux host, installed Podman/age/

@@ -49,6 +49,8 @@ the boundary and tradeoffs.
 - Delegated CPU, memory, and process cgroup controllers.
 - A host OpenCode 1.x or 2.x installation (2.x support requires oc-box 1.5+).
   Integration checks use 1.19.5 and 2.2.6; see [2.x compatibility](docs/opencode-2.md).
+  Historical host passes and later offline checks are distinguished in the
+  [source-bound evidence index](docs/testing.md#source-bound-evidence-index).
 - Git on the host for installation from GitHub and self-updates; curl for the
   one-line installer.
 - Network access for initial image, package, and plugin downloads.
