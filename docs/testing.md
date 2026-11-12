@@ -69,7 +69,7 @@ the original owner's global readiness wait, so its success does not establish
 that the original or reopened job inventory was empty. This is a plausible
 mechanism for the reported all-day exit failure, not proof of that user's trigger.
 
-The diagnostic change preserves the 30-second budget, two quiet pairs, all job
+The first diagnostic change (`7f7915b`) preserves the 30-second budget, two quiet pairs, all job
 statuses, pending-export checks and nonzero cleanup behavior. Unit matrices cover
 retained jobs, partial/slow observations, API failure at deadline, capped count-only
 diagnostics and unchanged client exit codes/no export after refusal. It adds no
@@ -79,9 +79,72 @@ Idle query timing and held-stdin native checks did not reproduce a transport or
 stdin-induced timeout. Ordinary interrupted foreground/background jobs recovered
 after their synthetic work completed. These observations and native regression
 fixtures are offline/process evidence, not a live rootless-Podman pass, an all-day
-soak or acceptance of a repair. Native job cleanup and automatic recovery remain
-open; any recovery must first establish safe teardown rather than assuming a
-reaped host-side Podman wrapper proves the remote service stopped.
+soak or acceptance of a repair. Native job cleanup remains open; the subsequent
+snapshot candidate below establishes a stronger teardown boundary rather than
+assuming a reaped host-side Podman wrapper proves the remote service stopped.
+
+#### Post-stop persisted-history snapshot candidate
+
+`history_recovery.py`, `history_reader.py` and `workspace_control.py` add a one-shot
+snapshot path after eligible shell-only timeouts. The ordinary live wait still
+fails. Eligibility is based on two prior complete validated pairs, not the final
+query phase: a tiny remaining CLI-query budget must not randomly disable the
+snapshot. A real timeout may retain those observations, but contradictory late
+responses and known non-timeout API failures invalidate them. All versions/kinds
+outside the supported 2.2.6/2.2.7 shell case retain the existing pending behavior.
+
+Unit/process matrices cover private stop intent before admission, stable locks,
+uncertain transition fences, immutable resource identity, stop/start/snapshot/stop
+ordering, one isolated reader, deadline propagation and unchanged nonzero results.
+Malformed/unsafe controls never initialize or repair themselves from readers.
+Source and destination scheduler guards inspect metadata only, use WAL-visible
+read-only SQLite connections and refuse every schedule row/unknown schema. The
+native scheduler's rewake path can run despite `-schedules`; no-schedules metadata
+and system-configuration guards are therefore prerequisites, not optional hints.
+
+`tests/smoke_history_recovery_v2.py` runs on unmodified 2.2.6 and 2.2.7. It closes
+the old **local native process**, then exercises the production reader, real
+archive/import verification, retained running-looking job metadata, no invented
+notices and source/destination scheduler refusals. Provider/shell/plugin canaries
+must not execute during the reader. It is included in `tests/smoke_v2.py`; it does
+not establish whole-container process death, actual rootless stop/start ordering
+or host acceptance. The original live timeout and nonzero result remain distinct
+from a successful checked snapshot; native job cleanup is still not repaired.
+
+The focused host runner adds opt-in `--history-recovery-case snapshot` and
+`--history-recovery-case stop-cancel`. Each invocation creates a separate fresh
+synthetic root. Their `oc-box-history-recovery-host-v1` reports require 12 and six
+checks respectively, owner exits `[0,1]` in each, and explicit-stop exit `0` in the
+cancellation case. They are **additional to**, not replacements for, the unchanged
+default 42-check/eight-exit run. The new cases remain strictly native **2.2.6**;
+2.2.7 reader results are not mislabeled as host acceptance.
+
+Run outside oc-box as an unprivileged user, with the runner outside a clean,
+full-history candidate checkout and an existing safe work parent:
+
+```sh
+python3 -I -B /srv/oc-box-harness/tools/test_session_sync_podman.py \
+  --source /srv/oc-box-candidate --expect-commit "$CANDIDATE_COMMIT" \
+  --work-dir /srv/oc-box-acceptance --opencode-v2 /srv/native/opencode-2.2.6 \
+  --history-recovery-case snapshot
+# Repeat the same command with: --history-recovery-case stop-cancel
+```
+
+The snapshot case must exercise the actual default 30-second production refusal,
+old owner closure, full stop proof, exactly one pinned-ID restart/private reader,
+real verified host archives and final stopped state. The cancellation case uses
+independent control processes; the stop process is preloaded but cannot invoke
+the CLI until the real timeout/owner closure, then publishes intent before held
+admission is released. Missing reproduction is a failure, not a drained-job pass.
+Only forwarding observers are permitted; selector support must preserve actual
+production fences, never manufacture them. Reports retain fixed categories and
+source/native/runner identities, never argv/env/transcripts.
+
+These first two cases do not establish naturally ambiguous engine-start behavior
+or every stop-timing race. Keep unit/process fence coverage and obtain the relevant
+additional host fault/race and lifecycle/vault/history evidence before stable
+publication. Never run these fixtures here, move retained stores, delete private
+reports to make a checkout clean or overwrite earlier failed evidence.
 
 #### History and interrupted-export contracts
 

@@ -389,8 +389,29 @@ failure category. Request failure at the deadline also remains `activity-timeout
 Native 2.2.6/2.2.7 location reload can retain a cancelled background-shell job
 without foreground activity; reopening can expose it as running. Successful
 explicit sync is not evidence that the row cleared: that path checks native
-exports without the original owner's activity wait. Retained jobs remain blocking,
-and this diagnostic change is not a native job-cleanup fix or automatic recovery.
+exports without the original owner's activity wait. Retained jobs remain blocking
+in the live owner; neither diagnostics nor snapshots repair native job cleanup.
+
+The development candidate adds one bounded post-stop snapshot for supported
+2.2.6/2.2.7 shell-only timeouts. Its last validated pairs are routing hints, not
+quiescence proof. The original owner must close normally with no attached clients;
+the actual old-producer boundary is a verified whole-container stop, not the exit
+of its host-side Podman wrapper. Stop intent can suppress the same-ID history-only
+restart. Ambiguous starts retain an uncertainty fence instead of a successful-stop
+claim. No container/volume replacement, runtime preparation or credential refresh
+is performed by recovery.
+
+One non-executing private reader then supplies every inventory/export operation;
+no controller or managed-service recovery is published. Source and host destination
+guards refuse any native schedule row, unknown scheduler schemas and nonempty
+system configuration before service construction. Scheduler flags alone do not
+disable native pending-input rewakes. Isolated configuration, provider/tool/plugin
+denials and disabled warming supplement those guards. Foreground activity remains
+a before/after refusal tripwire. Existing projection/export checks and verified
+archive import remain unchanged. The reader may maintain native metadata; it is
+not a byte-read-only backup. Final cleanup stops the container, and even successful
+snapshots retain the original nonzero result and interrupted-work warning. This
+path has native/offline coverage only until the new focused host gates pass.
 
 Once activity readiness passes, projected-history checks also reject messages
 omitted by native export while a direct user shell or compaction is running, or

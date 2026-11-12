@@ -226,7 +226,7 @@ def checked_export(request, ident):
 
 
 @contextlib.contextmanager
-def server(binary):
+def server(binary, *, exit_info=None):
     password = secrets.token_urlsafe(32)
     env = {**os.environ, "OPENCODE_PASSWORD": password}
     descriptor = os.memfd_create("oc-box-v2-errors", os.MFD_CLOEXEC)
@@ -271,15 +271,19 @@ def server(binary):
                 time.sleep(0.1)
             yield request
         finally:
+            forced = False
             if child.stdin:
                 child.stdin.close()
             try:
                 child.wait(timeout=5)
             except subprocess.TimeoutExpired:
+                forced = True
                 os.killpg(child.pid, signal.SIGKILL)
                 child.wait(timeout=5)
             if child.stdout:
                 child.stdout.close()
+            if exit_info is not None:
+                exit_info.update(code=child.returncode, forced=forced)
 
 
 def seed_database():

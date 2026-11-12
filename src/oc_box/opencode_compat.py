@@ -25,6 +25,10 @@ def command(release, executable, arguments, *, server=None):
     if major(release) == 1:
         return [executable, *args]
     args = [arg for arg in args if arg != "--pure"]
+    if args[:2] == ["debug", "paths"]:
+        # This native local handler neither discovers nor starts a service and
+        # does not accept connection flags, even for a private server caller.
+        return [executable, *(arg for arg in args if arg != "--standalone")]
     if args and args[0] in ("export", "import"):
         args.insert(0, "session")
     if args[:2] == ["session", "list"] and "--max-count" not in args:
