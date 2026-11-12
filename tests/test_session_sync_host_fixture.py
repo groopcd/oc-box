@@ -2382,6 +2382,8 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 "provider_requests": 2,
                 "shell_starts": 1,
                 "explicit_stop_exit_code": 0 if case == "stop-cancel" else None,
+                "recovery_calls": 1,
+                "snapshot_completed": int(case == "snapshot"),
             }
 
             def report(*, observations=observations, case=case, **changes):
@@ -2398,7 +2400,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
 
             passed = report()
             self.assertEqual(passed["status"], "PASS")
-            self.assertEqual(passed["format"], "oc-box-history-recovery-host-v1")
+            self.assertEqual(passed["format"], "oc-box-history-recovery-host-v2")
             self.assertEqual(len(passed["checks"]), count)
             self.assertEqual(passed["launcher_exit_codes"], [0, 1])
             for name in runner.RECOVERY_CHECKS[case]:
@@ -2418,6 +2420,8 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 ("auth_calls", 1),
                 ("provider_requests", 3),
                 ("shell_starts", 2),
+                ("recovery_calls", 2),
+                ("snapshot_completed", int(case != "snapshot")),
             ):
                 self.assertEqual(
                     report(observations={**observations, key: wrong})["status"],
@@ -2633,6 +2637,90 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         with self.assertRaises(OSError) as raised:
             h.observe_run(command)
         self.assertIs(raised.exception, error)
+
+    def test_recovery_phase_excludes_budgeted_outer_cleanup_without_relaxing_trace(
+        self,
+    ):
+        from oc_box import history_recovery
+
+        h = self.recovery_harness()
+        h.closed.set()
+        h.source_fence = True
+        h.box.history_recovery = history_recovery
+        running, results = True, []
+
+        def engine(command, **_options):
+            nonlocal running
+            action = command[1:]
+            if action[:1] == ["stop"]:
+                running = False
+            elif action[:1] == ["start"]:
+                running = True
+            value = [
+                {
+                    "Id": h.container_id,
+                    "State": {
+                        "Running": running,
+                        "Pid": 100 if running else 0,
+                        "ConmonPid": 100 if running else 0,
+                        "Status": "running" if running else "exited",
+                    },
+                }
+            ]
+            result = SimpleNamespace(returncode=0, stdout=json.dumps(value))
+            results.append(result)
+            return result
+
+        h.raw_run = Mock(side_effect=engine)
+        inspect = ["podman", "container", "inspect", h.container_id]
+
+        def actual_recovery():
+            self.assertTrue(h.recovering())
+            with history_recovery.budget(30):
+                for command in (
+                    inspect,
+                    ["podman", "stop", "--time", "10", h.container_id],
+                    inspect,
+                    ["podman", "start", h.container_id],
+                    inspect,
+                    ["podman", "stop", "--time", "10", h.container_id],
+                    inspect,
+                ):
+                    self.assertIs(h.observe_run(command), results[-1])
+            return True
+
+        h.raw_recovery = Mock(side_effect=actual_recovery)
+        self.assertIs(h.observe_recovery(), True)
+        with history_recovery.budget(30):
+            self.assertFalse(h.recovering())
+            self.assertIs(h.observe_run(inspect), results[-1])
+        self.assertEqual(h.raw_run.call_count, 8)
+        self.assertEqual(h.recovery_calls, 1)
+        self.assertEqual(h.recovery_results, [True])
+        self.assertEqual(len(h.transitions), 7)
+        self.assertEqual(h.stop_proofs, [True, True])
+        h.verify_recovery_transitions()
+        h.transitions.append(("inspect", True, False))
+        with self.assertRaises(runner.Refusal):
+            h.verify_recovery_transitions()
+
+    def test_recovery_observer_preserves_failed_results_exceptions_and_phase_reset(
+        self,
+    ):
+        h = self.recovery_harness()
+        h.raw_recovery = Mock(return_value=False)
+        self.assertIs(h.observe_recovery("public-argument"), False)
+        h.raw_recovery.assert_called_once_with("public-argument")
+        self.assertEqual(h.recovery_results, [False])
+        self.assertFalse(h.recovering())
+        failure = OSError("private-sentinel")
+        h.raw_recovery.side_effect = failure
+        with self.assertRaises(OSError) as raised:
+            h.observe_recovery()
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(h.recovery_calls, 2)
+        self.assertEqual(h.recovery_results, [False])
+        self.assertFalse(h.recovering())
 
     def test_stop_worker_waits_for_real_close_then_publishes_intent_before_release(
         self,

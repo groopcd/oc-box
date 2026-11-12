@@ -214,3 +214,21 @@ The new native fixture exercises the reader and real archive round trips on
 same-ID restart and concurrent explicit-stop authority require the focused
 external-host gate on a clean frozen candidate. No host fixture may run here;
 no stable publication is authorized by these offline results.
+
+## First external attempt: transition oracle failure
+
+The first snapshot gate on runtime `d736bc1` reached the real eligible timeout and
+old-owner closure, then failed the strict transition assertion. This is failed
+evidence; it does not establish snapshot or stop-cancellation acceptance.
+
+Source inspection and an offline regression exposed a fixture-only phase error:
+using `DEADLINE` as a recovery marker also includes the separately bounded outer
+cleanup. The corrected v2 harness instead forwards the actual recovery call,
+tracks its thread/return value, and retains the original strict seven transitions
+and two stop proofs. An unexpected extra operation inside that call still fails.
+The old report lacks the event trace, so another runtime issue is not ruled out.
+
+No runtime source is changed for this oracle correction. Keep the failed store
+and old harness intact; use a new external harness file and fresh fixture roots
+against the unchanged clean `d736bc1` candidate. Record the new runner identity
+separately, and do not retrospectively relabel the first run.
