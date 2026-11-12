@@ -75,6 +75,146 @@ class FakeClock:
 
 
 class ProbeBoundaryTests(unittest.TestCase):
+    def test_pax_reason_requires_a_validated_refusal_and_no_capture_overflow(self):
+        authentication = ([0, 0], True, False, b"", b"", False)
+        diagnostic = b"archive-scan:malformed-pax\npax-reason:xattr-value-nul\n"
+        cases = (
+            ([0, 0], True, False, probe.REFUSAL, False, "unknown", "not-observed"),
+            ([0, 2], True, False, probe.REFUSAL, False, "unknown", "not-observed"),
+            ([0, 1], True, False, probe.SUCCESS, False, "unknown", "not-observed"),
+            ([0, 1], True, False, b"malformed", False, "unknown", "not-observed"),
+            (
+                [0, 1],
+                True,
+                False,
+                probe.REFUSAL,
+                True,
+                "capture-overflow",
+                "not-observed",
+            ),
+            (
+                [-signal.SIGPIPE, 1],
+                True,
+                False,
+                probe.REFUSAL,
+                False,
+                "malformed-pax",
+                "xattr-value-nul",
+            ),
+            (
+                [-signal.SIGTERM, 1],
+                False,
+                True,
+                probe.REFUSAL,
+                False,
+                "malformed-pax",
+                "xattr-value-nul",
+            ),
+        )
+        for codes, complete, expired, stdout, overflow, category, reason in cases:
+            with self.subTest(
+                codes=codes, stdout=stdout, overflow=overflow, timeout=expired
+            ):
+                with crypto.memory_file(b"ciphertext") as ciphertext:
+                    with (
+                        patch.object(
+                            probe.os,
+                            "open",
+                            side_effect=lambda *a: os.dup(ciphertext.fileno()),
+                        ),
+                        patch.object(
+                            probe,
+                            "_pipeline",
+                            side_effect=[
+                                authentication,
+                                (
+                                    codes,
+                                    complete,
+                                    expired,
+                                    stdout,
+                                    diagnostic,
+                                    overflow,
+                                ),
+                            ],
+                        ),
+                    ):
+                        result = probe.probe_component(
+                            crypto, "unused", PRIVATE, SCANNER, "oci", pax_reason=True
+                        )
+                self.assertEqual(result["scanner_category"], category)
+                self.assertEqual(result["pax_reason"], reason)
+                self.assertEqual(result["timed_out"], expired)
+                self.assertTrue(result["authenticated"])
+
+    def test_pax_reason_protocol_is_exact_and_preserves_original_refusal(self):
+        authentication = ([0, 0], True, False, b"", b"", False)
+        for reason in probe.PAX_REASONS:
+            if reason == "not-observed":
+                continue
+            original = b"archive-scan:malformed-pax\n"
+            for suffix, expected_category, expected_reason in (
+                (("pax-reason:" + reason + "\n").encode(), "malformed-pax", reason),
+                (
+                    b"pax-reason:" + SENSITIVE.encode() + b"\n",
+                    "unknown",
+                    "not-observed",
+                ),
+                (b"", "unknown", "not-observed"),
+                (
+                    ("pax-reason:" + reason + "\n").encode() + b"extra",
+                    "unknown",
+                    "not-observed",
+                ),
+            ):
+                with self.subTest(reason=reason, suffix=expected_reason):
+                    with crypto.memory_file(b"ciphertext") as ciphertext:
+                        with (
+                            patch.object(
+                                probe.os,
+                                "open",
+                                side_effect=lambda *a: os.dup(ciphertext.fileno()),
+                            ),
+                            patch.object(
+                                probe,
+                                "_pipeline",
+                                side_effect=[
+                                    authentication,
+                                    (
+                                        [0, 1],
+                                        True,
+                                        False,
+                                        probe.REFUSAL,
+                                        original + suffix,
+                                        False,
+                                    ),
+                                ],
+                            ) as pipeline,
+                        ):
+                            result = probe.probe_component(
+                                crypto,
+                                "unused",
+                                PRIVATE,
+                                SCANNER,
+                                "oci",
+                                pax_reason=True,
+                            )
+                    self.assertTrue(result["authenticated"])
+                    self.assertEqual(result["scanner_exit"], 1)
+                    self.assertEqual(result["scanner_category"], expected_category)
+                    self.assertEqual(result["pax_reason"], expected_reason)
+                    self.assertNotIn(SENSITIVE, json.dumps(result))
+                    self.assertEqual(
+                        pipeline.call_args_list[1].args[2],
+                        [
+                            sys.executable,
+                            "-I",
+                            "-B",
+                            str(SCANNER.with_name("sharing_pax_reason.py")),
+                            str(SCANNER),
+                            "oci",
+                        ],
+                    )
+
     def invoke(self, specifications=None, *, timeout=10, clock=None):
         specifications = (
             [{}, {}, {}, {"output": probe.SUCCESS}]
@@ -597,6 +737,36 @@ def make_oci(layer):
     shutil.which("age") and shutil.which("age-keygen"), "native age tools unavailable"
 )
 class NativeAgeProbeTests(unittest.TestCase):
+    def test_reason_observation_repeats_original_refusal_without_accepting_binary_metadata(
+        self,
+    ):
+        body = b"SCHILY.xattr.security.capability=\x00\x00\x00\x01\n"
+        length = len(body) + 2
+        while len(str(length)) + 1 + len(body) != length:
+            length = len(str(length)) + 1 + len(body)
+        payload = str(length).encode() + b" " + body
+        member = tarfile.TarInfo("synthetic-pax")
+        member.type, member.size = tarfile.XHDTYPE, len(payload)
+        layer = (
+            member.tobuf(format=tarfile.USTAR_FORMAT)
+            + payload
+            + bytes((-len(payload)) % 512)
+            + make_tar([("safe", b"safe")])
+        )
+        path = self.encrypt(make_oci(layer))
+        original = path.read_bytes()
+        baseline = probe.probe_component(
+            crypto, path, self.private, SCANNER, "oci", timeout=15
+        )
+        detail = probe.probe_component(
+            crypto, path, self.private, SCANNER, "oci", timeout=15, pax_reason=True
+        )
+        self.assertEqual(detail["pax_reason"], "xattr-value-nul")
+        self.assertEqual({key: detail[key] for key in RESULT_KEYS}, baseline)
+        self.assertTrue(detail["authenticated"])
+        self.assertEqual(detail["scanner_category"], "malformed-pax")
+        self.assertEqual(path.read_bytes(), original)
+
     @classmethod
     def setUpClass(cls):
         cls.private = crypto.small(["age-keygen"])

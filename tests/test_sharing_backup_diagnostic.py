@@ -843,6 +843,35 @@ class ArchiveInspectionCase(EvidenceCase):
 
 
 class ArchiveInspectionTests(ArchiveInspectionCase):
+    def test_explicit_reason_observation_targets_only_image_and_forwards_boolean(self):
+        self.probe.probe_component.side_effect = None
+        self.probe.probe_component.return_value = {
+            **probe_result(),
+            "scanner_exit": 1,
+            "scanner_category": "malformed-pax",
+            "pax_reason": "xattr-value-nul",
+        }
+        result = diagnostic.inspect_archive(
+            self.loaded,
+            self.root / "sharing-full.ocbox",
+            self.root / "sharing-age-identity.txt",
+            self.scanner,
+            self.source,
+            self.probe,
+            pax_reason=True,
+        )
+        self.assertEqual(set(result), {"image.age"})
+        self.probe.probe_component.assert_called_once_with(
+            self.f.crypto,
+            self.directory / "image.age",
+            self.private,
+            self.scanner,
+            "oci",
+            pax_reason=True,
+        )
+        self.assertEqual(result["image.age"]["scanner_category"], "malformed-pax")
+        self.assertEqual(result["image.age"]["pax_reason"], "xattr-value-nul")
+
     def test_real_native_manifest_validation_remains_pure_metadata(self):
         self.loaded.box.DISTROS = {"synthetic": {}}
         self.manifest.update(
@@ -993,6 +1022,38 @@ class MainReportTests(ArchiveInspectionCase):
     def invoke(self):
         return self.capture_main(
             self.main_arguments(), history=self.history, probe=self.probe
+        )
+
+    def test_explicit_image_reason_mode_records_worker_identity_without_acceptance(
+        self,
+    ):
+        self.probe.probe_component.side_effect = None
+        self.probe.probe_component.return_value = {
+            **probe_result(),
+            "scanner_exit": 1,
+            "scanner_category": "malformed-pax",
+            "pax_reason": "xattr-value-nul",
+        }
+        code, result = self.capture_main(
+            [*self.main_arguments(), "--pax-reason"],
+            history=self.history,
+            probe=self.probe,
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "diagnostic-only")
+        self.assertEqual(result["observation"], "original-image-pax-reason")
+        self.assertEqual(set(result["components"]), {"image.age"})
+        self.assertEqual(
+            result["components"]["image.age"]["pax_reason"], "xattr-value-nul"
+        )
+        worker = Path(diagnostic.__file__).with_name("sharing_pax_reason.py")
+        self.assertEqual(
+            result["diagnostic_sha256"][worker.name], diagnostic.digest(worker)
+        )
+        self.assertIs(result["original_evidence_unchanged"], True)
+        self.probe.probe_component.assert_called_once()
+        self.assertEqual(
+            self.probe.probe_component.call_args.kwargs, {"pax_reason": True}
         )
 
     def test_output_cleanup_failure_never_erases_primary_or_returns_completed_status(

@@ -129,6 +129,11 @@ def parser():
     result.add_argument("--fixture", type=Path, required=True)
     result.add_argument("--recorded-harness-commit", required=True)
     result.add_argument(
+        "--pax-reason",
+        action="store_true",
+        help="Inspect only image.age with a decision-preserving, fixed-reason observer of the original scanner",
+    )
+    result.add_argument(
         "--temp-dir",
         type=Path,
         required=True,
@@ -222,7 +227,9 @@ def validated_evidence(args, history, loaded):
     return root, records["source-a"][1], archive, identity, scanner, watched
 
 
-def inspect_archive(loaded, archive, identity, scanner, source, probe):
+def inspect_archive(
+    loaded, archive, identity, scanner, source, probe, *, pax_reason=False
+):
     f = loaded.fixture
     results = {}
     try:
@@ -240,7 +247,7 @@ def inspect_archive(loaded, archive, identity, scanner, source, probe):
                 and set(manifest.get("components", {})) == set(COMPONENTS),
                 "purpose",
             )
-            for name in COMPONENTS:
+            for name in ("image.age",) if pax_reason else COMPONENTS:
                 path = directory / name
                 measured = f.crypto.digest(path)
                 require(measured == manifest["components"][name], "evidence-changed")
@@ -250,6 +257,7 @@ def inspect_archive(loaded, archive, identity, scanner, source, probe):
                     private,
                     scanner,
                     "oci" if name == "image.age" else "tar",
+                    **({"pax_reason": True} if pax_reason else {}),
                 )
                 require(f.crypto.digest(path) == measured, "evidence-changed")
                 results[name] = {
@@ -332,13 +340,24 @@ def main(argv=None):
                     scanner,
                 )
             }
+            if args.pax_reason:
+                result["diagnostic_sha256"]["sharing_pax_reason.py"] = digest(
+                    directory / "sharing_pax_reason.py"
+                )
+                result["observation"] = "original-image-pax-reason"
             try:
                 with (
                     patch.dict(os.environ, f.isolated_env(root), clear=True),
                     f.temporary_location(root, parent),
                 ):
                     result["components"] = inspect_archive(
-                        loaded, archive, identity, scanner, source, probe
+                        loaded,
+                        archive,
+                        identity,
+                        scanner,
+                        source,
+                        probe,
+                        **({"pax_reason": True} if args.pax_reason else {}),
                     )
             except BaseException as error:
                 result["category"] = category(error)

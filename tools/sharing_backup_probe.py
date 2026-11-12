@@ -9,6 +9,7 @@ Only fixed categories and child exit codes cross this module's boundary.
 
 import math
 import os
+from pathlib import Path
 import re
 import signal
 import stat
@@ -40,6 +41,22 @@ SCANNER_CATEGORIES = frozenset(
         "input-error",
         "interrupted",
     )
+)
+PAX_REASONS = (
+    "length-prefix",
+    "record-length",
+    "delimiter",
+    "key-nul",
+    "key-utf8",
+    "xattr-value-nul",
+    "xattr-value-utf8",
+    "text-value-nul",
+    "text-value-utf8",
+    "size",
+    "owner",
+    "timestamp",
+    "outside-pax-fields",
+    "not-observed",
 )
 # Bounded raw reads, no parsing/output, and no early exit before input EOF.
 EOF_SINK = "import os\nwhile os.read(0, 65536):\n    pass\n"
@@ -184,7 +201,9 @@ def _category(codes, completed, timed_out, response, diagnostic, capture_overflo
     return "unknown"
 
 
-def probe_component(crypto, path, private, scanner, mode, timeout=3600):
+def probe_component(
+    crypto, path, private, scanner, mode, timeout=3600, *, pax_reason=False
+):
     """Return fixed JSON-safe diagnostics without exposing native tool output.
 
     ``crypto`` is the source-pinned candidate's backup_crypto module. ``private``
@@ -207,8 +226,11 @@ def probe_component(crypto, path, private, scanner, mode, timeout=3600):
         "scanner_category": "unknown",
         "timed_out": False,
     }
+    if pax_reason is True:
+        result["pax_reason"] = "not-observed"
     if (
         mode not in ("tar", "oci")
+        or type(pax_reason) is not bool
         or not isinstance(private, bytes)
         or len(private) > 16384
         or isinstance(timeout, bool)
@@ -259,18 +281,45 @@ def probe_component(crypto, path, private, scanner, mode, timeout=3600):
                     return result
                 source.seek(0)
                 identity.seek(0)
+                consumer = [sys.executable, "-I", "-B", os.fspath(scanner), mode]
+                if pax_reason:
+                    consumer = [
+                        sys.executable,
+                        "-I",
+                        "-B",
+                        str(Path(__file__).with_name("sharing_pax_reason.py")),
+                        os.fspath(scanner),
+                        mode,
+                    ]
                 codes, complete, expired, response, diagnostic, overflow = _pipeline(
                     crypto,
                     first,
-                    [sys.executable, "-I", "-B", os.fspath(scanner), mode],
+                    consumer,
                     descriptors,
                     deadline,
                 )
                 result["scanner_producer_exit"], result["scanner_exit"] = codes
                 result["timed_out"] = expired
+                observed_reason = "not-observed"
+                if pax_reason:
+                    original = b"archive-scan:malformed-pax\n"
+                    for reason in PAX_REASONS:
+                        if reason != "not-observed" and diagnostic == (
+                            original + ("pax-reason:" + reason + "\n").encode("ascii")
+                        ):
+                            observed_reason = reason
+                            diagnostic = original
+                            break
+                    else:
+                        if diagnostic == original:
+                            # A malformed-PAX observation without its required
+                            # fixed detail is an incomplete worker protocol.
+                            diagnostic = b""
                 result["scanner_category"] = _category(
                     codes, complete, expired, response, diagnostic, overflow
                 )
+                if pax_reason and result["scanner_category"] == "malformed-pax":
+                    result["pax_reason"] = observed_reason
     except (OSError, ValueError, subprocess.SubprocessError, crypto.BackupError):
         # Preserve any completed authentication/exit evidence, never exception
         # text (which could contain private paths, plaintext, or credentials).

@@ -279,3 +279,39 @@ complete backup/restore/SELinux acceptance. Keep all three failed attempts intac
 Leave the source, diagnostic checkout and retained evidence idle while it runs.
 The before/after hashes detect persistent changes, not malicious same-user
 substitution followed by restoration; this is not a hostile-host attestation.
+
+### Image PAX refusal: first diagnostic result and narrow observation
+
+The reviewed file-only host diagnostic against the original `e0b10f9` evidence
+and clean candidate `8ac6829` authenticated all four components completely.
+Project, home and registry scans returned `ok`; the image scanner returned
+`malformed-pax` with producer exit 0, scanner exit 1, no timeout, no secondary
+failure and unchanged original evidence. This identifies the component and parser
+category, **not** image exclusion, the precise PAX branch, or host acceptance.
+
+Binary `SCHILY.xattr.*` values are an established container-archive convention
+and an offline compatibility issue in the original scanner. However, the same
+`malformed-pax` category also covers invalid framing, key/value encodings, numeric
+fields and extension padding. Do not attribute this retained host failure to
+binary xattrs solely from that category.
+
+For a narrower observation, append **`--pax-reason`** to the diagnostic command.
+This inspects **only `image.age`**, after the same complete encrypted-envelope,
+manifest, source, provenance and preservation checks. The output adds the fixed
+`observation: original-image-pax-reason` label and a fixed `pax_reason` for that
+component. It does not repeat the project/home/registry scans or establish their
+current exclusion independently of the earlier diagnostic.
+
+The internal stdin-only `sharing_pax_reason.py` worker verifies the exact original
+scanner SHA-256, compiles those verified source bytes without a bytecode cache,
+and observes the original PAX parser's exception. It **re-raises the same
+exception**; the original parser still refuses and drains input as before. No
+format is newly accepted, no metadata is skipped, and all capture/timeout/core
+limits remain in force. Only fixed branches such as `xattr-value-nul`,
+`text-value-utf8`, `record-length` or `outside-pax-fields` may be reported; no
+member/xattr names, values, offsets or plaintext hashes are exposed.
+
+An observed first binary-xattr refusal would justify investigating that narrow
+compatibility boundary, but would still not prove that later records pass. Keep
+the original scanner, diagnostic result and failed host reports intact until a
+reviewed correction and fresh complete acceptance establish the required scope.
