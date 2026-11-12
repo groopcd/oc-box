@@ -208,3 +208,74 @@ The original report remains failed evidence. Neither its completed setup checks
 nor the corrected local/native controls constitute a new host-sharing PASS.
 Keep both earlier failed fixtures unchanged and use another fresh fixture for
 the corrected, reviewed harness against the same frozen candidate.
+
+## Third host attempt: backup inspection failure, not acceptance
+
+The `e0b10f9` harness on clean `8ac6829` completed 28 checkpoints, including
+live text/images, the real nested-mount refusal, native denials, two workspaces,
+owner lease draining, and revocation through reset. Its provider consumed all
+43 plans with 86 requests and zero errors; all owners reached validated terminal
+states, without secondary failures. The run then failed during the encrypted
+backup decryption/scanner pipeline. Backup/restore and the final unchanged-label
+check were not completed. The original report remains **FAIL**.
+
+The old failure trace does not identify which of the four components failed, or
+whether the producer or scanner refused. Successful envelope opening verified
+the encrypted manifest and every component's ciphertext hash/size, but does not
+prove each component's complete age authentication. Do not infer corruption, an
+image-metadata incompatibility, or an external-data leak from that trace alone.
+
+### File-only diagnostic of the retained backup
+
+`tools/diagnose_sharing_backup.py` is a separate **host-only diagnostic**, not a
+retry or acceptance runner. Use a reviewed, pinned diagnostic checkout, the
+original unchanged source checkout, and the original failed fixture. From the
+diagnostic repository root on the external host:
+
+```bash
+uv run --isolated --no-project --python /usr/bin/python3 --with cryptography \
+  python -I -B tools/diagnose_sharing_backup.py \
+  --source /path/to/clean/candidate \
+  --expect-commit 8ac68294d1d607ca9ff57fc5e15d16292ff957c6 \
+  --fixture /var/tmp/oc-box-gv-host-sharing-EXAMPLE \
+  --recorded-harness-commit e0b10f9c2bb83a10faa46a8d926a001ae6f176ee \
+  --temp-dir /var/tmp
+```
+
+The diagnostic:
+
+- Refuses root/containers before source or fixture access. Requires original
+  failed-backup scope, private owned files, matching full source identity, original
+  harness Git hashes, and the **unchanged original scanner and history helper**.
+- Checks the retained boot marker using files only. Stale, absent or invalid
+  markers refuse without running the engine, rewriting markers or moving stores.
+- Runs **zero Podman or OpenCode commands**. It never starts/unlocks a workspace,
+  refreshes credentials, restores, cleans up, retries the host scenario, or writes
+  into the retained fixture or either checkout. Ordinary file reads can update
+  access times; byte/content preservation is not an atime-preservation claim.
+- Uses private temporary storage outside all fixtures/checkouts for **encrypted
+  components only**. Keys, decrypted manifests, plaintext streams and child output
+  stay in anonymous memory/pipes. No plaintext tar/image extraction occurs.
+- Authenticates each component independently through age and a discard-to-EOF
+  sink **before** streaming a second decryption into the original scanner.
+  It reports measured ciphertext hash/size, authentication result, separate child
+  exits, timeout, and an exact allowlisted scanner category—not member names,
+  xattrs, payloads, native errors, identities or environment values. Each component
+  has a one-hour total processing bound, plus bounded owned-child cleanup. Child
+  output captures have kernel-enforced size limits; `capture-overflow` is a fixed
+  incomplete diagnostic, never a scanner success or an authentication claim.
+- Rechecks original archive/key/purpose/report hashes and source/tool identities
+  even after inspection errors. Later preservation failures stay separate from
+  the primary failure. No original report or encrypted evidence is overwritten.
+
+Return only the printed JSON. `diagnostic-only` means the inspection completed,
+**not** that all scans passed; inspect each component's fields. An authenticated
+component with a scanner refusal has not established exclusion. A nonzero age
+exit is not automatically proof of corruption, especially after a scanner pipe
+closes. `unknown`, timeout, and `diagnostic-refused` remain inconclusive.
+Every output has `engine_commands: 0` and `acceptance: false`. Even four successful
+component scans cannot retroactively turn the original failed run into PASS or
+complete backup/restore/SELinux acceptance. Keep all three failed attempts intact.
+Leave the source, diagnostic checkout and retained evidence idle while it runs.
+The before/after hashes detect persistent changes, not malicious same-user
+substitution followed by restoration; this is not a hostile-host attestation.
