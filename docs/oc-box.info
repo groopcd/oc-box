@@ -548,22 +548,25 @@ Initially select one existing project/workspace, or omit selectors for
 the registered workspace overview.  The sidebar still permits switching
 between registrations.  Browsing does not create/start a workspace, take
 lifecycle ownership, reset, sync, refresh credentials or unlock the
-vault.  ‘--read-only’ disables native session mutation and terminal
-control/input.  ‘--demo’ is a synthetic-only preview with fixed
-CPU/RAM/storage readings that also permits execution inside a container:
-no host services, actual registry/log access or host/workspace actions.
-Refreshing demo data does not animate those sample values; use normal
-host mode (optionally ‘--read-only’) for live measurements.
+vault.  ‘--read-only’ disables native session mutation, backup
+creation/restore/deletion, workspace removal and terminal control/input.
+Explicit backup inspection remains available.  ‘--demo’ is a
+synthetic-only preview with fixed CPU/RAM/storage readings that also
+permits execution inside a container: no host services, actual
+registry/log access or host/workspace actions.  Refreshing demo data
+does not animate those sample values; use normal host mode (optionally
+‘--read-only’) for live measurements.
 
-The five tabs are Status, Settings, Sessions, Terminals and Logs.
-‘1’–‘5’ select them; ‘r’ refreshes and ‘q’ quits outside a focused
-embedded terminal.  The compact one-line header ellipsizes long labels
-and keeps case-insensitive literal log search available from every tab,
-including while follow is paused; ‘Ctrl+L’ opens Logs and focuses
-search.  ‘s’ or ‘F2’ opens all dashboard settings outside focused text
-inputs or the native shell.  A focused terminal keeps its keys,
-including ‘s’, ‘F2’ and ‘Ctrl+L’; use ‘Ctrl-]’ to detach its client
-without ending the native shell before using dashboard shortcuts.
+The seven tabs are Status, Settings, Sessions, Terminals, Logs, Storage
+and Backup/restore.  ‘1’–‘7’ select them; ‘r’ refreshes and ‘q’ quits
+outside a focused embedded terminal.  The compact one-line header
+ellipsizes long labels and keeps case-insensitive literal log search
+available from every tab, including while follow is paused; ‘Ctrl+L’
+opens Logs and focuses search.  ‘s’ or ‘F2’ opens all dashboard settings
+outside focused text inputs or the native shell.  A focused terminal
+keeps its keys, including ‘s’, ‘F2’ and ‘Ctrl+L’; use ‘Ctrl-]’ to detach
+its client without ending the native shell before using dashboard
+shortcuts.
 
 Drag-select visible text throughout the dashboard, including logs,
 graphs, terminal output and control labels.  Releasing the mouse copies
@@ -604,11 +607,16 @@ control.  Cheap metrics are batched; slow queries never overlap or queue
 refreshes, so cadence is best-effort rather than an exact timing
 guarantee.  Expensive allocated storage scans remain a separate manual
 action for the selected workspace.  Native session inventories still
-require manual Connect/refresh.  Their rows, selection and scroll
-position are not rebuilt by background status, log or storage refreshes.
-Use Connect / refresh (or ‘r’ on an already-connected Sessions tab) to
-fetch a new snapshot.  Explicit filters/project selection and session
-actions can update the displayed rows.
+require manual Connect/refresh.  An animated indicator and source/stage
+label remain visible while connecting or loading an inventory.  Connect
+is disabled until the bounded request finishes; Cancel or a source
+change visibly cancels its result without automatically connecting a
+replacement.  Existing rows remain available during refresh.  Their
+rows, selection and scroll position are not rebuilt by background
+status, log or storage refreshes.  Use Connect / refresh (or ‘r’ on an
+already-connected Sessions tab) to fetch a new snapshot.  Explicit
+filters/project selection and session actions can update the displayed
+rows.
 
 The Settings tab keeps quick monitoring controls and an Open all
 settings button.  The categorized modal window covers Monitoring
@@ -625,8 +633,8 @@ or the CLI-selected safety mode.  Esc/Cancel discards edits; Apply
 changes only allowlisted dashboard preferences **for this session**,
 with no persistence or logging.  Search text is never persisted.  The
 window cannot weaken ‘--read-only’, modify OpenCode ‘cli.json’ or host
-settings, or change workspace resources or credentials.  All live
-CPU/RAM/storage changes, quotas, resizes and graphroot/runroot moves are
+settings, or change workspace resources or credentials.  Live CPU/RAM
+limit edits, storage quotas, resizes and graphroot/runroot moves are
 deferred to a separate project.  Existing explicit CLI ‘reset’ remains
 outside the manager; there is no ‘podman update’ action,
 resource-control RPC or resource-editing service extension.
@@ -658,6 +666,57 @@ permanent mirror suppression.  Source and host archive copies are
 independent, and later normal sync may replace or recreate a managed
 host copy.  Existing V1 launcher commands remain supported; these new
 live manager APIs are V2-only.
+
+Failed or refused deletion shows a reason-specific notification and a
+persistent notice.  These distinguish active work, running shells,
+managed copies with native children, stale reviews, unknown ownership,
+incomplete inventories and read-only mode.  Transport/protocol failures
+after submission leave the outcome unverified: inspect the source before
+retrying.  A completed deletion followed by a failed inventory refresh
+is not reported as though the deletion itself was refused.
+
+Storage and Backup/restore offer three **separate scopes**: host
+OpenCode, selected workspace, and all registered workspaces.  Host
+actions operate only on individual native session trees; there is no
+whole-host database wipe or replacement.  All-workspaces is an inventory
+for choosing one explicit target, not an unreviewed bulk-delete
+authority.  Size scans are manual and informational.  Removing workspace
+storage requires a workspace-specific typed review and uses the normal
+‘purge’ validators/lock.  It retains host project files, host history
+and verified recovery provenance; it never adds ‘--all’ or
+‘--delete-sessions’.  Exit owning clients first.  Purge can briefly
+start the container for final history synchronization; no forced stop or
+lock bypass is offered.
+
+Backup/restore hands reviewed operations to the **same pinned runtime**
+in the foreground host terminal, temporarily suspending the dashboard
+for existing masked password/age prompts.  Passwords never enter
+dashboard fields, clipboard actions, argv, environment or plaintext
+files.  Workspace full/portable ‘.ocbox’ archives, inspection and
+new-directory restore retain the normal CLI contracts below; restored
+workspaces remain stopped.  No output file or restore destination is
+overwritten, and whole-workspace archives may contain copied
+config/auth.
+
+Native V2 session-tree history instead uses encrypted ‘.ocsession’
+files: versioned, authenticated age components, at most 50 sessions,
+100,000 messages and 64 MiB encoded history.  Select the corresponding
+verified source in Sessions before backing up or restoring history.  No
+private workspace is started for this connection.  Session restore shows
+decrypted **metadata only** for a second typed review in the foreground
+terminal, assigns fresh session/message IDs, clears
+permissions/privileged configuration, and restores native parent links
+only within that new tree.  It never executes restored work or
+overwrites old IDs.  Partial failures report newly created/attempted IDs
+for explicit recovery; they are not atomic restores and trigger no
+automatic rollback/delete or retry.
+
+Delete backup file is a separate typed action for one selected, owned,
+private, regular supported encrypted archive.  It does not delete
+sessions or workspace storage.  No tab prunes shared images, arbitrary
+caches, global vaults, retired provenance or host databases.  Session
+search text, backup paths and transcript content are not added to the
+activity journal.
 
 The Terminals tab embeds the existing native persistent-session terminal
 client through a local PTY and optional ‘pyte’ emulator, not a new
@@ -3142,20 +3201,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2691
 Node: Commands6203
-Node: Options79147
-Node: Lifecycle and persistence99304
-Node: Distribution images101424
-Node: Sessions and recovery106299
-Node: Devices and host permissions112884
-Node: Resource reports115230
-Node: Configuration and environment117341
-Node: Files128604
-Node: Exit status134548
-Node: Examples135401
-Node: Troubleshooting137487
-Node: Installation and manuals148839
-Node: Authors and license158059
-Node: See also158666
+Node: Options82574
+Node: Lifecycle and persistence102731
+Node: Distribution images104851
+Node: Sessions and recovery109726
+Node: Devices and host permissions116311
+Node: Resource reports118657
+Node: Configuration and environment120768
+Node: Files132031
+Node: Exit status137975
+Node: Examples138828
+Node: Troubleshooting140914
+Node: Installation and manuals152266
+Node: Authors and license161486
+Node: See also162093
 
 End Tag Table
 

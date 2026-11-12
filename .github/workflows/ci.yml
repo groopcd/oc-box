@@ -54,6 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
@@ -64,7 +65,7 @@ jobs:
           chmod 755 "$apt_root"
           apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config")
           sudo apt-get -c "$apt_config" update
-          sudo apt-get -c "$apt_config" install -y --no-install-recommends poppler-utils
+          sudo apt-get -c "$apt_config" install -y --no-install-recommends poppler-utils age
           npm install --prefix "$RUNNER_TEMP/opencode-v1" --no-audit --no-fund opencode-ai@1.19.5
           npm install --prefix "$RUNNER_TEMP/opencode-v2" --no-audit --no-fund @opencode/cli@2.2.6
       - name: Offline V1 and V2 native integration
@@ -74,6 +75,8 @@ jobs:
           python3 -B tests/smoke_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_tui_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_sharing_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_session_backups_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_session_backup_transport_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_host_plugins.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_native_host_port.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -m venv "$RUNNER_TEMP/global-vault-tests"
