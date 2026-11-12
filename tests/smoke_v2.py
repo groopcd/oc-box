@@ -1805,8 +1805,10 @@ if __name__ == "__main__":
         help="optional local V1 plugin sources copied into disposable fixture storage",
     )
     args = parser.parse_args()
+    from smoke_host_plugins import configured_provider_refusal_probe
     from smoke_session_sync_v2 import main as session_sync_probe
 
+    configured_provider_refusal_probe(str(Path(args.opencode).resolve(strict=True)))
     session_sync_probe(str(Path(args.opencode).resolve()))
     main(args.opencode, args.legacy_plugin_dir)
     host_fixture_probe(str(Path(args.opencode).resolve()))
