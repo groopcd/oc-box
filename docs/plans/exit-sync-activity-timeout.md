@@ -3,6 +3,10 @@
 Status: planning only, 2026-11-11. Implementation and execution of tests are
 deferred to the next work session. No runtime behavior changes in this commit.
 
+Update, 2026-11-12: investigation started; the original plan below is retained.
+The diagnostic-first change does **not** yet fix native job cleanup or establish
+the reported workspace's exact trigger. See the progress section at the end.
+
 Branch: `fix/exit-sync-activity-timeout`, based on
 `8ac68294d1d607ca9ff57fc5e15d16292ff957c6` (`feature/release-1.7`).
 
@@ -135,3 +139,44 @@ move retained storage or overwrite evidence. Keep unrelated untracked files
 untouched. This branch is not a release, and the published 1.6.58 evidence does
 not validate a future change. Resume with reproduction/diagnostics, not a blind
 timeout increase or export-safety bypass.
+
+## Progress: reproduced mechanism and remaining repair
+
+Private native experiments on unmodified 2.2.7 and 2.2.6 reproduced a retained
+background-shell job after location reload. With zero foreground sessions, the
+cancelled row remained across shell release and a real 30-second production wait.
+Native export was still accepted; reopening could expose the retained row as
+running. Explicit sync success therefore does not imply the row disappeared.
+Ordinary interrupted jobs recovered when their synthetic work completed. Idle
+native query timing and held-stdin checks did not reproduce those alternatives.
+This establishes a mechanism, not the trigger of the reported real session.
+
+Read-only review of public native v2.2.6 source at
+`dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06` corroborates that mechanism:
+`packages/core/src/job.ts` retains global jobs, persists running background rows,
+does not persist cancelled settlement, and removes rows after completion notice
+admission. `packages/core/src/tool/plugin/shell.ts` delivers that notice through a
+location/plugin-scoped observer; location teardown can interrupt it while the
+global job survives. `packages/core/src/job/list.ts` uses live generation state
+when present, otherwise durable state. The public job/shell schema exposes no
+definitive observer-liveness, notice-admission or orphan marker. This source review
+is of 2.2.6; compiled 2.2.7 behavior was measured separately, not assumed identical.
+
+Independent safety review rejected an automatic post-owner snapshot fallback for
+now. Current host-wrapper teardown alone is not proof that all remote native
+processes stopped, a `sync_sessions()` call can open multiple private services,
+and an `activity-timeout` can also mean an API failure at the deadline. None of
+those conditions authorizes new concurrent database access or ignoring work.
+
+The first runtime change adds only fixed-phase and capped count-only timeout
+diagnostics while preserving the original exception text, readiness rules,
+deadline, failure status and cleanup. Unit coverage distinguishes unavailable
+partial observations from a complete empty observation and keeps retained jobs
+blocking. Public documentation distinguishes readiness refusal (no final exports)
+from a pending export (other sessions still progress).
+
+Next repair gate: confirm the mechanism with the new diagnostic on a disposable
+host reproduction or an operator-provided count-only recurrence, then establish a
+supported native cleanup/quiescence contract. Do not silently reinterpret
+cancelled/running retained jobs as idle, rely on restarts clearing them, or ship
+the diagnostic as a completed fix. Fresh external-host acceptance remains pending.

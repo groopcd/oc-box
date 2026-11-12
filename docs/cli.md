@@ -350,6 +350,23 @@ An idle persistent shell terminal does not block this wait. Timeout or an invali
 activity response leaves history sync pending and returns nonzero; normal cleanup
 still stops the container, so running work is not promised to continue. This is
 bounded checking, not an atomic freeze of every possible history producer.
+On timeout, a separate diagnostic reports the wait phase (`foreground-query`,
+`background-query` or `poll-delay`) and counts from the last complete, validated
+activity/job observation. Job counts distinguish running, completed, error and
+cancelled entries; counts above 9999 appear as `9999+`. If no complete pair was
+validated, the observation is `unavailable`, not zero. These are previous
+observations, not proof of the current state or that a native request succeeded:
+a request failure at the deadline also retains the `activity-timeout` category.
+No session/job identifiers, commands, transcript text or native errors are printed.
+
+Native OpenCode 2.2.6/2.2.7 can retain a cancelled background-shell job after a
+location reload, even with no foreground activity. Such a row still blocks the
+wait; it is not safe to ignore terminal-status jobs generally because their
+completion notices can restart foreground work. A successful later `oc-box sync`
+checks native exports without the original owner's activity wait and does not
+prove that its retained job disappeared. This diagnostic does not repair native
+job cleanup, increase the timeout or automatically restart/delete work.
+
 `--no-vault` is accepted only when web becomes a new V2 owner; an attached web
 client rejects it and never changes the owner's credential snapshot.
 
