@@ -21,6 +21,12 @@ arming tools. Production sharing uses the actual host CLI entrypoint, typed
 consent over a real local PTY, and the actual container-native client-MCP relay.
 Only the owning native TUI interaction is scripted; launch, authentication,
 leases, history, tools and Podman remain real.
+Tool-check sessions have a fixed explicit synthetic title. Host execution and
+the native rehearsal use the same session-payload builder, preventing unrelated
+automatic title inference from consuming a strictly armed provider plan. The
+rehearsal includes an untitled negative control and a positive cell with the real
+generated production Build plugin enabled; unexpected provider errors remain
+fatal rather than being ignored or answered heuristically.
 
 Required checks include:
 
@@ -182,3 +188,23 @@ framing regressions. These preparation checks are not a corrected host pass.
 Keep the original failed report/store unchanged. A new reviewed harness must run
 against the unchanged candidate in a fresh fixture; never replay, relabel or
 overwrite the failed attempt to establish acceptance.
+
+## Second host attempt: failed provider-plan isolation, not acceptance
+
+The `cae879f` run reached owner readiness and completed the consent, protected-
+source and registration invariants, then failed on the first shared-text check.
+Its provider recorded three requests and one error; owner shutdown returned 0
+with no secondary errors. The host runner omitted a native session title while
+the passing local rehearsal supplied one.
+
+A private native 2.2.6 reproduction with an untitled synthetic read session
+produced the same three-request/one-error signature: an auxiliary no-tools
+title-generation request reached the strict tool-plan provider. The correction
+gives host and rehearsal sessions the same explicit content-free title, retaining
+the strict refusal/error criterion. Fixed-enum provider diagnostics expose counts
+and plan phases, never prompts, tokens, headers, paths or tool-result content.
+
+The original report remains failed evidence. Neither its completed setup checks
+nor the corrected local/native controls constitute a new host-sharing PASS.
+Keep both earlier failed fixtures unchanged and use another fresh fixture for
+the corrected, reviewed harness against the same frozen candidate.

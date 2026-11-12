@@ -5,12 +5,14 @@ Run from the checkout root:
   python3 -B tests/smoke_sharing_host_helpers.py --opencode /path/to/opencode-2.2.6
 
 This is NOT host acceptance, Podman isolation or owner/client-lease acceptance.
-Only ShareChild is imported from the host runner; its entrypoints and host guards
-are neither called nor patched. A separately named test-only Box facade replaces
-workspace discovery/backend/attachment with synthetic metadata and a nullcontext
-around a private native endpoint. Production sharing.cli, Export, serve and the
-WebSocket/pipe transport stay real. All data, native state and credentials are
-synthetic; child PTY output and provider payloads remain in memory, never reports.
+ShareChild and the actual session-payload builder are imported from the host
+runner; its entrypoints and host guards are neither called nor patched. A
+separately named test-only Box facade replaces workspace discovery/backend/
+attachment with synthetic metadata and a nullcontext around a private native
+endpoint. Production sharing.cli, Export, serve and the WebSocket/pipe transport
+stay real. All data, native state and credentials are synthetic; child PTY output
+and provider payloads remain in memory, never reports. An isolated untitled read
+reproduces the original refusal before the generated-Build-plugin positive cell.
 """
 
 import argparse
@@ -26,6 +28,7 @@ import sys
 import tempfile
 import time
 from unittest.mock import patch
+from urllib.parse import quote
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO))
@@ -33,9 +36,10 @@ sys.path.insert(0, str(REPO / "src"))
 sys.path.insert(0, str(REPO / "tests"))
 from oc_box import opencode_compat as compat
 from oc_box import opencode_v2_io as bridge
+from oc_box import oc_box as box
 from smoke_session_sync_v2 import bounded, private_environment
 from tools.sharing_fixture_provider import Provider
-from tools.test_sharing_podman import ShareChild
+from tools.test_sharing_podman import ShareChild, sharing_session_payload
 
 PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 IMAGE = "data:image/png;base64," + PNG
@@ -65,6 +69,8 @@ FAILURES = frozenset(
         "native-denial",
         "namespace-revocation",
         "native-reload",
+        "untitled-control",
+        "production-build",
         "unexpected",
     )
 )
@@ -157,6 +163,7 @@ def digest(path):
 def module_hashes():
     names = (
         "tests/smoke_sharing_host_helpers.py",
+        "tests/test_sharing_session_payload.py",
         "tests/smoke_session_sync_v2.py",
         "tools/test_sharing_podman.py",
         "tools/sharing_fixture_provider.py",
@@ -246,6 +253,207 @@ def manifest(directory):
     return result
 
 
+class UntitledControlProvider(Provider):
+    """Observe refused auxiliary shapes without retaining or changing a request."""
+
+    def __init__(self):
+        self.no_tools_refusals = 0
+        super().__init__()
+
+    def _reply(self, body):
+        try:
+            return super()._reply(body)
+        except Exception:
+            # The production fixture still decides/refuses every request. Keep
+            # only a count, never the body, token, messages or exception text.
+            if (
+                isinstance(body, dict)
+                and body.get("stream") is True
+                and body.get("model") == "share-model"
+                and body.get("tools") in (None, [])
+            ):
+                self.no_tools_refusals += 1
+            raise
+
+
+def production_build_environment(env):
+    """Install the real generated Build helper in this synthetic HOME only."""
+    plugin = Path(env["HOME"]) / ".config/opencode/plugins/oc-box-build-permissions"
+    plugin.mkdir(parents=True, mode=0o700)
+    (plugin / "package.json").write_text(
+        '{"type":"module","main":"index.js"}', encoding="utf-8"
+    )
+    (plugin / "index.js").write_text(
+        box.container_build_plugin("2.2.6"), encoding="utf-8"
+    )
+    overlay = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+    private_deny = {"action": "plugin.use", "resource": "*", "effect": "deny"}
+    policies = overlay.get("policies", [])
+    require(policies.count(private_deny) == 1, "production-build")
+    overlay["policies"] = [rule for rule in policies if rule != private_deny]
+    overlay.update(box.container_build_config("2.2.6", home=env["HOME"]))
+    require(
+        overlay.get("snapshots") is False
+        and overlay.get("formatter") is False
+        and overlay.get("update") == "disable",
+        "production-build",
+    )
+    env["OPENCODE_CONFIG_CONTENT"] = json.dumps(overlay)
+    return plugin
+
+
+@contextlib.contextmanager
+def native_fixture(binary, root, *, negative=False):
+    """Fresh provider, native HOME/XDG/database/project and private server per cell."""
+    project = root / "project"
+    project.mkdir(mode=0o700)
+    env = private_environment(root / "native")
+    plugin = None if negative else production_build_environment(env)
+    previous = Path.cwd()
+    with UntitledControlProvider() if negative else Provider() as provider:
+        env["LEMONADE_BASE_URL"] = f"http://127.0.0.1:{provider.port}"
+        version = compat.version(bounded([binary, "--version"], env, project))
+        require(version == "2.2.6", "native-version")
+        print(
+            "NATIVE version=" + version + "; private offline rehearsal only.",
+            flush=True,
+        )
+        configuration = provider.config()
+        # A COPY returned by the real provider, adapted only for this native-only
+        # fixture. No host service, Podman gateway or production config is edited.
+        configuration["providers"]["fixture"]["settings"]["baseURL"] = (
+            f"http://127.0.0.1:{provider.port}/v1"
+        )
+        config = Path(env["XDG_CONFIG_HOME"]) / "opencode/opencode.json"
+        config.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        config.write_text(json.dumps(configuration), encoding="utf-8")
+        config_before = digest(config)
+        plugin_before = None if plugin is None else manifest(plugin)
+        try:
+            os.chdir(project)
+            with (
+                patch.dict(os.environ, env, clear=True),
+                bridge.server(binary) as native,
+            ):
+                require(
+                    native("GET", "/api/credential")["data"] == [], "native-credentials"
+                )
+                require(
+                    native("GET", "/openapi.json")["paths"]
+                    .get("/api/experimental/client-mcp", {})
+                    .get("get", {})
+                    .get("x-websocket")
+                    is True,
+                    "native-client-mcp",
+                )
+                if plugin is not None:
+                    query = "?directory=" + quote(str(project), safe="")
+                    native("GET", "/api/model/default" + query)
+                    plugins = native("GET", "/api/plugin" + query)["data"]
+                    require(
+                        any(
+                            item.get("id") == "oc-box.build-permissions"
+                            and item.get("state", {}).get("status") == "active"
+                            for item in plugins
+                        )
+                        and not any(
+                            item.get("state", {}).get("status") == "failed"
+                            for item in plugins
+                        ),
+                        "production-build",
+                    )
+                    require(provider.errors == 0, "provider")
+                yield native, provider, env, project
+            require(digest(config) == config_before, "configuration-mutated")
+            if plugin is not None:
+                require(manifest(plugin) == plugin_before, "configuration-mutated")
+        finally:
+            os.chdir(previous)
+
+
+def untitled_negative_control(binary, root):
+    """Reproduce the refused native auxiliary request, not a mocked HTTP replay."""
+    root.mkdir(mode=0o700)
+    with native_fixture(binary, root, negative=True) as (native, provider, _, project):
+        baseline = "SYNTHETIC_UNTITLED_READ_BASELINE"
+        source = project / "baseline.txt"
+        source.write_text(baseline, encoding="utf-8")
+        before = digest(source)
+        with time_limit(30, "native-invoke-timeout"):
+            token = provider.plan("read", {"path": str(source)})
+            payload = sharing_session_payload(str(project))
+            # The only session-payload difference from the actual host helper is
+            # omission of its fixed title, reproducing the original failure.
+            del payload["title"]
+            ident = native("POST", "/api/session", payload)["data"]["id"]
+            native("POST", f"/api/session/{ident}/prompt", {"text": token})
+            captured = None
+
+            def settled():
+                nonlocal captured
+                require(
+                    native("GET", f"/api/session/{ident}/permission")["data"] == [],
+                    "pending-permission",
+                )
+                diagnostics = provider.diagnostics()
+                require(
+                    diagnostics["requests"] <= 3 and diagnostics["errors"] <= 1,
+                    "untitled-control",
+                )
+                if captured is None:
+                    captured = provider.take(token)
+                active = native("GET", "/api/session/active")["data"]
+                messages = native(
+                    "GET", f"/api/session/{ident}/message?limit=100&order=asc"
+                )["data"]
+                reads = [
+                    part
+                    for message in messages
+                    if message.get("type") == "assistant"
+                    for part in message.get("content", [])
+                    if part.get("type") == "tool"
+                    and part.get("name") == "read"
+                    and part.get("state", {}).get("status") == "completed"
+                    and part.get("state", {}).get("input", {}).get("path")
+                    == str(source)
+                ]
+                return (
+                    diagnostics
+                    if diagnostics["errors"] == 1
+                    and diagnostics["requests"] == 3
+                    and provider.no_tools_refusals == 1
+                    and len(reads) == 1
+                    and captured is not None
+                    and baseline in captured["text"]
+                    and ident not in active
+                    and any(
+                        item.get("type") == "assistant"
+                        and item.get("time", {}).get("completed")
+                        for item in messages
+                    )
+                    else None
+                )
+
+            diagnostics = wait(settled, "untitled-control")
+            require(
+                sum(diagnostics["error_categories"].values()) == diagnostics["errors"],
+                "untitled-control",
+            )
+            require(
+                captured is not None
+                and baseline in captured["text"]
+                and len(captured["tool_results"]) == 1
+                and provider.take(token) is None,
+                "untitled-control",
+            )
+            require(
+                native("GET", f"/api/session/{ident}")["data"].get("permissions")
+                == payload["permissions"],
+                "session-permissions",
+            )
+            require(digest(source) == before, "source-mutated")
+
+
 class Rehearsal:
     def __init__(self, native, provider, env, project, source):
         self.native, self.provider, self.env = native, provider, env
@@ -289,21 +497,12 @@ class Rehearsal:
         with time_limit(30, "native-invoke-timeout"):
             before = manifest(self.source)
             token = self.provider.plan("execute", {"code": code})
-            rules = (
-                permissions
-                if permissions is not None
-                else [{"action": "*", "resource": "*", "effect": "allow"}]
-            )
+            payload = sharing_session_payload(str(self.project), permissions)
+            rules = payload["permissions"]
             ident = self.native(
                 "POST",
                 "/api/session",
-                {
-                    "location": {"directory": str(self.project)},
-                    "title": "Synthetic native sharing helper rehearsal",
-                    "agent": "build",
-                    "model": {"providerID": "fixture", "id": "share-model"},
-                    "permissions": rules,
-                },
+                payload,
             )["data"]["id"]
             self.native("POST", f"/api/session/{ident}/prompt", {"text": token})
             captured = None
@@ -488,8 +687,8 @@ class Rehearsal:
 
 
 def exercise(binary, root):
-    project, source = root / "project", root / "export"
-    project.mkdir(mode=0o700)
+    root.mkdir(mode=0o700)
+    source = root / "export"
     source.mkdir(mode=0o700)
     (source / "text.txt").write_text("synthetic-live-before 中", encoding="utf-8")
     (source / ".hidden").write_text("synthetic-hidden", encoding="utf-8")
@@ -499,55 +698,15 @@ def exercise(binary, root):
     (source / "hard-a").write_text("synthetic-hardlink", encoding="utf-8")
     os.link(source / "hard-a", source / "hard-b")
     os.mkfifo(source / "fifo", 0o600)
-    env = private_environment(root / "native")
-    previous = Path.cwd()
-    with Provider() as provider:
-        env["LEMONADE_BASE_URL"] = f"http://127.0.0.1:{provider.port}"
-        version = compat.version(bounded([binary, "--version"], env, project))
-        require(version == "2.2.6", "native-version")
-        print(
-            "NATIVE version=" + version + "; private offline rehearsal only.",
-            flush=True,
-        )
-        configuration = provider.config()
-        # A COPY returned by the real provider, adapted only for this native-only
-        # fixture. No host service, Podman gateway or production config is edited.
-        configuration["providers"]["fixture"]["settings"]["baseURL"] = (
-            f"http://127.0.0.1:{provider.port}/v1"
-        )
-        config = Path(env["XDG_CONFIG_HOME"]) / "opencode/opencode.json"
-        config.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        config.write_text(json.dumps(configuration), encoding="utf-8")
-        config_before, outside_before = digest(config), digest(root / "outside.txt")
+    outside_before = digest(root / "outside.txt")
+    with native_fixture(binary, root) as (native, provider, env, project):
+        rehearsal = Rehearsal(native, provider, env, project, source)
         try:
-            os.chdir(project)
-            with (
-                patch.dict(os.environ, env, clear=True),
-                bridge.server(binary) as native,
-            ):
-                require(
-                    native("GET", "/api/credential")["data"] == [], "native-credentials"
-                )
-                require(
-                    native("GET", "/openapi.json")["paths"]
-                    .get("/api/experimental/client-mcp", {})
-                    .get("get", {})
-                    .get("x-websocket")
-                    is True,
-                    "native-client-mcp",
-                )
-                rehearsal = Rehearsal(native, provider, env, project, source)
-                try:
-                    rehearsal.exercise()
-                    require(provider.errors == 0 and provider.requests > 0, "provider")
-                    require(digest(config) == config_before, "configuration-mutated")
-                    require(
-                        digest(root / "outside.txt") == outside_before, "source-mutated"
-                    )
-                finally:
-                    rehearsal.close()
+            rehearsal.exercise()
+            require(provider.errors == 0 and provider.requests > 0, "provider")
+            require(digest(root / "outside.txt") == outside_before, "source-mutated")
         finally:
-            os.chdir(previous)
+            rehearsal.close()
 
 
 def main():
@@ -561,7 +720,7 @@ def main():
         raise Failure("fixture-timeout")
 
     signal.signal(signal.SIGALRM, expired)
-    signal.alarm(240)
+    signal.alarm(360)
     initial, binary_before, binary = None, None, None
     failure = None
     try:
@@ -576,7 +735,9 @@ def main():
         with tempfile.TemporaryDirectory(
             prefix="oc-box-share-helpers-", dir=parent
         ) as temporary:
-            exercise(binary, Path(temporary).resolve())
+            root = Path(temporary).resolve()
+            untitled_negative_control(binary, root / "untitled-control")
+            exercise(binary, root / "production-build")
     except Failure as error:
         failure = str(error) if str(error) in FAILURES else "unexpected"
     except (Exception, KeyboardInterrupt):
@@ -600,6 +761,12 @@ def main():
     if failure:
         print("FAIL: native sharing helpers (" + failure + ").", file=sys.stderr)
         return 1
+    print(
+        "PASS: fresh untitled native read reproduces the refused no-tools auxiliary request."
+    )
+    print(
+        "PASS: actual host session payload with active generated Build plugin preserves session permissions."
+    )
     print(
         "PASS: real ShareChild controlling PTY, typed consent/cancel and production sharing CLI/transport."
     )

@@ -612,6 +612,13 @@ class NativeSettlingOracleTests(HarnessCase):
             self.assertIs(result, captured)
             self.assertIs(actual_messages, messages)
             self.assertGreaterEqual(self.harness.provider.take.call_count, 2)
+            created = next(
+                call.args[2]
+                for call in self.harness.request.call_args_list
+                if call.args[:2] == ("POST", "/api/session")
+            )
+            self.assertEqual(created["title"], "Synthetic host-sharing check")
+            self.assertNotIn("SHARING_CASE_", created["title"])
         finally:
             first_take.set()
             worker.join(3)

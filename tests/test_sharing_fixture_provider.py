@@ -21,6 +21,7 @@ provider = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(provider)
 
 IMAGE = "data:image/png;base64,c3ludGhldGljLWltYWdl"
+PRIVATE = "SYNTHETIC_PRIVATE_NEVER_DIAGNOSE_THIS"
 
 
 class SharingFixtureProviderTests(unittest.TestCase):
@@ -60,6 +61,47 @@ class SharingFixtureProviderTests(unittest.TestCase):
                 }
             ],
         }
+
+    def raw_http(self, request, *, finish_body=True, timeout=3):
+        connection = socket.create_connection(
+            ("127.0.0.1", self.fixture.port), timeout=timeout
+        )
+        self.addCleanup(connection.close)
+        connection.sendall(request)
+        if finish_body:
+            connection.shutdown(socket.SHUT_WR)
+        chunks = []
+        while chunk := connection.recv(65536):
+            chunks.append(chunk)
+        connection.close()
+        head, payload = b"".join(chunks).split(b"\r\n\r\n", 1)
+        return int(head.split(b" ", 2)[1]), payload
+
+    def diagnostics(self, *, requests, errors, categories=None, phases=None):
+        result = self.fixture.diagnostics()
+        self.assertEqual(
+            set(result), {"requests", "errors", "error_categories", "plan_phases"}
+        )
+        self.assertEqual(result["requests"], requests)
+        self.assertEqual(result["errors"], errors)
+        self.assertEqual(result["requests"], self.fixture.requests)
+        self.assertEqual(result["errors"], self.fixture.errors)
+        self.assertEqual(sum(result["error_categories"].values()), errors)
+        self.assertLessEqual(
+            set(result["error_categories"]), set(provider.ERROR_CATEGORIES)
+        )
+        self.assertEqual(set(result["plan_phases"]), set(provider.PLAN_PHASES))
+        for counts in (result["error_categories"], result["plan_phases"]):
+            self.assertTrue(
+                all(type(count) is int and count >= 0 for count in counts.values())
+            )
+        if categories is not None:
+            self.assertEqual(result["error_categories"], categories)
+        if phases is not None:
+            expected = dict.fromkeys(provider.PLAN_PHASES, 0)
+            expected.update(phases)
+            self.assertEqual(result["plan_phases"], expected)
+        return result
 
     def events(self, body):
         status, kind, payload = self.http(body=body)
@@ -303,6 +345,12 @@ class SharingFixtureProviderTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "^provider-token$"):
             self.fixture.take(unknown)
         self.assertEqual(self.fixture.errors, len(bodies))
+        self.diagnostics(
+            requests=len(bodies),
+            errors=len(bodies),
+            categories={"token": len(bodies)},
+            phases={"planned": 1},
+        )
 
     def test_out_of_order_wrong_call_and_reuse_are_refused(self):
         token = self.fixture.plan("execute", {"code": "return 'SYNTHETIC'"})
@@ -330,6 +378,12 @@ class SharingFixtureProviderTests(unittest.TestCase):
         self.completed(body)
         self.take(token)
         self.refused(self.body(token))
+        self.diagnostics(
+            requests=3,
+            errors=1,
+            categories={"result-phase": 1},
+            phases={"taken": 1},
+        )
 
     def test_tool_result_without_native_assistant_call_is_refused(self):
         token = self.fixture.plan("execute", {})
@@ -406,6 +460,455 @@ class SharingFixtureProviderTests(unittest.TestCase):
                 self.refused(body)
         self.assertIsNone(self.fixture.take(token))
 
+    def test_request_category_matrix_uses_only_fixed_labels(self):
+        cases = (
+            ("wrong-model", {"model": PRIVATE}, [], "request-shape"),
+            ("not-streaming", {"stream": False}, [], "request-shape"),
+            ("missing-messages", {"messages": None}, [], "messages"),
+            ("empty-messages", {"messages": []}, [], "messages"),
+            ("non-object-message", {"messages": [PRIVATE]}, [], "messages"),
+            (
+                "too-many-messages",
+                {
+                    "messages": [{"role": "user", "content": PRIVATE}]
+                    * (provider.MAX_MESSAGES + 1)
+                },
+                [],
+                "messages",
+            ),
+            (
+                "malformed-token",
+                {"messages": [{"role": "user", "content": "SHARING_CASE_" + PRIVATE}]},
+                [],
+                "token",
+            ),
+            ("missing-tools", {"tools": None}, [], "tool-unavailable"),
+            ("empty-tools", {"tools": []}, [], "tool-unavailable"),
+            (
+                "unhashable-tool-name",
+                {"tools": [{"type": "function", "function": {"name": [PRIVATE]}}]},
+                [],
+                "tool-unavailable",
+            ),
+            (
+                "premature-result",
+                {},
+                [{"role": "tool", "tool_call_id": PRIVATE, "content": PRIVATE}],
+                "initial-history",
+            ),
+            (
+                "premature-call",
+                {},
+                [{"role": "assistant", "tool_calls": [{"id": PRIVATE}]}],
+                "initial-history",
+            ),
+            (
+                "malformed-initial-call",
+                {},
+                [{"role": "assistant", "tool_calls": {"private": PRIVATE}}],
+                "initial-history",
+            ),
+        )
+        expected = {}
+        for index, (name, change, tail, category) in enumerate(cases, 1):
+            with self.subTest(case=name):
+                token = self.fixture.plan("execute", {"code": PRIVATE})
+                body = self.body(token)
+                body.update(change)
+                if isinstance(body["messages"], list):
+                    body["messages"].extend(tail)
+                self.refused(body, headers={"Authorization": "Bearer " + PRIVATE})
+                expected[category] = expected.get(category, 0) + 1
+                self.diagnostics(
+                    requests=index,
+                    errors=index,
+                    categories=expected,
+                    phases={"planned": index},
+                )
+                self.assertIsNone(self.fixture.take(token))
+
+    def test_real_http_framing_body_json_and_route_category_matrix(self):
+        base = b"POST /v1/chat/completions HTTP/1.1\r\nHost: synthetic\r\n"
+        cases = (
+            ("missing-length", b"", b"", 400, "framing"),
+            (
+                "duplicate-length",
+                b"Content-Length: 2\r\nContent-Length: 2\r\n",
+                b"{}",
+                400,
+                "framing",
+            ),
+            (
+                "nondecimal-length",
+                b"Content-Length: " + PRIVATE.encode() + b"\r\n",
+                b"",
+                400,
+                "framing",
+            ),
+            ("negative-length", b"Content-Length: -1\r\n", b"", 400, "framing"),
+            (
+                "transfer-encoding",
+                b"Content-Length: 2\r\nTransfer-Encoding: chunked\r\n",
+                b"{}",
+                400,
+                "framing",
+            ),
+            (
+                "content-encoding",
+                b"Content-Length: 2\r\nContent-Encoding: gzip\r\n",
+                b"{}",
+                400,
+                "framing",
+            ),
+            ("empty-body", b"Content-Length: 0\r\n", b"", 413, "body-size"),
+            (
+                "oversized-body",
+                f"Content-Length: {provider.MAX_BODY + 1}\r\n".encode(),
+                b"",
+                413,
+                "body-size",
+            ),
+            ("truncated-body", b"Content-Length: 3\r\n", b"{", 400, "framing"),
+            ("invalid-json", b"Content-Length: 1\r\n", b"{", 400, "json"),
+            ("invalid-utf8", b"Content-Length: 1\r\n", b"\xff", 400, "json"),
+            ("nonobject-json", b"Content-Length: 2\r\n", b"[]", 400, "request-shape"),
+        )
+        expected = {}
+        for index, (name, headers, body, status, category) in enumerate(cases, 1):
+            with self.subTest(case=name):
+                code, payload = self.raw_http(base + headers + b"\r\n" + body)
+                self.assertEqual((code, payload), (status, provider.ERROR))
+                expected[category] = expected.get(category, 0) + 1
+                self.diagnostics(requests=index, errors=index, categories=expected)
+        code, _, payload = self.http("GET", "/" + PRIVATE)
+        self.assertEqual((code, payload), (404, provider.ERROR))
+        expected["route"] = 1
+        self.diagnostics(
+            requests=len(cases), errors=len(cases) + 1, categories=expected
+        )
+
+    def test_parser_and_unknown_method_failures_never_reflect_request(self):
+        cases = (
+            (
+                "malformed-request-line",
+                b"GET /"
+                + PRIVATE.encode()
+                + b" EXTRA HTTP/1.1\r\nHost: synthetic\r\n\r\n",
+                400,
+                "parser",
+            ),
+            (
+                "overlong-private-header",
+                # Exactly one overlong line, without unread trailing bytes.
+                b"GET /health HTTP/1.1\r\nX-Private: "
+                + PRIVATE.encode().ljust(65524, b"x")
+                + b"\r\n",
+                431,
+                "parser",
+            ),
+            (
+                "unknown-method",
+                b"PATCH /" + PRIVATE.encode() + b" HTTP/1.1\r\nHost: synthetic\r\n\r\n",
+                501,
+                "route",
+            ),
+        )
+        expected = {}
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            for index, (name, request, status, category) in enumerate(cases, 1):
+                with self.subTest(case=name):
+                    code, payload = self.raw_http(request)
+                    self.assertEqual((code, payload), (status, provider.ERROR))
+                    expected[category] = expected.get(category, 0) + 1
+                    self.diagnostics(requests=0, errors=index, categories=expected)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(errors.getvalue(), "")
+
+    def test_result_category_matrix_preserves_strict_native_call_order(self):
+        cases = (
+            ("missing-result", "result-phase"),
+            ("multiple-results", "result-phase"),
+            ("wrong-result-id", "result-shape"),
+            ("null-content", "result-shape"),
+            ("missing-call", "call-order"),
+            ("malformed-call-list", "call-order"),
+            ("wrong-call-id", "call-order"),
+            ("wrong-function", "call-order"),
+            ("malformed-arguments", "call-order"),
+            ("wrong-argument-type", "call-order"),
+            ("changed-arguments", "call-order"),
+            ("result-before-call", "call-order"),
+        )
+        expected = {}
+        for index, (name, category) in enumerate(cases, 1):
+            with self.subTest(case=name):
+                token = self.fixture.plan("execute", {"code": PRIVATE})
+                body, call = self.issued(token)
+                result = {
+                    "role": "tool",
+                    "tool_call_id": call["id"],
+                    "content": PRIVATE,
+                }
+                body["messages"].append(result)
+                if name == "missing-result":
+                    body["messages"].pop()
+                elif name == "multiple-results":
+                    body["messages"].append(dict(result))
+                elif name == "wrong-result-id":
+                    result["tool_call_id"] = PRIVATE
+                elif name == "null-content":
+                    result["content"] = None
+                elif name == "missing-call":
+                    body["messages"].pop(1)
+                elif name == "malformed-call-list":
+                    body["messages"][1]["tool_calls"] = PRIVATE
+                elif name == "wrong-call-id":
+                    call["id"] = PRIVATE
+                elif name == "wrong-function":
+                    call["function"]["name"] = PRIVATE
+                elif name == "malformed-arguments":
+                    call["function"]["arguments"] = PRIVATE
+                elif name == "wrong-argument-type":
+                    call["function"]["arguments"] = {"private": PRIVATE}
+                elif name == "changed-arguments":
+                    call["function"]["arguments"] = json.dumps(
+                        {"code": PRIVATE + "_CHANGED"}
+                    )
+                elif name == "result-before-call":
+                    body["messages"][1:] = [result, body["messages"][1]]
+                self.refused(body)
+                expected[category] = expected.get(category, 0) + 1
+                self.diagnostics(
+                    requests=index * 2,
+                    errors=index,
+                    categories=expected,
+                    phases={"issued": index},
+                )
+                self.assertIsNone(self.fixture.take(token))
+
+    def test_diagnostics_are_fresh_count_only_snapshots_and_preserve_image_results(
+        self,
+    ):
+        self.diagnostics(requests=0, errors=0, categories={}, phases={})
+        root = "/synthetic/" + PRIVATE + "/project"
+        token = self.fixture.plan("read", {"path": root})
+        snapshot = self.diagnostics(
+            requests=0, errors=0, categories={}, phases={"planned": 1}
+        )
+        snapshot["requests"] = 999
+        snapshot["error_categories"]["protocol"] = 999
+        snapshot["plan_phases"]["planned"] = 999
+        self.diagnostics(requests=0, errors=0, categories={}, phases={"planned": 1})
+        body, call = self.issued(token, "read")
+        self.diagnostics(requests=1, errors=0, categories={}, phases={"issued": 1})
+        content = {
+            "content": [{"type": "text", "text": PRIVATE}],
+            "private": {"root": root, "provider_payload": PRIVATE},
+        }
+        result = {"role": "tool", "tool_call_id": call["id"], "content": content}
+        body["messages"].extend(
+            [
+                result,
+                {
+                    "role": "user",
+                    "content": [{"type": "image_url", "image_url": {"url": IMAGE}}],
+                },
+            ]
+        )
+        self.completed(body)
+        deadline = time.monotonic() + 2
+        while (
+            self.fixture.diagnostics()["plan_phases"]["finished"] != 1
+            and time.monotonic() < deadline
+        ):
+            time.sleep(0.005)
+        self.diagnostics(requests=2, errors=0, categories={}, phases={"finished": 1})
+        captured = self.take(token)
+        self.assertEqual(
+            captured, {"text": PRIVATE, "images": [IMAGE], "tool_results": [result]}
+        )
+        self.refused(
+            {"model": PRIVATE, "messages": {"root": root, "token": token}},
+            headers={"Authorization": "Bearer " + PRIVATE, "X-Private": root},
+        )
+        self.refused({"provider_payload": PRIVATE}, path=root, status=404)
+        diagnostics = self.diagnostics(
+            requests=4,
+            errors=2,
+            categories={"request-shape": 1, "route": 1},
+            phases={"taken": 1},
+        )
+        for field, forbidden in (
+            ("sentinel", PRIVATE),
+            ("root", root),
+            ("token", token),
+            ("call-id", call["id"]),
+            ("image", IMAGE),
+            ("authorization-header", "Authorization"),
+            ("private-header", "X-Private"),
+            ("payload", "provider_payload"),
+            ("model", "share-model"),
+            ("arguments", "arguments"),
+            ("result", "tool_results"),
+            ("token-prefix", "SHARING_CASE_"),
+        ):
+            with self.subTest(field=field):
+                self.assertNotIn(forbidden, json.dumps(diagnostics))
+        self.fixture.close()
+        closed = self.diagnostics(
+            requests=4,
+            errors=2,
+            categories={"request-shape": 1, "route": 1},
+            phases={"taken": 1},
+        )
+        self.assertEqual(self.fixture._plans, {})
+        self.assertEqual(self.fixture._retained, 0)
+        self.assertNotIn(PRIVATE, json.dumps(closed))
+        closed["plan_phases"]["taken"] = 999
+        closed["error_categories"]["route"] = 999
+        self.fixture.close()
+        self.diagnostics(
+            requests=4,
+            errors=2,
+            categories={"request-shape": 1, "route": 1},
+            phases={"taken": 1},
+        )
+
+    def test_close_then_diagnostics_preserves_issued_counts_not_private_plans(self):
+        self.fixture.plan("read", {"path": "/synthetic/" + PRIVATE})
+        token = self.fixture.plan("execute", {"code": PRIVATE})
+        self.issued(token)
+        self.fixture.close()
+        closed = self.diagnostics(
+            requests=1,
+            errors=0,
+            categories={},
+            phases={"planned": 1, "issued": 1},
+        )
+        self.assertEqual(self.fixture._plans, {})
+        self.assertEqual(self.fixture._retained, 0)
+        self.assertNotIn(PRIVATE, json.dumps(closed))
+        self.assertNotIn(token, json.dumps(closed))
+        closed["plan_phases"]["issued"] = 999
+        closed["error_categories"]["protocol"] = 999
+        self.fixture.close()
+        self.diagnostics(
+            requests=1,
+            errors=0,
+            categories={},
+            phases={"planned": 1, "issued": 1},
+        )
+
+    def test_failed_sse_write_never_publishes_result_or_counts_failure_twice(self):
+        token = self.fixture.plan("execute", {"code": PRIVATE})
+        body, call = self.issued(token)
+        body["messages"].append(
+            {"role": "tool", "tool_call_id": call["id"], "content": PRIVATE}
+        )
+        handler = self.fixture.server.RequestHandlerClass
+        output, errors = io.StringIO(), io.StringIO()
+        started = time.monotonic()
+        with (
+            contextlib.redirect_stdout(output),
+            contextlib.redirect_stderr(errors),
+            patch.object(handler, "end_headers", side_effect=OSError(PRIVATE)),
+            self.assertRaises((http.client.RemoteDisconnected, ConnectionError)),
+        ):
+            self.http(body=body)
+        self.assertLess(time.monotonic() - started, 4.5)
+        self.diagnostics(
+            requests=2,
+            errors=1,
+            categories={"response-write": 1},
+            phases={"finishing": 1},
+        )
+        self.assertIsNone(self.fixture.take(token))
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(errors.getvalue(), "")
+        self.assertNotIn(PRIVATE, json.dumps(self.fixture.diagnostics()))
+        self.assertGreater(self.fixture._retained, 0)
+        self.fixture.close()
+        closed = self.diagnostics(
+            requests=2,
+            errors=1,
+            categories={"response-write": 1},
+            phases={"finishing": 1},
+        )
+        self.assertEqual(self.fixture._plans, {})
+        self.assertEqual(self.fixture._retained, 0)
+        self.assertNotIn(PRIVATE, json.dumps(closed))
+        self.assertNotIn(token, json.dumps(closed))
+        closed["plan_phases"]["finishing"] = 999
+        self.fixture.close()
+        self.diagnostics(
+            requests=2,
+            errors=1,
+            categories={"response-write": 1},
+            phases={"finishing": 1},
+        )
+
+    def test_failed_refusal_write_keeps_original_category_and_single_error(self):
+        handler = self.fixture.server.RequestHandlerClass
+        cases = (
+            ("POST", "/v1/chat/completions", {"model": PRIVATE}, "request-shape"),
+            ("GET", "/" + PRIVATE, None, "route"),
+        )
+        expected = {}
+        with patch.object(handler, "end_headers", side_effect=OSError(PRIVATE)):
+            for index, (method, path, body, category) in enumerate(cases, 1):
+                with (
+                    self.subTest(method=method),
+                    self.assertRaises(
+                        (http.client.RemoteDisconnected, ConnectionError)
+                    ),
+                ):
+                    self.http(method, path, body)
+                expected[category] = expected.get(category, 0) + 1
+                self.diagnostics(requests=1, errors=index, categories=expected)
+
+    def test_incomplete_request_body_timeout_is_one_bounded_transport_error(self):
+        started = time.monotonic()
+        status, payload = self.raw_http(
+            b"POST /v1/chat/completions HTTP/1.1\r\nHost: synthetic\r\n"
+            b"Content-Length: 3\r\n\r\n{",
+            finish_body=False,
+            timeout=5,
+        )
+        self.assertEqual((status, payload), (400, provider.ERROR))
+        self.assertLess(time.monotonic() - started, 4.5)
+        self.diagnostics(requests=1, errors=1, categories={"transport": 1})
+
+    def test_protocol_fallback_and_untrusted_category_never_retain_exception_details(
+        self,
+    ):
+        cases = (
+            ("unexpected-protocol", RuntimeError(PRIVATE), 400, "protocol"),
+            (
+                "untrusted-category",
+                provider._Refusal(category=PRIVATE),
+                400,
+                "protocol",
+            ),
+            ("fixed-status", provider._Refusal(413, "result-size"), 413, "result-size"),
+        )
+        expected = {}
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            for index, (name, failure, status, category) in enumerate(cases, 1):
+                with self.subTest(case=name):
+                    with patch.object(self.fixture, "_reply", side_effect=failure):
+                        self.refused({"provider_payload": PRIVATE}, status=status)
+                    expected[category] = expected.get(category, 0) + 1
+                    result = self.diagnostics(
+                        requests=index, errors=index, categories=expected
+                    )
+                    self.assertNotIn(PRIVATE, json.dumps(result))
+                    if isinstance(failure, provider._Refusal):
+                        self.assertEqual(failure.args, ())
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(errors.getvalue(), "")
+
     def test_request_case_plan_and_retained_result_bounds(self):
         token = self.fixture.plan("execute", {})
         with patch.object(provider, "MAX_CASE_REQUESTS", 1):
@@ -421,6 +924,12 @@ class SharingFixtureProviderTests(unittest.TestCase):
                 self.fixture.plan("read", {})
         with patch.object(provider, "MAX_RETAINED", 1):
             self.refused(body, status=413)
+        self.diagnostics(
+            requests=4,
+            errors=3,
+            categories={"case-budget": 1, "request-budget": 1, "result-size": 1},
+            phases={"issued": 1},
+        )
 
     def test_large_utf8_tool_text_and_image_are_not_truncated(self):
         token = self.fixture.plan("execute", {})
@@ -498,6 +1007,7 @@ class SharingFixtureProviderTests(unittest.TestCase):
         self.assertFalse(self.fixture.thread.is_alive())
         self.fixture.close()
         self.assertEqual(self.fixture._plans, {})
+        self.assertEqual(self.fixture._retained, 0)
         with self.assertRaisesRegex(RuntimeError, "^provider-closed$"):
             self.fixture.plan("read", {})
 

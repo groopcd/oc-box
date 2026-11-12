@@ -301,6 +301,24 @@ def nodes(value):
             yield from nodes(child)
 
 
+def sharing_session_payload(directory, permissions=None):
+    """One fixed native session contract for host runs and native rehearsals.
+
+    An explicit, content-free title prevents unrelated automatic title inference
+    from consuming the strictly armed synthetic provider's tool plan.
+    """
+    require(Path(directory).is_absolute(), "protocol")
+    return {
+        "location": {"directory": str(directory)},
+        "title": "Synthetic host-sharing check",
+        "agent": "build",
+        "model": {"providerID": "fixture", "id": "share-model"},
+        "permissions": permissions
+        if permissions is not None
+        else [{"action": "*", "resource": "*", "effect": "allow"}],
+    }
+
+
 def source_manifest(directory):
     """No symlink following or special-file I/O; no atime preservation claim."""
     result = {}
@@ -1532,14 +1550,7 @@ class Harness:
         token = self.provider.plan(action, arguments)
         records = self.f.workspace_records(self.root)
         directory = self.box.container_project(records[project][1])
-        value = {
-            "location": {"directory": directory},
-            "agent": "build",
-            "model": {"providerID": "fixture", "id": "share-model"},
-            "permissions": permissions
-            if permissions is not None
-            else [{"action": "*", "resource": "*", "effect": "allow"}],
-        }
+        value = sharing_session_payload(directory, permissions)
         ident = self.request("POST", "/api/session", value, project=project)["data"][
             "id"
         ]
@@ -2074,6 +2085,10 @@ def report_value(harness, loaded, runner, primary, failure=None):
         "provider": None
         if harness is None
         else {"requests": harness.provider.requests, "errors": harness.provider.errors},
+        "provider_diagnostics": None
+        if harness is None
+        or not callable(getattr(harness.provider, "diagnostics", None))
+        else harness.provider.diagnostics(),
         "scope": "Synthetic external-host production sharing CLI/PTY, real rootless workspace/native tools; no real providers/projects or security certification.",
         "manual_observations": "NOT_AUTOMATICALLY_PASSED",
     }

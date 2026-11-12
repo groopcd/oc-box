@@ -25,13 +25,37 @@ MAX_MESSAGES = 2048
 TOKEN = re.compile(r"(?<![A-Za-z0-9_])SHARING_CASE_[0-9a-f]{32}(?![A-Za-z0-9_])")
 COMPLETE = "SYNTHETIC_SHARING_COMPLETE"
 ERROR = b'{"error":{"message":"Synthetic sharing provider refused request.","type":"fixture_error"}}'
+ERROR_CATEGORIES = (
+    "protocol",
+    "route",
+    "framing",
+    "body-size",
+    "json",
+    "request-shape",
+    "messages",
+    "token",
+    "request-budget",
+    "case-budget",
+    "initial-history",
+    "tool-unavailable",
+    "result-phase",
+    "result-shape",
+    "call-order",
+    "result-size",
+    "response-write",
+    "transport",
+    "parser",
+)
+PLAN_PHASES = ("planned", "issued", "finishing", "finished", "taken")
 
 
 class _Refusal(Exception):
-    """Fixed HTTP status only; never retain an offending value."""
+    """Fixed HTTP status and allowlisted category; no offending values."""
 
-    def __init__(self, status=400):
+    def __init__(self, status=400, category="protocol"):
+        super().__init__()
         self.status = status
+        self.category = category if category in ERROR_CATEGORIES else "protocol"
 
 
 def _encoded(value):
@@ -72,7 +96,8 @@ class Provider:
     """Loopback-only HTTP fixture with bounded, single-use in-memory plans.
 
     ``requests`` counts POST attempts (not health/catalog reads); ``errors``
-    counts refusals and transport failures without storing their details.
+    counts failed HTTP operations once, including parser and GET refusals.
+    ``diagnostics()`` returns independent fixed-label count dictionaries only.
     ``take(token)`` returns None while pending or after consumption, otherwise
     {'text': str, 'images': list[str], 'tool_results': list[dict]}. Tool results
     are the original tool message dictionaries, including list/dict content.
@@ -83,41 +108,76 @@ class Provider:
         self._lock = threading.RLock()
         self._close_lock = threading.Lock()
         self._plans = {}
+        self._closed_plan_phases = None
+        self._error_categories = {}
         self._retained = 0
         self._closed = False
         self._connections = set()
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
+            def setup(self):
+                self._error_recorded = False
+                super().setup()
+
             def log_message(self, *_):
                 pass
+
+            def log_error(self, *_):
+                # The base handler consumes request-line timeouts itself.
+                self._record_error("transport")
 
             def version_string(self):
                 return "SyntheticSharingFixture"
 
+            def _record_error(self, category):
+                if not self._error_recorded:
+                    self._error_recorded = True
+                    outer._record_error(category)
+
+            def handle(self):
+                try:
+                    super().handle()
+                except OSError:
+                    self._record_error("transport")
+                except Exception:
+                    self._record_error("parser")
+
             def finish(self):
                 try:
                     super().finish()
+                except Exception:
+                    self._record_error("transport")
                 finally:
                     with outer._lock:
                         outer._connections.discard(self.connection)
 
-            def send_error(self, code, message=None, explain=None):
+            def send_error(self, code, message=None, explain=None, *, category=None):
                 # BaseHTTPRequestHandler otherwise echoes malformed request
                 # lines in HTML and can log headers/path/parser exceptions.
-                with outer._lock:
-                    outer.errors += 1
-                self._send(code, ERROR, "application/json")
+                if self._error_recorded:
+                    return
+                if category is None:
+                    category = "route" if code == 501 else "parser"
+                self._record_error(category)
+                try:
+                    self._send(code, ERROR, "application/json")
+                except Exception:
+                    pass  # A failed refusal write is still one refusal.
 
             def _send(self, status, content, kind):
                 self.close_connection = True
-                self.send_response(status)
-                self.send_header("Content-Type", kind)
-                self.send_header("Content-Length", str(len(content)))
-                self.send_header("Connection", "close")
-                self.end_headers()
-                self.wfile.write(content)
-                self.wfile.flush()
+                try:
+                    self.send_response(status)
+                    self.send_header("Content-Type", kind)
+                    self.send_header("Content-Length", str(len(content)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    self.wfile.write(content)
+                    self.wfile.flush()
+                except Exception:
+                    self._record_error("response-write")
+                    raise
 
             def do_GET(self):
                 paths = (
@@ -131,7 +191,7 @@ class Provider:
                     "/api/v1/version",
                 )
                 if self.path not in paths:
-                    self.send_error(404)
+                    self.send_error(404, category="route")
                     return
                 # LEMONADE_BASE_URL may point here so optional discovery never
                 # contacts a real host service. There are deliberately no models.
@@ -142,9 +202,9 @@ class Provider:
                     with outer._lock:
                         outer.requests += 1
                         if outer._closed or outer.requests > MAX_REQUESTS:
-                            raise _Refusal(429)
+                            raise _Refusal(429, "request-budget")
                     if self.path != "/v1/chat/completions":
-                        raise _Refusal(404)
+                        raise _Refusal(404, "route")
                     lengths = self.headers.get_all("Content-Length", [])
                     if (
                         len(lengths) != 1
@@ -154,14 +214,20 @@ class Provider:
                         or self.headers.get("Content-Encoding", "identity")
                         != "identity"
                     ):
-                        raise _Refusal()
-                    size = int(lengths[0])
+                        raise _Refusal(category="framing")
+                    try:
+                        size = int(lengths[0])
+                    except ValueError:
+                        raise _Refusal(category="framing") from None
                     if not 0 < size <= MAX_BODY:
-                        raise _Refusal(413)
+                        raise _Refusal(413, "body-size")
                     raw = self.rfile.read(size)
                     if len(raw) != size:
-                        raise _Refusal()
-                    body = json.loads(raw)
+                        raise _Refusal(category="framing")
+                    try:
+                        body = json.loads(raw)
+                    except (ValueError, UnicodeDecodeError, RecursionError):
+                        raise _Refusal(category="json") from None
                     del raw
                     with outer._lock:
                         token, delta, reason, result = outer._reply(body)
@@ -192,10 +258,13 @@ class Provider:
                                 plan["phase"] = "finished"
                 except Exception as error:
                     status = error.status if isinstance(error, _Refusal) else 400
-                    try:
-                        self.send_error(status)
-                    except Exception:
-                        pass  # The refusal counter already records this failure.
+                    if isinstance(error, _Refusal):
+                        category = error.category
+                    elif isinstance(error, OSError):
+                        category = "transport"
+                    else:
+                        category = "protocol"
+                    self.send_error(status, category=category)
 
         class Server(ThreadingHTTPServer):
             daemon_threads = True
@@ -210,8 +279,7 @@ class Provider:
 
             def handle_error(self, *_):
                 # Socket/parser failures must not print native payloads.
-                with outer._lock:
-                    outer.errors += 1
+                outer._record_error("transport")
 
         self.server = Server(("127.0.0.1", 0), Handler)
         self.port = self.server.server_port
@@ -227,6 +295,41 @@ class Provider:
 
     def __exit__(self, *_):
         self.close()
+
+    def _record_error(self, category):
+        category = category if category in ERROR_CATEGORIES else "protocol"
+        with self._lock:
+            self.errors += 1
+            self._error_categories[category] = (
+                self._error_categories.get(category, 0) + 1
+            )
+
+    def diagnostics(self):
+        """Fresh host-memory-only counts; no plan keys, payloads, or HTTP data.
+
+        Error categories include only observed labels; plan phases include all
+        fixed phases, including zeros. Closing retains only final phase counts
+        while clearing plans; HTTP counters remain live through shutdown.
+        """
+        with self._lock:
+            phases = (
+                self._plan_phase_counts()
+                if self._closed_plan_phases is None
+                else dict(self._closed_plan_phases)
+            )
+            return {
+                "requests": self.requests,
+                "errors": self.errors,
+                "error_categories": dict(self._error_categories),
+                "plan_phases": phases,
+            }
+
+    def _plan_phase_counts(self):
+        """Caller holds _lock; retain only fixed phase labels and integers."""
+        phases = dict.fromkeys(PLAN_PHASES, 0)
+        for plan in self._plans.values():
+            phases[plan["phase"]] += 1
+        return phases
 
     def plan(self, action, arguments):
         """Arm a single execute/shell/read call; return SHARING_CASE_<32 hex>."""
@@ -281,34 +384,37 @@ class Provider:
             or body.get("stream") is not True
             or body.get("model") != "share-model"
         ):
-            raise _Refusal()
+            raise _Refusal(category="request-shape")
         messages = body.get("messages")
         if (
             not isinstance(messages, list)
             or not 0 < len(messages) <= MAX_MESSAGES
             or not all(isinstance(item, dict) for item in messages)
         ):
-            raise _Refusal()
+            raise _Refusal(category="messages")
         token, anchor = None, None
         for index in range(len(messages) - 1, -1, -1):
             message = messages[index]
             if message.get("role") != "user":
                 continue
-            text = _text(message.get("content"))
+            try:
+                text = _text(message.get("content"))
+            except RecursionError:
+                raise _Refusal(category="messages") from None
             if "SHARING_CASE_" not in text:
                 continue
             tokens = set(TOKEN.findall(text))
             if len(tokens) != 1:
-                raise _Refusal()
+                raise _Refusal(category="token")
             (token,) = tokens
             anchor = index
             break
         if token not in self._plans:
-            raise _Refusal()
+            raise _Refusal(category="token")
         plan = self._plans[token]
         plan["requests"] += 1
         if plan["requests"] > MAX_CASE_REQUESTS:
-            raise _Refusal(429)
+            raise _Refusal(429, "case-budget")
         tail = messages[anchor + 1 :]
         results = [message for message in tail if message.get("role") == "tool"]
         calls = []
@@ -319,21 +425,29 @@ class Provider:
             if not isinstance(advertised, list) or not all(
                 isinstance(call, dict) for call in advertised
             ):
-                raise _Refusal()
+                category = (
+                    "initial-history" if plan["phase"] == "planned" else "call-order"
+                )
+                raise _Refusal(category=category)
             calls.extend((index, call) for call in advertised)
         if plan["phase"] == "planned":
             tools = body.get("tools")
-            if not isinstance(tools, list) or results or calls:
-                raise _Refusal()
-            names = {
-                item["function"].get("name")
-                for item in tools
-                if isinstance(item, dict)
-                and item.get("type") == "function"
-                and isinstance(item.get("function"), dict)
-            }
+            if results or calls:
+                raise _Refusal(category="initial-history")
+            if not isinstance(tools, list):
+                raise _Refusal(category="tool-unavailable")
+            try:
+                names = {
+                    item["function"].get("name")
+                    for item in tools
+                    if isinstance(item, dict)
+                    and item.get("type") == "function"
+                    and isinstance(item.get("function"), dict)
+                }
+            except TypeError:
+                raise _Refusal(category="tool-unavailable") from None
             if plan["action"] not in names:
-                raise _Refusal()
+                raise _Refusal(category="tool-unavailable")
             call = {
                 "index": 0,
                 "id": plan["call"],
@@ -346,14 +460,14 @@ class Provider:
             plan["phase"] = "issued"
             return token, {"tool_calls": [call]}, "tool_calls", None
         if plan["phase"] != "issued" or len(results) != 1:
-            raise _Refusal()
+            raise _Refusal(category="result-phase")
         result = results[0]
         if result.get("tool_call_id") != plan["call"] or not isinstance(
             result.get("content"), (str, list, dict)
         ):
-            raise _Refusal()
+            raise _Refusal(category="result-shape")
         if len(calls) != 1:
-            raise _Refusal()
+            raise _Refusal(category="call-order")
         call_index, call = calls[0]
         result_index = next(
             index for index, message in enumerate(tail) if message is result
@@ -364,17 +478,25 @@ class Provider:
             or call.get("type") != "function"
             or not isinstance(call.get("function"), dict)
             or call["function"].get("name") != plan["action"]
-            or json.loads(call["function"].get("arguments", "")) != plan["arguments"]
         ):
-            raise _Refusal()
-        captured = {
-            "text": _text(result["content"]),
-            "images": _images(tail),
-            "tool_results": copy.deepcopy(results),
-        }
-        size = len(_encoded(captured))
+            raise _Refusal(category="call-order")
+        try:
+            arguments = json.loads(call["function"].get("arguments", ""))
+        except (TypeError, ValueError, RecursionError):
+            raise _Refusal(category="call-order") from None
+        if arguments != plan["arguments"]:
+            raise _Refusal(category="call-order")
+        try:
+            captured = {
+                "text": _text(result["content"]),
+                "images": _images(tail),
+                "tool_results": copy.deepcopy(results),
+            }
+            size = len(_encoded(captured))
+        except (TypeError, ValueError, RecursionError):
+            raise _Refusal(category="result-shape") from None
         if size > MAX_BODY or self._retained + size > MAX_RETAINED:
-            raise _Refusal(413)
+            raise _Refusal(413, "result-size")
         self._retained += size
         plan["bytes"] = size
         plan["phase"] = "finishing"
@@ -443,6 +565,7 @@ class Provider:
                     return
                 self._closed = True
                 connections = list(self._connections)
+                self._closed_plan_phases = self._plan_phase_counts()
                 self._plans.clear()
                 self._retained = 0
             for connection in connections:
