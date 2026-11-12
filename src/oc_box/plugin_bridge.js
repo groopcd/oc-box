@@ -215,7 +215,7 @@ async function configure(ctx, hook) {
       if (!object(model)) throw new Error("oc-box V1 adapter: invalid provider model")
       return toModel(id, name, model)
     })
-    edits.push({ id, provider: clone(provider), previous, options: clone(options), inventory })
+    edits.push({ id, provider: clone(provider), previous, inventory })
   }
   const removed = Object.keys(before.provider).filter(id => !owns(config.provider, id))
   // There is no supported late-provider/config API on the pinned plugin Context.
@@ -223,7 +223,7 @@ async function configure(ctx, hook) {
   // providers: a later project/managed declaration is not visible in this fold
   // or guaranteed to be in the minimal discovery helper. Request hooks cannot
   // implement provider-list settings, removal, or configured-key deletion.
-  if (removed.length || edits.some(({ previous, options }) => !previous || !same(previous.options || {}, options))) {
+  if (removed.length || edits.some(({ previous, provider }) => !previous || !owns(provider, "options") || !same(previous.options, provider.options))) {
     throw new Error("oc-box V1 adapter: provider settings/addition/removal edits require a native V2 port; native config applies after plugin setup")
   }
   if (!edits.length && !removed.length) return

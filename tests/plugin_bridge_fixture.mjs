@@ -310,6 +310,12 @@ if (!process.argv[3] || process.argv[3] === "settings") {
     assert.equal(records.has("added"), false)
     assert.deepEqual(plain(records.get("fixture").provider.settings), { retained: 1 })
   })
+  await check("F5 deleting empty source options still refuses because final configured options are unseen", async () => {
+    const { ctx, records, edits } = providerFixture()
+    await assert.rejects(setupConfig(ctx, config => { delete config.provider.fixture.options }), settingsRefusal)
+    assert.deepEqual(edits, [])
+    assert.deepEqual(plain(records.get("fixture").provider.settings), {})
+  })
   await check("F5 original config-hook refusal propagates by identity independently of native-setting refusal", async () => {
     const { ctx, records, edits } = providerFixture({ retained: 1 })
     const refusal = new Error("original user hook refusal")
