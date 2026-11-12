@@ -526,6 +526,7 @@ normal provider accounts, encrypted vault, configuration or conversation DB.
 
 ```sh
 uv run --isolated --no-project --with cryptography python -I -B tools/test_global_vault_podman.py \
+  --expect-commit FULL_REVIEWED_CANDIDATE_COMMIT \
   --opencode-v2 "$(command -v opencode)" \
   --distro tumbleweed --work-dir /var/tmp --temp-dir /var/tmp
 ```

@@ -263,13 +263,13 @@ select a retained fixture or any of its descendants as a parent.
   test -z "$(git status --porcelain --untracked-files=all)"
 
   uv run --isolated --no-project --with cryptography python -I -B \
-    tools/test_global_vault_podman.py --opencode-v2 "$v2" \
+    tools/test_global_vault_podman.py --expect-commit "$commit" --opencode-v2 "$v2" \
     --distro tumbleweed --work-dir "$fixtures" --temp-dir "$temporary"
   test "$(git rev-parse HEAD)" = "$commit"
   test -z "$(git status --porcelain --untracked-files=all)"
 
   uv run --isolated --no-project --with cryptography python -I -B \
-    tools/test_v2_podman.py --opencode-v1 "$v1" --opencode-v2 "$v2" \
+    tools/test_v2_podman.py --expect-commit "$commit" --opencode-v1 "$v1" --opencode-v2 "$v2" \
     --distro tumbleweed --work-dir "$fixtures" --temp-dir "$temporary"
   test "$(git rev-parse HEAD)" = "$commit"
   test -z "$(git status --porcelain --untracked-files=all)"

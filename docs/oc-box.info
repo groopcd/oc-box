@@ -2531,6 +2531,7 @@ delivery, Build approvals/reload and full backup/restore, use the
 source-checkout fixture:
 
      uv run --isolated --no-project --with cryptography python -I -B tools/test_global_vault_podman.py \
+       --expect-commit FULL_REVIEWED_CANDIDATE_COMMIT \
        --opencode-v2 "$(command -v opencode)" \
        --distro tumbleweed --work-dir /var/tmp --temp-dir /var/tmp
 
@@ -2923,9 +2924,9 @@ Node: Files120968
 Node: Exit status125821
 Node: Examples126632
 Node: Troubleshooting128718
-Node: Installation and manuals138046
-Node: Authors and license145993
-Node: See also146600
+Node: Installation and manuals138102
+Node: Authors and license146049
+Node: See also146656
 
 End Tag Table
 

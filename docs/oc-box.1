@@ -1047,6 +1047,7 @@ For a disposable host validation of V2 global\-vault first\-launch delivery, Bui
 .nf
 .fam C
 uv run \-\-isolated \-\-no\-project \-\-with cryptography python \-I \-B tools/test_global_vault_podman.py \e
+  \-\-expect\-commit FULL_REVIEWED_CANDIDATE_COMMIT \e
   \-\-opencode\-v2 "$(command \-v opencode)" \e
   \-\-distro tumbleweed \-\-work\-dir /var/tmp \-\-temp\-dir /var/tmp
 .fam T
