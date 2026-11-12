@@ -177,6 +177,7 @@ class DocumentationTests(unittest.TestCase):
             "\x1f\nFile: oc-box.info,  Node: Top,  Up: (dir)\n\n"
             "Records\n*******\n\nKeep `synthetic' records.\n\n"
             "\x1f\nTag Table:\nNode: Top\x7f100\n\x1f\nEnd Tag Table\n"
+            "\n\x1f\nLocal Variables:\ncoding: utf-8\nEnd:\n"
         )
         second = (
             first.replace("version 7.1", "version 7.3")
@@ -194,6 +195,190 @@ class DocumentationTests(unittest.TestCase):
                 self.assertNotEqual(
                     build.info_content(first), build.info_content(changed)
                 )
+
+    @unittest.skipUnless(shutil.which("makeinfo"), "GNU makeinfo not installed")
+    def test_info_content_check_preserves_literal_example_bytes(self):
+        cases = (
+            (
+                "argument-spaces",
+                "printf '%s\\n' 'two  words'",
+                "printf '%s\\n' 'two words'",
+            ),
+            ("literal-apostrophe", 'printf "%s\\n" "a’b"', 'printf "%s\\n" "a\'b"'),
+            ("indentation", "if True:\n  print('x')", "if True:\n print('x')"),
+            ("line-break", "printf one\nprintf two", "printf one printf two"),
+            ("blank-line", "printf one\n\nprintf two", "printf one\nprintf two"),
+            (
+                "nonbreaking-space",
+                "printf 'two\N{NO-BREAK SPACE}words'",
+                "printf 'two words'",
+            ),
+        )
+        with (
+            tempfile.TemporaryDirectory(prefix="oc-box-info-literals-") as temporary,
+            contextlib.redirect_stdout(io.StringIO()),
+            patch.object(build, "ROOT", Path(temporary)),
+        ):
+            docs = Path(temporary) / "docs"
+            docs.mkdir()
+            output = ["--output-dir", str(docs)]
+            for name, old, new in cases:
+                with self.subTest(name=name):
+                    original = "# Synthetic\n\n## Records\n\n```sh\n" + old + "\n```\n"
+                    changed = "# Synthetic\n\n## Records\n\n```sh\n" + new + "\n```\n"
+                    (docs / "cli.md").write_text(original)
+                    self.assertEqual(build.main(output), 0)
+                    info = (docs / "oc-box.info").read_bytes()
+                    for line in old.split("\n"):
+                        if line:
+                            self.assertIn(b"     " + line.encode("utf-8") + b"\n", info)
+                    stale = re.sub(
+                        rb"makeinfo version [0-9.]+", b"makeinfo version 0.0", info
+                    )
+                    (docs / "oc-box.info").write_bytes(stale)
+                    self.assertEqual(build.main(["--check-info-content", *output]), 0)
+                    (docs / "cli.md").write_text(changed)
+                    (docs / "oc-box.1").write_text(build.render_man(changed))
+                    (docs / "oc-box.texi").write_text(build.render_texinfo(changed))
+                    with (
+                        contextlib.redirect_stderr(io.StringIO()) as errors,
+                        self.assertRaises(SystemExit) as refused,
+                    ):
+                        build.main(["--check-info-content", *output])
+                    self.assertEqual(refused.exception.code, 1)
+                    self.assertIn("oc-box.info", errors.getvalue())
+                    self.assertEqual((docs / "oc-box.info").read_bytes(), stale)
+
+    def test_info_content_compares_tag_labels_and_validates_terminal_structure(self):
+        first = (
+            "This is oc-box.info, produced by makeinfo version 7.1 from oc-box.texi.\n\n"
+            "\x1f\nFile: oc-box.info,  Node: Top,  Up: (dir)\n\n"
+            "Records\n*******\n\nKeep synthetic records.\n\n"
+            "\x1f\nTag Table:\nNode: Top\x7f100\nRef: Records\x7f120\n"
+            "\x1f\nEnd Tag Table\n\n\x1f\nLocal Variables:\ncoding: utf-8\nEnd:\n"
+        )
+        second = (
+            "This is oc-box.info, produced by makeinfo version 7.3 from oc-box.texi.\n\n"
+            "\x1f\nFile: oc-box.info,  Node: Top,  Up: (dir)\n\n"
+            "Records\n*******\n\nKeep synthetic records.\n\n"
+            "\x1f\nTag Table:\nNode: Top\x7f104\nRef: Records\x7f124\n"
+            "\x1f\nEnd Tag Table\n\n\x1f\nLocal Variables:\ncoding: utf-8\nEnd:\n"
+        )
+        self.assertEqual(build.info_content(first), build.info_content(second))
+        self.assertNotEqual(
+            build.info_content(first),
+            build.info_content(second.replace("Ref: Records\x7f", "Ref: Changed\x7f")),
+        )
+        marker = "\x1f\nTag Table:\n"
+        for name, invalid in (
+            ("missing-table", second.split(marker)[0]),
+            ("truncated-at-table", second.split(marker)[0] + marker),
+            ("missing-terminator", second.replace("\x1f\nEnd Tag Table\n", "")),
+            ("missing-footer", second.split("\n\x1f\nLocal Variables:")[0] + "\n"),
+            ("coding", second.replace("coding: utf-8", "coding: latin-1")),
+            ("trailing-prose", second + "Unexpected prose: Drop synthetic records.\n"),
+            ("duplicate-marker", second.replace(marker, marker + marker)),
+            (
+                "duplicate-entry",
+                second.replace(
+                    "Node: Top\x7f104\n", "Node: Top\x7f104\nNode: Top\x7f105\n"
+                ),
+            ),
+            ("nonnumeric-offset", second.replace("Top\x7f104", "Top\x7funknown")),
+            ("oversized-offset", second.replace("Top\x7f104", "Top\x7f" + "1" * 13)),
+            (
+                "oversized-label",
+                second.replace("Ref: Records\x7f", "Ref: " + "x" * 257 + "\x7f"),
+            ),
+            (
+                "too-many-tags",
+                second.replace(
+                    "Ref: Records\x7f124\n",
+                    "".join(
+                        "Ref: tag" + str(index) + "\x7f124\n" for index in range(1024)
+                    ),
+                ),
+            ),
+        ):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                build.info_content(invalid)
+
+    def test_info_prose_wrapping_keeps_quoted_code_and_unicode_content(self):
+        prefix = (
+            "This is oc-box.info, produced by makeinfo version 7.1 from oc-box.texi.\n\n"
+            "\x1f\nFile: oc-box.info,  Node: Top,  Up: (dir)\n\n"
+        )
+        suffix = (
+            "\n\n\x1f\nTag Table:\nNode: Top\x7f100\n\x1f\nEnd Tag Table\n"
+            "\n\x1f\nLocal Variables:\ncoding: utf-8\nEnd:\n"
+        )
+        old = prefix + "Keep `two  words' safely.  Then continue." + suffix
+        equivalent = (
+            prefix.replace("version 7.1", "version 7.3")
+            + "Keep ‘two  words’\nsafely.  Then\ncontinue."
+            + suffix
+        )
+        self.assertEqual(build.info_content(old), build.info_content(equivalent))
+        for name, old_body, new_body in (
+            ("quoted-spaces", "Use ‘two  words’.", "Use ‘two words’."),
+            ("quoted-apostrophe", "Use ‘a’b’.", "Use ‘a'b’."),
+            (
+                "nonbreaking-space",
+                "Keep two\N{NO-BREAK SPACE}words.",
+                "Keep two words.",
+            ),
+        ):
+            with self.subTest(name=name):
+                self.assertNotEqual(
+                    build.info_content(prefix + old_body + suffix),
+                    build.info_content(
+                        prefix.replace("version 7.1", "version 7.3") + new_body + suffix
+                    ),
+                )
+
+    @unittest.skipUnless(shutil.which("makeinfo"), "GNU makeinfo not installed")
+    def test_info_content_check_rejects_malformed_footer_and_suffix(self):
+        with (
+            tempfile.TemporaryDirectory(prefix="oc-box-info-footer-") as temporary,
+            contextlib.redirect_stdout(io.StringIO()),
+            patch.object(build, "ROOT", Path(temporary)),
+        ):
+            docs = Path(temporary) / "docs"
+            docs.mkdir()
+            (docs / "cli.md").write_text("# Synthetic\n\n## Records\n\nKeep records.\n")
+            output = ["--output-dir", str(docs)]
+            self.assertEqual(build.main(output), 0)
+            info = re.sub(
+                rb"makeinfo version [0-9.]+",
+                b"makeinfo version 0.0",
+                (docs / "oc-box.info").read_bytes(),
+            )
+            marker = b"\x1f\nTag Table:\n"
+            for name, invalid in (
+                ("truncated-at-table", info.split(marker)[0] + marker),
+                ("missing-terminator", info.replace(b"\x1f\nEnd Tag Table\n", b"")),
+                ("missing-footer", info.split(b"\n\x1f\nLocal Variables:")[0] + b"\n"),
+                ("coding", info.replace(b"coding: utf-8", b"coding: latin-1")),
+                (
+                    "trailing-prose",
+                    info + b"Unexpected prose: Drop synthetic records.\n",
+                ),
+                ("duplicate-marker", info.replace(marker, marker + marker)),
+                (
+                    "changed-label",
+                    info.replace(b"Node: Records\x7f", b"Node: Different\x7f"),
+                ),
+            ):
+                with self.subTest(name=name):
+                    (docs / "oc-box.info").write_bytes(invalid)
+                    with (
+                        contextlib.redirect_stderr(io.StringIO()) as errors,
+                        self.assertRaises(SystemExit) as refused,
+                    ):
+                        build.main(["--check-info-content", *output])
+                    self.assertEqual(refused.exception.code, 1)
+                    self.assertIn("oc-box.info", errors.getvalue())
+                    self.assertEqual((docs / "oc-box.info").read_bytes(), invalid)
 
     def test_public_examples_do_not_publish_development_session_ids_or_home_paths(self):
         for name in (

@@ -186,22 +186,76 @@ def render_info(texinfo, makeinfo):
 
 
 def info_content(text):
-    """Compare all Info text across GNU versions, not just its node inventory.
+    """Compare the bounded default GNU Info layout, retaining literal content.
 
-    Ignore the renderer banner, byte-offset tag table, whitespace wrapping and
-    GNU's ASCII/Unicode single-quote typography. Keep body words, punctuation,
-    examples, directory entries, headings and node/navigation text in order.
-    Within the same renderer version the caller requires exact bytes instead.
+    GNU's default @example layout indents every nonempty line five spaces;
+    paragraphindent=0 leaves prose unindented. Keep *all* indented paragraphs
+    and paragraph separators exact, including example whitespace and Unicode.
+    Only unindented prose can rewrap/requote; quoted contents stay literal.
+    Unknown tag-table/footer layouts refuse rather than dropping a suffix.
     """
+    marker = "\x1f\nTag Table:\n"
+    terminator = "\x1f\nEnd Tag Table\n"
+    footer = "\n\x1f\nLocal Variables:\ncoding: utf-8\nEnd:\n"
+    if text.count(marker) != 1 or text.count(terminator) != 1:
+        raise ValueError("Invalid Info tag-table boundaries")
+    text, table = text.split(marker)
+    table, actual_footer = table.split(terminator)
+    if actual_footer != footer:
+        raise ValueError("Unsupported Info footer")
+    # This is the small unsplit table emitted for this manual, not a general
+    # Info parser. Bound entries, label sizes and decimal fields explicitly.
+    entries = table.split("\n")
+    if entries[-1] != "" or not 1 <= len(entries) - 1 <= 1024:
+        raise ValueError("Invalid Info tag-table size")
+    labels = []
+    for entry in entries[:-1]:
+        match = re.fullmatch(
+            r"(Node|Ref): ([^\x00-\x1f\x7f]{1,256})\x7f[0-9]{1,12}", entry
+        )
+        if match is None or match.groups() in labels:
+            raise ValueError("Invalid or duplicate Info tag")
+        labels.append(match.groups())
     text = re.sub(
         r"\AThis is oc-box\.info, produced by makeinfo version [0-9.]+ from oc-box\.texi\.\n",
         "",
         text,
         count=1,
     )
-    text = text.split("\x1f\nTag Table:\n", 1)[0]
-    text = text.translate(str.maketrans({"‘": "`", "’": "'"}))
-    return " ".join(text.split())
+
+    def prose_piece(value):
+        # An unmatched quote/backtick can be literal code, not a proven prose
+        # boundary. Retain ambiguous layouts exactly rather than flattening them.
+        if any(character in value for character in ("`", "‘", "’")):
+            return "literal", value
+        return "prose", re.sub(r"[ \n]+", " ", value)
+
+    paragraphs = []
+    for paragraph in re.split(r"(\n{2,})", text):
+        lines = paragraph.split("\n")
+        structural = paragraph.lstrip("\n").startswith(
+            ("\x1f\nFile:", "File:", "* ", "INFO-DIR-SECTION", "START-INFO-DIR-ENTRY")
+        ) or re.search(r"(?m)^[*=-]{2,}$", paragraph)
+        if structural or any(line.startswith((" ", "\t")) for line in lines):
+            paragraphs.append(("literal", paragraph))
+        elif not paragraph.strip("\n"):
+            paragraphs.append(("separator", paragraph))
+        else:
+            parts = []
+            position = 0
+            # Keep quote *contents* (including internal quotes, spaces and NBSP)
+            # intact. The different opening character bounds adjacent spans;
+            # greedy closing preserves apostrophes inside one quoted value.
+            for quoted in re.finditer(r"‘([^‘]*)’|`([^`]*)'", paragraph):
+                parts.append(prose_piece(paragraph[position : quoted.start()]))
+                value = quoted[1] if quoted[1] is not None else quoted[2]
+                # Inline @code has no source newline: blocks() joins paragraphs.
+                # A line break here is GNU wrapping, unlike an @example newline.
+                parts.append(("quoted", value.replace("\n", " ")))
+                position = quoted.end()
+            parts.append(prose_piece(paragraph[position:]))
+            paragraphs.append(("prose", tuple(parts)))
+    return tuple(paragraphs), tuple(labels), actual_footer
 
 
 def main(argv=None):
@@ -286,9 +340,12 @@ def main(argv=None):
             current = committed == info
             comparison = "exact bytes"
         else:
-            current = info_content(committed.decode("utf-8")) == info_content(
-                info.decode("utf-8")
-            )
+            try:
+                current = info_content(committed.decode("utf-8")) == info_content(
+                    info.decode("utf-8")
+                )
+            except ValueError:
+                current = False
             comparison = "normalized cross-version content"
         if not current:
             parser.exit(
