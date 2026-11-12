@@ -11,10 +11,12 @@ Copyright (C) 2026 Paulo Dias <paulo.miguel.dias@gmail.com>.
 Licensed [GPL-3.0-or-later](LICENSE); see [NOTICE](NOTICE) for attribution and
 the acknowledgment of OpenAI coding-assistant contributions through OpenCode.
 
-**1.7 release candidate:** the integrated candidate adds the optional Textual
-manager and temporary live host-file tools, and retains the private-memory and
-Ubuntu CI fixes from 1.6.60. See the [1.7 release notes and acceptance checklist](docs/releases/1.7.md).
-Preparing this candidate does not publish it or replace the required live-host checks.
+**1.7 rollout:** the series adds the optional Textual manager, temporary live
+host-file tools and guarded exit-history recovery, and retains the private-memory
+and Ubuntu CI fixes from 1.6.60. See the
+[1.7 release notes and acceptance checklist](docs/releases/1.7.md) for the feature
+set and publication requirements. Development-branch contents and component
+passes alone are not a published stable release.
 
 ## Why oc-box?
 
@@ -307,6 +309,16 @@ for up to 30 seconds after client leases drain; normal cleanup still stops the
 container on failure. Archives are mirrors, not bidirectional working copies or
 full backups of pending input and live execution. See the [sync reference](docs/cli.md#sync).
 
+In 1.7, eligible V2 shell-only timeouts can trigger one bounded persisted-history
+snapshot after the old owner closes and a whole-container stop is verified.
+The same existing container restarts temporarily for an isolated history reader,
+without normal runtime preparation, credential refresh or requested model/tool
+execution, then stops again. Explicit stop intent suppresses recovery. Even when
+snapshots are saved, the original timeout remains nonzero and warns that work or
+completion notices may be missing; native job rows are not repaired. Unsafe or
+unsupported cases remain pending. See the
+[recovery notes and validation scope](docs/releases/1.7.md#exit-history-recovery).
+
 An interrupted V1 assistant can remain unfinished after migration even when later
 turns have completed. In an inactive session, sync mirrors native OpenCode's
 export without those superseded assistants and records only their omitted count
@@ -317,8 +329,9 @@ Stable [v1.6.58](https://github.com/groopcd/oc-box/releases/tag/v1.6.58) records
 reviewed external history/readiness, global-vault and V1/V2 lifecycle reports,
 including the migrated superseded-assistant correction. This is a reconciliation
 with the published release notes, not a fresh review of its raw reports or
-acceptance of the later Textual manager. The new TUI candidate still needs fresh
-host checks on its exact clean source before stable GitHub/PyPI publication.
+acceptance of the later Textual manager or post-stop recovery. Each integrated
+release must meet the final-source gates in the
+[1.7 publication checklist](docs/releases/1.7.md#final-candidate-and-publication-gates).
 Earlier reports do not validate a later revision; see [test evidence and release
 boundaries](docs/testing.md#published-v1658-evidence-reconciliation).
 

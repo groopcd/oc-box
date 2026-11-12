@@ -380,11 +380,48 @@ Replacement refuses observed native host children and re-exports imports to
 verify messages and metadata, since CLI success can represent an import conflict.
 
 After client leases close, normal owner shutdown bounds its native activity wait
-to 30 seconds. Projected-history checks also reject messages omitted by native
-export while a direct user shell or compaction is running, or an assistant is
-unfinished at the end of a session. Failure leaves that
-session's sync pending (other sessions still synchronize, the command returns
-nonzero) and retains private data; normal cleanup still stops the container.
+to 30 seconds. An activity-wait refusal skips the live-owner sync attempt.
+Timeout diagnostics separately report the query/poll phase and the last complete
+validated foreground/job counts, or `unavailable` if no complete pair was observed;
+counts are capped at `9999+`. They contain no native identifiers, commands or
+response/error text, do not prove current quiescence, and do not change the fixed
+failure category. Request failure at the deadline also remains `activity-timeout`.
+Native 2.2.6/2.2.7 location reload can retain a cancelled background-shell job
+without foreground activity; reopening can expose it as running. Successful
+explicit sync is not evidence that the row cleared: that path checks native
+exports without the original owner's activity wait. Retained jobs remain blocking
+in the live owner; neither diagnostics nor snapshots repair native job cleanup.
+
+Eligible shell-only timeouts can trigger one bounded post-stop snapshot with
+supported native 2.2.6/2.2.7 owners. The last validated pairs are routing hints, not
+quiescence proof. The original owner must close normally with no attached clients;
+the actual old-producer boundary is a verified whole-container stop, not the exit
+of its host-side Podman wrapper. Stop intent can suppress the same-ID history-only
+restart. Ambiguous starts retain an uncertainty fence instead of a successful-stop
+claim. No container/volume replacement, runtime preparation or credential refresh
+is performed by recovery.
+
+One non-executing private reader then supplies every inventory/export operation;
+no controller or managed-service recovery is published. Source and host destination
+guards refuse any native schedule row, unknown scheduler schemas and nonempty
+system configuration before service construction. Scheduler flags alone do not
+disable native pending-input rewakes. Isolated configuration, provider/tool/plugin
+denials and disabled warming supplement those guards. Foreground activity remains
+a before/after refusal tripwire. Existing projection/export checks and verified
+archive import remain unchanged. The reader may maintain native metadata; it is
+not a byte-read-only backup. Final cleanup stops the container, and even successful
+snapshots retain the original nonzero result and interrupted-work warning.
+Reviewed scripted host acceptance covers native 2.2.6 on the recorded runtime;
+native 2.2.7 reader coverage is offline-only. See the
+[test strategy](testing.md#reviewed-focused-recovery-host-acceptance) for exact
+identities, scope and integrated-release validation requirements.
+
+Once activity readiness passes, projected-history checks also reject messages
+omitted by native export while a direct user shell or compaction is running, or
+an assistant is unfinished at the end of a session. Such a per-session refusal
+leaves that session's sync pending while other sessions still synchronize. Both
+failure paths return nonzero and retain private data; normal cleanup still stops
+the container.
 An unfinished assistant followed by settled messages in an idle session is
 superseded: native never settles it (observed for history migrated from 1.x after
 an interrupted turn; 2.x settles older ones at the next turn) and omits it from

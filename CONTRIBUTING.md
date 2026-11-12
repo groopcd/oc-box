@@ -428,8 +428,15 @@ not a published release or passing report.
    host reports; the release owner must review those gates explicitly.
 3. For history/lifecycle changes and this first integrated TUI release, obtain
    new external-host reports for the focused history/readiness runner,
-   global-vault fixture and V1/V2 lifecycle
-   fixture on the same clean candidate. Include regression-specific host cases,
+   global-vault fixture and V1/V2 lifecycle fixture on the same clean candidate.
+   Retain all 42 default history/readiness checks and the ordered exits
+   `[0,0,0,1,0,0,0,0]`. Also run both fresh post-stop recovery cases:
+   `--history-recovery-case snapshot` (12 checks) and `stop-cancel` (six checks),
+   with owner exits `[0,1]` each and explicit-stop exit `0` in the cancellation
+   case. See the
+   [recovery evidence and scope](docs/testing.md#reviewed-focused-recovery-host-acceptance).
+   Earlier component passes do not accept a later integrated source.
+   Include regression-specific host cases,
    not just the previously accepted baseline. Use only private synthetic state;
    never bypass host-only guards from an oc-box container. Follow the
    [history/readiness handoff](docs/testing.md#focused-historyreadiness-host-runner)

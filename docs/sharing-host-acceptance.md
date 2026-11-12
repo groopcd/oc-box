@@ -108,13 +108,24 @@ From the harness repository root, on the host:
 uv run --isolated --no-project --python /usr/bin/python3 --with cryptography \
   python -I -B tools/test_sharing_podman.py \
   --source /path/to/clean/candidate \
-  --expect-commit 8ac68294d1d607ca9ff57fc5e15d16292ff957c6 \
+  --expect-commit "$CANDIDATE_COMMIT" \
   --opencode-v2 /path/to/opencode-2.2.6 \
   --work-dir /var/tmp --temp-dir /var/tmp \
   --distro tumbleweed --mount-probe --require-selinux
 ```
 
-The candidate above is `1.7.83+g8ac6829`; the harness has its own later identity.
+Set `CANDIDATE_COMMIT` to the release owner's full, frozen integrated source
+commit; do not infer it from a patch number. The integration baseline tested by
+this sharing handoff is `4a76c5184eb8a1ebe673929ca84f6918f8c291b5`
+(`1.7.90+g4a76c51`), including the earlier sharing/TUI candidate plus guarded
+exit-history recovery. The harness has its own identity and runtime/donor
+integration tests; those local/native results are not host acceptance. The TUI
+session owns final source selection, combined release checks and publication.
+The earlier `8ac6829` sharing attempts and diagnostics retain their exact source
+identity; they do not accept this newer candidate. Final publication also needs
+the release checklist's 42 baseline, 12 snapshot and six stop-cancellation checks,
+global-vault/V1/V2 lifecycle reports and actual manager observations on the frozen
+integrated source.
 If the host lacks enforcing SELinux, stop at the preflight refusal and report
 that fact. A run without `--require-selinux` can provide separately scoped core
 evidence but cannot complete the currently declared release gate.
@@ -231,6 +242,13 @@ image-metadata incompatibility, or an external-data leak from that trace alone.
 retry or acceptance runner. Use a reviewed, pinned diagnostic checkout, the
 original unchanged source checkout, and the original failed fixture. From the
 diagnostic repository root on the external host:
+
+For the retained `e0b10f9`/`8ac6829` evidence described here, keep using the frozen
+**`11fa34cfe9adb27513c171569361305c11f3523f` diagnostic checkout**. The final-source
+harness has newer history/donor helpers; their bytes deliberately cannot replace
+the original recorded helper hashes. A provenance refusal is not permission to
+change the old report, its hashes or the retained source. This historical probe
+is independent of the fresh final-candidate host run.
 
 ```bash
 uv run --isolated --no-project --python /usr/bin/python3 --with cryptography \

@@ -26,24 +26,30 @@ if __package__:
     from . import (
         credentials,
         dependencies,
+        history_reader,
+        history_recovery,
         opencode_compat,
         opencode_v2_io,
         paths,
         plugin_compat,
         private_memory,
         vault,
+        workspace_control,
         workspace_identity,
         workspace_service,
     )
 else:
     import credentials
     import dependencies
+    import history_reader
+    import history_recovery
     import opencode_compat
     import opencode_v2_io
     import paths
     import plugin_compat
     import private_memory
     import vault
+    import workspace_control
     import workspace_identity
     import workspace_service
 
@@ -96,6 +102,15 @@ class BoxError(Exception):
 
 class HistoryPending(BoxError):
     """A session's history is not settled right now; others may still sync."""
+
+
+class HistoryWaitTimeout(BoxError):
+    """Keep the fixed refusal separate from count-only readiness diagnostics."""
+
+    def __init__(self, diagnostic, *, recovery_eligible=False):
+        super().__init__("OpenCode 2.x history wait failed (activity-timeout).")
+        self.diagnostic = diagnostic
+        self.recovery_eligible = recovery_eligible
 
 
 @contextlib.contextmanager
@@ -246,6 +261,10 @@ def check_private_output():
 
 
 def run(argv, *, capture=False, check=True, private=False, **kwargs):
+    remaining = history_recovery.remaining()
+    if remaining is not None:
+        requested = kwargs.get("timeout")
+        kwargs["timeout"] = min(requested, remaining) if requested else remaining
     if getattr(argv, "environment", None) is not None:
         kwargs.setdefault("env", argv.environment)
     if kwargs.get("cwd"):
@@ -255,6 +274,11 @@ def run(argv, *, capture=False, check=True, private=False, **kwargs):
         }
     try:
         command = [str(x) for x in argv]
+        invoke = (
+            history_recovery.run_fenced
+            if history_recovery.FENCE.get() is not None
+            else subprocess.run
+        )
         if capture:
             # Mainline OpenCode can truncate large exports when stdout is a
             # pipe. Use regular files for captured CLI output instead.
@@ -262,7 +286,7 @@ def run(argv, *, capture=False, check=True, private=False, **kwargs):
                 captured_output(private=private) as output,
                 captured_output(private=private) as errors,
             ):
-                result = subprocess.run(
+                result = invoke(
                     command, text=True, stdout=output, stderr=errors, **kwargs
                 )
                 output.seek(0)
@@ -270,13 +294,14 @@ def run(argv, *, capture=False, check=True, private=False, **kwargs):
                 result.stdout = output.read().decode("utf-8")
                 result.stderr = errors.read().decode("utf-8", errors="replace")
         else:
-            result = subprocess.run(command, text=True, **kwargs)
+            result = invoke(command, text=True, **kwargs)
     except FileNotFoundError as exc:
         raise BoxError(f"Executable not found: {argv[0]}") from exc
     except subprocess.TimeoutExpired as exc:
         raise BoxError(
             f"{argv[0]} exceeded its {exc.timeout}s timeout; operation stopped."
         ) from exc
+    history_recovery.remaining()
     if check and result.returncode:
         detail = (
             (result.stderr or result.stdout or "").strip()
@@ -909,6 +934,7 @@ def start_container(path, data):
             f"From a host terminal, relabel this project with: chcon -R -t container_file_t {shlex.quote(data['project'])}\n"
             "Then retry the same oc-box command. New containers use Podman's shared project label (:z)."
         )
+    return info
 
 
 def stop_container(data, *, env=None):
@@ -994,6 +1020,12 @@ def private_host_env(path, data):
                     {"action": "plugin.use", "resource": "*", "effect": "deny"}
                 ],
             }
+        )
+    reader = history_reader.current()
+    if reader is not None:
+        env = history_reader.fence_environment(env)
+        history_reader.assert_host_safe(
+            sys.modules[__name__], path, data, env, reader.remaining
         )
     return env
 
@@ -1756,17 +1788,22 @@ def run_v2_history(data, action, **settings):
         if live and live["workspace"] == data["id"]
         else None
     )
+    reader = history_reader.current()
+    arguments = [
+        "python3",
+        "-c",
+        (PACKAGE / "opencode_v2_io.py").read_text(),
+        action,
+        CONTAINER_OPENCODE,
+    ]
+    if reader is not None:
+        if reader.data["id"] != data["id"] or endpoint is None:
+            raise BoxError("History reader does not own this snapshot request.")
+        command = reader.command(arguments)
+    else:
+        command = exec_command(data, arguments)
     result = run(
-        exec_command(
-            data,
-            [
-                "python3",
-                "-c",
-                (PACKAGE / "opencode_v2_io.py").read_text(),
-                action,
-                CONTAINER_OPENCODE,
-            ],
-        ),
+        command,
         input=json.dumps(
             {"directory": container_project(data), "endpoint": endpoint, **settings}
         ),
@@ -2333,7 +2370,7 @@ def verify_host_archive(path, data, archived):
         )
 
 
-def sync_sessions(path, data):
+def sync_sessions(path, data, *, announce=True):
     state = refresh_sessions(path, data)
     archives = path.parent / "history"
     archives.mkdir(exist_ok=True, mode=0o700)
@@ -2395,7 +2432,7 @@ def sync_sessions(path, data):
             + "; ".join(dict.fromkeys(pending))
             + " Their last archives are retained and other sessions were synchronized."
         )
-    if state.get("sessions"):
+    if state.get("sessions") and announce:
         print(
             "Session history synced to your normal host OpenCode database.", flush=True
         )
@@ -2481,9 +2518,21 @@ def launch_environment(path, data, args):
         with loading_stage("Exporting host session"):
             exported = export_host_session(path, data, args.import_session)
     code = 1
+    stop_token, source, cleanup_data = None, None, data
+    if (
+        opencode_compat.major(version) == 2
+        and args.command != "sync"
+        and path.is_file()
+    ):
+        try:
+            stop_token = workspace_control.capture(path)
+        except (workspace_control.ControlError, OSError):
+            # Optional recovery never repairs unsafe control state or prevents
+            # the ordinary owning launch/cleanup from retaining its old behavior.
+            pass
     try:
         with loading_stage(f"Starting {data['distro']} container"):
-            start_container(path, data)
+            initial_info = start_container(path, data)
         with loading_stage("Preparing OpenCode and syncing configuration"):
             prepare_runtime(path, data, version)
         if args.command == "sync":
@@ -2498,10 +2547,51 @@ def launch_environment(path, data, args):
                 if opencode_compat.major(version) == 2
                 else None
             )
-            return launch_client(path, data, args, version, exported, owner)
+            if owner:
+                source = history_recovery.capture(
+                    sys.modules[__name__], data, initial_info, stop_token
+                )
+                owner._history_source = source
+            code = launch_client(path, data, args, version, exported, owner)
+        timeout = getattr(owner, "_history_timeout", None) if owner else None
+        if isinstance(timeout, HistoryWaitTimeout):
+            code = code or 1
+        if (
+            source is not None
+            and isinstance(timeout, HistoryWaitTimeout)
+            and timeout.recovery_eligible
+            and type(owner.clients) is int
+            and owner.clients == 0
+            and type(owner.child.returncode) is int
+            and owner.child.returncode == 0
+        ):
+            cleanup_data = {**data, "container": source.container_id}
+            history_recovery.recover(sys.modules[__name__], path, data, source)
+        elif timeout is not None:
+            print(
+                f"oc-box: history sync pending: {timeout}\n"
+                "Container data retained. Retry with 'oc-box sync'.",
+                file=sys.stderr,
+            )
+        return code
     finally:
-        with loading_stage("Stopping container"):
-            stop_container(data)
+        if cleanup_data is data:
+            with loading_stage("Stopping container"):
+                stop_container(cleanup_data)
+        else:
+            try:
+                with (
+                    loading_stage("Stopping container"),
+                    history_recovery.budget(history_recovery.CLEANUP_BUDGET),
+                ):
+                    stop_container(cleanup_data)
+            except (BoxError, OSError, ValueError, subprocess.SubprocessError):
+                # The original failure is already nonzero; do not mask it or
+                # claim stopped state after an unverified bounded final attempt.
+                print(
+                    "oc-box: Final history-recovery cleanup could not be verified; inspect the workspace on the host.",
+                    file=sys.stderr,
+                )
 
 
 def launch_client(path, data, args, version, exported, owner=None):
@@ -2587,6 +2677,19 @@ def launch_client(path, data, args, version, exported, owner=None):
                 )
             sync_sessions(path, data)
     except (BoxError, ValueError, KeyError) as exc:
+        if isinstance(exc, HistoryWaitTimeout):
+            print(f"oc-box: {exc.diagnostic}", file=sys.stderr)
+            if (
+                exc.recovery_eligible
+                and getattr(owner, "_history_source", None) is not None
+            ):
+                owner._history_timeout = exc
+                print(
+                    f"oc-box: {exc} Closing the owner before a bounded, "
+                    "post-stop persisted-history snapshot attempt.",
+                    file=sys.stderr,
+                )
+                return code or 1
         print(
             f"oc-box: history sync pending: {exc}\nContainer data retained. Retry with 'oc-box sync'.",
             file=sys.stderr,
@@ -3474,7 +3577,19 @@ def main(argv=None):
     # Explicit stop is usable from a second terminal. Tool calls
     # never auto-restart a stopped container; the running TUI can then be exited.
     if args.command == "stop":
-        stop_container(data)
+        if opencode_compat.major(data.get("opencode_version", "1.0.0")) == 1:
+            stop_container(data)
+        else:
+            try:
+                workspace_control.request_stop(path)
+                with workspace_control.admission(path, timeout=45):
+                    stop_container(data)
+                    workspace_control.require_certain(path)
+            except workspace_control.ControlError as exc:
+                # Still honor stop as far as possible, but never claim an ordered
+                # successful stop if startup/control state could not be fenced.
+                stop_container(data)
+                raise BoxError(str(exc)) from None
         print("Container stopped; files, packages, and conversations retained.")
         return 0
     if (

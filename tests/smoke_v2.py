@@ -1552,7 +1552,9 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
     from smoke_session_sync_v2 import main as session_sync_probe
+    from smoke_history_recovery_v2 import main as history_recovery_probe
 
     session_sync_probe(str(Path(args.opencode).resolve()))
+    history_recovery_probe(str(Path(args.opencode).resolve()))
     main(args.opencode, args.legacy_plugin_dir)
     host_fixture_probe(str(Path(args.opencode).resolve()))
