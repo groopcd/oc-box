@@ -237,6 +237,20 @@ def exact(source, size):
     return b"".join(pieces)
 
 
+def opaque_xattr_key(key):
+    """Only the established SCHILY xattr-value convention is binary-valued.
+
+    These values are metadata, never pathname/size overrides. Keep their keys
+    and lossless values in the normal mapping for duplicate and field budgets.
+    """
+    prefix = "SCHILY.xattr."
+    return (
+        key.startswith(prefix)
+        and len(key) > len(prefix)
+        and not any(char in key for char in ("\0", "\n", "\r", "="))
+    )
+
+
 def pax_fields(payload):
     """Strict framing before tarfile can allocate or silently ignore PAX data."""
     result = {}
@@ -250,10 +264,23 @@ def pax_fields(payload):
         if length < 5 or end > len(payload) or payload[end - 1 : end] != b"\n":
             raise ScanError("malformed-pax")
         field, equals, value = payload[space + 1 : end - 1].partition(b"=")
-        if not equals or not field or b"\0" in field + value:
+        if (
+            not equals
+            or not field
+            or any(char in field for char in (b"\0", b"\n", b"\r"))
+        ):
             raise ScanError("malformed-pax")
         try:
-            key, text = field.decode("utf-8"), value.decode("utf-8")
+            key = field.decode("utf-8")
+            if opaque_xattr_key(key):
+                # Container archive writers carry raw xattr bytes here. Python
+                # ignores these keys semantically; preserve bytes reversibly,
+                # not with replacement/ignore decoding or a blanket PAX charset.
+                text = value.decode("utf-8", "surrogateescape")
+            else:
+                if b"\0" in value:
+                    raise ScanError("malformed-pax")
+                text = value.decode("utf-8")
         except UnicodeError:
             raise ScanError("malformed-pax") from None
         if key in result or key.startswith(("GNU.sparse", "SCHILY.realsize")):
@@ -328,6 +355,11 @@ def strict_tarinfo(state):
                     ):
                         raise ScanError("resource-limit")
                     payload = exact(archive.fileobj, member.size)
+                    # Check raw bounded metadata before any parsing, decoding or
+                    # opaque-value handling. Compressed bytes are not an oracle
+                    # for markers in expanded OCI PAX/long-name metadata.
+                    if FORBIDDEN_CONTENT in payload:
+                        state.violation = state.violation or "forbidden-content"
                     padding = exact(archive.fileobj, (-member.size) % 512)
                     if padding.strip(b"\0"):
                         raise ScanError("malformed-pax")

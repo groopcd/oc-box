@@ -20,12 +20,12 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
-from tools import sharing_archive_scan as original
+from tools import sharing_archive_scan_original as original
 from tools import sharing_pax_reason as worker
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCANNER = ROOT / "tools/sharing_archive_scan.py"
+SCANNER = ROOT / "tools/sharing_archive_scan_original.py"
 WORKER = ROOT / "tools/sharing_pax_reason.py"
 PRIVATE = "SYNTHETIC_PRIVATE_PAX_REASON"
 EXPECTED_SHA256 = "455abf6daab5f3777471fc960103350ed316d224dd598c20b9e08b3f4670193c"
@@ -173,6 +173,7 @@ class PaxReasonTests(unittest.TestCase):
         self.assertNotIn(PRIVATE, output + errors)
 
     def test_original_source_identity_is_fixed_and_unchanged(self):
+        self.assertEqual(Path(original.__file__).resolve(), SCANNER)
         before = SCANNER.read_bytes()
         self.assertEqual(hashlib.sha256(before).hexdigest(), EXPECTED_SHA256)
         self.assertEqual(worker.ORIGINAL_SCANNER_SHA256, EXPECTED_SHA256)
@@ -608,7 +609,7 @@ class PaxReasonTests(unittest.TestCase):
         self.assertEqual(
             second.pax_fields(pax(b"comment", b"safe")), {"comment": "safe"}
         )
-        self.assertIs(sys.modules.get("tools.sharing_archive_scan"), original)
+        self.assertIs(sys.modules.get("tools.sharing_archive_scan_original"), original)
 
     def test_protocol_errors_fail_closed_without_reflecting_any_text(self):
         cases = (

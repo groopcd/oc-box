@@ -2,8 +2,9 @@
 """HOST-only, file-only diagnosis of an original failed sharing backup scan.
 
 No Podman/native OpenCode, workspace start, vault unlock, restore, retry, purge,
-report rewrite or plaintext staging. The recorded scanner and source must match
-their original Git identities. Read-only results are diagnostics, not acceptance.
+report rewrite or plaintext staging. The recorded oracle and source stay pinned;
+explicit current-scanner comparison requires a clean verified harness commit.
+Read-only results are diagnostics, not acceptance.
 """
 
 import argparse
@@ -28,6 +29,9 @@ RECORDED_FILES = (
     "sharing_archive_scan.py",
 )
 COMPONENTS = ("project.age", "home.age", "registry.age", "image.age")
+ORIGINAL_SCANNER_SHA256 = (
+    "455abf6daab5f3777471fc960103350ed316d224dd598c20b9e08b3f4670193c"
+)
 HOST_SCOPE = (
     "Synthetic external-host production sharing CLI/PTY, real rootless "
     "workspace/native tools; no real providers/projects or security certification."
@@ -128,10 +132,16 @@ def parser():
     result.add_argument("--expect-commit", required=True)
     result.add_argument("--fixture", type=Path, required=True)
     result.add_argument("--recorded-harness-commit", required=True)
-    result.add_argument(
+    scanner_mode = result.add_mutually_exclusive_group()
+    scanner_mode.add_argument(
         "--pax-reason",
         action="store_true",
         help="Inspect only image.age with a decision-preserving, fixed-reason observer of the original scanner",
+    )
+    scanner_mode.add_argument(
+        "--current-image-scanner",
+        action="store_true",
+        help="Compare only image.age with the scanner verified against this clean harness HEAD; not acceptance",
     )
     result.add_argument(
         "--temp-dir",
@@ -140,6 +150,37 @@ def parser():
         help="Existing parent outside all fixtures/checkouts; encrypted temporary components only",
     )
     return result
+
+
+def recorded_scanner(directory, expected):
+    """Use the recorded oracle, never silently substitute a corrected scanner."""
+    candidates = [directory / "sharing_archive_scan.py"]
+    if expected == ORIGINAL_SCANNER_SHA256:
+        candidates.append(directory / "sharing_archive_scan_original.py")
+    for path in candidates:
+        if not path.is_symlink() and path.is_file() and digest(path) == expected:
+            return path
+    raise Refusal("scanner-changed")
+
+
+def current_scanner(history, directory):
+    """Explicit comparison is tied to a clean full-history harness commit."""
+    root = directory.parent
+    require(
+        not history.git(root, "status", "--porcelain", "--untracked-files=all"),
+        "source-changed",
+    )
+    commit = history.git(root, "rev-parse", "HEAD").decode("ascii").strip()
+    require(re.fullmatch(r"[0-9a-f]{40}", commit), "source-changed")
+    path = directory / "sharing_archive_scan.py"
+    expected = hashlib.sha256(
+        history.git(root, "show", commit + ":tools/" + path.name)
+    ).hexdigest()
+    require(
+        not path.is_symlink() and path.is_file() and digest(path) == expected,
+        "scanner-changed",
+    )
+    return path, commit
 
 
 def validated_evidence(args, history, loaded):
@@ -210,10 +251,8 @@ def validated_evidence(args, history, loaded):
         and report.get("harness_sha256") == expected,
         "purpose",
     )
-    scanner = Path(__file__).resolve().with_name("sharing_archive_scan.py")
-    require(
-        not scanner.is_symlink() and digest(scanner) == expected[scanner.name],
-        "scanner-changed",
+    scanner = recorded_scanner(
+        Path(__file__).resolve().parent, expected["sharing_archive_scan.py"]
     )
     require(digest(scanner.with_name(HISTORY)) == expected[HISTORY], "source-changed")
     archive = private_file(f, root, "sharing-full.ocbox", f.crypto.MAX_BACKUP)
@@ -228,7 +267,15 @@ def validated_evidence(args, history, loaded):
 
 
 def inspect_archive(
-    loaded, archive, identity, scanner, source, probe, *, pax_reason=False
+    loaded,
+    archive,
+    identity,
+    scanner,
+    source,
+    probe,
+    *,
+    pax_reason=False,
+    image_only=False,
 ):
     f = loaded.fixture
     results = {}
@@ -247,7 +294,7 @@ def inspect_archive(
                 and set(manifest.get("components", {})) == set(COMPONENTS),
                 "purpose",
             )
-            for name in ("image.age",) if pax_reason else COMPONENTS:
+            for name in ("image.age",) if pax_reason or image_only else COMPONENTS:
                 path = directory / name
                 measured = f.crypto.digest(path)
                 require(measured == manifest["components"][name], "evidence-changed")
@@ -324,6 +371,19 @@ def main(argv=None):
             root, source, archive, identity, scanner, watched = validated_evidence(
                 args, history, loaded
             )
+            original_scanner = scanner
+            result["recorded_scanner_sha256"] = digest(original_scanner)
+            result["scanner_role"] = "recorded-original"
+            if args.pax_reason:
+                require(
+                    result["recorded_scanner_sha256"] == ORIGINAL_SCANNER_SHA256,
+                    "scanner-changed",
+                )
+            if args.current_image_scanner:
+                scanner, comparison_commit = current_scanner(history, directory)
+                result["comparison_harness_commit"] = comparison_commit
+                result["observation"] = "current-image-scanner"
+                result["scanner_role"] = "current-comparison"
             require(not parent.is_relative_to(root), "placement")
             before = {path: digest(path) for path in watched}
             result["source_identity"] = {
@@ -337,6 +397,7 @@ def main(argv=None):
                     Path(__file__).resolve(),
                     directory / "sharing_backup_probe.py",
                     directory / HISTORY,
+                    original_scanner,
                     scanner,
                 )
             }
@@ -357,7 +418,13 @@ def main(argv=None):
                         scanner,
                         source,
                         probe,
-                        **({"pax_reason": True} if args.pax_reason else {}),
+                        **(
+                            {"pax_reason": True}
+                            if args.pax_reason
+                            else {"image_only": True}
+                            if args.current_image_scanner
+                            else {}
+                        ),
                     )
             except BaseException as error:
                 result["category"] = category(error)
@@ -388,6 +455,15 @@ def main(argv=None):
                     )
                 except BaseException:
                     checks.append("source-changed")
+                if args.current_image_scanner:
+                    try:
+                        require(
+                            current_scanner(history, directory)
+                            == (scanner, comparison_commit),
+                            "source-changed",
+                        )
+                    except BaseException:
+                        checks.append("source-changed")
                 for name, old in result["diagnostic_sha256"].items():
                     try:
                         require(digest(directory / name) == old, "scanner-changed")
@@ -401,7 +477,9 @@ def main(argv=None):
             if result["category"] is None:
                 result["status"] = "diagnostic-only"
             result["scope"] = (
-                "File-only component inspection with independent authentication and the original recorded scanner; no engine, lifecycle, replay, restore or acceptance claim."
+                "File-only image comparison with independent authentication and a clean-commit current scanner; no engine, lifecycle, replay, restore or acceptance claim."
+                if args.current_image_scanner
+                else "File-only component inspection with independent authentication and the original recorded scanner; no engine, lifecycle, replay, restore or acceptance claim."
             )
     except BaseException as error:
         result["status"] = "diagnostic-refused"

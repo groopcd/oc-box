@@ -315,3 +315,44 @@ An observed first binary-xattr refusal would justify investigating that narrow
 compatibility boundary, but would still not prove that later records pass. Keep
 the original scanner, diagnostic result and failed host reports intact until a
 reviewed correction and fresh complete acceptance establish the required scope.
+
+### Confirmed binary-xattr refusal and corrected-scanner comparison
+
+The subsequent reviewed `ef34a47` file-only host observation identified
+`xattr-value-nul` on the same authenticated image ciphertext, with producer exit
+0, scanner exit 1, no timeout and unchanged original evidence. Its key
+classification requires a complete valid UTF-8 `SCHILY.xattr.*` key with a
+nonempty suffix. This establishes the **first** original-parser incompatibility;
+it does not establish that later image records pass or complete host acceptance.
+
+The corrected scanner allows opaque NUL/non-UTF-8 values only for that narrow
+SCHILY convention. It retains their mapping entries for duplicate/field budgets,
+uses lossless decoding, and does not apply them as paths, sizes or permissions.
+Semantic/ordinary values, keys, PAX framing/padding, numeric fields, sparse and
+charset refusals, path/link checks, OCI validation and resource limits stay
+strict. Every bounded raw extension payload is also checked for the never-read
+sentinel before parsing, including metadata inside expanded compressed layers.
+
+`tools/sharing_archive_scan_original.py` is an intentional **immutable historical
+tool oracle**, byte-identical to the original `e0b10f9` scanner (SHA-256
+`455abf6daab5f3777471fc960103350ed316d224dd598c20b9e08b3f4670193c`).
+Do not edit or reformat it. Original diagnostics select by the recorded Git hash,
+not the filename of the latest corrected scanner. They refuse if neither the
+current scanner nor this exact historical oracle matches; no unknown original
+version is silently replaced. `--pax-reason` remains limited to that original
+oracle and retains its original refusal decision.
+
+To inspect **only the retained image with the corrected scanner**, append
+**`--current-image-scanner`** instead of `--pax-reason`. These options are mutually
+exclusive. This comparison requires a clean diagnostic harness checkout and
+verifies its current scanner against its full Git HEAD before and after the
+inspection. Output records both the original scanner identity and the actual
+comparison scanner/commit, with `scanner_role: current-comparison` and
+`observation: current-image-scanner`. The encrypted manifest and every component's
+ciphertext hash/size are still validated, even though only the image is scanned.
+
+This mode neither changes the recorded oracle nor overwrites the failed report.
+Even `scanner_category: ok` is only a file-only corrected-oracle comparison with
+`acceptance: false`. A fresh full external-host harness run must still complete
+backup/restore, revocation, source/label preservation and every required check
+before release. Preserve all earlier failures and diagnostics unchanged.

@@ -32,6 +32,7 @@ from tools import sharing_backup_probe as probe
 
 
 SCANNER = Path(__file__).resolve().parents[1] / "tools/sharing_archive_scan.py"
+ORIGINAL_SCANNER = SCANNER.with_name("sharing_archive_scan_original.py")
 PRIVATE = b"AGE-SECRET-KEY-1" + b"A" * 58 + b"\n"
 SENSITIVE = "SYNTHETIC_PRIVATE_PROBE_CONTENT"
 RESULT_KEYS = {
@@ -707,6 +708,22 @@ def make_tar(entries):
     return output.getvalue()
 
 
+def binary_xattr_layer(value):
+    body = b"SCHILY.xattr.security.capability=" + value + b"\n"
+    length = len(body) + 2
+    while len(str(length)) + 1 + len(body) != length:
+        length = len(str(length)) + 1 + len(body)
+    payload = str(length).encode() + b" " + body
+    member = tarfile.TarInfo("synthetic-pax")
+    member.type, member.size = tarfile.XHDTYPE, len(payload)
+    return (
+        member.tobuf(format=tarfile.USTAR_FORMAT)
+        + payload
+        + bytes((-len(payload)) % 512)
+        + make_tar([("safe", b"safe")])
+    )
+
+
 def make_oci(layer):
     entries = [("oci-layout", b'{"imageLayoutVersion":"1.0.0"}')]
 
@@ -740,32 +757,49 @@ class NativeAgeProbeTests(unittest.TestCase):
     def test_reason_observation_repeats_original_refusal_without_accepting_binary_metadata(
         self,
     ):
-        body = b"SCHILY.xattr.security.capability=\x00\x00\x00\x01\n"
-        length = len(body) + 2
-        while len(str(length)) + 1 + len(body) != length:
-            length = len(str(length)) + 1 + len(body)
-        payload = str(length).encode() + b" " + body
-        member = tarfile.TarInfo("synthetic-pax")
-        member.type, member.size = tarfile.XHDTYPE, len(payload)
-        layer = (
-            member.tobuf(format=tarfile.USTAR_FORMAT)
-            + payload
-            + bytes((-len(payload)) % 512)
-            + make_tar([("safe", b"safe")])
-        )
+        layer = binary_xattr_layer(b"\x00\x00\x00\x01")
         path = self.encrypt(make_oci(layer))
         original = path.read_bytes()
         baseline = probe.probe_component(
-            crypto, path, self.private, SCANNER, "oci", timeout=15
+            crypto, path, self.private, ORIGINAL_SCANNER, "oci", timeout=15
         )
         detail = probe.probe_component(
-            crypto, path, self.private, SCANNER, "oci", timeout=15, pax_reason=True
+            crypto,
+            path,
+            self.private,
+            ORIGINAL_SCANNER,
+            "oci",
+            timeout=15,
+            pax_reason=True,
         )
         self.assertEqual(detail["pax_reason"], "xattr-value-nul")
         self.assertEqual({key: detail[key] for key in RESULT_KEYS}, baseline)
         self.assertTrue(detail["authenticated"])
         self.assertEqual(detail["scanner_category"], "malformed-pax")
+        corrected = probe.probe_component(
+            crypto, path, self.private, SCANNER, "oci", timeout=15
+        )
+        self.assertTrue(corrected["authenticated"])
+        self.assertEqual(corrected["scanner_producer_exit"], 0)
+        self.assertEqual(corrected["scanner_exit"], 0)
+        self.assertEqual(corrected["scanner_category"], "ok")
         self.assertEqual(path.read_bytes(), original)
+
+    def test_corrected_encrypted_metadata_retains_raw_sentinel_exclusion(self):
+        for value, category in (
+            (b"\x00\xff\n=\r", "ok"),
+            (b"\x00\xffSHARING_NEVER_READ_CONTENT_\x00", "forbidden-content"),
+        ):
+            path = self.encrypt(make_oci(binary_xattr_layer(value)))
+            before = path.read_bytes()
+            result = probe.probe_component(
+                crypto, path, self.private, SCANNER, "oci", timeout=15
+            )
+            self.assertTrue(result["authenticated"])
+            self.assertEqual(result["scanner_producer_exit"], 0)
+            self.assertEqual(result["scanner_exit"], int(category != "ok"))
+            self.assertEqual(result["scanner_category"], category)
+            self.assertEqual(path.read_bytes(), before)
 
     @classmethod
     def setUpClass(cls):

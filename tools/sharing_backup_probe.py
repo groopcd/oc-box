@@ -1,9 +1,9 @@
-"""Read-only, two-pass age authentication and original archive-scanner probe.
+"""Read-only, two-pass age authentication and selected archive-scanner probe.
 
 The caller owns retained-fixture, source/hash, and private-path validation. This
 helper never opens a workspace or calls a container engine. It pins a regular
 ciphertext file, authenticates it independently to an EOF sink, then streams a
-second decryption to the caller's original scanner. Plaintext is never staged.
+second decryption to the caller's verified scanner. Plaintext is never staged.
 Only fixed categories and child exit codes cross this module's boundary.
 """
 
@@ -208,7 +208,8 @@ def probe_component(
 
     ``crypto`` is the source-pinned candidate's backup_crypto module. ``private``
     is its already-decrypted native age identity, never an identity pathname.
-    ``scanner`` is the unchanged sharing_archive_scan.py script. Success of the
+    ``scanner`` is the caller's verified original or explicit comparison script.
+    PAX reason observation remains restricted to the unchanged original. Success of the
     scanner is represented only by ``scanner_category == 'ok'``; authentication
     alone does not establish archive exclusion. ``timeout`` bounds both passes
     together, with at most two additional three-second TERM/KILL cleanup waits.

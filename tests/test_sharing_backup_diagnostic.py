@@ -28,6 +28,7 @@ from tools import test_session_sync_podman as history_donor
 
 COMMIT = "b" * 40
 HARNESS_COMMIT = "c" * 40
+CURRENT_COMMIT = "d" * 40
 SENSITIVE = "SYNTHETIC_PRIVATE_ERROR_ENV_ARGV_AND_PAYLOAD"
 NAMESPACE = "oc_box_share_" + "d" * 32
 HOST_SCOPE = (
@@ -175,8 +176,56 @@ class OfflineCase(unittest.TestCase):
 
 
 class OptionsAndHostGuardTests(OfflineCase):
+    def test_recorded_oracle_fallback_refuses_redirected_or_mismatched_archives(self):
+        directory = self.parent / "tools"
+        directory.mkdir()
+        current = directory / "sharing_archive_scan.py"
+        archived = directory / "sharing_archive_scan_original.py"
+        old = Path(diagnostic.__file__).with_name(archived.name).read_bytes()
+        current.write_bytes(b"new scanner source")
+        archived.write_bytes(old)
+        self.assertEqual(
+            diagnostic.recorded_scanner(directory, diagnostic.ORIGINAL_SCANNER_SHA256),
+            archived,
+        )
+        target = directory / "public-original-source"
+        archived.rename(target)
+        archived.symlink_to(target)
+        with self.refused("scanner-changed"):
+            diagnostic.recorded_scanner(directory, diagnostic.ORIGINAL_SCANNER_SHA256)
+        archived.unlink()
+        archived.write_bytes(b"mismatched archived source")
+        with self.refused("scanner-changed"):
+            diagnostic.recorded_scanner(directory, diagnostic.ORIGINAL_SCANNER_SHA256)
+
+    def test_explicit_comparison_refuses_a_symlink_even_when_target_matches_committed_blob(
+        self,
+    ):
+        directory = self.parent / "tools"
+        directory.mkdir()
+        target = self.parent / "public-source"
+        code = b"synthetic committed public source"
+        target.write_bytes(code)
+        current = directory / "sharing_archive_scan.py"
+        current.symlink_to(target)
+
+        def git(root, *arguments):
+            if arguments[0] == "status":
+                return b""
+            if arguments[0] == "rev-parse":
+                return (CURRENT_COMMIT + "\n").encode()
+            return code
+
+        with self.refused("scanner-changed"):
+            diagnostic.current_scanner(SimpleNamespace(git=git), directory)
+
     def test_parser_errors_do_not_reflect_private_argv(self):
-        for arguments in ([], self.arguments("--" + SENSITIVE), ["--source"]):
+        for arguments in (
+            [],
+            self.arguments("--" + SENSITIVE),
+            ["--source"],
+            self.arguments("--pax-reason", "--current-image-scanner"),
+        ):
             errors = io.StringIO()
             with (
                 self.subTest(arguments=arguments),
@@ -326,11 +375,17 @@ class EvidenceCase(OfflineCase):
             "sha256": {"src/oc_box/sharing.py": "d" * 64},
         }
         self.scanner = (
-            Path(diagnostic.__file__).resolve().with_name("sharing_archive_scan.py")
+            Path(diagnostic.__file__)
+            .resolve()
+            .with_name("sharing_archive_scan_original.py")
         )
         self.blobs = {
-            name: self.scanner.with_name(name).read_bytes()
-            if name in (self.scanner.name, diagnostic.HISTORY)
+            name: (
+                self.scanner
+                if name == "sharing_archive_scan.py"
+                else self.scanner.with_name(name)
+            ).read_bytes()
+            if name in ("sharing_archive_scan.py", diagnostic.HISTORY)
             else ("synthetic original Git blob " + name).encode()
             for name in diagnostic.RECORDED_FILES
         }
@@ -453,6 +508,12 @@ class EvidenceCase(OfflineCase):
         self.assertEqual(root, Path(diagnostic.__file__).resolve().parents[1])
         if arguments == ("rev-parse", "--is-shallow-repository"):
             return b"false\n"
+        if arguments == ("rev-parse", "HEAD"):
+            return (CURRENT_COMMIT + "\n").encode()
+        if arguments == ("status", "--porcelain", "--untracked-files=all"):
+            return b""
+        if arguments == ("show", CURRENT_COMMIT + ":tools/sharing_archive_scan.py"):
+            return self.scanner.with_name("sharing_archive_scan.py").read_bytes()
         self.assertEqual(arguments[0], "show")
         prefix = HARNESS_COMMIT + ":tools/"
         self.assertTrue(arguments[1].startswith(prefix))
@@ -487,6 +548,21 @@ class EvidenceCase(OfflineCase):
 
 
 class EvidenceValidationTests(EvidenceCase):
+    def test_original_oracle_is_selected_by_recorded_hash_not_current_filters(self):
+        result = self.validate()
+        self.assertEqual(result[4], self.scanner)
+        self.assertEqual(
+            diagnostic.digest(result[4]), diagnostic.ORIGINAL_SCANNER_SHA256
+        )
+        current = self.scanner.with_name("sharing_archive_scan.py")
+        self.assertNotEqual(diagnostic.digest(current), diagnostic.digest(self.scanner))
+        self.assertEqual(
+            diagnostic.recorded_scanner(current.parent, diagnostic.digest(current)),
+            current,
+        )
+        with self.refused("scanner-changed"):
+            diagnostic.recorded_scanner(current.parent, "f" * 64)
+
     def test_original_failed_report_is_file_only_and_pins_four_git_blobs(self):
         root, source, archive, identity, scanner, watched = self.validate()
         self.assertEqual(
@@ -594,7 +670,7 @@ class EvidenceValidationTests(EvidenceCase):
 
     def test_changed_current_scanner_refuses_instead_of_using_new_filters(self):
         changed = dict(self.blobs)
-        changed[self.scanner.name] = b"old scanner with different exact filters"
+        changed["sharing_archive_scan.py"] = b"old scanner with different exact filters"
         self.blobs = changed
         hashes = {
             name: hashlib.sha256(blob).hexdigest() for name, blob in changed.items()
@@ -1023,6 +1099,106 @@ class MainReportTests(ArchiveInspectionCase):
         return self.capture_main(
             self.main_arguments(), history=self.history, probe=self.probe
         )
+
+    def test_current_image_comparison_is_explicit_clean_commit_bound_and_not_acceptance(
+        self,
+    ):
+        self.probe.probe_component.side_effect = None
+        self.probe.probe_component.return_value = probe_result()
+        code, result = self.capture_main(
+            [*self.main_arguments(), "--current-image-scanner"],
+            history=self.history,
+            probe=self.probe,
+        )
+        current = self.scanner.with_name("sharing_archive_scan.py")
+        self.assertEqual(code, 0)
+        self.assertEqual(result["status"], "diagnostic-only")
+        self.assertEqual(result["observation"], "current-image-scanner")
+        self.assertEqual(result["scanner_role"], "current-comparison")
+        self.assertEqual(result["comparison_harness_commit"], CURRENT_COMMIT)
+        self.assertEqual(
+            result["recorded_scanner_sha256"], diagnostic.ORIGINAL_SCANNER_SHA256
+        )
+        self.assertEqual(
+            result["diagnostic_sha256"][current.name], diagnostic.digest(current)
+        )
+        self.assertEqual(
+            result["diagnostic_sha256"][self.scanner.name],
+            diagnostic.ORIGINAL_SCANNER_SHA256,
+        )
+        self.assertEqual(set(result["components"]), {"image.age"})
+        self.assertIn("comparison", result["scope"])
+        self.assertNotIn("sharing_pax_reason.py", result["diagnostic_sha256"])
+        self.probe.probe_component.assert_called_once_with(
+            self.f.crypto, self.directory / "image.age", self.private, current, "oci"
+        )
+
+    def test_dirty_or_uncommitted_current_comparison_refuses_before_age(self):
+        original_git = self.git
+        for mode, category in (
+            ("dirty", "source-changed"),
+            ("different-blob", "scanner-changed"),
+        ):
+
+            def changed(root, *arguments):
+                if mode == "dirty" and arguments == (
+                    "status",
+                    "--porcelain",
+                    "--untracked-files=all",
+                ):
+                    return SENSITIVE.encode()
+                if mode == "different-blob" and arguments == (
+                    "show",
+                    CURRENT_COMMIT + ":tools/sharing_archive_scan.py",
+                ):
+                    return b"different committed scanner"
+                return original_git(root, *arguments)
+
+            self.history.git.side_effect = changed
+            with self.subTest(mode=mode):
+                code, result = self.capture_main(
+                    [*self.main_arguments(), "--current-image-scanner"],
+                    history=self.history,
+                    probe=self.probe,
+                )
+                self.assertEqual(code, 1)
+                self.assertEqual(result["category"], category)
+        self.probe.probe_component.assert_not_called()
+        self.f.crypto.opened.assert_not_called()
+
+    def test_current_comparison_commit_change_during_inspection_refuses(self):
+        changed = False
+        original_git = self.git
+
+        def git(root, *arguments):
+            if changed and arguments == ("rev-parse", "HEAD"):
+                return ("e" * 40 + "\n").encode()
+            if changed and arguments == (
+                "show",
+                "e" * 40 + ":tools/sharing_archive_scan.py",
+            ):
+                # The scanner itself is unchanged in the second valid commit.
+                # Refusal must come from captured-commit identity, not a failed
+                # lookup or changed parser bytes.
+                return self.scanner.with_name("sharing_archive_scan.py").read_bytes()
+            return original_git(root, *arguments)
+
+        def scanned(*args):
+            nonlocal changed
+            changed = True
+            return probe_result()
+
+        self.history.git.side_effect = git
+        self.probe.probe_component.side_effect = scanned
+        code, result = self.capture_main(
+            [*self.main_arguments(), "--current-image-scanner"],
+            history=self.history,
+            probe=self.probe,
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "diagnostic-refused")
+        self.assertEqual(result["category"], "source-changed")
+        self.assertIs(result["acceptance"], False)
 
     def test_explicit_image_reason_mode_records_worker_identity_without_acceptance(
         self,
