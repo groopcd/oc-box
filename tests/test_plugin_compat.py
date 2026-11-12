@@ -22,9 +22,9 @@ class PluginCompatibilityTests(unittest.TestCase):
         self.run_bridge_fixture("legacy")
 
     @unittest.skipUnless(
-        shutil.which("node"), "Node required for provider settings deltas"
+        shutil.which("node"), "Node required for provider settings refusal contracts"
     )
-    def test_bridge_provider_edits_preserve_effective_settings_and_refuse_invalid_changes(
+    def test_bridge_provider_source_views_and_unrepresentable_edits_refuse_without_partial_application(
         self,
     ):
         self.run_bridge_fixture("settings")

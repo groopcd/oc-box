@@ -199,89 +199,126 @@ function providerFixture(settings = {}) {
   return { ctx, records, edits, replay: () => replay() }
 }
 const setupConfig = (ctx, hook) => adapt({ default: async () => ({ config: hook }) }, "settings-contract").setup(ctx)
+const settingsRefusal = error => error.message === "oc-box V1 adapter: provider settings/addition/removal edits require a native V2 port; native config applies after plugin setup"
 
 if (!process.argv[3] || process.argv[3] === "settings") {
-  await check("F5 reduced helper and launch overlay preserve effective settings after a successful edit", async () => {
+  await check("F5 reduced helper and launch view cannot authorize an effective settings edit", async () => {
     const secret = Buffer.from([115, 121, 110, 116, 104, 101, 116, 105, 99]).toString()
-    const { ctx, records } = providerFixture({ baseURL: "http://effective/v1", apiKey: secret,
+    const { ctx, records, edits } = providerFixture({ baseURL: "http://effective/v1", apiKey: secret,
       headers: { authorization: secret, retained: "effective" }, nested: { retained: true }, timeout: 1 })
     declaration = { providers: { fixture: { package: "aisdk:fixture", settings: { baseURL: "http://discovered/v1", headers: { helper: "yes" } } } } }
     environment.OPENCODE_CONFIG_CONTENT = JSON.stringify({ providers: { fixture: { settings: { timeout: 42, headers: { launch: "yes" } } } } })
-    await setupConfig(ctx, config => { config.provider.fixture.options.baseURL = "http://edited/v1" })
-    assert.deepEqual(plain(records.get("fixture").provider.settings), { baseURL: "http://edited/v1", apiKey: secret,
+    await assert.rejects(setupConfig(ctx, config => { config.provider.fixture.options.baseURL = "http://edited/v1" }), settingsRefusal)
+    assert.deepEqual(edits, [])
+    assert.deepEqual(plain(records.get("fixture").provider.settings), { baseURL: "http://effective/v1", apiKey: secret,
       headers: { authorization: secret, retained: "effective" }, nested: { retained: true }, timeout: 1 })
-    // Supplied discovery/launch values form the hook view, not an unrelated write
-    // back to effective settings: only the hook's baseURL edit is committed.
+    // The setup prefix and helper cannot establish final native settings.
+    // Nothing is registered: a successful source edit would be misleading.
   })
   delete environment.OPENCODE_CONFIG_CONTENT
   declaration = {}
-  await check("F5 supplied nested discovery and launch keys are overlaid into the effective hook view", async () => {
-    const { ctx, records } = providerFixture({ nested: { retained: 1 }, headers: { native: "kept" }, timeout: 1 })
+  await check("F5 read-only source/discovery hook view retains supplied nested keys without applying settings", async () => {
+    const { ctx, records, edits } = providerFixture({ nested: { retained: 1 }, headers: { native: "kept" }, timeout: 1 })
     declaration = { providers: { fixture: { settings: { nested: { helper: 2 }, headers: { helper: "yes" } } } } }
     environment.OPENCODE_CONFIG_CONTENT = JSON.stringify({ providers: { fixture: { settings: { nested: { launch: 3 }, timeout: 42 } } } })
     await setupConfig(ctx, config => {
       assert.deepEqual(plain(config.provider.fixture.options), { nested: { retained: 1, helper: 2, launch: 3 }, headers: { native: "kept", helper: "yes" }, timeout: 42 })
-      config.provider.fixture.options.timeout = 43
     })
-    assert.deepEqual(plain(records.get("fixture").provider.settings), { nested: { retained: 1 }, headers: { native: "kept" }, timeout: 43 })
+    assert.deepEqual(plain(records.get("fixture").provider.settings), { nested: { retained: 1 }, headers: { native: "kept" }, timeout: 1 })
+    assert.deepEqual(edits, [])
   })
   delete environment.OPENCODE_CONFIG_CONTENT
   declaration = {}
-  await check("F5 recursive delta preserves unseen current keys and intentionally deletes visible keys", async () => {
-    const { ctx, records, replay } = providerFixture({ headers: { keep: "yes", remove: "old", change: "old" }, nested: { keep: true, remove: 1 }, remove: true })
-    await setupConfig(ctx, config => {
+  await check("F5 nested settings edits/deletions refuse while preserving visible and unseen source keys", async () => {
+    const { ctx, records, edits } = providerFixture({ headers: { keep: "yes", remove: "old", change: "old" }, nested: { keep: true, remove: 1 }, remove: true })
+    await assert.rejects(setupConfig(ctx, config => {
       delete config.provider.fixture.options.headers.remove
       config.provider.fixture.options.headers.change = "new"
       delete config.provider.fixture.options.nested.remove
       delete config.provider.fixture.options.remove
       records.get("fixture").provider.settings.headers.unseen = "later"
       records.get("fixture").provider.settings.unseen = { retained: true }
-    })
-    const expected = { headers: { keep: "yes", change: "new", unseen: "later" }, nested: { keep: true }, unseen: { retained: true } }
+    }), settingsRefusal)
+    const expected = { headers: { keep: "yes", change: "old", remove: "old", unseen: "later" }, nested: { keep: true, remove: 1 }, remove: true, unseen: { retained: true } }
     assert.deepEqual(plain(records.get("fixture").provider.settings), expected)
-    replay()
-    assert.deepEqual(plain(records.get("fixture").provider.settings), expected)
+    assert.deepEqual(edits, [])
   })
-  await check("F5 arrays and scalar values replace atomically", async () => {
-    const { ctx, records } = providerFixture({ array: [1, { retained: true }], scalar: "old", object: { old: 1 }, unchanged: [3] })
-    await setupConfig(ctx, config => {
+  await check("F5 array scalar and object replacements refuse instead of source-only success", async () => {
+    const { ctx, records, edits } = providerFixture({ array: [1, { retained: true }], scalar: "old", object: { old: 1 }, unchanged: [3] })
+    await assert.rejects(setupConfig(ctx, config => {
       config.provider.fixture.options.array = [2]
       config.provider.fixture.options.scalar = null
       config.provider.fixture.options.object = false
       config.provider.fixture.options.added = { value: 7 }
-    })
-    assert.deepEqual(plain(records.get("fixture").provider.settings), { array: [2], scalar: null, object: false, unchanged: [3], added: { value: 7 } })
+    }), settingsRefusal)
+    assert.deepEqual(plain(records.get("fixture").provider.settings), { array: [1, { retained: true }], scalar: "old", object: { old: 1 }, unchanged: [3] })
+    assert.deepEqual(edits, [])
   })
-  await check("F5 newly supplied object keys recurse without replacing unseen current siblings", async () => {
-    const { ctx, records } = providerFixture({ retained: true })
-    await setupConfig(ctx, config => {
+  await check("F5 newly supplied option objects refuse and leave unseen source siblings intact", async () => {
+    const { ctx, records, edits } = providerFixture({ retained: true })
+    await assert.rejects(setupConfig(ctx, config => {
       config.provider.fixture.options.added = { edited: true }
       records.get("fixture").provider.settings.added = { unseen: true }
-    })
-    assert.deepEqual(plain(records.get("fixture").provider.settings), { retained: true, added: { unseen: true, edited: true } })
+    }), settingsRefusal)
+    assert.deepEqual(plain(records.get("fixture").provider.settings), { retained: true, added: { unseen: true } })
+    assert.deepEqual(edits, [])
   })
-  await check("F5 deleting the options property deletes its visible keys but retains unseen effective keys", async () => {
-    const { ctx, records } = providerFixture({ remove: 1, headers: { visible: "remove" } })
-    await setupConfig(ctx, config => {
+  await check("F5 whole-options deletion refuses without deleting visible or unseen source keys", async () => {
+    const { ctx, records, edits } = providerFixture({ remove: 1, headers: { visible: "remove" } })
+    await assert.rejects(setupConfig(ctx, config => {
       delete config.provider.fixture.options
       records.get("fixture").provider.settings.unseen = "retained"
-    })
-    assert.deepEqual(plain(records.get("fixture").provider.settings), { unseen: "retained" })
+    }), settingsRefusal)
+    assert.deepEqual(plain(records.get("fixture").provider.settings), { remove: 1, headers: { visible: "remove" }, unseen: "retained" })
+    assert.deepEqual(edits, [])
   })
-  await check("F5 provider addition removal and model inventory edits remain supported", async () => {
-    const { ctx, records } = providerFixture({ retained: 1 })
+  await check("F5 provider addition/removal refuses the entire plan including earlier model inventory edits", async () => {
+    const { ctx, records, edits } = providerFixture({ retained: 1 })
     records.set("remove", { provider: { id: "remove", name: "Remove", package: "aisdk:fixture", settings: {} }, models: new Map() })
-    await setupConfig(ctx, config => {
+    await assert.rejects(setupConfig(ctx, config => {
       delete config.provider.remove
       config.provider.added = { name: "Added", npm: "fixture", options: { baseURL: "http://added/v1" }, models: { added: { name: "Added model", options: { temperature: 0.3 } } } }
       config.provider.fixture.models = { edited: { name: "Edited model", limit: { context: 1234 }, attachment: true } }
+    }), settingsRefusal)
+    assert.equal(records.has("remove"), true)
+    assert.equal(records.has("added"), false)
+    assert.equal(records.get("fixture").models.size, 0)
+    assert.deepEqual(edits, [])
+  })
+  await check("F5 source model-inventory-only edits retain their distinct supported mapping and replay", async () => {
+    const { ctx, records, replay } = providerFixture({ retained: 1 })
+    await setupConfig(ctx, config => {
+      config.provider.fixture.models = { edited: { name: "Edited model", limit: { context: 1234 }, attachment: true, options: { temperature: 0.3 } } }
     })
-    assert.equal(records.has("remove"), false)
-    assert.equal(records.get("added").provider.package, "aisdk:fixture")
-    assert.deepEqual(plain(records.get("added").provider.settings), { baseURL: "http://added/v1" })
-    assert.equal(records.get("added").models.get("added").settings.temperature, 0.3)
     assert.equal(records.get("fixture").models.get("edited").limit.context, 1234)
     assert.deepEqual(plain(records.get("fixture").models.get("edited").capabilities.input), ["text", "image"])
+    assert.equal(records.get("fixture").models.get("edited").settings.temperature, 0.3)
+    assert.deepEqual(plain(records.get("fixture").provider.settings), { retained: 1 })
+    replay()
+    assert.equal(records.get("fixture").models.get("edited").limit.context, 1234)
+    assert.deepEqual(plain(records.get("fixture").provider.settings), { retained: 1 })
+  })
+  for (const [name, mutate] of [
+    ["existing settings edit", config => { config.provider.fixture.options.endpoint = "edited" }],
+    ["single provider removal", config => { delete config.provider.fixture }],
+    ["single provider addition", config => { config.provider.added = { npm: "fixture", models: {} } }],
+  ]) await check("F5 refuses " + name + " even when the minimal helper declares no provider", async () => {
+    const { ctx, records, edits } = providerFixture({ retained: 1 })
+    await assert.rejects(setupConfig(ctx, mutate), settingsRefusal)
+    assert.deepEqual(edits, [])
+    assert.equal(records.has("fixture"), true)
+    assert.equal(records.has("added"), false)
+    assert.deepEqual(plain(records.get("fixture").provider.settings), { retained: 1 })
+  })
+  await check("F5 original config-hook refusal propagates by identity independently of native-setting refusal", async () => {
+    const { ctx, records, edits } = providerFixture({ retained: 1 })
+    const refusal = new Error("original user hook refusal")
+    await assert.rejects(setupConfig(ctx, config => {
+      config.provider.fixture.options.changed = true
+      throw refusal
+    }), error => error === refusal)
+    assert.deepEqual(plain(records.get("fixture").provider.settings), { retained: 1 })
+    assert.deepEqual(edits, [])
   })
   for (const [name, mutate] of [
     ["null options", value => { value.options = null }],

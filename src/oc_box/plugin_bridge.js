@@ -42,25 +42,12 @@ function json(value, seen = new Set()) {
   seen.delete(value)
   return valid
 }
-// Both helpers are in-memory only. Discovery overlays have no deletion meaning;
-// hook deltas delete only keys that were visible in the captured initial view.
+// Discovery overlays are in-memory only and omissions have no deletion meaning.
+// This is the current source fold, not final effective native configuration.
 function overlay(current, supplied) {
   return Object.fromEntries([...new Set([...Object.keys(current), ...Object.keys(supplied)])].map(key => [key,
     !owns(supplied, key) ? clone(current[key]) : object(current[key]) && object(supplied[key])
       ? overlay(current[key], supplied[key]) : clone(supplied[key])]))
-}
-function delta(current, before, after) {
-  const result = object(current) ? clone(current) : {}
-  for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
-    if (!owns(after, key)) delete result[key]
-    else if (!owns(before, key) || !same(before[key], after[key])) {
-      // Define own data properties, including ordinary JSON "__proto__" keys.
-      Object.defineProperty(result, key, { configurable: true, enumerable: true, writable: true,
-        value: object(after[key]) && (!owns(before, key) || object(before[key]))
-          ? delta(result[key], before[key] || {}, after[key]) : clone(after[key]) })
-    }
-  }
-  return result
 }
 const expand = value => typeof value === "string" ? value.replace(/\{env:([^}]+)\}/g, (_, name) => process.env[name] || "")
   : Array.isArray(value) ? value.map(expand)
@@ -171,8 +158,9 @@ function toModel(providerID, id, value) {
 }
 
 async function configure(ctx, hook) {
-  // Only provider inventory/settings are bridged. General config hooks need
-  // domain-specific ports; never pretend an ignored edit took effect.
+  // Only source model inventory edits are bridged. In 2.2.6, native provider
+  // config runs AFTER external plugins. Neither setup reads nor this editor's
+  // position is the final configured settings view, including after reload.
   const listed = await ctx.provider.list()
   const providers = Array.isArray(listed) ? listed : listed.data
   const config = { provider: Object.fromEntries(providers.map(provider => [provider.id, {
@@ -230,19 +218,18 @@ async function configure(ctx, hook) {
     edits.push({ id, provider: clone(provider), previous, options: clone(options), inventory })
   }
   const removed = Object.keys(before.provider).filter(id => !owns(config.provider, id))
+  // There is no supported late-provider/config API on the pinned plugin Context.
+  // Refuse the whole plan before registration, even for apparently unconfigured
+  // providers: a later project/managed declaration is not visible in this fold
+  // or guaranteed to be in the minimal discovery helper. Request hooks cannot
+  // implement provider-list settings, removal, or configured-key deletion.
+  if (removed.length || edits.some(({ previous, options }) => !previous || !same(previous.options || {}, options))) {
+    throw new Error("oc-box V1 adapter: provider settings/addition/removal edits require a native V2 port; native config applies after plugin setup")
+  }
   if (!edits.length && !removed.length) return
   await ctx.provider.transform(editor => {
-    for (const id of removed) editor.remove(id)
-    for (const { id, provider, previous, options, inventory } of edits) {
-      const original = editor.get(id)
-      if (!original) {
-        editor.add({ info: { id, name: provider.name || id, package: "aisdk:" + provider.npm, activation: "enabled", settings: clone(options) }, models: inventory })
-      } else {
-        if (!same(previous?.options || {}, options)) {
-          editor.update(id, value => { value.settings = delta(value.settings, previous?.options || {}, options) })
-        }
-        if (!same(previous?.models, provider.models)) editor.models.set(id, inventory)
-      }
+    for (const { id, provider, previous, inventory } of edits) {
+      if (!same(previous.models, provider.models)) editor.models.set(id, inventory)
     }
   })
 }
