@@ -161,6 +161,39 @@ unexpected operations inside recovery still refuse. A fresh run may test the sam
 clean `d736bc1` runtime with the corrected external harness and its own recorded
 runner hash. Preserve the old candidate, runner, report and retained storage.
 
+#### Reviewed focused recovery host acceptance
+
+Two operator-provided v2 reports passed review against clean runtime
+`d736bc1bb33ffeedee65ad3ec281de77c1e31847`, count **115**, version
+`1.7.86+gd736bc1`. All **44** runtime/donor hashes match that Git tree. Both pin
+native **2.2.6**, binary SHA-256
+`50503d24577fa4117a7c95ee85b2cd679606a87eacf20ca54ed5db5c9e1cf895`, matching the
+retained offline executable. The external runner is from `60df669`, SHA-256
+`56668d8480f08e06a630bad5f6c214793f999e59a910496a7f22c8bbfb356d20`.
+
+| Case | Reviewed results |
+| --- | --- |
+| Snapshot | 12 checks true; 34 observed cancelled-job pairs; one restart, one reader, one recovery call and completed snapshot. |
+| Stop cancellation | Six checks true; 34 pairs; no restart/reader/snapshot; one recovery call and explicit-stop exit `0`. |
+
+Both reports have owner exits `[0,1]`, zero preparation/authentication calls during
+recovery, exactly two synthetic provider requests and one shell start, no primary
+or secondary failures, and empty failure traces. Source manifest canonical-JSON
+SHA-256 is `3dd3bd86e4d5dc5b6ae3baaa13151acd2222f1021cf6a2a01d42707637db4568`.
+Report-byte SHA-256 values are:
+
+- Snapshot: `192cc00c8931f6e087a0eef8459ebd0946b8b4368c7c587336d8b554c92c062a`.
+- Stop cancellation: `bf87052f4917263779b250f7e0bef483263fd229d3f359e0b050a269810f524e`.
+
+This establishes **18 focused synthetic, scripted external-host recovery checks**
+on native 2.2.6, not completion of the interrupted work or repair of native job
+state. The original nonzero result remains intentional. The earlier v1 oracle
+failure remains failed evidence. No new baseline 42-check, lifecycle/vault,
+interactive UI, real-provider, 2.2.7 host, exhaustive fault/race or security claim
+is established by these reports. Keep raw reports private and the two fresh stores
+and old failed store intact; later documentation/harness commits do not change the
+recorded tested runtime identity.
+
 #### History and interrupted-export contracts
 
 The changes introduced in `d638907be97f9f33d00e59da526eb046e39a3627` add paginated

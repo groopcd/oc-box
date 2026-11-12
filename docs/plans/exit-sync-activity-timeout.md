@@ -232,3 +232,24 @@ No runtime source is changed for this oracle correction. Keep the failed store
 and old harness intact; use a new external harness file and fresh fixture roots
 against the unchanged clean `d736bc1` candidate. Record the new runner identity
 separately, and do not retrospectively relabel the first run.
+
+## Reviewed focused host results
+
+The two fresh v2 reports now pass metadata and independent review: runtime
+`d736bc1bb33ffeedee65ad3ec281de77c1e31847` / `1.7.86+gd736bc1`, count 115,
+clean source, all 44 audited hashes matching Git, runner `60df669` and native
+2.2.6. Snapshot passed all 12 checks with one restart/reader and completed
+snapshot; stop cancellation passed all six with no restart/reader and explicit
+stop exit 0. Both observed 34 cancelled-job pairs, retained owner exits `[0,1]`,
+made no preparation/authentication calls during recovery, and had no primary or
+secondary failures. Exact evidence hashes and scope are in `docs/testing.md`.
+
+This accepts the focused snapshot/stop-suppression contract only. The first v1
+run remains failed; no native job is repaired and interrupted execution is not
+declared successful. Raw reports remain private/untracked. The runtime bytes are
+unchanged by the subsequent harness correction and this evidence note.
+
+The next host regression gate is the retained default 42-check history/readiness
+run on the same frozen source, with exits `[0,0,0,1,0,0,0,0]`. Broader lifecycle,
+vault, additional fault/race and integrated release gates remain separate before
+stable publication; native 2.2.7 currently has offline reader coverage only.
