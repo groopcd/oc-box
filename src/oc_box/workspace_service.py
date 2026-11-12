@@ -233,12 +233,14 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
 
     phase = "foreground-query"
     observation = "unavailable"
+    shell_pairs = 0
 
     def fail(category):
         if category == "activity-timeout":
             raise box.HistoryWaitTimeout(
                 f"History wait timeout: phase={phase}; "
-                f"last complete observation: {observation}."
+                f"last complete observation: {observation}.",
+                recovery_eligible=shell_pairs >= 2,
             ) from None
         raise box.BoxError(f"OpenCode 2.x history wait failed ({category}).") from None
 
@@ -259,8 +261,33 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             fail("activity-timeout")
         return budget
 
+    def active_items(response):
+        value = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(value, dict) or any(
+            not box.valid_session_id(ident)
+            or not isinstance(state, dict)
+            or state.get("type") != "running"
+            for ident, state in value.items()
+        ):
+            return None
+        return value
+
+    def job_items(response):
+        value = response.get("data") if isinstance(response, dict) else None
+        if not isinstance(value, list) or any(
+            not isinstance(job, dict)
+            or not isinstance(job.get("id"), str)
+            or not job["id"]
+            or not box.valid_session_id(job.get("sessionID"))
+            or job.get("kind") not in ("shell", "subagent", "image")
+            or job.get("status") not in ("running", "completed", "error", "cancelled")
+            for job in value
+        ):
+            return None
+        return value
+
     def request(target):
-        nonlocal phase
+        nonlocal phase, shell_pairs
         budget = remaining()
         phase = (
             "foreground-query"
@@ -276,37 +303,44 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
                 target,
                 timeout=min(60, budget),
             )
-        except (box.BoxError, OSError, ValueError, subprocess.SubprocessError):
+        except (box.BoxError, OSError, ValueError, subprocess.SubprocessError) as error:
             # Never include native errors: they can contain commands, provider
-            # values, or private response bodies. Deadline expiry stays distinct.
+            # values, or private response bodies. Preserve the legacy public
+            # deadline category, but a known non-timeout failure invalidates the
+            # optional snapshot hint even when the clock also expired. run()
+            # retains subprocess.TimeoutExpired as the private BoxError cause.
+            if not isinstance(error, subprocess.TimeoutExpired) and not isinstance(
+                error.__cause__, subprocess.TimeoutExpired
+            ):
+                shell_pairs = 0
             remaining()
             fail("activity-api-failed")
+        value = (
+            active_items(result)
+            if target == "/api/session/active"
+            else job_items(result)
+        )
+        if value is None or (
+            bool(value)
+            if target == "/api/session/active"
+            else not value or any(job["kind"] != "shell" for job in value)
+        ):
+            # A late successful response can contradict the last complete pair.
+            # Validate/reset BEFORE checking the deadline; it must never leave a
+            # stale routing hint behind. A real request timeout cannot manufacture
+            # a qualifying pair, but does not erase prior validated observations.
+            shell_pairs = 0
         remaining()
-        return result
+        return value
 
     quiet = 0
     while True:
-        response = request("/api/session/active")
-        active = response.get("data") if isinstance(response, dict) else None
-        if not isinstance(active, dict) or any(
-            not box.valid_session_id(ident)
-            or not isinstance(state, dict)
-            or state.get("type") != "running"
-            for ident, state in active.items()
-        ):
+        active = request("/api/session/active")
+        if active is None:
             fail("invalid-active-response")
 
-        response = request("/api/experimental/job")
-        jobs = response.get("data") if isinstance(response, dict) else None
-        if not isinstance(jobs, list) or any(
-            not isinstance(job, dict)
-            or not isinstance(job.get("id"), str)
-            or not job["id"]
-            or not box.valid_session_id(job.get("sessionID"))
-            or job.get("kind") not in ("shell", "subagent", "image")
-            or job.get("status") not in ("running", "completed", "error", "cancelled")
-            for job in jobs
-        ):
+        jobs = request("/api/experimental/job")
+        if jobs is None:
             fail("invalid-jobs-response")
         # A terminal job can still have an unconsumed completion notice. Native
         # reload can also retain cancelled shell jobs indefinitely. Neither age
@@ -317,6 +351,15 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
         observation = ", ".join(
             f"{name}={value if value < 10000 else '9999+'}"
             for name, value in counts.items()
+        )
+        # This requests only a post-STOP snapshot, never a live readiness waiver.
+        # Durable shell rows can hydrate as running on the next owner. The
+        # ordinary timeout already stops genuine pending work too; recovery must
+        # preserve that failure/interruption result, irrespective of job status.
+        shell_pairs = (
+            shell_pairs + 1
+            if not active and jobs and all(job["kind"] == "shell" for job in jobs)
+            else 0
         )
         quiet = quiet + 1 if not active and not jobs else 0
         if quiet == 2:

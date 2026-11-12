@@ -20,6 +20,7 @@ import json
 import os
 import re
 import resource
+import select
 import secrets
 import shlex
 import shutil
@@ -147,6 +148,35 @@ LAUNCH_STAGES = (
     "unarchived_restart",
 )
 EXPECTED_EXITS = (0, 0, 0, 1, 0, 0, 0, 0)
+RECOVERY_FORMAT = "oc-box-history-recovery-host-v1"
+RECOVERY_CHECKS = {
+    "snapshot": frozenset(
+        (
+            "eligible_live_timeout",
+            "old_owner_closed",
+            "verified_stop_before_restart",
+            "same_id_single_restart",
+            "single_private_reader",
+            "source_destination_fences",
+            "checked_archives_exact",
+            "missing_notice_not_invented",
+            "durable_job_retained",
+            "reader_no_execution",
+            "reader_no_prepare",
+            "nonzero_warning_stopped",
+        )
+    ),
+    "stop-cancel": frozenset(
+        (
+            "stop_after_real_timeout",
+            "stop_intent_before_admission",
+            "explicit_stop_success",
+            "restart_and_reader_suppressed",
+            "no_start_after_stop_return",
+            "final_identity_archives_retained",
+        )
+    ),
+}
 STAGES = frozenset(
     (
         "preparation",
@@ -993,10 +1023,13 @@ class Harness:
             )
             wrapper = self.f.safe_path(self.root, "bin/opencode")
             require(
-                wrapper.read_text() == self.f.native_wrapper_source()
+                wrapper.read_text() == self.native_selector_source()
                 and os.access(wrapper, os.X_OK),
                 "native-changed",
             )
+
+    def native_selector_source(self):
+        return self.f.native_wrapper_source()
 
     def bind(self, command):
         self.f.record_ids(self.root)
@@ -2092,6 +2125,929 @@ class Harness:
         self.stage = "complete"
 
 
+def recovery_result(
+    case,
+    checks,
+    identity,
+    runner,
+    native,
+    primary=None,
+    secondary=(),
+    exits=(),
+    *,
+    stage="preparation",
+    failure_trace=(),
+    observations=None,
+):
+    """Separate evidence: never add recovery claims to the retained 42-check report."""
+    require(case in RECOVERY_CHECKS, "report-schema")
+    require(
+        stage
+        in (
+            "preparation",
+            "private-store",
+            "native-version",
+            "primer",
+            "cancelled",
+            "complete",
+        ),
+        "report-schema",
+    )
+    require(
+        set(checks) <= RECOVERY_CHECKS[case]
+        and all(type(v) is bool for v in checks.values()),
+        "report-schema",
+    )
+    require(len(exits) <= 2, "report-schema")
+    require(primary is None or primary in CATEGORIES, "report-schema")
+    # Reuse the strict identity/native/category/trace validator, not its claims.
+    validated = result(
+        {},
+        identity,
+        runner,
+        native,
+        primary or "missing-checks",
+        secondary,
+        exits,
+        failure_trace=failure_trace,
+    )
+    observations = {} if observations is None else observations
+    require(
+        set(observations)
+        <= {
+            "cancelled_pairs",
+            "restarts",
+            "reader_leases",
+            "prepare_calls",
+            "auth_calls",
+            "provider_requests",
+            "shell_starts",
+            "explicit_stop_exit_code",
+        }
+        and all(
+            value is None or type(value) is int and -255 <= value < 10000
+            for value in observations.values()
+        ),
+        "report-schema",
+    )
+    expected = {
+        "restarts": int(case == "snapshot"),
+        "reader_leases": int(case == "snapshot"),
+        "prepare_calls": 0,
+        "auth_calls": 0,
+        "provider_requests": 2,
+        "shell_starts": 1,
+        "explicit_stop_exit_code": 0 if case == "stop-cancel" else None,
+    }
+    if primary is None and (
+        set(checks) != RECOVERY_CHECKS[case]
+        or not all(checks.values())
+        or tuple(exits) != (0, 1)
+        or stage != "complete"
+        or type(observations.get("cancelled_pairs")) is not int
+        or observations["cancelled_pairs"] < 2
+        or any(
+            key not in observations or observations[key] != value
+            for key, value in expected.items()
+        )
+    ):
+        primary = "missing-checks"
+    return {
+        **{
+            key: validated[key]
+            for key in (
+                "source_identity",
+                "runner_sha256",
+                "native",
+                "secondary_categories",
+                "failure_trace",
+            )
+        },
+        "format": RECOVERY_FORMAT,
+        "case": case,
+        "stage": stage,
+        "status": "PASS" if primary is None and not secondary else "FAIL",
+        "checks": checks,
+        "launcher_exit_codes": list(exits),
+        "launcher_stages": ["primer", "cancelled"][: len(exits)],
+        "expected_launcher_exit_codes": [0, 1],
+        "primary_category": primary,
+        "observations": observations,
+        "scope": "Fresh synthetic external-host persisted-history recovery; native 2.2.6 only. Not interactive UI, inference, security or general lifecycle acceptance.",
+        "observers": [
+            "forwarding engine results",
+            "real owner shutdown and timeout counts",
+            "actual private reader Popen",
+            "pre-selector production environment",
+            "read-only owned-volume metadata",
+        ],
+    }
+
+
+def recovery_fence():
+    return {
+        "OPENCODE_FLAGS": "-schedules",
+        **dict.fromkeys(
+            (
+                "OPENCODE_CONFIG_PROJECT_DISABLE",
+                "OPENCODE_DISABLE_PROJECT_CONFIG",
+                "OPENCODE_DISABLE_CLAUDE_CODE",
+                "OPENCODE_DISABLE_AUTOUPDATE",
+                "OPENCODE_DISABLE_MODELS_FETCH",
+                "OPENCODE_FILEWATCHER_DISABLE",
+            ),
+            "1",
+        ),
+        "OPENCODE_CONFIG_CONTENT": {
+            "$schema": "https://opencode.ai/config.json",
+            "snapshots": False,
+            "formatter": False,
+            "update": "disable",
+            "warming": False,
+            "policies": [
+                {"action": action, "resource": "*", "effect": "deny"}
+                for action in ("plugin.use", "provider.use", "tool.use")
+            ],
+        },
+    }
+
+
+def fenced(env):
+    try:
+        return all(
+            (json.loads(env[name]) if name == "OPENCODE_CONFIG_CONTENT" else env[name])
+            == value
+            for name, value in recovery_fence().items()
+        ) and not any(
+            name.endswith(("_API_KEY", "_TOKEN")) or name == "OPENCODE_AUTH_CONTENT"
+            for name in env
+        )
+    except (KeyError, TypeError, ValueError):
+        return False
+
+
+# These helper processes use only stdlib and hashed candidate modules. Neither
+# creates a service. Admission is held in an INDEPENDENT process, not a thread
+# sharing the launcher's global os.environ or lifecycle lock.
+CONTROL_HELPER = """import hashlib,json,os,pathlib,select,sys
+line=sys.stdin.readline(131073);assert len(line)<=131072 and line.endswith('\\n')
+s=json.loads(line); root=pathlib.Path(s['source'])
+sys.dont_write_bytecode=True; sys.pycache_prefix='/nonexistent-oc-box-control-bytecode-'+os.urandom(16).hex()
+for name,digest in s['sha256'].items():
+ assert hashlib.sha256((root/name).read_bytes()).hexdigest()==digest
+def guard():
+ for name,module in tuple(sys.modules.items()):
+  filename=getattr(module,'__file__',None)
+  protected=name=='oc_box' or name=='tools' or name.startswith(('oc_box.','tools.'))
+  if protected: assert filename and pathlib.Path(filename).resolve().is_relative_to(root)
+  if filename and pathlib.Path(filename).resolve().is_relative_to(root):
+   assert pathlib.Path(filename).resolve().relative_to(root).as_posix() in s['sha256']
+guard()
+sys.path[:0]=[str(root/'src'),str(root)]
+from oc_box import workspace_control,oc_box
+guard()
+if s['action']=='admission':
+ with workspace_control.admission(pathlib.Path(s['path']),timeout=5):
+  print('ready',flush=True)
+  assert select.select([sys.stdin],[],[],75)[0]
+  assert sys.stdin.readline()=='release\\n'
+else:
+ assert s['action']=='stop'
+ print('ready',flush=True)
+ assert select.select([sys.stdin],[],[],75)[0]
+ assert sys.stdin.readline()=='stop\\n'
+ raise SystemExit(oc_box.main(['stop','--workspace',s['workspace']]))
+"""
+
+METADATA_HELPER = """import json,pathlib,sqlite3,sys
+p=pathlib.Path(sys.argv[1]); assert p.is_file() and not p.is_symlink()
+with sqlite3.connect(p.as_uri()+'?mode=ro',uri=True,timeout=1) as db:
+ db.execute('PRAGMA query_only=ON'); db.execute('BEGIN')
+ assert db.execute("SELECT type FROM sqlite_master WHERE name='schedule'").fetchall()==[('table',)]
+ columns={r[1]:r for r in db.execute("PRAGMA table_info('schedule')")}
+ assert all(k in columns and columns[k][2].upper()=='TEXT' for k in ('id','session_id','status','last_message_id')) and columns['id'][5]
+ assert db.execute('SELECT 1 FROM schedule LIMIT 1').fetchone() is None
+ jobs=db.execute('SELECT * FROM job ORDER BY id LIMIT 3').fetchall()
+ assert len(jobs)<=1
+value={'jobs':jobs}
+if len(sys.argv)>2:
+ p=pathlib.Path(sys.argv[2]); assert p.is_file() and p.stat().st_size<=16
+ value['starts']=p.read_text()
+out=json.dumps(value); assert len(out)<262144; print(out)
+"""
+
+SOURCE_FENCE_HELPER = """import json,pathlib,sys
+s=json.load(sys.stdin); ns={'__name__':'fixture_observer'};exec(s['bridge'],ns)
+info=ns['endpoint_request'](s['connection'])('GET','/api/info');pid=info['pid']
+assert type(pid) is int and pid>0
+p=pathlib.Path('/proc')/str(pid)
+raw=(p/'environ').read_bytes();assert len(raw)<131072
+env=dict(v.decode().split('=',1) for v in raw.split(b'\\0') if v)
+print(json.dumps(all((json.loads(env[k]) if k=='OPENCODE_CONFIG_CONTENT' else env[k])==v for k,v in s['fence'].items()) and env.get('XDG_DATA_HOME')==s['home']+'/.local/share' and env.get('OPENCODE_DB')=='oc-box-v2.db' and not any(k.endswith(('_API_KEY','_TOKEN')) or k=='OPENCODE_AUTH_CONTENT' for k in env)))
+"""
+
+
+class FileGate:
+    """Finite regular-file gate: release never waits for a now-cancelled reader."""
+
+    def __init__(self, harness):
+        self.harness = harness
+        self.relative = ".local/share/oc-box-history-" + secrets.token_hex(16)
+        self.path = harness.data["home"] + "/" + self.relative
+        harness.container_python(
+            "import json,pathlib,sys\np=pathlib.Path(json.load(sys.stdin));p.mkdir(mode=0o700)\n",
+            self.path,
+        )
+
+    def command(self):
+        code = (
+            "import pathlib,sys,time\np=pathlib.Path(sys.argv[1])\n"
+            "with (p/'starts').open('ab') as f:f.write(b'x')\n"
+            "deadline=time.monotonic()+90\n"
+            "while not (p/'release').exists() and time.monotonic()<deadline:time.sleep(.02)\n"
+            "assert (p/'release').exists()\nprint('SYNTHETIC_HISTORY_BG_DONE')\n"
+        )
+        return shlex.join(["python3", "-c", code, self.path])
+
+    def release(self):
+        self.harness.container_python(
+            "import json,pathlib,sys\n(pathlib.Path(json.load(sys.stdin))/'release').touch(mode=0o600)\n",
+            self.path,
+        )
+
+
+class RecoveryHarness(Harness):
+    """Opt-in case using normal owning launches; no recovery implementation mocks."""
+
+    def __init__(self, loaded, root, binary, runner, case):
+        super().__init__(loaded, root, binary, runner)
+        require(self.native["version"] == "2.2.6", "native-changed")
+        require(case in RECOVERY_CHECKS, "invalid-options")
+        self.case = case
+        self.closed = threading.Event()
+        self.transitions, self.readers = [], []
+        self.stop_proofs = []
+        self.starts = []
+        self.reader_attempts = 0
+        self.stop_observed = False
+        self.prepares = self.auth = self.host_fences = self.cancelled_pairs = 0
+        self.source_fence = self.guards = False
+        self.holder = self.stopper = self.stop_worker = self.client = None
+        self.returned_at = None
+        self.shell_starts = None
+        self.idle_pair = False
+
+    def check(self, name):
+        require(name in RECOVERY_CHECKS[self.case], "report-schema")
+        self.checks[name] = True
+        self.progress(name)
+
+    def purpose(self):
+        return {**super().purpose(), "format": RECOVERY_FORMAT, "case": self.case}
+
+    def native_selector_source(self):
+        return self.f.native_wrapper_source(history_recovery=True)
+
+    def recovering(self):
+        return (
+            self.closed.is_set()
+            and self.box.history_recovery.DEADLINE.get() is not None
+        )
+
+    def metadata(self, *, source=True):
+        if source:
+            database = self.volume / ".local/share/opencode/oc-box-v2.db"
+            args = [
+                "podman",
+                "unshare",
+                "python3",
+                "-I",
+                "-S",
+                "-c",
+                METADATA_HELPER,
+                str(database),
+                str(self.volume / self.gate.relative / "starts"),
+            ]
+        else:
+            args = [
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                METADATA_HELPER,
+                str(self.host_database),
+            ]
+        value = self.raw_run(
+            args,
+            env=self.box.maintenance_host_env(),
+            capture=True,
+            private=True,
+            timeout=15,
+        ).stdout
+        require(len(value) < 262144)
+        return json.loads(value)
+
+    def observe_run(self, command, *args, **options):
+        recovery = self.recovering()
+        host = recovery and str(command[0]) in (
+            "opencode",
+            str(self.root / "bin/opencode"),
+        )
+        if host:
+            require(fenced(options.get("env", {})))  # BEFORE the selector.
+            self.host_fences += 1
+        if self.closed.is_set():
+            self.auth += int("auth" in command)
+        if self.closed.is_set() and command[:2] == ["podman", "start"]:
+            self.starts.append(time.monotonic())
+        response = self.raw_run(command, *args, **options)
+        if recovery and command[0] == "podman":
+            action = command[1:]
+            if action[:1] in (["stop"], ["start"]):
+                self.transitions.append(
+                    (
+                        action[0],
+                        action[-1] == self.container_id,
+                        response.returncode == 0,
+                    )
+                )
+            elif action[:2] == ["container", "inspect"]:
+                values = json.loads(response.stdout)
+                require(len(values) == 1)
+                info = values[0]
+                self.transitions.append(
+                    (
+                        "inspect",
+                        info.get("Id") == self.container_id,
+                        info.get("State", {}).get("Running"),
+                    )
+                )
+                if info.get("State", {}).get("Running") is False:
+                    self.stop_proofs.append(self.stopped_state(info))
+        if (
+            recovery
+            and not self.source_fence
+            and self.box.history_reader.current() is not None
+        ):
+            probe = [
+                "podman",
+                "exec",
+                "-i",
+                self.container_id,
+                "python3",
+                "-I",
+                "-S",
+                "-c",
+                SOURCE_FENCE_HELPER,
+            ]
+            result = self.raw_run(
+                probe,
+                env=self.box.maintenance_host_env(),
+                input=json.dumps(
+                    {
+                        "home": self.data["home"],
+                        "fence": recovery_fence(),
+                        "bridge": (self.box.PACKAGE / "opencode_v2_io.py").read_text(),
+                        "connection": self.box.history_reader.current().connection,
+                    }
+                ),
+                capture=True,
+                private=True,
+                timeout=15,
+            )
+            require(json.loads(result.stdout) is True)
+            self.source_fence = True
+        return response
+
+    def observe_popen(self, command, *args, **options):
+        reader = (
+            self.closed.is_set()
+            and (self.box.PACKAGE / "history_reader.py").read_text() in command
+            and "lease" in command
+        )
+        if reader:
+            require(
+                self.metadata()["jobs"] == self.job_rows
+                and self.metadata(source=False)["jobs"] == []
+            )
+            self.guards = True
+            require(
+                command[:3] == ["podman", "exec", "-i"]
+                and self.container_id in command
+                and "/usr/bin/env" in command
+                and "-i" in command
+                and options.get("stdin") == subprocess.PIPE
+                and options.get("stdout") == subprocess.PIPE
+            )
+        if reader:
+            self.reader_attempts += 1
+        child = self.raw_popen(command, *args, **options)
+        if reader:
+            self.readers.append(child)
+        return child
+
+    def observe_api(self, box, data, connection, method, route, value=None, **options):
+        response = self.raw_api(box, data, connection, method, route, value, **options)
+        if (
+            self.stage == "cancelled"
+            and self.returned_at is not None
+            and not self.closed.is_set()
+            and method == "GET"
+        ):
+            if route == "/api/session/active":
+                self.idle_pair = response.get("data") == {}
+            elif route == "/api/experimental/job":
+                jobs = response.get("data")
+                if (
+                    self.idle_pair
+                    and isinstance(jobs, list)
+                    and len(jobs) == 1
+                    and jobs[0].get("id") == self.job["id"]
+                    and jobs[0].get("sessionID") == self.job["sessionID"]
+                    and jobs[0].get("kind") == "shell"
+                    and jobs[0].get("status") == "cancelled"
+                ):
+                    self.cancelled_pairs += 1
+                self.idle_pair = False
+        return response
+
+    def observe_shutdown(self, owner):
+        result = self.raw_shutdown(owner)
+        if self.stage == "cancelled":
+            self.timeout = getattr(owner, "_history_timeout", None)
+            self.elapsed = (
+                time.monotonic() - self.returned_at if self.returned_at else 0
+            )
+            self.owner_closed = (
+                owner.child.returncode == 0
+                and not owner.thread.is_alive()
+                and owner.listener.fileno() == -1
+                and owner.clients == 0
+                and self.service.live_connection() is None
+                and not self.service.socket_path(self.box, self.data).exists()
+            )
+            self.closed.set()
+        return result
+
+    def launch_case(self, callback, expected):
+        self.stage = callback.__name__
+        self.validate()
+        self.connection = None
+        self.raw_run, self.raw_popen = self.box.run, subprocess.Popen
+        self.raw_api, self.raw_shutdown = self.service.api, self.service.Owner.shutdown
+        publish = self.service.Owner.publish
+        unchanged = self.box.workspace_control.unchanged
+        owner_thread = threading.get_ident()
+
+        def stop_intent(path, baseline):
+            value = unchanged(path, baseline)
+            if (
+                self.closed.is_set()
+                and threading.get_ident() == owner_thread
+                and value is False
+            ):
+                self.stop_observed = True
+            return value
+
+        def published(owner, ident):
+            value = publish(owner, ident)
+            self.owner = owner
+            return value
+
+        def client(command):
+            ident = self.bind(command)
+            with self.service.attach(self.box, self.path, self.data) as attached:
+                require(attached["session"] == ident)
+                self.service.api(self.box, self.data, attached, "GET", "/api/info")
+            value = callback(ident)
+            self.returned_at = time.monotonic()
+            return value
+
+        def count(original, field):
+            def forward(*args, **kwargs):
+                if self.closed.is_set():
+                    setattr(self, field, getattr(self, field) + 1)
+                return original(*args, **kwargs)
+
+            return forward
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(self.f.no_vault_probe())
+            for target, name, replacement in (
+                (self.box, "run_tui", client),
+                (self.box, "run", self.observe_run),
+                (subprocess, "Popen", self.observe_popen),
+                (self.service, "api", self.observe_api),
+                (self.service.Owner, "publish", published),
+                (self.box.workspace_control, "unchanged", stop_intent),
+                (
+                    self.service.Owner,
+                    "shutdown",
+                    lambda owner: self.observe_shutdown(owner),
+                ),
+                (
+                    self.box,
+                    "prepare_runtime",
+                    count(self.box.prepare_runtime, "prepares"),
+                ),
+                (
+                    self.box,
+                    "config_archive",
+                    count(self.box.config_archive, "prepares"),
+                ),
+                (
+                    self.box,
+                    "launch_credentials",
+                    count(self.box.launch_credentials, "auth"),
+                ),
+            ):
+                stack.enter_context(patch.object(target, name, replacement))
+            output, errors = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+                code = self.box.main(
+                    ["start", "--project", str(self.root / "source-a"), "--no-vault"]
+                )
+            self.exits.append(code)
+            require(code == expected, "launcher-exit")
+            self.warning = errors.getvalue()
+            self.ordinary_success = (
+                "Session history synced to your normal host" in output.getvalue()
+            )
+        self.stopped()
+
+    def primer(self, selected):
+        self.seed("ses_history_recovery_baseline")
+        self.sync()
+        self.baseline_ids = {selected, "ses_history_recovery_baseline"}
+        return 0
+
+    def control_process(self, action):
+        self.same_identity()
+        child = self.raw_popen(
+            [sys.executable, "-I", "-B", "-c", CONTROL_HELPER],
+            env=self.control_env,
+            cwd=self.root,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            child.stdin.write(
+                (
+                    json.dumps(
+                        {
+                            "source": str(self.loaded.source),
+                            "sha256": self.loaded.identity["sha256"],
+                            "path": str(self.path),
+                            "workspace": self.data["id"],
+                            "action": action,
+                        }
+                    )
+                    + "\n"
+                ).encode()
+            )
+            child.stdin.flush()
+        except BaseException:
+            with contextlib.suppress(OSError):
+                child.stdin.close()
+            finish_actions((lambda: self.reap(child),), self.secondary)
+            raise
+        return child
+
+    def release_admission(self):
+        if (
+            self.holder is not None
+            and self.holder.stdin is not None
+            and not self.holder.stdin.closed
+        ):
+            with contextlib.suppress(BrokenPipeError):
+                self.holder.stdin.write(b"release\n")
+                self.holder.stdin.flush()
+            self.holder.stdin.close()
+
+    @staticmethod
+    def reap(child):
+        if child is None:
+            return
+        try:
+            child.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            child.terminate()
+            try:
+                child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=3)
+            raise Refusal("worker-timeout") from None
+        finally:
+            for stream in (child.stdin, child.stdout):
+                if stream is not None:
+                    stream.close()
+
+    def stop_after_close(self):
+        require(self.closed.wait(90), "gate-timeout")
+        self.reproduction()
+        self.check("stop_after_real_timeout")
+        require(self.stopper is not None, "gate-timeout")
+        try:
+            self.stopper.stdin.write(b"stop\n")
+            self.stopper.stdin.flush()
+            self.stopper.stdin.close()
+            self.until(
+                lambda: (
+                    not self.box.workspace_control.unchanged(self.path, self.stop_token)
+                ),
+                timeout=3,
+            )
+            require(self.holder.poll() is None and self.stopper.poll() is None)
+            self.check("stop_intent_before_admission")
+        finally:
+            self.release_admission()
+        require(self.stopper.wait(timeout=60) == 0, "launcher-exit")
+        self.stop_returned = time.monotonic()
+        self.check("explicit_stop_success")
+
+    def cancelled(self, selected):
+        self.control_env = dict(os.environ)
+        require(set(self.box.session_state(self.path)["sessions"]) == self.baseline_ids)
+        info = self.f.verify_owned_resources(self.root, self.data)
+        require(
+            info["Id"] == self.container_id and self.owner._history_source is not None
+        )
+        self.stop_token = self.owner._history_source.stop_token
+        self.gate = FileGate(self)
+        self.provider.background = {
+            "command": self.gate.command(),
+            "background": True,
+            "workdir": self.box.container_project(self.data),
+        }
+        self.client = Worker(
+            lambda: self.native_run(selected, "SYNTHETIC_HISTORY_RECOVERY")
+        )
+
+        def inventory():
+            return (
+                self.request("GET", "/api/session/active")["data"],
+                self.request("GET", "/api/experimental/job")["data"],
+            )
+
+        def running():
+            active, jobs = inventory()
+            return (
+                active == {}
+                and len(jobs) == 1
+                and jobs[0].get("sessionID") == selected
+                and jobs[0].get("kind") == "shell"
+                and jobs[0].get("status") == "running"
+            )
+
+        self.until(running)
+        self.job = inventory()[1][0]
+        require("FOREGROUND_IDLE_MARKER" in json.dumps(self.export(selected)))
+        self.job_rows = self.metadata()["jobs"]
+        require(len(self.job_rows) == 1 and self.metadata()["starts"] == "x")
+        require(self.request("POST", "/api/location/reload") is None)
+        self.gate.release()
+
+        def cancelled_idle():
+            active, jobs = inventory()
+            return (
+                active == {}
+                and len(jobs) == 1
+                and jobs[0].get("id") == self.job["id"]
+                and jobs[0].get("status") == "cancelled"
+            )
+
+        self.until(cancelled_idle)
+        self.saved = {ident: self.export(ident) for ident in self.baseline_ids}
+        require(
+            not any(
+                m.get("metadata", {}).get("jobID") == self.job["id"]
+                for value in self.saved.values()
+                for m in value["messages"]
+            )
+        )
+        require(
+            self.provider.requests == 2 and self.provider.errors == 0,
+            "provider-contract",
+        )
+        require(
+            self.metadata()["jobs"] == self.job_rows
+            and self.metadata(source=False)["jobs"] == []
+        )
+        if self.case == "stop-cancel":
+            # Validate/import the independent stop process BEFORE the production
+            # timeout starts. Only its actual CLI invocation is gated on owner
+            # closure, avoiding a cold-import race with five-second admission.
+            self.stopper = self.control_process("stop")
+            require(select.select([self.stopper.stdout], [], [], 10)[0], "gate-timeout")
+            require(self.stopper.stdout.readline() == b"ready\n")
+            self.holder = self.control_process("admission")
+            require(select.select([self.holder.stdout], [], [], 10)[0], "gate-timeout")
+            require(self.holder.stdout.readline() == b"ready\n")
+            self.stop_worker = Worker(self.stop_after_close)
+        self.returned_at = None
+        return 0
+
+    def reproduction(self):
+        require(
+            isinstance(self.timeout, self.box.HistoryWaitTimeout)
+            and self.timeout.recovery_eligible is True
+            and self.cancelled_pairs >= 2
+            and self.elapsed >= 29
+            and self.owner_closed
+        )
+        require(
+            self.timeout.diagnostic.endswith(
+                "foreground=0, jobs-running=0, jobs-completed=0, jobs-error=0, jobs-cancelled=1."
+            )
+        )
+
+    @staticmethod
+    def stopped_state(info):
+        state = info.get("State", {})
+        return (
+            state.get("Running") is False
+            and state.get("Paused", False) is False
+            and state.get("Restarting", False) is False
+            and type(state.get("Pid")) is int
+            and state["Pid"] == 0
+            and state.get("ConmonPid", 0) == 0
+            and state.get("Status") in ("exited", "stopped")
+        )
+
+    def verify_saved(self):
+        state = self.box.session_state(self.path)
+        require(set(state["sessions"]) == self.baseline_ids and not state["missing"])
+        for ident, source in self.saved.items():
+            expected = self.box.archive_session(source, self.data)
+            private = self.box.read_json(self.archive_path(ident))
+            require(
+                private == expected
+                and state["synced"][ident] == file_hash(self.archive_path(ident))
+            )
+            require(state["host_sessions"][ident] == self.archive_id(ident))
+            actual = self.export(self.archive_id(ident), host=True)
+            require(actual["messages"] == expected["messages"])
+            self.box.verify_host_archive(self.path, self.data, private)
+            require(
+                not any(
+                    m.get("metadata", {}).get("jobID") == self.job["id"]
+                    for m in actual["messages"]
+                )
+            )
+
+    def run(self):
+        require(
+            {
+                "src/oc_box/history_recovery.py",
+                "src/oc_box/history_reader.py",
+                "src/oc_box/workspace_control.py",
+            }
+            <= self.loaded.identity["sha256"].keys(),
+            "clean-source-required",
+        )
+        self.stage = "private-store"
+        self.validate(initial=True)
+        self.stage = "native-version"
+        self.f.prepare_native_cli(self.root, self.binary, history_recovery=True)
+        self.launch_case(self.primer, 0)
+        # Native's supported path-only query does not construct a service or DB.
+        # Pin its actual selector result, not an assumed native channel filename.
+        selected_db = self.box.run(
+            self.box.host_command(self.data, "debug", "paths", "db"),
+            env=self.box.private_host_env(self.path, self.data),
+            cwd=self.path.parent / "controller",
+            stdin=subprocess.DEVNULL,
+            capture=True,
+            private=True,
+            timeout=15,
+        ).stdout.removesuffix("\n")
+        self.host_database = safe_path(selected_db)
+        require(
+            self.host_database.is_file()
+            and self.host_database.parent
+            in (
+                self.root / "host-data-2/opencode",
+                self.root / "host-home/.local/share/opencode",
+            ),
+            "fixture-only",
+        )
+        self.container_id = self.f.verify_owned_resources(
+            self.root, self.data, stopped=True
+        )["Id"]
+        self.volume = (
+            self.root
+            / "data/containers/storage/volumes"
+            / self.data["home_volume"]
+            / "_data"
+        )
+        self.baseline = {ident: self.snapshot(ident) for ident in self.baseline_ids}
+        self.baseline_state = self.box.session_file(self.path).read_bytes()
+        self.returned_at = None
+        try:
+            self.launch_case(self.cancelled, 1)
+        finally:
+            finish_actions(
+                (
+                    self.release_admission,
+                    lambda: self.reap(self.holder),
+                    lambda: self.stop_worker.join(100) if self.stop_worker else None,
+                    lambda: self.reap(self.stopper),
+                    lambda: self.client.join(25) if self.client else None,
+                ),
+                self.secondary,
+            )
+        self.reproduction()
+        self.same_identity()
+        final = self.f.verify_owned_resources(self.root, self.data, stopped=True)
+        require(final["Id"] == self.container_id and self.stopped_state(final))
+        require(
+            self.metadata()["jobs"] == self.job_rows
+            and self.metadata()["starts"] == "x"
+        )
+        require(
+            self.provider.requests == 2 and self.provider.errors == 0,
+            "provider-contract",
+        )
+        require(self.prepares == self.auth == 0)
+        self.shell_starts = 1
+        if self.case == "snapshot":
+            self.check("eligible_live_timeout")
+            self.check("old_owner_closed")
+            require(
+                self.transitions
+                == [
+                    ("inspect", True, True),
+                    ("stop", True, True),
+                    ("inspect", True, False),
+                    ("start", True, True),
+                    ("inspect", True, True),
+                    ("stop", True, True),
+                    ("inspect", True, False),
+                ]
+            )
+            require(self.stop_proofs == [True, True])
+            self.check("verified_stop_before_restart")
+            self.check("same_id_single_restart")
+            require(
+                len(self.readers) == self.reader_attempts == 1
+                and self.readers[0].poll() == 0
+            )
+            self.check("single_private_reader")
+            require(self.guards and self.source_fence and self.host_fences > 0)
+            self.check("source_destination_fences")
+            self.verify_saved()
+            self.check("checked_archives_exact")
+            self.check("missing_notice_not_invented")
+            self.check("durable_job_retained")
+            self.check("reader_no_execution")
+            self.check("reader_no_prepare")
+            require(
+                "Checked persisted history snapshots were synchronized after stopping the workspace."
+                in self.warning
+                and "Execution was interrupted; completion notices or final results may be missing."
+                in self.warning
+                and "original history-wait failure remains nonzero" in self.warning
+                and not self.ordinary_success
+            )
+            self.check("nonzero_warning_stopped")
+        else:
+            require(
+                not self.transitions
+                and not self.starts
+                and not self.readers
+                and self.reader_attempts == 0
+                and self.stop_observed
+                and self.stopper.returncode == 0
+            )
+            self.check("restart_and_reader_suppressed")
+            require(time.monotonic() >= self.stop_returned)
+            self.check("no_start_after_stop_return")
+            require(
+                self.box.session_file(self.path).read_bytes() == self.baseline_state
+            )
+            for ident, before in self.baseline.items():
+                preserved(before, self.snapshot(ident))
+            self.check("final_identity_archives_retained")
+        self.stage = "complete"
+
+    def observations(self):
+        return {
+            "cancelled_pairs": self.cancelled_pairs,
+            "restarts": len(self.starts),
+            "reader_leases": self.reader_attempts,
+            "prepare_calls": self.prepares,
+            "auth_calls": self.auth,
+            "provider_requests": self.provider.requests if self.provider else None,
+            "shell_starts": self.shell_starts,
+            "explicit_stop_exit_code": self.stopper.returncode
+            if self.stopper
+            else None,
+        }
+
+
 class ShellGate:
     def __init__(self, harness, *, marker="SYNTHETIC_HISTORY_SHELL_DONE"):
         self.harness = harness
@@ -2132,7 +3088,18 @@ def parser():
     value.add_argument("--temp-dir", type=Path)
     value.add_argument("--opencode-v2", type=Path, required=True)
     value.add_argument("--distro", default="tumbleweed")
+    value.add_argument(
+        "--history-recovery-case",
+        choices=tuple(RECOVERY_CHECKS),
+        help="opt-in fresh recovery gate, separate from the unchanged default 42-check run",
+    )
     return value
+
+
+def build_harness(loaded, root, binary, digest, recovery_case=None):
+    if recovery_case is None:
+        return Harness(loaded, root, binary, digest)
+    return RecoveryHarness(loaded, root, binary, digest, recovery_case)
 
 
 def main(argv=None):
@@ -2167,10 +3134,18 @@ def main(argv=None):
         )
         require(native_podman is not None, "fixture-only")
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-        root = Path(tempfile.mkdtemp(prefix=f.PREFIX + "history-", dir=parent))
+        root = Path(
+            tempfile.mkdtemp(
+                prefix=f.PREFIX
+                + ("history-recovery-" if args.history_recovery_case else "history-"),
+                dir=parent,
+            )
+        )
         root.chmod(0o700)
         print("Retained history root: " + str(root), file=output)
-        harness = Harness(loaded, root, binary, runner_digest)
+        harness = build_harness(
+            loaded, root, binary, runner_digest, args.history_recovery_case
+        )
         harness.distro = args.distro
         harness.progress = lambda name: print(
             "session-history fixture: " + name, file=output, flush=True
@@ -2203,7 +3178,19 @@ def main(argv=None):
         if harness is not None:
             try:
                 secondary.extend(harness.secondary)
-                report = result(
+                report_function = (
+                    (
+                        lambda *values, **options: recovery_result(
+                            harness.case,
+                            *values,
+                            **options,
+                            observations=harness.observations(),
+                        )
+                    )
+                    if args.history_recovery_case
+                    else result
+                )
+                report = report_function(
                     harness.checks,
                     loaded.identity,
                     harness.runner,

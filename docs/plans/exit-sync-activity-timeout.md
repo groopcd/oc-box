@@ -162,8 +162,8 @@ when present, otherwise durable state. The public job/shell schema exposes no
 definitive observer-liveness, notice-admission or orphan marker. This source review
 is of 2.2.6; compiled 2.2.7 behavior was measured separately, not assumed identical.
 
-Independent safety review rejected an automatic post-owner snapshot fallback for
-now. Current host-wrapper teardown alone is not proof that all remote native
+Independent safety review initially rejected a naive post-owner snapshot fallback.
+Host-wrapper teardown alone is not proof that all remote native
 processes stopped, a `sync_sessions()` call can open multiple private services,
 and an `activity-timeout` can also mean an API failure at the deadline. None of
 those conditions authorizes new concurrent database access or ignoring work.
@@ -175,8 +175,42 @@ partial observations from a complete empty observation and keeps retained jobs
 blocking. Public documentation distinguishes readiness refusal (no final exports)
 from a pending export (other sessions still progress).
 
-Next repair gate: confirm the mechanism with the new diagnostic on a disposable
+The first-stage repair gate was to confirm the mechanism on a disposable
 host reproduction or an operator-provided count-only recurrence, then establish a
 supported native cleanup/quiescence contract. Do not silently reinterpret
 cancelled/running retained jobs as idle, rely on restarts clearing them, or ship
 the diagnostic as a completed fix. Fresh external-host acceptance remains pending.
+
+## Subsequent implementation: fenced post-stop snapshot
+
+Continued independent review established a narrower useful contract without
+changing native job state: let the live owner refuse, close it, verify an actual
+whole-container stop, then permit one non-executing persisted-history snapshot.
+The same existing ready container is pinned by immutable ID, passive entrypoint,
+project/home association and ownership. No replacement/bootstrap/preparation is
+allowed. Private stop intent plus stable admission serializes the sole restart
+against this launcher's explicit stop; indeterminate starts retain a persistent
+fence rather than permitting a false successful-stop claim.
+
+The final live request's phase cannot determine snapshot eligibility: native
+CLI-query timing otherwise makes it random. Two complete validated foreground-empty,
+shell-only pairs are a routing hint. A real deadline timeout can retain them;
+known non-timeout API errors and contradictory/malformed late responses cannot.
+All known shell statuses are included because a cancelled row can hydrate as
+running on the next owner. The wait still fails and **no live export** is waived.
+
+One isolated reader supplies the whole snapshot. It forwards no vault/provider
+environment, uses no saved/project integrations and performs no credential refresh.
+Source/destination native scheduler rows and nonempty system configuration cause
+refusal before projection. Disabling schedules alone is insufficient: native
+`Schedule.rewake` can still wake durable input. Existing checked exports and host
+verification remain mandatory; no row, outcome or notice is manufactured or
+deleted. The snapshot budget is 180 seconds, with separate transition/cleanup
+allowances. Even successful snapshots retain the original nonzero/interrupted-work
+warning, and cleanup stops the container again.
+
+The new native fixture exercises the reader and real archive round trips on
+2.2.6/2.2.7 behind a **local process barrier only**. Whole-container stop/death,
+same-ID restart and concurrent explicit-stop authority require the focused
+external-host gate on a clean frozen candidate. No host fixture may run here;
+no stable publication is authorized by these offline results.

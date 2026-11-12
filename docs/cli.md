@@ -194,6 +194,15 @@ Its processes stop, and the active client may disconnect or report tool errors.
 Exit that launcher before starting another instance or resetting the workspace.
 Use `sync` afterward if a final history export was missed.
 
+For V2, this command records stop intent before waiting for a private transition
+lock (up to 45 seconds). A same-version owning launcher then suppresses automatic
+post-stop history recovery rather than undoing the successful stop. A start whose
+engine outcome could not be verified leaves a private uncertainty fence: stop is
+still attempted, but no successful-stop message is printed and the command returns
+nonzero. Do not delete control files to bypass that refusal; verify the host state
+before repairing the control condition. Older launchers or direct Podman commands
+do not participate in this coordination protocol. V1 stop behavior is unchanged.
+
 ```sh
 oc-box stop --project ~/devel/demo
 ```
@@ -268,6 +277,10 @@ existing workspace and an intact project directory. It starts or recreates the
 container if needed, prepares its runtime/configuration, discovers saved
 sessions, exports them, and imports separate namespaced archive copies into the
 host database. It stops the container afterward, even if it had been running.
+
+Manual `sync` retains ordinary runtime preparation and native service startup,
+including configured integrations and native scheduling behavior. It is not the
+isolated, non-executing post-stop reader used by automatic timeout recovery.
 
 On V2, discovery reads every native API page at the workspace's internal project
 directory, including archived conversations, forks, and linked child/subagent
@@ -364,8 +377,44 @@ location reload, even with no foreground activity. Such a row still blocks the
 wait; it is not safe to ignore terminal-status jobs generally because their
 completion notices can restart foreground work. A successful later `oc-box sync`
 checks native exports without the original owner's activity wait and does not
-prove that its retained job disappeared. This diagnostic does not repair native
-job cleanup, increase the timeout or automatically restart/delete work.
+prove that its retained job disappeared. The native job-cleanup issue is not
+repaired by the diagnostic or by the persisted-history snapshot described below.
+
+For supported native 2.2.6/2.2.7 owners, a shell-only timeout can trigger **one
+post-stop persisted-history snapshot**. Two complete validated observations must
+have shown no foreground activity and only shell jobs. A later real query timeout
+does not manufacture an observation; a contradictory/malformed response or known
+non-timeout API error invalidates the hint. The live wait still refuses, and no
+live export is authorized by that hint.
+
+After the owner closes normally and all clients detach, oc-box verifies and stops
+the same existing, ready container. If stop intent is unchanged, it starts that
+exact container once for an isolated history reader, never a replacement or a
+normal owning launch. There is no runtime/configuration/auth refresh, vault unlock,
+credential forwarding, controller publication or requested model/tool execution.
+The transition budget is 35 seconds and the snapshot budget 180 seconds, with
+separate bounded cleanup. The container is stopped again before exit.
+
+This conservative path requires a passive container entrypoint, no custom Podman
+arguments or automatic health/restart/shell-loader hooks, and validated identity/home mounts.
+It also refuses native scheduler rows (including paused/completed rows), unknown
+scheduler schemas, unsafe stores and nonempty system OpenCode configuration.
+Read-only executable-version probes must match the captured supported release
+on both sides; a binary changed during the session does not inherit that proof.
+Source and destination helpers use isolated configuration, execution denials and
+disabled scheduling/warming; disabling scheduling alone is insufficient because
+native restart notification handling can still wake work. Other failures retain
+the normal pending-history/manual-sync behavior.
+
+Snapshots retain the existing complete-inventory, checked-export, pending-session
+and verified-host-import safeguards. Native startup/projection can maintain its
+database; this is not a byte-read-only database backup. No native job is deleted,
+rewritten or declared completed. **The original failure remains nonzero even when
+snapshots are saved**, with a warning that execution was interrupted and completion
+notices/final results may be missing. Historical job rows can remain running-looking
+on the next owner; the same bounded post-stop path may save another snapshot, but
+does not make the underlying native owner healthy. This development-branch path
+still requires fresh external-host acceptance before stable publication.
 
 `--no-vault` is accepted only when web becomes a new V2 owner; an attached web
 client rejects it and never changes the owner's credential snapshot.

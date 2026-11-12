@@ -104,6 +104,17 @@ their checkout ownership distinct from unrelated source and flat installations.
   ephemeral memory only; no published container/LAN ports or shared host service.
   Owners wait for attached clients before sync/stop, and lifecycle locks remain
   exclusive against reset/purge/backup. Attach never refreshes credentials.
+- `history_recovery.py` / `history_reader.py` / `workspace_control.py`: one bounded
+  persisted-history snapshot after shell-only live timeouts, never a live readiness
+  waiver or native job cleanup. Require actual verified whole-container stop,
+  immutable same-resource restart, stop intent/admission and persistent uncertainty
+  fences. Readers are unregistered/non-executing, with source/destination scheduler
+  metadata and system-config refusals, one endpoint, unchanged checked exports and
+  host verification, separate cleanup and original nonzero/interruption warnings.
+  Never clear an uncertain start without verified transition completion, resume
+  work, refresh credentials, create replacement resources or infer host acceptance
+  from local native/process fixtures. The focused host recovery gate is additional
+  to the retained 42-check history/readiness runner, not a relabeling of it.
 - `session_terminal.py`: native persistent V2 session shell PTY client with
   authenticated WebSocket framing, resize/checkpoint replay and Ctrl-] detach.
   Reuse the session terminal, never replace it with the mini chat interface.

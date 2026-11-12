@@ -2343,6 +2343,522 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                         with self.assertRaises(runner.Refusal):
                             harness.verify_archive("ses_source")
 
+    def recovery_harness(self, case="snapshot"):
+        old = self.harness()
+        value = runner.RecoveryHarness(
+            old.loaded, self.parent, old.binary, old.runner, case
+        )
+        value.box.PACKAGE = self.source
+        (self.source / "history_reader.py").write_text("# pinned reader helper\n")
+        value.container_id = "a" * 64
+        value.provider = SimpleNamespace(requests=2, errors=0)
+        value.box.HistoryWaitTimeout = type("HistoryWaitTimeout", (Exception,), {})
+        value.timeout = value.box.HistoryWaitTimeout()
+        value.timeout.recovery_eligible = True
+        value.timeout.diagnostic = "History wait timeout: phase=poll-delay; last complete observation: foreground=0, jobs-running=0, jobs-completed=0, jobs-error=0, jobs-cancelled=1."
+        value.cancelled_pairs, value.elapsed, value.owner_closed = 2, 30, True
+        return value
+
+    def test_recovery_reports_keep_default_evidence_separate_and_require_real_counts(
+        self,
+    ):
+        identity = {
+            "commit": self.commit,
+            "commit_count": 80,
+            "version": "1.7.51+g" + self.commit[:7],
+            "dirty": False,
+            "sha256": {"src/oc_box/history_reader.py": "c" * 64},
+        }
+        native = {"version": "2.2.6", "sha256": "d" * 64}
+        self.assertEqual(len(runner.CHECKS), 42)
+        self.assertEqual(runner.EXPECTED_EXITS, (0, 0, 0, 1, 0, 0, 0, 0))
+        for case, count in (("snapshot", 12), ("stop-cancel", 6)):
+            observations = {
+                "cancelled_pairs": 2,
+                "restarts": int(case == "snapshot"),
+                "reader_leases": int(case == "snapshot"),
+                "prepare_calls": 0,
+                "auth_calls": 0,
+                "provider_requests": 2,
+                "shell_starts": 1,
+                "explicit_stop_exit_code": 0 if case == "stop-cancel" else None,
+            }
+
+            def report(*, observations=observations, case=case, **changes):
+                settings = {
+                    "stage": "complete",
+                    "exits": (0, 1),
+                    "observations": observations,
+                    "checks": dict.fromkeys(runner.RECOVERY_CHECKS[case], True),
+                }
+                settings.update(changes)
+                return runner.recovery_result(
+                    case, identity=identity, runner="e" * 64, native=native, **settings
+                )
+
+            passed = report()
+            self.assertEqual(passed["status"], "PASS")
+            self.assertEqual(passed["format"], "oc-box-history-recovery-host-v1")
+            self.assertEqual(len(passed["checks"]), count)
+            self.assertEqual(passed["launcher_exit_codes"], [0, 1])
+            for name in runner.RECOVERY_CHECKS[case]:
+                self.assertEqual(
+                    report(
+                        checks=dict.fromkeys(
+                            runner.RECOVERY_CHECKS[case] - {name}, True
+                        )
+                    )["status"],
+                    "FAIL",
+                )
+            for key, wrong in (
+                ("cancelled_pairs", 0),
+                ("restarts", 2),
+                ("reader_leases", 2),
+                ("prepare_calls", 1),
+                ("auth_calls", 1),
+                ("provider_requests", 3),
+                ("shell_starts", 2),
+            ):
+                self.assertEqual(
+                    report(observations={**observations, key: wrong})["status"],
+                    "FAIL",
+                    key,
+                )
+            for exits in ((), (0, 0), (1, 0)):
+                self.assertEqual(report(exits=exits)["status"], "FAIL")
+            for bad_native in ("2.2.7", "2.2.8"):
+                with (
+                    patch.dict(native, {"version": bad_native}),
+                    self.assertRaises(runner.Refusal),
+                ):
+                    report()
+            with self.assertRaises(runner.Refusal):
+                report(observations={"private-sentinel": 0})
+
+    def test_recovery_option_is_opt_in_and_all_cases_keep_the_early_host_guard(self):
+        base = [
+            "--source",
+            str(self.source),
+            "--expect-commit",
+            self.commit,
+            "--work-dir",
+            str(self.parent),
+            "--opencode-v2",
+            "/synthetic/native",
+        ]
+        self.assertIsNone(runner.parser().parse_args(base).history_recovery_case)
+        for case in (None, *runner.RECOVERY_CHECKS):
+            with (
+                patch.object(runner, "Harness") as default,
+                patch.object(runner, "RecoveryHarness") as recovery,
+            ):
+                arguments = (object(), self.parent, Path("/synthetic/native"), "d" * 64)
+                value = runner.build_harness(*arguments, recovery_case=case)
+                if case is None:
+                    default.assert_called_once_with(*arguments)
+                    recovery.assert_not_called()
+                    self.assertIs(value, default.return_value)
+                else:
+                    recovery.assert_called_once_with(*arguments, case)
+                    default.assert_not_called()
+                    self.assertIs(value, recovery.return_value)
+        for case in runner.RECOVERY_CHECKS:
+            arguments = [*base, "--history-recovery-case", case]
+            self.assertEqual(
+                runner.parser().parse_args(arguments).history_recovery_case, case
+            )
+            with (
+                patch.object(
+                    runner, "host_guard", side_effect=runner.Refusal("host-only")
+                ),
+                patch.object(runner, "load_source") as source,
+                patch.object(runner.tempfile, "mkdtemp") as allocate,
+                patch.object(runner, "RecoveryHarness") as harness,
+            ):
+                self.assertEqual(runner.main(arguments), 1)
+            source.assert_not_called()
+            allocate.assert_not_called()
+            harness.assert_not_called()
+
+    def test_recovery_reproduction_cannot_accept_a_drained_job_or_shortened_wait(self):
+        # A genuine final tiny-budget query timeout may preserve the two prior
+        # validated pairs. The typed production hint, not its final phase, rules.
+        for phase in ("foreground-query", "background-query", "poll-delay"):
+            h = self.recovery_harness()
+            h.timeout.diagnostic = h.timeout.diagnostic.replace(
+                "phase=poll-delay", "phase=" + phase
+            )
+            h.reproduction()
+        for defect in (
+            None,
+            "not eligible",
+            "drained",
+            "no pairs",
+            "short wait",
+            "owner alive",
+            "wrong error",
+        ):
+            h = self.recovery_harness()
+            if defect == "not eligible":
+                h.timeout.recovery_eligible = False
+            elif defect == "drained":
+                h.timeout.diagnostic = h.timeout.diagnostic.replace(
+                    "jobs-cancelled=1", "jobs-cancelled=0"
+                )
+            elif defect == "no pairs":
+                h.cancelled_pairs = 0
+            elif defect == "short wait":
+                h.elapsed = 1
+            elif defect == "owner alive":
+                h.owner_closed = False
+            elif defect == "wrong error":
+                h.timeout = ValueError("private-sentinel")
+            with self.subTest(defect=defect):
+                if defect is None:
+                    h.reproduction()
+                else:
+                    with self.assertRaises(runner.Refusal):
+                        h.reproduction()
+
+    def test_reader_observer_guards_both_stores_before_forwarding_the_real_popen(self):
+        for defect in (None, "source rows", "destination schedule", "actual failure"):
+            h = self.recovery_harness()
+            h.closed.set()
+            h.job_rows = [["job_synthetic", "running"]]
+            calls = []
+
+            def metadata(*, source=True, calls=calls, defect=defect, h=h):
+                calls.append("source" if source else "destination")
+                if not source and defect == "destination schedule":
+                    raise runner.Refusal("oracle")
+                return {
+                    "jobs": [] if not source or defect == "source rows" else h.job_rows
+                }
+
+            h.metadata = metadata
+            child, failure = Mock(), OSError("private-sentinel")
+
+            def popen(
+                *args,
+                calls=calls,
+                defect=defect,
+                failure=failure,
+                child=child,
+                **kwargs,
+            ):
+                calls.append("popen")
+                if defect == "actual failure":
+                    raise failure
+                return child
+
+            h.raw_popen = Mock(side_effect=popen)
+            command = [
+                "podman",
+                "exec",
+                "-i",
+                h.container_id,
+                "/usr/bin/env",
+                "-i",
+                (h.box.PACKAGE / "history_reader.py").read_text(),
+                "lease",
+            ]
+            with self.subTest(defect=defect):
+                if defect is None:
+                    self.assertIs(
+                        h.observe_popen(
+                            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE
+                        ),
+                        child,
+                    )
+                    self.assertEqual(calls, ["source", "destination", "popen"])
+                    self.assertEqual(h.readers, [child])
+                else:
+                    with self.assertRaises(
+                        OSError if defect == "actual failure" else runner.Refusal
+                    ) as raised:
+                        h.observe_popen(
+                            command, stdin=subprocess.PIPE, stdout=subprocess.PIPE
+                        )
+                    if defect == "actual failure":
+                        self.assertIs(raised.exception, failure)
+                    else:
+                        h.raw_popen.assert_not_called()
+                    self.assertEqual(h.readers, [])
+
+    def test_engine_observer_returns_actual_results_and_checks_env_before_selector(
+        self,
+    ):
+        h = self.recovery_harness()
+        h.closed.set()
+        h.recovering = lambda: True
+        h.source_fence = True
+        h.box.history_reader = SimpleNamespace(current=lambda: None)
+        response = SimpleNamespace(
+            stdout=json.dumps([{"Id": h.container_id, "State": {"Running": False}}]),
+            returncode=0,
+        )
+        h.raw_run = Mock(return_value=response)
+        command = ["podman", "container", "inspect", h.container_id]
+        self.assertIs(h.observe_run(command, private=True), response)
+        self.assertEqual(h.transitions, [("inspect", True, False)])
+        self.assertEqual(h.stop_proofs, [False])
+        response.stdout = json.dumps(
+            [
+                {
+                    "Id": h.container_id,
+                    "State": {
+                        "Running": False,
+                        "Pid": 0,
+                        "ConmonPid": 0,
+                        "Status": "exited",
+                    },
+                }
+            ]
+        )
+        self.assertIs(h.observe_run(command, private=True), response)
+        self.assertEqual(h.stop_proofs, [False, True])
+        env = runner.recovery_fence()
+        env["OPENCODE_CONFIG_CONTENT"] = json.dumps(env["OPENCODE_CONFIG_CONTENT"])
+        self.assertIs(
+            h.observe_run(["opencode", "debug", "paths", "db"], env=env), response
+        )
+        for key in runner.recovery_fence():
+            bad = {name: value for name, value in env.items() if name != key}
+            h.raw_run.reset_mock()
+            with self.subTest(missing=key), self.assertRaises(runner.Refusal):
+                h.observe_run(["opencode", "debug", "paths", "db"], env=bad)
+            h.raw_run.assert_not_called()
+        error = OSError("private-sentinel")
+        h.raw_run.side_effect = error
+        with self.assertRaises(OSError) as raised:
+            h.observe_run(command)
+        self.assertIs(raised.exception, error)
+
+    def test_stop_worker_waits_for_real_close_then_publishes_intent_before_release(
+        self,
+    ):
+        for defect in (None, "no timeout", "holder exited", "stop exited"):
+            h = self.recovery_harness("stop-cancel")
+            h.closed.set()
+            h.path, h.stop_token = self.parent / "workspace.json", "b" * 64
+            calls = []
+            h.reproduction = Mock(
+                side_effect=lambda calls=calls: calls.append("timeout")
+            )
+            if defect == "no timeout":
+                h.reproduction.side_effect = runner.Refusal("oracle")
+            h.holder = SimpleNamespace(
+                poll=lambda defect=defect: 0 if defect == "holder exited" else None
+            )
+            stopper = SimpleNamespace(
+                poll=lambda defect=defect: 0 if defect == "stop exited" else None,
+                wait=lambda calls=calls, **kw: calls.append("stop return") or 0,
+                stdin=SimpleNamespace(
+                    write=lambda value, calls=calls: (
+                        calls.append("signal")
+                        if value == b"stop\n"
+                        else self.fail("Wrong stop signal")
+                    ),
+                    flush=lambda: None,
+                    close=lambda: None,
+                ),
+            )
+            h.stopper = stopper
+            h.control_process = Mock(
+                side_effect=lambda action, calls=calls, stopper=stopper: (
+                    calls.append(action) or stopper
+                )
+            )
+            h.box.workspace_control = SimpleNamespace(
+                unchanged=lambda *args, calls=calls: calls.append("intent") or False
+            )
+            h.release_admission = lambda calls=calls: calls.append("release")
+            with self.subTest(defect=defect):
+                if defect is None:
+                    h.stop_after_close()
+                    self.assertEqual(
+                        calls, ["timeout", "signal", "intent", "release", "stop return"]
+                    )
+                    self.assertEqual(
+                        set(h.checks),
+                        {
+                            "stop_after_real_timeout",
+                            "stop_intent_before_admission",
+                            "explicit_stop_success",
+                        },
+                    )
+                    h.control_process.assert_not_called()
+                else:
+                    with self.assertRaises(runner.Refusal):
+                        h.stop_after_close()
+                    self.assertNotIn("explicit_stop_success", h.checks)
+                    if defect == "no timeout":
+                        h.control_process.assert_not_called()
+                    else:
+                        self.assertEqual(calls[-1], "release")
+
+    def test_recovery_file_gate_release_is_safe_without_a_live_reader_and_counts_execution(
+        self,
+    ):
+        import shlex
+
+        h = SimpleNamespace(data={"home": str(self.parent)})
+        (self.parent / ".local/share").mkdir(parents=True)
+
+        def python(code, payload):
+            with patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
+                exec(compile(code, "fixture-gate", "exec"), {})
+
+        h.container_python = python
+        gate = runner.FileGate(h)
+        gate.release()  # No reader exists, unlike a FIFO.
+        gate.release()
+        args = shlex.split(gate.command())
+        with (
+            patch.object(sys, "argv", args[2:]),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            exec(compile(args[2], "fixture-command", "exec"), {})
+        self.assertEqual((Path(gate.path) / "starts").read_bytes(), b"x")
+        self.assertTrue((Path(gate.path) / "release").is_file())
+
+    def test_recovery_cleanup_bounds_and_reaps_children_even_after_timeout(self):
+        child = Mock()
+        child.wait.side_effect = [
+            subprocess.TimeoutExpired("private-sentinel", 5),
+            subprocess.TimeoutExpired("private-sentinel", 3),
+            0,
+        ]
+        with self.assertRaisesRegex(runner.Refusal, "worker-timeout"):
+            runner.RecoveryHarness.reap(child)
+        child.terminate.assert_called_once()
+        child.kill.assert_called_once()
+        child.stdin.close.assert_called_once()
+        child.stdout.close.assert_called_once()
+
+    def test_owner_close_observer_forwards_before_recording_and_never_waives_failure(
+        self,
+    ):
+        h = self.recovery_harness()
+        h.stage, h.returned_at, h.data = "cancelled", time.monotonic() - 30, {}
+        h.service.live_connection = lambda: None
+        h.service.socket_path = lambda *_: self.parent / "absent-socket"
+        owner = SimpleNamespace(
+            child=SimpleNamespace(returncode=0),
+            clients=0,
+            thread=SimpleNamespace(is_alive=lambda: False),
+            listener=SimpleNamespace(fileno=lambda: -1),
+            _history_timeout=h.timeout,
+        )
+        sentinel = object()
+
+        def closed(actual):
+            self.assertIs(actual, owner)
+            self.assertFalse(h.closed.is_set())
+            return sentinel
+
+        h.raw_shutdown = closed
+        self.assertIs(h.observe_shutdown(owner), sentinel)
+        self.assertTrue(h.closed.is_set())
+        h.reproduction()
+        h.closed.clear()
+        error = OSError("private-sentinel")
+        h.raw_shutdown = Mock(side_effect=error)
+        with self.assertRaises(OSError) as raised:
+            h.observe_shutdown(owner)
+        self.assertIs(raised.exception, error)
+        self.assertFalse(h.closed.is_set())
+
+    def test_scheduler_probe_is_read_only_and_refuses_every_row_not_only_due_work(self):
+        import sqlite3
+
+        database = self.parent / "native-fixture.db"
+        for state in (None, "paused", "completed", "cancelled", "unknown"):
+            with sqlite3.connect(database) as db:
+                db.execute(
+                    "CREATE TABLE IF NOT EXISTS schedule(id TEXT PRIMARY KEY, session_id TEXT, status TEXT, last_message_id TEXT)"
+                )
+                db.execute("CREATE TABLE IF NOT EXISTS job(id TEXT PRIMARY KEY)")
+                db.execute("DELETE FROM schedule")
+                if state:
+                    db.execute(
+                        "INSERT INTO schedule VALUES('sch_synthetic','ses_synthetic',?,NULL)",
+                        (state,),
+                    )
+            before = database.read_bytes()
+            with (
+                self.subTest(status=state),
+                patch.object(sys, "argv", ["probe", str(database)]),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                if state is None:
+                    exec(
+                        compile(runner.METADATA_HELPER, "fixture-scheduler", "exec"), {}
+                    )
+                    self.assertEqual(json.loads(output.getvalue()), {"jobs": []})
+                else:
+                    with self.assertRaises(AssertionError):
+                        exec(
+                            compile(
+                                runner.METADATA_HELPER, "fixture-scheduler", "exec"
+                            ),
+                            {},
+                        )
+            self.assertEqual(database.read_bytes(), before)
+
+    def test_recovery_selector_preserves_only_public_fences_without_manufacturing_them(
+        self,
+    ):
+        from tools import test_global_vault_podman as donor
+
+        fence = runner.recovery_fence()
+        fence["OPENCODE_CONFIG_CONTENT"] = json.dumps(fence["OPENCODE_CONFIG_CONTENT"])
+        for opt_in, incoming, accepted in (
+            (False, fence, True),
+            (True, {}, True),
+            (True, fence, True),
+            (True, {**fence, "OPENCODE_CONFIG_CONTENT": "{}"}, False),
+            (True, {**fence, "OPENCODE_FILEWATCHER_DISABLE": "0"}, False),
+        ):
+            script = donor.native_wrapper_source(
+                root=self.parent, binary="/synthetic/native", history_recovery=opt_in
+            )
+            with (
+                self.subTest(opt_in=opt_in, incoming=incoming),
+                patch.dict(
+                    os.environ,
+                    {
+                        **incoming,
+                        "PRIVATE_API_KEY": "private-sentinel",
+                        "OPENCODE_EXTRA": "private-sentinel",
+                    },
+                    clear=True,
+                ),
+                patch.object(sys, "argv", ["opencode", "debug", "paths", "db"]),
+                patch.object(os, "execve") as execute,
+            ):
+                if accepted:
+                    exec(compile(script, "fixture-selector", "exec"), {})
+                else:
+                    with self.assertRaises(AssertionError):
+                        exec(compile(script, "fixture-selector", "exec"), {})
+            if not accepted:
+                execute.assert_not_called()
+                continue
+            actual = execute.call_args.args[2]
+            self.assertEqual(
+                execute.call_args.args[1], ["/synthetic/native", "debug", "paths", "db"]
+            )
+            self.assertNotIn("PRIVATE_API_KEY", actual)
+            self.assertNotIn("OPENCODE_EXTRA", actual)
+            self.assertEqual("OPENCODE_FLAGS" in actual, opt_in and bool(incoming))
+            if opt_in and incoming:
+                self.assertTrue(runner.fenced(actual))
+        self.assertEqual(
+            donor.native_wrapper_source(),
+            donor.native_wrapper_source(history_recovery=False),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

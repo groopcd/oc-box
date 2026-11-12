@@ -72,6 +72,17 @@ class OpenCodeCompatibilityTests(unittest.TestCase):
             {"providerID": "provider", "id": "model", "variant": "variant"},
         )
 
+    def test_v2_local_database_path_handler_never_elects_a_service(self):
+        for release in ("2.2.6", "2.2.7"):
+            for server in (None, "http://127.0.0.1:12345"):
+                with self.subTest(release=release, server=server):
+                    self.assertEqual(
+                        compat.command(
+                            release, "oc", ["debug", "paths", "db"], server=server
+                        ),
+                        ["oc", "debug", "paths", "db"],
+                    )
+
     def test_legacy_auth_override_is_translated_without_secret_argv_or_files(self):
         entries = compat.legacy_credentials(
             '{"openai":{"type":"api","key":"synthetic-key"},"github-copilot":{"type":"oauth","access":"synthetic-access","refresh":"synthetic-refresh","expires":42}}'
