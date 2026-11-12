@@ -17,6 +17,7 @@ from types import ModuleType
 import unittest
 from unittest.mock import Mock, patch
 
+from acceptance_inputs import private_store_info
 from oc_box import oc_box as box, vault
 from tools import test_global_vault_podman as cleanup_guards
 from tools import acceptance_guards
@@ -2310,18 +2311,8 @@ print('NO_CANDIDATE_IMPORT')
                     )
                     info.pop("Labels")
                 resources[(kind, token)] = info
-        info = {
-            "host": {"security": {"rootless": True}, "serviceIsRemote": False},
-            "store": {
-                "graphDriverName": "overlay",
-                "graphRoot": str(root / "data/containers/storage"),
-                "runRoot": str(root / "podman-run"),
-                "volumePath": str(root / "data/containers/storage/volumes"),
-                "imageCopyTmpDir": str(root / "temporary"),
-                "configFile": str(root / "config/containers/storage.conf"),
-            },
-            "version": {"Version": "6.1.4"},
-        }
+        info = private_store_info(root=root, image_copy_tmp_dir=root / "temporary")
+        info["version"] = {"Version": "6.1.4"}
         return records, resources, info
 
     @contextlib.contextmanager

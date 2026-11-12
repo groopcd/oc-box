@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+from acceptance_inputs import private_store_info
 from oc_box import backup_crypto as crypto, backups, oc_box as box
 from tools import acceptance_guards, test_global_vault_podman as fixture
 from tools import test_interactive_podman as interactive
@@ -789,26 +790,13 @@ class HomeOwnershipHostFixtureTests(unittest.TestCase):
             self.assertEqual(kwargs["timeout"], 30)
             calls.append(kwargs["env"])
             marker.write_bytes(self.boot)
-            store = {
-                "graphDriverName": "overlay",
-                "graphRoot": str(self.root / "data/containers/storage"),
-                "runRoot": str(self.root / "podman-run"),
-                "volumePath": str(self.root / "data/containers/storage/volumes"),
-                "configFile": str(self.root / "config/containers/storage.conf"),
-                "imageCopyTmpDir": kwargs["env"]["TMPDIR"],
-            }
+            value = private_store_info(
+                root=self.root, image_copy_tmp_dir=kwargs["env"]["TMPDIR"]
+            )
             return subprocess.CompletedProcess(
                 command,
                 0,
-                json.dumps(
-                    {
-                        "host": {
-                            "security": {"rootless": True},
-                            "serviceIsRemote": False,
-                        },
-                        "store": store,
-                    }
-                ),
+                json.dumps(value),
                 "",
             )
 

@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from acceptance_inputs import private_store_info
 from oc_box import oc_box as box, backup_crypto as crypto, backups, vault
 from tools import test_global_vault_podman as fixture
 
@@ -76,17 +77,9 @@ class GlobalVaultHostFixtureTests(unittest.TestCase):
         )
 
     def info(self):
-        return {
-            "host": {"security": {"rootless": True}, "serviceIsRemote": False},
-            "store": {
-                "graphDriverName": "overlay",
-                "graphRoot": str(self.root / "data/containers/storage"),
-                "runRoot": str(self.root / "podman-run"),
-                "volumePath": str(self.root / "data/containers/storage/volumes"),
-                "imageCopyTmpDir": str(self.root / "temporary"),
-                "configFile": str(self.root / "config/containers/storage.conf"),
-            },
-        }
+        return private_store_info(
+            root=self.root, image_copy_tmp_dir=self.root / "temporary"
+        )
 
     def record(self, name, ident, *, origin=None):
         project = self.root / name
