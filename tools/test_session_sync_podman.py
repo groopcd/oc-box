@@ -132,7 +132,7 @@ LAUNCH_STAGES = (
     "recovery-sync",
 )
 EXPECTED_EXITS = (0, 0, 0, 1, 0)
-RECOVERY_FORMAT = "oc-box-history-recovery-host-v1"
+RECOVERY_FORMAT = "oc-box-history-recovery-host-v2"
 RECOVERY_CHECKS = {
     "snapshot": frozenset(
         (
@@ -1878,6 +1878,8 @@ def recovery_result(
             "provider_requests",
             "shell_starts",
             "explicit_stop_exit_code",
+            "recovery_calls",
+            "snapshot_completed",
         }
         and all(
             value is None or type(value) is int and -255 <= value < 10000
@@ -1893,6 +1895,8 @@ def recovery_result(
         "provider_requests": 2,
         "shell_starts": 1,
         "explicit_stop_exit_code": 0 if case == "stop-cancel" else None,
+        "recovery_calls": 1,
+        "snapshot_completed": int(case == "snapshot"),
     }
     if primary is None and (
         set(checks) != RECOVERY_CHECKS[case]
@@ -1931,6 +1935,7 @@ def recovery_result(
         "scope": "Fresh synthetic external-host persisted-history recovery; native 2.2.6 only. Not interactive UI, inference, security or general lifecycle acceptance.",
         "observers": [
             "forwarding engine results",
+            "forwarding recovery call and completion result",
             "real owner shutdown and timeout counts",
             "actual private reader Popen",
             "pre-selector production environment",
@@ -2091,6 +2096,9 @@ class RecoveryHarness(Harness):
         self.returned_at = None
         self.shell_starts = None
         self.idle_pair = False
+        self.recovery_thread = None
+        self.recovery_results = []
+        self.recovery_calls = 0
 
     def check(self, name):
         require(name in RECOVERY_CHECKS[self.case], "report-schema")
@@ -2104,10 +2112,20 @@ class RecoveryHarness(Harness):
         return self.f.native_wrapper_source(history_recovery=True)
 
     def recovering(self):
-        return (
-            self.closed.is_set()
-            and self.box.history_recovery.DEADLINE.get() is not None
-        )
+        # A deadline also scopes the launcher's OUTER final cleanup. Observe the
+        # real recovery call explicitly instead of inferring phase from a budget.
+        return self.recovery_thread == threading.get_ident()
+
+    def observe_recovery(self, *args, **options):
+        require(self.recovery_thread is None)
+        self.recovery_calls += 1
+        self.recovery_thread = threading.get_ident()
+        try:
+            value = self.raw_recovery(*args, **options)
+            self.recovery_results.append(value if type(value) is bool else None)
+            return value
+        finally:
+            self.recovery_thread = None
 
     def metadata(self, *, source=True):
         if source:
@@ -2290,6 +2308,7 @@ class RecoveryHarness(Harness):
         self.connection = None
         self.raw_run, self.raw_popen = self.box.run, subprocess.Popen
         self.raw_api, self.raw_shutdown = self.service.api, self.service.Owner.shutdown
+        self.raw_recovery = self.box.history_recovery.recover
         publish = self.service.Owner.publish
         unchanged = self.box.workspace_control.unchanged
         owner_thread = threading.get_ident()
@@ -2333,6 +2352,7 @@ class RecoveryHarness(Harness):
                 (self.box, "run", self.observe_run),
                 (subprocess, "Popen", self.observe_popen),
                 (self.service, "api", self.observe_api),
+                (self.box.history_recovery, "recover", self.observe_recovery),
                 (self.service.Owner, "publish", published),
                 (self.box.workspace_control, "unchanged", stop_intent),
                 (
@@ -2559,6 +2579,21 @@ class RecoveryHarness(Harness):
             )
         )
 
+    def verify_recovery_transitions(self):
+        require(
+            self.transitions
+            == [
+                ("inspect", True, True),
+                ("stop", True, True),
+                ("inspect", True, False),
+                ("start", True, True),
+                ("inspect", True, True),
+                ("stop", True, True),
+                ("inspect", True, False),
+            ]
+        )
+        require(self.stop_proofs == [True, True])
+
     @staticmethod
     def stopped_state(info):
         state = info.get("State", {})
@@ -2671,19 +2706,8 @@ class RecoveryHarness(Harness):
         if self.case == "snapshot":
             self.check("eligible_live_timeout")
             self.check("old_owner_closed")
-            require(
-                self.transitions
-                == [
-                    ("inspect", True, True),
-                    ("stop", True, True),
-                    ("inspect", True, False),
-                    ("start", True, True),
-                    ("inspect", True, True),
-                    ("stop", True, True),
-                    ("inspect", True, False),
-                ]
-            )
-            require(self.stop_proofs == [True, True])
+            require(self.recovery_results == [True], "operation-failed")
+            self.verify_recovery_transitions()
             self.check("verified_stop_before_restart")
             self.check("same_id_single_restart")
             require(
@@ -2716,6 +2740,7 @@ class RecoveryHarness(Harness):
                 and self.reader_attempts == 0
                 and self.stop_observed
                 and self.stopper.returncode == 0
+                and self.recovery_results == [False]
             )
             self.check("restart_and_reader_suppressed")
             require(time.monotonic() >= self.stop_returned)
@@ -2739,6 +2764,11 @@ class RecoveryHarness(Harness):
             "shell_starts": self.shell_starts,
             "explicit_stop_exit_code": self.stopper.returncode
             if self.stopper
+            else None,
+            "recovery_calls": self.recovery_calls,
+            "snapshot_completed": int(self.recovery_results[0])
+            if len(self.recovery_results) == 1
+            and type(self.recovery_results[0]) is bool
             else None,
         }
 

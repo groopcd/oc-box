@@ -113,7 +113,7 @@ from a successful checked snapshot; native job cleanup is still not repaired.
 
 The focused host runner adds opt-in `--history-recovery-case snapshot` and
 `--history-recovery-case stop-cancel`. Each invocation creates a separate fresh
-synthetic root. Their `oc-box-history-recovery-host-v1` reports require 12 and six
+synthetic root. Their `oc-box-history-recovery-host-v2` reports require 12 and six
 checks respectively, owner exits `[0,1]` in each, and explicit-stop exit `0` in the
 cancellation case. They are **additional to**, not replacements for, the unchanged
 default 42-check/eight-exit run. The new cases remain strictly native **2.2.6**;
@@ -145,6 +145,21 @@ or every stop-timing race. Keep unit/process fence coverage and obtain the relev
 additional host fault/race and lifecycle/vault/history evidence before stable
 publication. Never run these fixtures here, move retained stores, delete private
 reports to make a checkout clean or overwrite earlier failed evidence.
+
+The first recovery snapshot host attempt against `d736bc1` failed the exact
+transition oracle after observing the eligible timeout and old-owner closure.
+That report remains **failed**, not an accepted snapshot. An offline regression
+identified a fixture defect: the v1 observer used any active recovery deadline to
+identify phase, so the launcher's separately budgeted outer cleanup could become
+an extra recovery inspection/stop proof. The old report does not retain those
+events and cannot exclude an additional runtime failure.
+
+The v2 fixture forwards the actual recovery function unchanged, scopes observation
+to that call/thread, and records the real boolean completion result separately.
+The seven required recovery transitions and two full-stop proofs remain strict;
+unexpected operations inside recovery still refuse. A fresh run may test the same
+clean `d736bc1` runtime with the corrected external harness and its own recorded
+runner hash. Preserve the old candidate, runner, report and retained storage.
 
 #### History and interrupted-export contracts
 
