@@ -126,6 +126,20 @@ termination is separately recorded and cannot yield PASS. An owner disconnected
 by the deliberate explicit-stop case may return 0 or 1; its actual exit is
 recorded separately, and subsequent owning-start/no-regrant checks remain required.
 
+Owner readiness and lifecycle observations use a dedicated inherited control
+pipe, never stdout. The child consumes its descriptor setting and marks the pipe
+close-on-exec before native commands run. Ordinary fixture/native stdout and
+stderr remain in anonymous private memory; they are not parsed as control JSON
+or echoed on protocol failure. Reports add bounded fixed owner stages and Python
+code-location-only failure traces, never exception messages, locals or full paths.
+Owner finish/cleanup drains and validates terminal control frames, including
+errors emitted after readiness. A requested-stop exit 1 is accepted only after
+readiness was published, the private output contains the fixed history-pending
+diagnostic, owned resources are verified stopped, and source identity is
+rechecked. Its explicit terminal event must agree with the actual process exit
+and the parent's requested-stop policy. Unexpected error frames never become an
+allowed exit-1 result.
+
 Reports record each check, `not_run` scope, native/source/harness hashes, provider
 counters and primary/secondary failures. Manual observations remain
 `NOT_AUTOMATICALLY_PASSED`; this scripted fixture cannot certify real screenshot
@@ -151,3 +165,20 @@ python3 -B tests/smoke_sharing_host_helpers.py --opencode /path/to/opencode-2.2.
 The native helper rehearsal uses a private native server and an explicitly local
 test adapter for workspace discovery/exec; it does not execute this host runner,
 weaken its host guard or prove real Podman leases/mount/restore/SELinux behavior.
+
+## First host attempt: failed harness protocol, not acceptance
+
+The original `f28bbd7` harness failed before its first named check on candidate
+`8ac6829`, with zero provider requests/errors and a secondary forced-owner
+termination. Its second `temporary_location()` entry printed a staging diagnostic
+outside owner output suppression. The parent incorrectly treated stdout as a
+JSON readiness channel, mapped the resulting parse error to `operation-failed`,
+and began cleanup while cold startup could still be active.
+
+A local synthetic process using the actual retained helper reproduced that
+protocol defect without Podman, native services or bypassing host guards. The
+correction separates control from stdout and adds real-helper/descriptor/error-
+framing regressions. These preparation checks are not a corrected host pass.
+Keep the original failed report/store unchanged. A new reviewed harness must run
+against the unchanged candidate in a fresh fixture; never replay, relabel or
+overwrite the failed attempt to establish acceptance.

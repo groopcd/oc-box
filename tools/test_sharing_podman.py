@@ -34,6 +34,7 @@ import tarfile
 import termios
 import threading
 import time
+import traceback
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -44,6 +45,24 @@ PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY4
 PROJECTS = {"source-a", "source-b", "restored-full"}
 INPUTS = {"share-input-a", "share-input-b"}
 MAX_OUTPUT = 256 * 1024
+CONTROL_FD_ENV = "OC_BOX_SHARING_CONTROL_FD"
+OWNER_STAGES = frozenset(
+    (
+        "owner-source",
+        "owner-validation",
+        "owner-store",
+        "owner-native",
+        "owner-launch",
+        "owner-ready",
+        "owner-wait",
+        "owner-finished",
+        "source-recheck",
+    )
+)
+TRACE_FRAME = re.compile(
+    r"[A-Za-z0-9_.-]{1,80}\.py:(?:<[a-z]{1,12}>|[A-Za-z_][A-Za-z0-9_]{0,63}):[0-9]{1,6}"
+)
+TRACE_TYPE = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 CHECKS = (
     "private_store_native_source",
     "consent_cancel",
@@ -123,6 +142,9 @@ CATEGORIES = frozenset(
         "operation-failed",
         "refresh-called",
         "forced-owner-termination",
+        "owner-control-protocol",
+        "owner-control-eof",
+        "owner-control-timeout",
         "missing-checks",
         "missing-host-scope",
     )
@@ -131,6 +153,10 @@ CATEGORIES = frozenset(
 
 class Refusal(Exception):
     """Fixed report categories only; never native output, argv or file contents."""
+
+
+class ChildControlFailure(Refusal):
+    """A newly consumed validated child failure, not a local transport error."""
 
 
 def require(condition, category="oracle"):
@@ -188,6 +214,71 @@ def category(error):
     if isinstance(error, OSError):
         return "io-error"
     return "operation-failed"
+
+
+def failure_trace(error):
+    """Code identities only; never exception messages, locals or full paths."""
+    result, seen = [], set()
+    while error is not None and id(error) not in seen and len(result) < 4:
+        seen.add(id(error))
+        frames = [
+            f"{Path(item.filename).name}:{item.name}:{item.lineno}"
+            for item in traceback.extract_tb(error.__traceback__)[-6:]
+        ]
+        name = type(error).__name__
+        result.append(
+            {
+                "type": name if TRACE_TYPE.fullmatch(name) else "other",
+                "frames": [frame for frame in frames if TRACE_FRAME.fullmatch(frame)],
+            }
+        )
+        error = error.__cause__ or error.__context__
+    return result
+
+
+def valid_trace(value):
+    return (
+        isinstance(value, list)
+        and len(value) <= 4
+        and all(
+            isinstance(item, dict)
+            and set(item) == {"type", "frames"}
+            and isinstance(item["type"], str)
+            and TRACE_TYPE.fullmatch(item["type"])
+            and isinstance(item["frames"], list)
+            and len(item["frames"]) <= 6
+            and all(
+                isinstance(frame, str) and TRACE_FRAME.fullmatch(frame)
+                for frame in item["frames"]
+            )
+            for item in value
+        )
+    )
+
+
+def owner_control():
+    """A per-child inherited pipe, isolated from stdout and all native execs."""
+    value = os.environ.pop(CONTROL_FD_ENV, "")
+    require(re.fullmatch(r"[0-9]{1,10}", value) is not None, "owner-control-protocol")
+    descriptor = int(value)
+    require(3 <= descriptor <= 2**31 - 1, "owner-control-protocol")
+    try:
+        info = os.fstat(descriptor)
+        flags = fcntl.fcntl(descriptor, fcntl.F_GETFL)
+        require(
+            stat.S_ISFIFO(info.st_mode) and flags & os.O_ACCMODE == os.O_WRONLY,
+            "owner-control-protocol",
+        )
+        os.set_inheritable(descriptor, False)
+        return os.fdopen(descriptor, "w", buffering=1)
+    except OSError:
+        raise Refusal("owner-control-protocol") from None
+
+
+def owner_stage(control, stage):
+    require(stage in OWNER_STAGES, "owner-control-protocol")
+    if control is not None:
+        print(json.dumps({"stage": stage}), file=control, flush=True)
 
 
 def wait(check, *, timeout=30, label="timeout"):
@@ -514,52 +605,183 @@ class NestedMount:
 
 
 class PipeChild:
-    """Small JSON readiness channel; all other child output is anonymous memory."""
+    """Dedicated JSON control pipe; stdout/stderr are anonymous private memory."""
 
-    def __init__(self, command, env, cwd):
+    def __init__(
+        self, command, env, cwd, *, require_terminal=False, expected_stop=False
+    ):
+        self.require_terminal = require_terminal
+        self.expected_stop = expected_stop
         self.errors = os.fdopen(
             os.memfd_create("sharing-fixture-child-errors", os.MFD_CLOEXEC), "w+b"
         )
+        read_fd, write_fd = os.pipe()
         try:
             self.process = subprocess.Popen(
                 command,
-                env=env,
+                env={**env, CONTROL_FD_ENV: str(write_fd)},
                 cwd=cwd,
                 stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
+                stdout=self.errors,
                 stderr=self.errors,
                 start_new_session=True,
+                pass_fds=(write_fd,),
             )
         except BaseException:
+            os.close(read_fd)
             self.errors.close()
             raise
+        finally:
+            os.close(write_fd)
+        self.control = os.fdopen(read_fd, "rb", buffering=0)
         self.incoming = bytearray()
+        self.last_stage = None
+        self.child_failure = None
+        self.control_category = None
+        self.premature_wait_clients = None
+        self.terminal = None
 
     def ready(self, timeout=1800):
-        require(self.message(timeout) == {"ready": True}, "protocol")
+        try:
+            deadline = time.monotonic() + timeout
+            while True:
+                value = self.message(max(0, deadline - time.monotonic()))
+                if value == {"ready": True}:
+                    return
+                if (
+                    set(value) == {"wait_clients"}
+                    and type(value["wait_clients"]) is int
+                    and value["wait_clients"] >= 0
+                ):
+                    self.premature_wait_clients = value["wait_clients"]
+                    continue  # Preserve the following structured startup failure.
+                raise Refusal("protocol")
+        except Refusal as error:
+            self.control_category = category(error)
+            raise
 
-    def message(self, timeout=30):
+    def message(self, timeout=30, *, eof_ok=False):
         deadline = time.monotonic() + timeout
-        while b"\n" not in self.incoming:
-            require(
-                time.monotonic() < deadline and self.process.poll() is None,
-                "owner-start",
-            )
-            if select.select([self.process.stdout], [], [], 0.1)[0]:
-                content = os.read(self.process.stdout.fileno(), 4096)
-                require(bool(content), "owner-start")
-                self.incoming.extend(content)
-                require(len(self.incoming) <= 8192, "bounded-output")
-        line, _, self.incoming = self.incoming.partition(b"\n")
-        return json.loads(line)
+        try:
+            while True:
+                while b"\n" not in self.incoming:
+                    require(time.monotonic() < deadline, "owner-control-timeout")
+                    # Read buffered terminal/error frames even after child exit.
+                    # CLOEXEC on the child endpoint prevents native descendants
+                    # from falsely keeping this control pipe alive.
+                    if select.select(
+                        [self.control],
+                        [],
+                        [],
+                        min(0.1, max(0, deadline - time.monotonic())),
+                    )[0]:
+                        content = os.read(self.control.fileno(), 4096)
+                        if not content and eof_ok and not self.incoming:
+                            return None
+                        require(bool(content), "owner-control-eof")
+                        self.incoming.extend(content)
+                        require(len(self.incoming) <= 8192, "bounded-output")
+                line, _, self.incoming = self.incoming.partition(b"\n")
+                try:
+                    value = json.loads(line)
+                except (ValueError, UnicodeError):
+                    raise Refusal("owner-control-protocol") from None
+                require(isinstance(value, dict), "owner-control-protocol")
+                if set(value) == {"stage"}:
+                    require(
+                        isinstance(value["stage"], str)
+                        and value["stage"] in OWNER_STAGES,
+                        "owner-control-protocol",
+                    )
+                    self.last_stage = value["stage"]
+                    continue
+                if set(value) == {"error", "failure_trace"}:
+                    require(
+                        isinstance(value["error"], str)
+                        and value["error"] in CATEGORIES
+                        and valid_trace(value["failure_trace"]),
+                        "owner-control-protocol",
+                    )
+                    self.child_failure = value
+                    raise ChildControlFailure(value["error"])
+                if set(value) == {"owner_exit", "intentional_stop"}:
+                    require(
+                        self.terminal is None
+                        and type(value["owner_exit"]) is int
+                        and value["owner_exit"] in (0, 1)
+                        and type(value["intentional_stop"]) is bool,
+                        "owner-control-protocol",
+                    )
+                    self.terminal = value
+                    return value
+                require(
+                    (set(value) == {"ready"} and value["ready"] is True)
+                    or (
+                        set(value) == {"wait_clients"}
+                        and type(value["wait_clients"]) is int
+                        and 0 <= value["wait_clients"] <= 2**31 - 1
+                    ),
+                    "owner-control-protocol",
+                )
+                return value
+        except Refusal as error:
+            self.control_category = category(error)
+            raise
+
+    def diagnostic(self):
+        return {
+            "last_stage": self.last_stage,
+            "control_category": self.control_category,
+            "child_failure": self.child_failure,
+            "premature_wait_clients": self.premature_wait_clients,
+            "terminal": self.terminal,
+        }
 
     def release(self):
         if self.process.stdin and not self.process.stdin.closed:
             self.process.stdin.close()
 
+    def drain(self, timeout=5):
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                value = self.message(max(0, deadline - time.monotonic()), eof_ok=True)
+                if value is None:
+                    return
+            except ChildControlFailure:
+                continue  # Only new child frames are drainable; deadlines are not.
+
+    def validate_terminal(self):
+        if self.child_failure is not None:
+            raise Refusal(self.child_failure["error"])
+        if self.control_category is not None:
+            raise Refusal(self.control_category)
+        if self.require_terminal:
+            require(
+                self.terminal is not None
+                and self.terminal["owner_exit"] == self.process.returncode
+                and self.terminal["intentional_stop"] is self.expected_stop,
+                "owner-control-protocol",
+            )
+            require(
+                self.process.returncode == 0
+                or self.expected_stop
+                and self.process.returncode == 1,
+                "owner-exit",
+            )
+
     def finish(self, timeout=180):
         self.release()
-        require(self.process.wait(timeout=timeout) == 0, "owner-exit")
+        code = self.process.wait(timeout=timeout)
+        known_failure = self.child_failure
+        self.drain()
+        if self.require_terminal:
+            self.validate_terminal()
+        else:
+            if self.child_failure is not None and self.child_failure != known_failure:
+                raise Refusal(self.child_failure["error"])
+            require(code == 0, "owner-exit")
+        return code
 
     def close(self, timeout=15):
         self.release()
@@ -574,8 +796,15 @@ class PipeChild:
                 except subprocess.TimeoutExpired:
                     os.killpg(self.process.pid, signal.SIGKILL)
                     self.process.wait(timeout=5)
-        self.process.stdout.close()
-        self.errors.close()
+        try:
+            if not self.control.closed:
+                try:
+                    self.drain(timeout=2)
+                except Refusal:
+                    pass  # The diagnostic is retained; cleanup must still close FDs.
+        finally:
+            self.control.close()
+            self.errors.close()
 
 
 class ShareChild:
@@ -727,6 +956,7 @@ def parser():
         "--acknowledge-risk", action="store_true", help=argparse.SUPPRESS
     )
     value.add_argument("--reset", action="store_true", help=argparse.SUPPRESS)
+    value.add_argument("--expect-stop", action="store_true", help=argparse.SUPPRESS)
     value.add_argument("--protected", action="store_true", help=argparse.SUPPRESS)
     return value
 
@@ -755,7 +985,12 @@ def validate_options(args):
                 and not args.acknowledge_risk
                 and not args.protected
             )
-            or (args.child == "share" and args.input_name in INPUTS and not args.reset),
+            or (
+                args.child == "share"
+                and args.input_name in INPUTS
+                and not args.reset
+                and not args.expect_stop
+            ),
             "invalid-options",
         )
     else:
@@ -767,7 +1002,13 @@ def validate_options(args):
                 for name in ("fixture", "project_name", "input_name")
             )
             and not any(
-                (args.single_file, args.acknowledge_risk, args.reset, args.protected)
+                (
+                    args.single_file,
+                    args.acknowledge_risk,
+                    args.reset,
+                    args.protected,
+                    args.expect_stop,
+                )
             ),
             "invalid-options",
         )
@@ -928,9 +1169,11 @@ def observe_refresh(box):
     require(not calls, "refresh-called")
 
 
-def child(args, loaded):
+def child(args, loaded, *, control=None):
     """All production operations stay real; only owner TUI input is scripted."""
     f, box = loaded.fixture, loaded.box
+    code = 0
+    owner_stage(control, "owner-validation")
     if args.child == "share" and os.isatty(0):
         fcntl.ioctl(0, termios.TIOCSCTTY, 0)
     with f.private_output():
@@ -940,8 +1183,10 @@ def child(args, loaded):
             f.temporary_location(root),
         ):
             _, records = validate_root(root, loaded)
+            owner_stage(control, "owner-store")
             f.validate_store(root, allow_unrecorded=True)
             binary = Path(f.private_json(root, MARKER)["native"]["path"])
+            owner_stage(control, "owner-native")
             f.check_native_version(root, binary, "2")
     # private_output must not hide a genuine share disclosure/confirmation PTY.
     with (
@@ -966,11 +1211,14 @@ def child(args, loaded):
                 code = entrypoint(box, arguments)
             require(code == 0, "share-exit")
         else:
-            channel = os.fdopen(os.dup(1), "w", buffering=1)
+            require(control is not None, "owner-control-protocol")
+            channel = control
             try:
                 original_wait = loaded.service.Owner.wait_clients
+                ready_announced = False
 
                 def wait_clients(owner):
+                    owner_stage(control, "owner-wait")
                     print(
                         json.dumps({"wait_clients": owner.clients}),
                         file=channel,
@@ -979,6 +1227,7 @@ def child(args, loaded):
                     return original_wait(owner)
 
                 def callback(command):
+                    nonlocal ready_announced
                     records = f.workspace_records(root)
                     require(args.project_name in records, "workspace-allowlist")
                     path, data = records[args.project_name]
@@ -986,7 +1235,9 @@ def child(args, loaded):
                     f.selected_session(command, path)
                     require(loaded.service.live_connection() is not None, "owner-start")
                     f.record_ids(root)
+                    owner_stage(control, "owner-ready")
                     print('{"ready":true}', file=channel, flush=True)
+                    ready_announced = True
                     require(sys.stdin.buffer.read(1) == b"", "protocol")
                     return 0
 
@@ -997,6 +1248,7 @@ def child(args, loaded):
                     patch.object(loaded.service.Owner, "wait_clients", wait_clients),
                 ):
                     operation = "reset" if args.reset else "start"
+                    owner_stage(control, "owner-launch")
                     code = entrypoint(
                         box,
                         [
@@ -1008,16 +1260,41 @@ def child(args, loaded):
                             "--no-vault",
                         ],
                     )
-                    require(code == 0, "owner-exit")
+                    if code != 0:
+                        sys.stderr.flush()
+                        descriptor = sys.stderr.fileno()
+                        size = os.fstat(descriptor).st_size
+                        tail = os.pread(
+                            descriptor, MAX_OUTPUT, max(0, size - MAX_OUTPUT)
+                        )
+                        require(
+                            args.expect_stop
+                            and ready_announced
+                            and code == 1
+                            and sum(
+                                line.startswith(b"oc-box: history sync pending: ")
+                                for line in tail.splitlines()
+                            )
+                            == 1,
+                            "owner-exit",
+                        )
                     records = f.workspace_records(root)
                     f.verify_owned_resources(
                         root, records[args.project_name][1], stopped=True
                     )
                     f.record_ids(root)
+                    owner_stage(control, "owner-finished")
             finally:
-                channel.close()
+                channel.flush()
+    owner_stage(control, "source-recheck")
     require(loaded.history_identity() == loaded.identity, "source-changed")
-    return 0
+    if control is not None:
+        print(
+            json.dumps({"owner_exit": code, "intentional_stop": args.expect_stop}),
+            file=control,
+            flush=True,
+        )
+    return code
 
 
 class Harness:
@@ -1137,14 +1414,18 @@ class Harness:
             *options,
         ]
 
-    def owner(self, project="source-a", *, reset=False):
+    def owner(self, project="source-a", *, reset=False, expect_stop=False):
         self.verify_inputs()
         self.validate(initial=not self.f.workspace_records(self.root))
         options = ["--reset"] if reset else []
+        if expect_stop:
+            options.append("--expect-stop")
         child = PipeChild(
             self.command("owner", project, options),
             fixture_environment(self.f, self.root),
             self.loaded.source,
+            require_terminal=True,
+            expected_stop=expect_stop,
         )
         self.owners.append(child)
         child.ready()
@@ -1582,7 +1863,7 @@ print(json.dumps(hashlib.sha256(json.dumps(sorted(items)).encode()).hexdigest())
         hold.finish()
         owner.finish()
         self.check("lease_release_stops_owner")
-        resumed = self.owner()
+        resumed = self.owner(expect_stop=True)
         self.no_regrant("source-a")
         self.check("resume_no_regrant")
         stopped_share, stopped_name = self.accepted_share(ack=True)
@@ -1590,9 +1871,7 @@ print(json.dumps(hashlib.sha256(json.dumps(sorted(items)).encode()).hexdigest())
         self.box.stop_container(data)
         stopped_share.finish()
         resumed.release()
-        resumed.process.wait(timeout=180)
-        self.exits.append(resumed.process.returncode)
-        require(resumed.process.returncode in (0, 1), "owner-exit")
+        self.exits.append(resumed.finish(timeout=180))
         self.f.verify_owned_resources(self.root, data, stopped=True)
         restarted = self.owner()
         self.no_regrant("source-a")
@@ -1728,8 +2007,14 @@ print(json.dumps(hashlib.sha256(json.dumps(sorted(items)).encode()).hexdigest())
         for child in reversed([*self.owners, *self.shares]):
             try:
                 child.close()
+            except BaseException as error:
+                self.secondary.append(category(error))
+            finally:
                 if getattr(child, "forced", False) is True:
                     self.secondary.append("forced-owner-termination")
+            try:
+                if isinstance(child, PipeChild) and child.require_terminal:
+                    child.validate_terminal()
             except BaseException as error:
                 self.secondary.append(category(error))
         if self.expected_inputs:
@@ -1739,7 +2024,8 @@ print(json.dumps(hashlib.sha256(json.dumps(sorted(items)).encode()).hexdigest())
                 self.secondary.append(category(error))
 
 
-def report_value(harness, loaded, runner, primary):
+def report_value(harness, loaded, runner, primary, failure=None):
+    require(valid_trace([] if failure is None else failure), "protocol")
     checks = {} if harness is None else harness.checks
     secondary = [] if harness is None else harness.secondary
     unavailable = (
@@ -1777,6 +2063,14 @@ def report_value(harness, loaded, runner, primary):
         "not_run": unavailable,
         "primary_category": primary,
         "secondary_categories": secondary,
+        "failure_trace": [] if failure is None else failure,
+        "owner_diagnostics": []
+        if harness is None
+        else [
+            child.diagnostic()
+            for child in getattr(harness, "owners", [])
+            if isinstance(child, PipeChild)
+        ],
         "provider": None
         if harness is None
         else {"requests": harness.provider.requests, "errors": harness.provider.errors},
@@ -1789,12 +2083,17 @@ def main(argv=None):
     args = parser().parse_args(argv)
     root = loaded = harness = provider = None
     primary = None
+    control = None
+    failure = []
     output = os.fdopen(os.dup(1), "w", buffering=1)
     try:
         # No fixture/source/private engine read before the external host fence.
         history, provider_path = helpers()
         history.host_guard()
         validate_options(args)
+        if args.child == "owner":
+            control = owner_control()
+            owner_stage(control, "owner-source")
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
         history, loaded, provider_module = load(args)
         require(args.distro in loaded.box.DISTROS, "invalid-options")
@@ -1802,7 +2101,7 @@ def main(argv=None):
             loaded.source, args.expect_commit
         )
         if args.child:
-            return child(args, loaded)
+            return child(args, loaded, control=control)
         parent = history.fresh_parent(args.work_dir)
         temporary = history.fresh_parent(args.temp_dir) if args.temp_dir else None
         require(
@@ -1916,6 +2215,16 @@ def main(argv=None):
                     harness.check("enforcing_selinux_source_labels_unchanged")
     except BaseException as error:
         primary = category(error)
+        failure = failure_trace(error)
+        if control is not None:
+            try:
+                print(
+                    json.dumps({"error": primary, "failure_trace": failure}),
+                    file=control,
+                    flush=True,
+                )
+            except (OSError, ValueError):
+                pass  # The failed parent/pipe is not permission to log private output.
     finally:
         if harness is not None:
             harness.close()
@@ -1927,7 +2236,7 @@ def main(argv=None):
                     harness.secondary.append(category(error))
         if not args.child and root is not None and loaded is not None:
             try:
-                value = report_value(harness, loaded, runner, primary)
+                value = report_value(harness, loaded, runner, primary, failure)
                 loaded.fixture.write_json_new(root / REPORT, value)
                 print("Report: " + str(root / REPORT), file=output)
                 print("sharing fixture: " + value["status"], file=output)
@@ -1938,6 +2247,8 @@ def main(argv=None):
                 primary = primary or "operation-failed"
         if primary:
             print("sharing fixture: category=" + primary, file=output)
+        if control is not None:
+            control.close()
         output.close()
     return 1 if primary else 0
 

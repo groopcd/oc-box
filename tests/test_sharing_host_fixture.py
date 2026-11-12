@@ -235,6 +235,7 @@ class SharingOptionsAndGuardTests(OfflineCase):
                     (runner, "load_file"),
                     (runner, "Harness"),
                     (runner, "child"),
+                    (runner, "owner_control"),
                     (runner.shutil, "which"),
                     (runner.resource, "setrlimit"),
                     (tempfile, "mkdtemp"),
@@ -242,14 +243,19 @@ class SharingOptionsAndGuardTests(OfflineCase):
                     (runner.subprocess, "Popen"),
                 )
             ]
-            # Even invalid options must not move any probe ahead of the fence.
-            arguments = self.arguments()
-            arguments[arguments.index(COMMIT)] = "not-a-commit"
-            self.assertEqual(runner.main(arguments), 1)
-            self.assertIn("category=host-only", output.getvalue())
-            self.assertNotIn(PRIVATE, output.getvalue())
-        helpers.assert_called_once_with()
-        history.host_guard.assert_called_once_with()
+            # Even an owner control FD and invalid options must not move any
+            # probe ahead of the fence. Neither row permits a host operation.
+            for arguments in (self.arguments(), self.child_arguments("owner")):
+                with self.subTest(child="--child" in arguments):
+                    arguments[arguments.index(COMMIT)] = "not-a-commit"
+                    with patch.dict(os.environ, {runner.CONTROL_FD_ENV: PRIVATE}):
+                        self.assertEqual(runner.main(arguments), 1)
+                    self.assertIn("category=host-only", output.getvalue())
+                    self.assertNotIn(PRIVATE, output.getvalue())
+        self.assertEqual(helpers.call_count, 2)
+        helpers.assert_called_with()
+        self.assertEqual(history.host_guard.call_count, 2)
+        history.host_guard.assert_called_with()
         history.fresh_parent.assert_not_called()
         history.load_source.assert_not_called()
         for boundary in boundaries:
@@ -963,10 +969,22 @@ class SharingChildTransportTests(OfflineCase):
 
     def pipe(self, script):
         child = runner.PipeChild(
-            self.command(script), {"PATH": os.defpath, "LANG": "C.UTF-8"}, self.parent
+            self.pipe_command(script),
+            {"PATH": os.defpath, "LANG": "C.UTF-8"},
+            self.parent,
         )
         self.addCleanup(child.close, 0.1)
         return child
+
+    def pipe_command(self, script):
+        # These generic protocol stubs historically print their machine frames.
+        # Redirect only their Python stdout, never the production helper's stdout.
+        return self.command(
+            "import os, sys\n"
+            "sys.stdout = os.fdopen(\n"
+            "    int(os.environ.pop('OC_BOX_SHARING_CONTROL_FD')), 'w', buffering=1\n"
+            ")\n" + script
+        )
 
     def accepted(self):
         child = self.share()
@@ -1081,7 +1099,14 @@ class SharingChildTransportTests(OfflineCase):
         self.assertIn(PRIVATE.encode(), child.errors.read())
 
     def test_pipe_readiness_rejects_other_json_shapes(self):
-        for payload in ({"ready": False}, {"ready": True, "extra": PRIVATE}, [], True):
+        for payload, category in (
+            ({"ready": False}, "owner-control-protocol"),
+            ({"ready": 1}, "owner-control-protocol"),
+            ({"ready": 1.0}, "owner-control-protocol"),
+            ({"ready": True, "extra": PRIVATE}, "owner-control-protocol"),
+            ([], "owner-control-protocol"),
+            (True, "owner-control-protocol"),
+        ):
             with self.subTest(payload=payload):
                 script = (
                     "import signal, sys\nprint("
@@ -1089,7 +1114,7 @@ class SharingChildTransportTests(OfflineCase):
                     + ", flush=True)\nsignal.pause()"
                 )
                 child = self.pipe(script)
-                with self.refused("protocol"):
+                with self.refused(category):
                     child.ready(timeout=5)
 
     def test_pipe_malformed_json_is_sanitized_without_exposing_private_stderr(self):
@@ -1101,20 +1126,23 @@ class SharingChildTransportTests(OfflineCase):
         output, errors = io.StringIO(), io.StringIO()
         with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
             child = self.pipe(script)
-            with self.assertRaises(json.JSONDecodeError) as raised:
+            with self.refused("owner-control-protocol") as raised:
                 child.ready(timeout=5)
-        self.assertEqual(runner.category(raised.exception), "operation-failed")
+        self.assertEqual(runner.category(raised.exception), "owner-control-protocol")
         self.assertNotIn(PRIVATE, runner.category(raised.exception))
         self.assertEqual(output.getvalue() + errors.getvalue(), "")
 
     def test_pipe_readiness_is_bounded_even_without_newline(self):
-        child = self.pipe("import os, signal\nos.write(1, b'x' * 9000)\nsignal.pause()")
+        child = self.pipe(
+            "import os, signal, sys\n"
+            "os.write(sys.stdout.fileno(), b'x' * 9000)\nsignal.pause()"
+        )
         with self.refused("bounded-output"):
             child.ready(timeout=5)
 
     def test_pipe_timeout_and_nonzero_exit_are_fixed_categories(self):
         child = self.pipe("import signal\nsignal.pause()")
-        with self.refused("owner-start"):
+        with self.refused("owner-control-timeout"):
             child.ready(timeout=0.1)
         failed = self.pipe(
             "import sys\nprint('{\"ready\":true}', flush=True)\nsys.stdin.buffer.read()\nsys.exit(3)"
@@ -1125,7 +1153,7 @@ class SharingChildTransportTests(OfflineCase):
 
     def test_pipe_close_terminates_waiting_stub_and_closes_private_channels(self):
         child = runner.PipeChild(
-            self.command(
+            self.pipe_command(
                 "import signal\nprint('{\"ready\":true}', flush=True)\nsignal.pause()"
             ),
             {"PATH": os.defpath},
@@ -1137,7 +1165,8 @@ class SharingChildTransportTests(OfflineCase):
             child.close(0.1)
         self.assertIsNotNone(child.process.returncode)
         self.assertTrue(child.process.stdin.closed)
-        self.assertTrue(child.process.stdout.closed)
+        self.assertIsNone(child.process.stdout)
+        self.assertTrue(child.control.closed)
         self.assertTrue(child.errors.closed)
 
 

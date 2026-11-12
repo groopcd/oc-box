@@ -654,8 +654,9 @@ class OwnerShutdownOracleTests(HarnessCase):
     def test_real_local_eof_cleanup_finishes_zero_without_forced_termination(self):
         marker = self.parent / "eof-cleanup-marker"
         script = (
-            "import pathlib,sys\n"
-            "print('{\"ready\":true}', flush=True)\n"
+            "import os,pathlib,sys\n"
+            "control=os.fdopen(int(os.environ.pop('OC_BOX_SHARING_CONTROL_FD')),'w',buffering=1)\n"
+            "print('{\"ready\":true}', file=control, flush=True)\n"
             "sys.stdin.buffer.read()\n"
             "pathlib.Path(sys.argv[1]).write_text('EOF_CLEANUP_COMPLETE')\n"
         )
@@ -673,7 +674,7 @@ class OwnerShutdownOracleTests(HarnessCase):
             self.assertFalse(getattr(child, "forced", False))
             self.assertEqual(self.harness.secondary, [])
             self.assertTrue(child.process.stdin.closed)
-            self.assertTrue(child.process.stdout.closed)
+            self.assertTrue(child.control.closed)
             self.assertTrue(child.errors.closed)
         finally:
             # Only this test's known, synthetic Python process can be killed.
@@ -681,7 +682,7 @@ class OwnerShutdownOracleTests(HarnessCase):
                 child.process.kill()
                 child.process.wait(timeout=3)
             child.process.stdin.close()
-            child.process.stdout.close()
+            child.control.close()
             child.errors.close()
 
     def test_hung_mock_owner_waits_before_signals_and_records_forced_termination(self):
