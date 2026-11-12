@@ -350,8 +350,12 @@ secondary failures or trace. Report SHA-256 9c94916f...49619 is recorded fully i
 docs/testing.md. Combined accepted scope is 60 scripted synthetic host checks
 (42 baseline + 18 focused recovery), not lifecycle/vault/backup, interactive UI,
 real-provider, network-containment, exhaustive fault/race or native 2.2.7 host
-acceptance. Preserve the earlier failure; fix-branch integration and stable
-publication remain separately authorized/gated.
+acceptance. Preserve the earlier failure. The user approved integrating the fix
+into feature/release-1.7 for the combined 1.7 rollout (fast-forward through
+dcc0482); no standalone fix release, master advancement, tag or publication is
+authorized by that integration step. Keep release-facing behavior and both
+12/six recovery gates in the 1.7 notes/checklist, and retain separate final-source
+publication gates and exact historical evidence identities.
 
 The global-vault fixture's initial host run failed during the first owning
 launch, not an accepted pass.

@@ -480,8 +480,10 @@ earlier failed recovery report. Keep all raw evidence private and retained.
 
 This is not a new lifecycle/vault/backup, interactive UI, real-provider,
 network-containment, exhaustive fault/race or native 2.2.7 host pass. Stable
-publication and integration/release approval remain separate; later evidence-only
-commits do not extend the recorded tested source identity.
+publication remains separately gated. The fix is integrated into
+`feature/release-1.7` for the combined 1.7 rollout; this approval does not complete
+final-candidate validation. Later documentation/harness commits do not extend the
+recorded tested source identity.
 
 #### History and interrupted-export contracts
 

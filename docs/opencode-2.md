@@ -380,7 +380,7 @@ Replacement refuses observed native host children and re-exports imports to
 verify messages and metadata, since CLI success can represent an import conflict.
 
 After client leases close, normal owner shutdown bounds its native activity wait
-to 30 seconds. An activity-wait refusal skips the entire final sync attempt.
+to 30 seconds. An activity-wait refusal skips the live-owner sync attempt.
 Timeout diagnostics separately report the query/poll phase and the last complete
 validated foreground/job counts, or `unavailable` if no complete pair was observed;
 counts are capped at `9999+`. They contain no native identifiers, commands or
@@ -392,8 +392,8 @@ explicit sync is not evidence that the row cleared: that path checks native
 exports without the original owner's activity wait. Retained jobs remain blocking
 in the live owner; neither diagnostics nor snapshots repair native job cleanup.
 
-The development candidate adds one bounded post-stop snapshot for supported
-2.2.6/2.2.7 shell-only timeouts. Its last validated pairs are routing hints, not
+Eligible shell-only timeouts can trigger one bounded post-stop snapshot with
+supported native 2.2.6/2.2.7 owners. The last validated pairs are routing hints, not
 quiescence proof. The original owner must close normally with no attached clients;
 the actual old-producer boundary is a verified whole-container stop, not the exit
 of its host-side Podman wrapper. Stop intent can suppress the same-ID history-only
@@ -410,8 +410,11 @@ denials and disabled warming supplement those guards. Foreground activity remain
 a before/after refusal tripwire. Existing projection/export checks and verified
 archive import remain unchanged. The reader may maintain native metadata; it is
 not a byte-read-only backup. Final cleanup stops the container, and even successful
-snapshots retain the original nonzero result and interrupted-work warning. This
-path has native/offline coverage only until the new focused host gates pass.
+snapshots retain the original nonzero result and interrupted-work warning.
+Reviewed scripted host acceptance covers native 2.2.6 on the recorded runtime;
+native 2.2.7 reader coverage is offline-only. See the
+[test strategy](testing.md#reviewed-focused-recovery-host-acceptance) for exact
+identities, scope and integrated-release validation requirements.
 
 Once activity readiness passes, projected-history checks also reject messages
 omitted by native export while a direct user shell or compaction is running, or

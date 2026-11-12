@@ -508,8 +508,9 @@ snapshots are saved**, with a warning that execution was interrupted and
 completion notices/final results may be missing.  Historical job rows
 can remain running-looking on the next owner; the same bounded post-stop
 path may save another snapshot, but does not make the underlying native
-owner healthy.  This development-branch path still requires fresh
-external-host acceptance before stable publication.
+owner healthy.  Recovery evidence and release-validation requirements
+are documented in the [test
+strategy](testing.md#reviewed-focused-recovery-host-acceptance).
 
 ‘--no-vault’ is accepted only when web becomes a new V2 owner; an
 attached web client rejects it and never changes the owner's credential
@@ -3141,20 +3142,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2691
 Node: Commands6203
-Node: Options79102
-Node: Lifecycle and persistence99259
-Node: Distribution images101379
-Node: Sessions and recovery106254
-Node: Devices and host permissions112839
-Node: Resource reports115185
-Node: Configuration and environment117296
-Node: Files128559
-Node: Exit status134503
-Node: Examples135356
-Node: Troubleshooting137442
-Node: Installation and manuals148794
-Node: Authors and license158014
-Node: See also158621
+Node: Options79147
+Node: Lifecycle and persistence99304
+Node: Distribution images101424
+Node: Sessions and recovery106299
+Node: Devices and host permissions112884
+Node: Resource reports115230
+Node: Configuration and environment117341
+Node: Files128604
+Node: Exit status134548
+Node: Examples135401
+Node: Troubleshooting137487
+Node: Installation and manuals148839
+Node: Authors and license158059
+Node: See also158666
 
 End Tag Table
 

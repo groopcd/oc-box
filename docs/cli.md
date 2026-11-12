@@ -413,8 +413,9 @@ rewritten or declared completed. **The original failure remains nonzero even whe
 snapshots are saved**, with a warning that execution was interrupted and completion
 notices/final results may be missing. Historical job rows can remain running-looking
 on the next owner; the same bounded post-stop path may save another snapshot, but
-does not make the underlying native owner healthy. This development-branch path
-still requires fresh external-host acceptance before stable publication.
+does not make the underlying native owner healthy. Recovery evidence and
+release-validation requirements are documented in the
+[test strategy](testing.md#reviewed-focused-recovery-host-acceptance).
 
 `--no-vault` is accepted only when web becomes a new V2 owner; an attached web
 client rejects it and never changes the owner's credential snapshot.

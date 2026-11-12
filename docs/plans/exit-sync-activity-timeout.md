@@ -1,7 +1,11 @@
 # Plan: exit history sync times out, explicit sync succeeds
 
-Status: planning only, 2026-11-11. Implementation and execution of tests are
-deferred to the next work session. No runtime behavior changes in this commit.
+Original planning status, 2026-11-11: implementation and test execution were
+deferred to the next work session; the initial plan commit changed no runtime.
+
+Current status: implemented and integrated into `feature/release-1.7` for the
+combined 1.7 rollout, with the reviewed source-qualified host evidence below.
+This is not a standalone fix release or completed stable-publication acceptance.
 
 Update, 2026-11-12: investigation started; the original plan below is retained.
 The diagnostic-first change does **not** yet fix native job cleanup or establish
@@ -267,7 +271,11 @@ through the subsequent fixture and evidence-only commits. The original failed
 recovery attempt remains failed and every raw report/store remains private.
 
 The requested fix-branch implementation and focused regression validation are
-complete. Integration into `feature/release-1.7` needs explicit approval beyond
-this branch's scope; do not merge into `master`, tag or publish a stable release
-on this evidence alone. Lifecycle/vault/backup, interactive/integrated release,
-additional fault/race and native 2.2.7 host validation retain their own gates.
+complete. Integration into `feature/release-1.7` was subsequently approved and
+fast-forwarded through fix tip `dcc0482`, with no runtime rewrite. Shipment is
+planned with the combined 1.7 rollout, not a standalone fix release. Release-facing
+behavior and required gates are included in `docs/releases/1.7.md`; the CLI and V2
+guide link to the current evidence rather than retaining stale development-only
+claims. Do not advance `master`, tag or publish on these component results alone.
+Lifecycle/vault/backup, interactive/integrated release, additional fault/race and
+native 2.2.7 host validation retain their own gates.
