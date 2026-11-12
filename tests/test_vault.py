@@ -42,9 +42,6 @@ class VaultFixture(unittest.TestCase):
         )
         environment.start()
         self.addCleanup(environment.stop)
-        self.project = self.root / "project"
-        self.project.mkdir()
-        self.registry, self.data = box.create_workspace(self.project, "tumbleweed")
 
     def encrypted(self, values=None):
         with vault.locked(self.path, create=True):
@@ -304,6 +301,12 @@ class EncryptedVaultTests(VaultFixture):
 
 
 class VaultPolicyTests(VaultFixture):
+    def workspace(self):
+        """Opt in to registered project state only for workspace policy cases."""
+        self.project = self.root / "project"
+        self.project.mkdir()
+        self.registry, self.data = box.create_workspace(self.project, "tumbleweed")
+
     def test_passphrase_cli_override_and_invalid_policy_are_checked_before_unlock(self):
         with patch.object(vault, "manage") as manage:
             self.assertEqual(
@@ -325,6 +328,7 @@ class VaultPolicyTests(VaultFixture):
             box.main(["secrets", "list", "--min-passphrase-length", "8"])
 
     def test_v1_env_default_never_opens_vault_or_loads_crypto(self):
+        self.workspace()
         with (
             patch.dict(os.environ, {"EXAMPLE_TOKEN": VALUE}),
             patch.object(vault, "select") as unlock,
@@ -337,6 +341,7 @@ class VaultPolicyTests(VaultFixture):
         self.assertNotIn("credentials", self.data)
 
     def test_selected_mode_excludes_automatic_tokens_and_custom_pass_env(self):
+        self.workspace()
         settings = self.root / "config/oc-box/config.json"
         settings.parent.mkdir(parents=True)
         settings.write_text('{"pass_env":["UNRELATED_SECRET"]}')
@@ -367,6 +372,7 @@ class VaultPolicyTests(VaultFixture):
             self.assertNotIn("VAULT_TOKEN", box.container_env(self.data))
 
     def test_env_mode_can_add_vault_names_without_changing_existing_workflow(self):
+        self.workspace()
         credentials.configure(self.data, secrets=["VAULT_TOKEN"])
         with (
             patch.dict(os.environ, {"EXAMPLE_TOKEN": VALUE}),
@@ -381,6 +387,7 @@ class VaultPolicyTests(VaultFixture):
     def test_launch_unlock_is_scoped_cleared_on_error_and_not_shared_to_other_workspace(
         self,
     ):
+        self.workspace()
         values = {"VAULT_TOKEN": "decrypted"}
         credentials.configure(self.data, secrets=["VAULT_TOKEN"])
         other = {**self.data, "id": "b" * 32}
@@ -398,6 +405,7 @@ class VaultPolicyTests(VaultFixture):
         self.assertEqual(credentials.active_values(self.data), {})
 
     def test_missing_selected_env_stops_before_unlock_and_reset_destruction(self):
+        self.workspace()
         credentials.configure(
             self.data,
             mode="selected",
@@ -437,6 +445,7 @@ class VaultPolicyTests(VaultFixture):
             self.assertNotIn("contains", str(raised.exception))
 
     def test_configuration_saves_only_names_and_keeps_default_mode(self):
+        self.workspace()
         with (
             patch.dict(os.environ, {"EXAMPLE_TOKEN": VALUE}),
             contextlib.redirect_stdout(io.StringIO()) as output,
@@ -476,6 +485,7 @@ class VaultPolicyTests(VaultFixture):
         )
 
     def test_conflicting_sources_and_invalid_policy_do_not_write(self):
+        self.workspace()
         before = self.registry.read_bytes()
         with self.assertRaises(box.BoxError):
             box.main(
@@ -492,11 +502,13 @@ class VaultPolicyTests(VaultFixture):
             credentials.policy({"credentials": {"mode": "unknown"}})
 
     def test_credentials_configuration_obeys_workspace_lock(self):
+        self.workspace()
         with box.workspace_lock(self.registry):
             with self.assertRaisesRegex(box.BoxError, "active oc-box"):
                 box.main(["credentials", "--workspace", self.data["id"]])
 
     def test_vault_host_only_and_commands_never_require_podman(self):
+        self.workspace()
         with (
             patch.object(vault, "manage") as manage,
             patch.object(box, "check_backend") as backend,
@@ -521,6 +533,7 @@ class VaultPolicyTests(VaultFixture):
                     box.main(arguments)
 
     def test_informational_terminal_and_sync_operations_never_unlock(self):
+        self.workspace()
         credentials.configure(self.data, secrets=["VAULT_TOKEN"])
         box.atomic_json(self.registry, self.data)
         with patch.object(vault, "select") as unlock:
@@ -547,6 +560,7 @@ class VaultPolicyTests(VaultFixture):
             box.validate_project(target)
 
     def test_plaintext_is_not_url_rewritten(self):
+        self.workspace()
         credentials.configure(self.data, secrets=["VAULT_TOKEN"])
         value = "http://localhost:1234/private"
         with patch.object(vault, "select", return_value={"VAULT_TOKEN": value}):
@@ -554,6 +568,7 @@ class VaultPolicyTests(VaultFixture):
                 self.assertEqual(box.container_env(self.data)["VAULT_TOKEN"], value)
 
     def test_launcher_failure_redacts_any_active_decrypted_value(self):
+        self.workspace()
         credentials.configure(self.data, secrets=["VAULT_TOKEN"])
 
         def child(*args, **kwargs):
@@ -571,6 +586,7 @@ class VaultPolicyTests(VaultFixture):
             self.assertIn("redacted credential", str(error.exception))
 
     def test_vault_child_output_uses_anonymous_memory_not_plaintext_temp_files(self):
+        self.workspace()
         credentials.configure(self.data, secrets=["VAULT_TOKEN"])
         with (
             patch.object(vault, "select", return_value={"VAULT_TOKEN": VALUE}),
@@ -643,6 +659,7 @@ class VaultPolicyTests(VaultFixture):
         self.assertEqual((home / ".local/share/oc-box/current").resolve(), previous)
 
     def test_wrong_vault_passphrase_aborts_reset_before_removing_any_resources(self):
+        self.workspace()
         credentials.configure(self.data, secrets=["VAULT_TOKEN"])
         box.atomic_json(self.registry, self.data)
         with (
@@ -658,6 +675,7 @@ class VaultPolicyTests(VaultFixture):
         self.assertTrue(self.registry.exists())
 
     def test_launch_unlock_happens_before_version_probe_or_container_setup(self):
+        self.workspace()
         credentials.configure(self.data, secrets=["VAULT_TOKEN"])
         with (
             patch.object(
