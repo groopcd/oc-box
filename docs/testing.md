@@ -459,6 +459,30 @@ is established by these reports. Keep raw reports private and the two fresh stor
 and old failed store intact; later documentation/harness commits do not change the
 recorded tested runtime identity.
 
+#### Reviewed baseline history/readiness host regression
+
+A separate `oc-box-session-sync-host-v1` report now passes review for the same
+clean `d736bc1bb33ffeedee65ad3ec281de77c1e31847` runtime, count 115 / version
+`1.7.86+gd736bc1`, the same 44-entry source manifest, the same external `60df669`
+runner and the same native 2.2.6 executable identified above. All **42** named
+baseline checks are true, with ordered owner exits `[0,0,0,1,0,0,0,0]`, complete
+stage, no primary/secondary failures and an empty failure trace. Report-byte
+SHA-256 is `9c94916f9e257e79c2a131df5fb25eecc50579d6358e834c36e99f0cd1749619`.
+Its baseline v1 format is distinct from the earlier failed recovery-v1 format.
+
+Together with the two recovery reports, the reviewed evidence establishes **60
+scripted synthetic external-host checks**: 42 baseline plus 12 snapshot and six
+stop-cancellation checks. The baseline adds history/readiness, child/archive
+preservation, pending-session isolation, lease handling, background notice wakeup
+and ordinary owning-start archived-root resume coverage. It does not repair the
+retained native job, make the intentional nonzero exits successful or change the
+earlier failed recovery report. Keep all raw evidence private and retained.
+
+This is not a new lifecycle/vault/backup, interactive UI, real-provider,
+network-containment, exhaustive fault/race or native 2.2.7 host pass. Stable
+publication and integration/release approval remain separate; later evidence-only
+commits do not extend the recorded tested source identity.
+
 #### History and interrupted-export contracts
 
 The changes introduced in `d638907be97f9f33d00e59da526eb046e39a3627` add paginated
