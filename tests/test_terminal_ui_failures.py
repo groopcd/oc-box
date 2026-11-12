@@ -21,6 +21,7 @@ from oc_box import terminal_ui as ui
 
 
 BANNER = re.compile(rb"\x1b7\x1b\[\d+;1H\x1b\[0m\x1b\[2K[^\x1b]*\x1b8")
+PREFERRED_TEMP = Path("/tmp/opencode")
 CLEANUP_FAILURE_CASES = (
     ("stop", True),
     ("stop", False),
@@ -204,7 +205,8 @@ class TerminalUIFailures(unittest.TestCase):
         self, fixture, *, interactive=True, cancel=False, loading=True, mode=None
     ):
         temporary = tempfile.TemporaryDirectory(
-            prefix="tui-failure-", dir="/tmp/opencode"
+            prefix="tui-failure-",
+            dir=PREFERRED_TEMP if PREFERRED_TEMP.is_dir() else None,
         )
         self.addCleanup(temporary.cleanup)
         root = Path(temporary.name)
@@ -324,6 +326,78 @@ class TerminalUIFailures(unittest.TestCase):
         self.assertTrue(observations, events)
         for flags in observations:
             self.assertEqual(flags, os.WEXITED | os.WNOHANG | os.WNOWAIT)
+
+    def assert_launch_temp_parent(self, *, preferred_exists):
+        with tempfile.TemporaryDirectory(prefix="tui-temp-parent-") as directory:
+            parent = Path(directory)
+            fallback = parent / "fallback"
+            preferred = parent / "preferred"
+            fallback.mkdir(mode=0o700)
+            if preferred_exists:
+                preferred.mkdir(mode=0o700)
+            expected = preferred if preferred_exists else fallback
+            probe = r"""
+import sys
+from pathlib import Path
+from unittest import mock
+import test_terminal_ui_failures as failures
+
+case = failures.TerminalUIFailures()
+root = None
+try:
+    # Override only the preferred location; stdlib TMPDIR selection stays real.
+    with mock.patch.object(failures, "PREFERRED_TEMP", Path(sys.argv[1])):
+        root, process, fd, _ = case.launch(
+            "import os,sys; from pathlib import Path; root=Path(sys.argv[1]); "
+            "assert os.isatty(0) and os.isatty(1); "
+            "assert Path(os.environ['HOME']) == root; "
+            "assert Path(os.environ['TMPDIR']) == root; "
+            "os.write(1,b'TEMP_PARENT_PTY_READY')",
+            loading=False,
+        )
+    case.assertEqual(case.collect(process, fd), b"TEMP_PARENT_PTY_READY")
+    case.assertEqual(case.assert_restored(root).get("returncode"), 0)
+    case.assertEqual(root.parent, Path(sys.argv[2]))
+    case.assertEqual(root.stat().st_mode & 0o777, 0o700)
+    case.assertFalse(root.is_symlink())
+finally:
+    case.doCleanups()
+case.assertFalse(root.exists())
+print("PRIVATE_PTY_TEMP_CLEANED")
+"""
+            completed = subprocess.run(
+                [sys.executable, "-B", "-c", probe, str(preferred), str(expected)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                env={
+                    "PATH": os.defpath,
+                    "PYTHONPATH": os.pathsep.join(
+                        (
+                            str(Path(__file__).resolve().parent),
+                            str(Path(ui.__file__).resolve().parents[1]),
+                        )
+                    ),
+                    "HOME": str(parent),
+                    "TMPDIR": str(fallback),
+                },
+                timeout=12,
+            )
+            self.assertEqual(completed.returncode, 0, completed.stdout)
+            self.assertEqual(completed.stdout, b"PRIVATE_PTY_TEMP_CLEANED\n")
+            self.assertEqual(list(fallback.iterdir()), [])
+            if preferred_exists:
+                self.assertEqual(list(preferred.iterdir()), [])
+            else:
+                self.assertFalse(preferred.exists())
+
+    def test_launch_without_preferred_directory_uses_tmpdir_and_cleans_private_pty(
+        self,
+    ):
+        self.assert_launch_temp_parent(preferred_exists=False)
+
+    def test_launch_with_existing_preferred_directory_cleans_private_pty(self):
+        self.assert_launch_temp_parent(preferred_exists=True)
 
     def test_numeric_group_signals_finish_before_reap_in_both_modes(self):
         for interactive in (True, False):
