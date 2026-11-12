@@ -85,7 +85,13 @@ and migrated by upstream; V1 history is retained for downgrade.
 
 Native V2 plugins use the new API; copied V1 local plugins get bounded adapters
 for shell environment, tool execution/output/definition, text custom tools and
-provider discovery. Unsupported hooks still require native ports. Supported
+provider discovery. On the tested native 2.2.6 API, copied V1 hooks that edit
+provider settings or add/remove providers explicitly refuse before applying any
+changes: native configuration is applied after plugin setup and could otherwise
+silently override them. Use native provider configuration for those changes.
+Read-only discovery and bounded source-model inventory remain supported; they
+do not override later native configured model fields. Unsupported hooks still
+require native ports. Supported
 legacy config and V2 fields are retained; the Build plugin is version-aware.
 MCP Code Mode and native formatting are preserved. Upstream 2.2.6 does not run language servers
 or expose LSP diagnostics; native LSP remains on 1.x. See `docs/opencode-2.md`

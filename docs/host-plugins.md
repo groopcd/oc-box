@@ -4,8 +4,10 @@
 
 If you use only OpenCode 2.x, `tools/port_host_plugins.py` audits the known personal
 plugins and replaces them with direct V2 implementations in your normal
-`~/.config/opencode`. No V1 SDK, generic compatibility bridge, alternate profile
-or special launcher is needed afterward. Existing V1 sources are removed from
+`~/.config/opencode`. A fully replaced profile needs no V1 SDK, generic
+compatibility bridge, alternate profile or special launcher afterward. Legacy
+dependencies are retained when preserved code or uninspected package references
+may still own them. Selected V1 sources are removed from
 autoload/config entries and placed in one private safety snapshot before changes;
 this is recovery evidence, not maintained V1 support. Auth and session databases
 are not changed by the tool.
@@ -82,6 +84,17 @@ silently replaced by their basename. Unrelated scoped packages are not
 reclassified by their basename. The explicitly supported
 sandbox package spellings remain `opencode-sandbox`, `opencode-sandbox@latest`
 and `opencode-sandbox@0.6.0`; other package versions require separate review.
+
+Inventory and activation are separate. A dormant file under `custom-plugins/`,
+an explicit removal entry, or a V2-ignored legacy registration does not become
+active merely because its bytes were reviewed. Dormant/disabled sources and
+ignored registrations remain untouched. Their dependency ownership is retained
+even when a package name resembles a native selector or matches another selected
+package. The audit includes bounded local directory/support-file ownership;
+unknown code/manifests need review, and ambiguous extensionless references
+refuse before a safety snapshot or any writes. A retained plugin's dependency
+cannot be deleted as another plugin's replacement. These checks are a bounded
+audit, not a general JavaScript/package-resolution certificate.
 
 Exit host OpenCode clients before applying to avoid reload during the file changes.
 If using the shared service, stop it intentionally first; the tool itself never
@@ -303,6 +316,14 @@ V1 history migration on first V2 use, so back up host session data beforehand.
   entrypoints. The bounded tested bridge supports shell environment, tool
   execution/output/definition, custom tools, provider discovery, outbound context
   and headers. Unsupported V1 API assumptions still require native ports.
+- Provider discovery means read-only/source-model inventory, not effective
+  settings mutation. On native 2.2.6, copied V1 config hooks that edit provider
+  settings or add/remove providers fail explicitly before any adapter changes.
+  Later native config could otherwise silently override the edit, including on
+  reload. Use native configuration for these changes. The discovery helper
+  contains only endpoint/model inventory, not expanded keys, arbitrary headers
+  or a second copy of full effective settings. This limitation also applies to
+  copied plugins inside oc-box; it does not change ordinary native config.
 - Unrelated config values, agents, commands, skills, supporting source files,
   plugin options and native V2 directory plugins. Config JSON comments are not
   retained in the *copy*; original JSON/JSONC is untouched.
@@ -316,10 +337,14 @@ V1 history migration on first V2 use, so back up host session data beforehand.
   This is a config snapshot: regenerate a new profile after changing original
   plugin sources/settings. Do not overwrite an existing profile to refresh it.
 
-Existing `node_modules`, auth files, service registrations, `.env`, `.npmrc`, and
+Existing `node_modules`, root auth files, native root service configurations
+(including channel-specific and legacy hashed names), `.env`, `.npmrc`, and
 oc-box-generated Build/containment overlays are not copied. No config values are
 printed. Existing literal credentials in your original config remain in its
 private copied settings; prefer `{env:NAME}` and keep both profiles private.
+These are root-state exclusions, not recursive basename filters: plugin-owned
+nested same-name support files/directories and an ordinary root `service.js`
+remain part of the copied source layout. Unsafe support symlinks still refuse.
 
 ## Host sandboxing is NOT the container opt-out
 

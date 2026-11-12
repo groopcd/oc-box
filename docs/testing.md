@@ -532,6 +532,31 @@ combined statement/branch coverage across runtime **and host/developer tools**,
 not 100% application coverage. It excludes child processes and JavaScript, so
 coverage equivalence is a cross-check, not the sole reason to retire a test.
 
+### Hardening follow-up: preserve cases, simplify only arrangement
+
+The subsequent vault setup split preserves all 37 named cases and 127 assertion
+expressions. Workspace setup is explicit for the 15 cases that need it; the
+other 22 create no project/registry state. Per-case runtime line/arc sets remain
+equal before and after the split. This does not substitute for child-process or
+TTY checks.
+
+A separate scoped host-fixture arrangement change adds one pure private-store
+input builder used by three callers. Caller-specific purposes, authorization,
+validation and independently known expected results stay in their tests. All
+365 cases, 1,190 named subcases and 1,783 assertion sites were retained; the
+before/after parent coverage sets matched (5,974 executed statement lines,
+1,195 branches and 13,138 recorded arcs). Other assigned fixture files were
+left alone where extraction was not justified. These are scoped preservation
+measurements, not a method-count goal or native/host acceptance claim.
+
+The native copied-provider fixture now observes actual migrated plugins and
+provider state after activation and supported reload. It tests the documented
+explicit-refusal boundary for unsupported settings/addition/removal edits,
+preserved configured values and no partial changes. It does **not** establish
+successful effective-settings edits; that original requirement remains deferred.
+Keep earlier source-prefix-only observations and failed configured-edit probes
+as separate evidence, never rewrite them into acceptance.
+
 ## Ownership map
 
 All unit-test files were inventoried against their behavior/risk and coverage.

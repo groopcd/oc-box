@@ -316,11 +316,27 @@ and every primary request (including advertised MCP/Code Mode tools); internal
 cyclic validation objects are not reported as zero-sized wire schemas. Outbound
 message conversion preserves original native media, reasoning and provider
 metadata unless a supported text/PDF/tool-input edit changes that specific part.
-Message identity, role and order changes are refused. Header hooks get the
+Message identity, role and order changes are refused, as are unsupported
+message/part metadata or tool-state edits. All proposed history changes are
+validated before any are applied; a later invalid edit cannot partially apply an
+earlier supported one. Header hooks get the
 selected model variant. The copied Copilot effort workaround's private-header
 contract is also applied at V2's native HTTP request boundary, preserving an
 existing reasoning field and stripping its private header.
-Config edits outside provider discovery, V1 client
+Provider discovery is a bounded **source inventory**, not a final effective
+configuration view. Native 2.2.6 applies its configured provider values after
+external plugin setup, and reload preserves that ordering. Copied V1 hooks that
+edit provider settings or add/remove providers therefore explicitly refuse,
+before any adapter transform is registered, instead of claiming an edit took
+effect. This includes nested changes and deleting an empty options view. Use
+native provider configuration for endpoint, key, header or provider changes;
+keep credential references such as `{env:NAME}` rather than copying values into
+discovery helpers. Read-only discovery and source-model inventory changes remain
+supported, without a promise to override later native configured model fields.
+Successful effective-settings editing through this adapter remains deferred,
+not an accepted native capability.
+
+Config edits outside this bounded discovery contract, V1 client
 DB/history APIs, auth/provider/other chat/event hooks and multi-factory modules require
 a native V2 port and are reported rather than silently ignored.
 

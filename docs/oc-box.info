@@ -137,12 +137,19 @@ history is retained for downgrade.
 
 Native V2 plugins use the new API; copied V1 local plugins get bounded
 adapters for shell environment, tool execution/output/definition, text
-custom tools and provider discovery.  Unsupported hooks still require
-native ports.  Supported legacy config and V2 fields are retained; the
-Build plugin is version-aware.  MCP Code Mode and native formatting are
-preserved.  Upstream 2.2.6 does not run language servers or expose LSP
-diagnostics; native LSP remains on 1.x.  See ‘docs/opencode-2.md’ for
-environment strategy, migration limits, and accepted host validation.
+custom tools and provider discovery.  On the tested native 2.2.6 API,
+copied V1 hooks that edit provider settings or add/remove providers
+explicitly refuse before applying any changes: native configuration is
+applied after plugin setup and could otherwise silently override them.
+Use native provider configuration for those changes.  Read-only
+discovery and bounded source-model inventory remain supported; they do
+not override later native configured model fields.  Unsupported hooks
+still require native ports.  Supported legacy config and V2 fields are
+retained; the Build plugin is version-aware.  MCP Code Mode and native
+formatting are preserved.  Upstream 2.2.6 does not run language servers
+or expose LSP diagnostics; native LSP remains on 1.x.  See
+‘docs/opencode-2.md’ for environment strategy, migration limits, and
+accepted host validation.
 
 
 File: oc-box.info,  Node: Commands,  Next: Options,  Prev: Description,  Up: Top
@@ -2894,21 +2901,21 @@ Node: Top210
 Node: Name769
 Node: Synopsis930
 Node: Description2540
-Node: Commands6045
-Node: Options66504
-Node: Lifecycle and persistence87612
-Node: Distribution images89732
-Node: Sessions and recovery94607
-Node: Devices and host permissions103694
-Node: Resource reports106040
-Node: Configuration and environment108151
-Node: Files119902
-Node: Exit status124755
-Node: Examples125566
-Node: Troubleshooting127652
-Node: Installation and manuals136980
-Node: Authors and license144927
-Node: See also145534
+Node: Commands6474
+Node: Options66933
+Node: Lifecycle and persistence88041
+Node: Distribution images90161
+Node: Sessions and recovery95036
+Node: Devices and host permissions104123
+Node: Resource reports106469
+Node: Configuration and environment108580
+Node: Files120331
+Node: Exit status125184
+Node: Examples125995
+Node: Troubleshooting128081
+Node: Installation and manuals137409
+Node: Authors and license145356
+Node: See also145963
 
 End Tag Table
 
