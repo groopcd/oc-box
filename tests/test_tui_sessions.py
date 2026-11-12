@@ -1,17 +1,20 @@
 import copy
 import fcntl
-from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import os
-from pathlib import Path
 import stat
 import tempfile
+import time
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from oc_box import tui_sessions as sessions
+
+FAVORITES_CONTENTION_TEST_TIMEOUT = 5.0
 
 
 def session(ident="ses_root", directory="/project", **extra):
@@ -707,18 +710,50 @@ class FavoriteStoreTests(unittest.TestCase):
         self.assertEqual(self.store.list(), [])
 
     def test_locks_serialize_independent_writers_and_no_staging_left(self):
-        def toggle(index):
-            return sessions.FavoriteStore(self.root).toggle(
-                "host", "global", f"ses_{index}"
-            )
+        real_fsync = os.fsync
+        for fsync_delay in (0, 0.05):
+            with self.subTest(fsync_delay=fsync_delay):
+                root = self.root / str(fsync_delay)
 
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            self.assertTrue(all(executor.map(toggle, range(40))))
-        self.assertEqual(len(self.store.list()), 40)
-        self.assertEqual(
-            {file.name for file in self.root.iterdir()},
-            {"favorites.json", "favorites.lock"},
-        )
+                def slow_fsync(fd, delay=fsync_delay):
+                    if delay and stat.S_ISREG(os.fstat(fd).st_mode):
+                        time.sleep(delay)
+                    return real_fsync(fd)
+
+                def toggle(index, root=root):
+                    return sessions.FavoriteStore(root).toggle(
+                        "host", "global", f"ses_{index}"
+                    )
+
+                # This checks serialization, not the UI's 250 ms busy deadline.
+                # Slow real fsync calls can queue writers beyond that deadline;
+                # keep a larger finite budget here and test busy refusal below.
+                with (
+                    patch.object(
+                        sessions,
+                        "FAVORITES_LOCK_TIMEOUT",
+                        FAVORITES_CONTENTION_TEST_TIMEOUT,
+                    ),
+                    patch.object(sessions.os, "fsync", side_effect=slow_fsync),
+                    ThreadPoolExecutor(max_workers=8) as executor,
+                ):
+                    self.assertTrue(all(executor.map(toggle, range(40))))
+                values = sessions.FavoriteStore(root).list()
+                self.assertEqual(len(values), 40)
+                self.assertCountEqual(
+                    values,
+                    [
+                        {"origin": "host", "store": "global", "id": f"ses_{index}"}
+                        for index in range(40)
+                    ],
+                )
+                self.assertEqual(stat.S_IMODE(root.stat().st_mode), 0o700)
+                for file in root.iterdir():
+                    self.assertEqual(stat.S_IMODE(file.stat().st_mode), 0o600)
+                self.assertEqual(
+                    {file.name for file in root.iterdir()},
+                    {"favorites.json", "favorites.lock"},
+                )
 
     def test_corrupt_state_refuses_without_overwrite(self):
         self.store.toggle("host", "global", "ses_root")
