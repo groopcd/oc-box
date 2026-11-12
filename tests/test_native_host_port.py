@@ -506,6 +506,223 @@ class NativeHostPortTests(unittest.TestCase):
         self.assertNotIn("opencode-sandbox", dependencies)
         self.assertTrue(result["no_v1_sdk_or_bridge"])
 
+    def test_ignored_legacy_package_references_keep_dependency_ownership(self):
+        cases = {
+            "ignored native-looking name": ("opencode.legacy", None),
+            "ignored native-looking removal": ("-opencode.legacy", None),
+            "ignored namespace selector spelling": ("opencode.legacy.*", None),
+            "ignored wildcard spelling": ("*", None),
+            "same sandbox version": (
+                "opencode-sandbox@0.6.0",
+                "opencode-sandbox@0.6.0",
+            ),
+            "distinct supported sandbox versions": (
+                "opencode-sandbox@0.6.0",
+                "opencode-sandbox@latest",
+            ),
+            "ignored latest sandbox version": (
+                "opencode-sandbox@latest",
+                "opencode-sandbox@0.6.0",
+            ),
+            "ignored unversioned sandbox": (
+                "opencode-sandbox",
+                "opencode-sandbox@latest",
+            ),
+        }
+        for index, (label, (ignored, active)) in enumerate(cases.items()):
+            with self.subTest(case=label):
+                source = self.root / ("ignored-reference-" + str(index))
+                (source / "plugins").mkdir(parents=True)
+                selected = source / "plugins/output-clamp.ts"
+                selected.write_text(SYNTHETIC_LEGACY_SOURCES["output-clamp"])
+                (source / "opencode.json").write_text(
+                    json.dumps({"plugins": [active] if active else []})
+                )
+                legacy = source / "config.json"
+                original = (
+                    json.dumps({"plugin": [ignored], "unchanged": "legacy ownership"})
+                    + "\n"
+                ).encode()
+                legacy.write_bytes(original)
+                (source / "package.json").write_text(
+                    '{"dependencies":{"@opencode-ai/plugin":"1.19.5","opencode-sandbox":"0.6.0"}}'
+                )
+                reviews = {
+                    selected.relative_to(source): hashlib.sha256(
+                        selected.read_bytes()
+                    ).hexdigest()
+                }
+                # The porter must not fetch or execute even an ignored spelling
+                # that happens to look like a native selector or selected package.
+                with patch.object(
+                    subprocess,
+                    "run",
+                    side_effect=AssertionError("migration must not execute packages"),
+                ):
+                    result = port.apply(source, reviewed_sources=reviews)
+                self.assertEqual(legacy.read_bytes(), original)
+                dependencies = json.loads((source / "package.json").read_bytes())[
+                    "dependencies"
+                ]
+                self.assertEqual(dependencies.get("@opencode-ai/plugin"), "1.19.5")
+                self.assertEqual(dependencies.get("opencode-sandbox"), "0.6.0")
+                self.assertEqual(
+                    result["preserved_packages"], [ignored.removeprefix("-")]
+                )
+                self.assertTrue(result["legacy_dependencies_retained"])
+                self.assertFalse(result["no_v1_sdk_or_bridge"])
+                expected_native = (
+                    ["opencode-sandbox", "output-clamp"] if active else ["output-clamp"]
+                )
+                self.assertEqual(result["native_plugins"], expected_native)
+                self.assertEqual(
+                    json.loads((source / "opencode.json").read_bytes())["plugins"],
+                    [
+                        {"package": str(source / "plugins" / name)}
+                        for name in expected_native
+                    ],
+                )
+
+    def test_retained_directory_ambiguous_extensionless_require_refuses_before_writes(
+        self,
+    ):
+        cases = {
+            "CommonJS cjs sibling and selected js all reviewed": (
+                "require",
+                (".cjs", ".js"),
+                None,
+            ),
+            "CommonJS unreviewed alternate cjs": ("require", (".cjs", ".js"), ".cjs"),
+            "CommonJS unreviewed selected js": ("require", (".cjs", ".js"), ".js"),
+            "CommonJS three suffixes all reviewed": (
+                "require",
+                (".cts", ".cjs", ".js"),
+                None,
+            ),
+            "ES module mjs and js all reviewed": ("import", (".mjs", ".js"), None),
+            "ES reexport ts and js unreviewed alternate": (
+                "export",
+                (".ts", ".js"),
+                ".ts",
+            ),
+        }
+        for index, (label, (syntax, suffixes, unreviewed)) in enumerate(cases.items()):
+            with self.subTest(case=label):
+                source = self.root / ("ambiguous-import-" + str(index))
+                shared = source / "shared"
+                retained = source / "vendor/retained"
+                shared.mkdir(parents=True)
+                retained.mkdir(parents=True)
+                for suffix in suffixes:
+                    (shared / ("output-clamp" + suffix)).write_text(
+                        (
+                            'module.exports = async () => ({ "tool.execute.after": async () => {} });\n'
+                            if syntax == "require"
+                            else SYNTHETIC_LEGACY_SOURCES["output-clamp"]
+                        )
+                        if suffix == ".js"
+                        else "module.exports = { syntheticSupport: true }\n"
+                    )
+                entry = retained / ("index.cjs" if syntax == "require" else "index.mjs")
+                statements = {
+                    "require": 'module.exports = require("../../shared/output-clamp");\n',
+                    "import": 'import dependency from "../../shared/output-clamp"; export default dependency;\n',
+                    "export": 'export { default } from "../../shared/output-clamp";\n',
+                }
+                entry.write_text(statements[syntax])
+                (retained / "package.json").write_text(
+                    json.dumps(
+                        {"name": "retained-fixture", "exports": "./" + entry.name}
+                    )
+                )
+                (source / "opencode.json").write_text(
+                    '{"plugins":["./shared/output-clamp.js","./vendor/retained"]}'
+                )
+                (source / "package.json").write_text(
+                    '{"type":"commonjs","dependencies":{"@opencode-ai/plugin":"1.19.5","opencode-sandbox":"0.6.0"}}'
+                )
+                reviews = {
+                    file.relative_to(source): hashlib.sha256(
+                        file.read_bytes()
+                    ).hexdigest()
+                    for file in (*shared.iterdir(), *retained.iterdir())
+                    if unreviewed is None
+                    or file != shared / ("output-clamp" + unreviewed)
+                }
+                with (
+                    patch.object(
+                        port,
+                        "atomic",
+                        side_effect=AssertionError("no file writes before refusal"),
+                    ),
+                    patch.object(
+                        Path,
+                        "mkdir",
+                        side_effect=AssertionError(
+                            "no snapshot/generated directory before refusal"
+                        ),
+                    ),
+                    patch.object(
+                        Path,
+                        "unlink",
+                        side_effect=AssertionError("no source deletion before refusal"),
+                    ),
+                ):
+                    self.assert_refused_unchanged(
+                        "Ambiguous extensionless local plugin import.*manual port",
+                        source,
+                        reviews,
+                    )
+                self.assertFalse((source / "plugins").exists())
+                self.assertTrue((shared / "output-clamp.js").is_file())
+
+    def test_retained_directory_exact_require_is_not_confused_by_adjacent_extensions(
+        self,
+    ):
+        source = self.root / "exact-directory-import"
+        shared = source / "shared"
+        retained = source / "vendor/retained"
+        shared.mkdir(parents=True)
+        retained.mkdir(parents=True)
+        selected = shared / "output-clamp.js"
+        selected.write_text(
+            'module.exports = async () => ({ "tool.execute.after": async () => {} });\n'
+        )
+        support = shared / "output-clamp.cjs"
+        support.write_text('module.exports = { id: "retained-exact", setup() {} };\n')
+        entry = retained / "index.cjs"
+        manifest = retained / "package.json"
+        entry.write_text('module.exports = require("../../shared/output-clamp.cjs");\n')
+        manifest.write_text('{"name":"retained-fixture","exports":"./index.cjs"}')
+        (source / "opencode.json").write_text(
+            '{"plugins":["./shared/output-clamp.js","./vendor/retained"]}'
+        )
+        (source / "package.json").write_text(
+            '{"type":"commonjs","dependencies":{"@opencode-ai/plugin":"1.19.5"}}'
+        )
+        reviews = {
+            file.relative_to(source): hashlib.sha256(file.read_bytes()).hexdigest()
+            for file in (selected, support, entry, manifest)
+        }
+        result = port.apply(source, reviewed_sources=reviews)
+        self.assertEqual(result["native_plugins"], ["output-clamp"])
+        self.assertFalse(selected.exists())
+        self.assertEqual(
+            support.read_text(),
+            'module.exports = { id: "retained-exact", setup() {} };\n',
+        )
+        self.assertEqual(
+            entry.read_text(),
+            'module.exports = require("../../shared/output-clamp.cjs");\n',
+        )
+        self.assertEqual(
+            json.loads((source / "package.json").read_bytes())["dependencies"][
+                "@opencode-ai/plugin"
+            ],
+            "1.19.5",
+        )
+        self.assertFalse(result["no_v1_sdk_or_bridge"])
+
     def test_only_ts_js_immediate_files_autoload_not_mts_or_mjs_or_nested_files(self):
         for index, (folder, suffix) in enumerate(
             (("plugins", ".mts"), ("plugin", ".mjs"), ("plugins/support", ".ts"))

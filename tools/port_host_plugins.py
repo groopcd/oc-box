@@ -393,19 +393,21 @@ def inspect(source, *, reviewed_sources=None):
                 choices.extend(
                     candidate.with_suffix(suffix) for suffix in sorted(CODE_SUFFIXES)
                 )
-            dependency = next(
-                (
-                    choice
-                    for choice in choices
-                    if choice.exists() or choice.is_symlink()
-                ),
-                None,
-            )
-            if dependency is None:
+            matches = [
+                choice for choice in choices if choice.exists() or choice.is_symlink()
+            ]
+            # Suffix ordering is not module resolution (CommonJS require, for
+            # example, does not automatically try .cjs). Do not choose one
+            # ownership edge and risk deleting another plausible dependency.
+            if not candidate.suffix and len(matches) > 1:
+                raise ValueError(
+                    "Ambiguous extensionless local plugin import requires a manual port"
+                )
+            if not matches:
                 raise ValueError(
                     "Unresolved local plugin import requires a manual port"
                 )
-            dependency = local_path(str(dependency), source)
+            dependency = local_path(str(matches[0]), source)
             include(dependency, depth + 1)
             owner = dependency.relative_to(source)
             imports[relative].update(
@@ -435,7 +437,7 @@ def inspect(source, *, reviewed_sources=None):
             for key in ("plugin", "plugins"):
                 if not isinstance(value.get(key, []), list):
                     raise ValueError("Plugin configuration must be an array")
-                for entry in value.get(key, []):
+                for index, entry in enumerate(value.get(key, [])):
                     if spec(entry).startswith("-") and not isinstance(entry, str):
                         raise ValueError(
                             "Ambiguous plugin removal entry requires manual review; use a string selector"
@@ -479,7 +481,15 @@ def inspect(source, *, reviewed_sources=None):
                         )
                     if local is None:
                         package_references.append(
-                            (target.removeprefix("-"), name, bool(package))
+                            {
+                                "document": filename,
+                                "key": key,
+                                "index": index,
+                                "target": target.removeprefix("-"),
+                                "name": name,
+                                "package": bool(package),
+                                "effective": effective,
+                            }
                         )
                     if effective:
                         operations.append(
@@ -526,21 +536,32 @@ def inspect(source, *, reviewed_sources=None):
             )
     selected = active_sources
     names = {candidates[path] for path in selected} | active_packages
-    preserved_packages = {
-        target
-        for target, name, package in package_references
-        if (package and name not in active_packages)
-        or (
-            not package
-            and target != "*"
-            and not target.endswith(".*")
-            and not target.startswith("opencode.")
-            and not any(
-                selector_matches(target, candidate)
-                for candidate in set(candidates.values()) | active_packages
+    preserved_packages = set()
+    for reference in package_references:
+        target = reference["target"]
+        reference["replaced"] = (
+            reference["effective"]
+            and reference["package"]
+            and reference["name"] in active_packages
+        )
+        # Native selector semantics and effective package replacement cannot
+        # discharge ownership of a different inventory-only registration, even
+        # when its spelling or package name happens to be the same.
+        selector = (
+            reference["effective"]
+            and not reference["package"]
+            and (
+                target == "*"
+                or target.endswith(".*")
+                or target.startswith("opencode.")
+                or any(
+                    selector_matches(target, candidate)
+                    for candidate in set(candidates.values()) | active_packages
+                )
             )
         )
-    }
+        if not reference["replaced"] and not selector:
+            preserved_packages.add(target)
     reviewed = set()
     for relative, content in files.items():
         digest = hashlib.sha256(content).hexdigest()
@@ -582,6 +603,7 @@ def inspect(source, *, reviewed_sources=None):
         "preserved": preserved,
         "tree": tree,
         "packages": active_packages,
+        "package_references": package_references,
         "preserved_packages": preserved_packages,
     }
 
