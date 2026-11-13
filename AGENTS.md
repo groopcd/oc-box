@@ -147,6 +147,42 @@ PyPI uses the public `1.6.N` version; retain the full `+gHASH` identity in packa
 resources. Python-package installations upgrade through pipx/uv/pip, never the
 GitHub self-updater. Preserve the normal curl/GitHub update path in parallel.
 
+## Update-channel publication policy
+
+Stable/devel are release channels, independent of installation method and version
+series. The initial channel-capable stable release stays in 1.6 on `master`;
+later 1.7 development work stays on `devel`, without merging that development
+line into master to ship channel support. Stable final releases and development
+`.dev0` prereleases use the same PyPI project. Preserve existing published tags,
+metadata and all historical host evidence below verbatim.
+
+Channel-aware installers/updaters select published releases, not moving branch
+HEAD. Verify tag/commit identity and selected branch membership. Save successful
+explicit selections per installation owner, defaulting to stable when absent;
+`--check` must not install or persist a selection. GitHub automatic updates remain
+opt-in and follow their saved channel. Package upgrades delegate only to the
+verified owning manager; keep their preferences separate and package automatic
+updates disabled. Keep discovery/ownership imports stdlib-only.
+
+The user approved channel publication subject to the existing gates, not a
+testing waiver. Freeze and validate the clean integrated candidate; retain
+source/package/native checks, build-only publication checks, all seven distro
+checks for package mapping changes, and relevant external-host evidence before
+publishing runtime/history/lifecycle/credential changes. A prerelease is not
+host acceptance. Never infer a live pass from unit/native/build checks or old
+reports. Publish the exact tested commit to the intended channel branch, with
+matching final/prerelease tag, version, GitHub assets and PyPI files. Later
+evidence-only branch commits no longer become channel updates automatically.
+See `docs/update-channels.md` and the CONTRIBUTING publication checklist.
+
+Exact v1.6.60 needs one plain upgrade bridge before new flags; pre-feature 1.7
+needs the channel-aware bootstrap. Preserve old updater/installer callers.
+Explicit downgrade warnings must say that launcher replacement does not roll
+back workspace/session state. Retain only target-supported extras; stable 1.6
+has no `--with-tui`. Do not bypass root/container refusals for package updates.
+
+## Documentation maintenance
+
 Update `docs/cli.md` when command-line behavior changes, then regenerate with
 `python3 tools/build_docs.py` (requires GNU makeinfo). Prebuilt manuals ship in
 the repository; installing oc-box must not require documentation build tools.

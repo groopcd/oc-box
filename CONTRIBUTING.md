@@ -1,11 +1,17 @@
 # Contributing
 
-Use the full Git history: the release identity is `1.6.N+gHASH`, with N the
-commit count minus the 1.0.0 baseline (29). Keep the absolute `commit_count` in
-metadata for upgrade compatibility with 0.1/1.0/1.5 releases. The 1.6 refactoring
+Use the full Git history: stable release identity is `1.6.N+gHASH`, development
+identity is `1.7.N.dev0+gHASH`, with N the commit count minus the 1.0.0 baseline
+(29). Keep the absolute `commit_count` in metadata for upgrade compatibility
+with 0.1/1.0/1.5 releases. The 1.6 refactoring
 release preserves that patch-count baseline, just as 1.5 did. Changes should keep
 mainline OpenCode unmodified and preserve MCPs, formatters, language servers, plugins, and
 the host/container storage boundary.
+
+Stable/devel are release channels, not fixed series numbers. See
+[update channels](docs/update-channels.md) for user migration and branch policy.
+The channel-capable 1.6 stable release belongs on `master`; subsequent 1.7
+development releases belong on `devel`, not merged into master as a shortcut.
 
 ## Source layout
 
@@ -346,14 +352,15 @@ tests CLI commands/resources, and ensures package upgrades do not invoke the
 GitHub installer. Standard build produces the wheel from the sdist to verify
 that it works without Git. Do not publish a dirty working tree.
 
-PyPI rejects local `+gHASH` version suffixes: the distribution version is
-`1.6.N` from full-history commit count minus `VERSION_BASE_COMMIT_COUNT`, and
-packaged `build-info.json` keeps `1.6.N+gHASH` plus the full commit and absolute
-commit count. The original stable release has count 29 and version 1.0.0; every
-subsequent commit advances the patch automatically. Version calculation rejects
+PyPI rejects local `+gHASH` version suffixes: stable distribution versions use
+`1.6.N`, development versions use `1.7.N.dev0` in the same project, from
+full-history commit count minus `VERSION_BASE_COMMIT_COUNT`.
+Packaged `build-info.json` keeps the full version with `+gHASH` plus the commit
+and absolute commit count. The original stable release has count 29 and version
+1.0.0; every subsequent commit advances the patch automatically. Version calculation rejects
 shallow history. The 1.5 and 1.6 series keep that baseline; a first published patch
 need not be zero. Embedded older series retain their identity until upgrade.
-Fast-forward the tested release commit into master so merging
+Fast-forward the tested release commit into its channel branch so merging
 does not add an extra version increment. Each selected release needs a unique
 version; ordinary commits remain on GitHub without requiring a PyPI upload.
 
@@ -371,8 +378,9 @@ Actions are pinned by commit. The user must create/own the PyPI account and
 configure the matching publisher; pending publishers do not reserve names.
 
 First run the workflow with its `publish` input false to verify a build-only
-run. A published GitHub release named `v1.6.N` (matching `public_version(build)`)
-builds, validates, and publishes to PyPI. Alternatively manually dispatch
+run. A published final GitHub Release named `v1.6.N`, or development prerelease
+named `v1.7.N.dev0` (matching `public_version(build)`), builds, validates, and
+publishes to the same PyPI project. Alternatively manually dispatch
 `publish.yml` on a reviewed commit with `publish` true. Environment protection
 rules may require owner approval. Do not publish from untrusted pull requests.
 The repository's CI builds/verifies packages on Python 3.10 and 3.13; the full
@@ -386,9 +394,12 @@ update errors for both hosted runners and the Ubuntu distro container; see
 
 ### Release gate and publication checklist
 
-GitHub/curl and PyPI are separate distribution channels. `install.sh` and the
-GitHub self-updater fetch `master`, not the latest release tag. Do not advance
-that branch to an unaccepted runtime candidate merely to start release CI.
+GitHub/curl and PyPI are separate installation methods with stable/devel release
+channels. Channel-aware `install.sh` and `oc-box upgrade` select published
+releases, not moving branch HEAD. Stable releases must belong to `master`;
+development prereleases must belong to `devel`. Do not advance master to an
+unaccepted runtime candidate or merge 1.7 development into it merely to start
+release CI. Keep published 1.6.60 and earlier tags/artifacts unchanged.
 
 1. Integrate changes on a `feature/**` candidate branch, preserving full history.
    Finish documentation and regenerate the manuals before freezing the commit.
@@ -411,12 +422,16 @@ that branch to an unaccepted runtime candidate merely to start release CI.
    reports and a successful build cannot substitute for host acceptance. If any
    source changes after testing, freeze and validate the new candidate instead.
 5. After acceptance and publication approval, fast-forward the exact tested
-   commit into `master`, push it and tag that same commit as `v1.6.N`. Do not
-   squash, rebase or add a merge/evidence commit between acceptance and tagging:
+   commit into its intended channel branch: `master` for stable, `devel` for
+   development. Push and tag that same commit as `v1.6.N` for current stable or
+   `v1.7.N.dev0` for current development. Channels remain independent of series
+   numbers. Do not squash, rebase or add a merge/evidence commit between
+   acceptance and tagging:
    every commit changes both source identity and the derived version. Put the
    accepted report summary in the GitHub release notes; later source-documentation
    updates have their own version and do not retroactively change the release.
-6. Publish the stable GitHub Release. Its release event invokes Trusted
+6. Publish a final stable GitHub Release, or a development GitHub prerelease,
+   matching the tag and channel. Its release event invokes Trusted
    Publishing to PyPI; do not start a second upload. Wait for successful build
    and publish jobs, including any environment approval. Download that run's
    `python-distributions` artifact and attach its exact wheel and sdist, plus a
@@ -424,12 +439,15 @@ that branch to an unaccepted runtime candidate merely to start release CI.
 7. Download the public PyPI files and compare their hashes with the GitHub assets
    and checksum file. Re-run `tools/check_package.py DISTDIR --with-vault`, verify
    an isolated installed CLI reports the accepted full `+gHASH` identity, and
-   check tag, release and `master` identities. Keep the full commit/count in
-   wheel and sdist resources even though the public version has no local suffix.
+   check tag, release and selected branch identities. Keep the full commit/count
+   in wheel and sdist resources even though the public version has no local suffix.
 
-A later evidence-only commit on `master` also advances the curl/self-update
-version, while PyPI stays at its selected release. Do not describe those channels
-as byte-identical after such an update; retain the released tag and artifacts.
+A later evidence-only branch commit advances source identity but does not become
+a channel update without a new published release. Keep final versus prerelease
+metadata, tags, selected branch membership and public artifacts consistent.
+Publication approval does not waive the gates above for either channel; unit,
+native and build-only checks do not establish live host acceptance. Preserve
+all historical accepted scopes and failed reports with their original identities.
 
 Use only the repository owner's explicit publication credential, isolated
 subprocess-local GitHub authentication and a verified owner identity for GitHub

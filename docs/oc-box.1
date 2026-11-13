@@ -22,7 +22,8 @@ oc\-box completion bash
 oc\-box web [\-\-project PATH | \-\-workspace ID] [\-\-port N] [\-\-no\-open] [\-\-no\-vault]
 oc\-box \-\-status [\-\-project PATH | \-\-workspace ID] [\-\-json]
 oc\-box status [\-\-project PATH | \-\-workspace ID] [\-\-json]
-oc\-box upgrade [\-\-check | \-\-auto\-update on|off]
+oc\-box upgrade [\-\-stable | \-\-devel] [\-\-check]
+oc\-box upgrade \-\-auto\-update on|off
 oc\-box secrets init|list|passwd
 oc\-box secrets set|remove NAME
 oc\-box credentials [\-\-project PATH | \-\-workspace ID] [CREDENTIAL\-OPTIONS]
@@ -254,26 +255,35 @@ oc\-box \-\-status \-\-json
 .fi
 .SS upgrade
 .PP
-Check and update the installed oc\-box launcher/modules and prebuilt manuals from the fixed public GitHub repository, branch \fBmaster\fR\&. Run on the host as your regular user; no sudo or GitHub token is needed. This command works without Podman or a registered workspace. It does not update host OpenCode, modify a source checkout, reset a container, or touch project/session data.
+Check and update the installed oc\-box launcher/modules and prebuilt manuals to a published release. Run on the host as your regular user; root and container invocations are refused before downloads or setting changes. No GitHub token, Podman, or registered workspace is needed. This command does not update host OpenCode, modify a source checkout, reset a container, or roll back project, workspace, credential, or session state.
 .PP
-This command's GitHub update path applies only to curl/source\-installed copies. Python\-package installations detect their packaged distribution marker and print \fBpipx upgrade oc\-box\fR, \fBuv tool upgrade oc\-box\fR, or the current interpreter's pip upgrade command instead, without downloading or installing anything. They reject \fB\-\-auto\-update on\fR because a package manager owns those files; normal launches skip GitHub automatic updates even if a shared host config enables them. \fB\-\-auto\-update off\fR on a package\-managed copy prints that package guidance and does not modify the GitHub installation's shared setting. Both channels use the same runtime/workspace format and remain supported in parallel.
+The stable channel selects published final releases associated with \fBmaster\fR; devel selects published development prereleases associated with \fBdevel\fR\&. Neither follows unpublished branch HEAD. A saved channel is used when no selector is given; without a saved preference the default is stable. \fB\-\-stable\fR and \fB\-\-devel\fR are mutually exclusive, upgrade\-only selectors, not launch flags. A successful explicit selection is remembered for that installation owner. GitHub and individual package\-managed owners keep separate preferences. \fB\-\-check\fR previews the selection without installing or saving a preference.
+.PP
+Curl/source\-installed copies use the fixed public GitHub repository. Python\-package copies instead delegate explicit upgrades to their verified pipx, uv tool, or dedicated virtual\-environment manager, using releases of the same \fBoc\-box\fR PyPI project. An ambiguous, system, or user\-site installation refuses with manager guidance, rather than guessing or installing through GitHub. Editable installs must update their source checkout separately. Package\-managed normal launches never perform GitHub automatic updates. They reject \fB\-\-auto\-update on\fR; \fB\-\-auto\-update off\fR prints package guidance and does not modify the GitHub installation's setting.
 .PP
 .nf
 .fam C
 oc\-box upgrade \-\-check
 oc\-box upgrade
+oc\-box upgrade \-\-devel \-\-check
+oc\-box upgrade \-\-devel
+oc\-box upgrade \-\-stable
 oc\-box upgrade \-\-auto\-update on
 oc\-box upgrade \-\-auto\-update off
 .fam T
 .fi
 .PP
-\fB\-\-check\fR compares the installed commit with GitHub and reports whether it differs, without installing. A normal upgrade clones the full public branch history into a temporary directory, pins the checked commit, verifies source identity, and runs its staged user\-local installer. An identical clean build does not download the full history again. A locally installed build whose commit count is ahead of the published branch is retained rather than downgraded. Source\-checkout updates remain a separate \fBgit pull\fR/review task: upgrade always targets the installed user\-local copy. A changed published commit at the same count can replace a different installed build.
+A GitHub upgrade clones full public history into a temporary directory, pins the selected release tag's commit, verifies source identity and channel branch membership, and runs its staged user\-local installer. A normal upgrade retains a newer installed version rather than silently downgrading. An explicit channel switch may select an older release and prints a downgrade warning. This replaces only the program: it cannot undo data/schema changes made by newer code. Stop active clients and retain suitable encrypted backups before a downgrade. Source\-checkout updates remain a separate \fBgit pull\fR/review task.
+.PP
+Stable public versions currently use \fB1.6.N\fR; development versions use \fB1.7.N.dev0\fR with GitHub prerelease tags \fBv1.7.N.dev0\fR\&. Both retain full source identity in \fBoc\-box \-\-version\fR\&. Channel and version series are independent; stable can later move to 1.7 without becoming devel. Only extras supported by the selected target are retained; current stable 1.6 does not support \fB\-\-with\-tui\fR\&.
 .PP
 The installer stages a complete release under \fB~/\:.local/\:share/\:oc\-box/\:releases/\:\fR, including license and manuals, before switching the launcher. New processes use the new version; active launchers keep their original release path and lazy\-load its original modules. Old release directories are retained and have no automatic garbage collection. \fBcurrent\fR and compatible top\-level installed paths point to the activated release. An older flat installation is migrated; its old manuals are preserved as \fBlegacy\-docs\fR\&. No workspaces or credentials are migrated/deleted.
 .PP
-Automatic updates are off by default. \fB\-\-auto\-update on\fR saves \fBauto_update: true\fR in the existing host oc\-box configuration, retaining settings such as \fBpass_env\fR\&. Normal installed \fBstart\fR launches check before Podman/workspace setup and, when updated, continue with the same arguments. No background daemon, active\-session update, or automatic check for list/status/terminal/reset/purge is introduced. Direct source\-checkout launches skip automatic updates. A concurrent check does not block another normal launcher. Network/download failures are reported and the normal launch continues with the installed version; explicit upgrade failures return nonzero. After enabling automatic updates you are trusting future code published to this development branch, not signed release artifacts.
+Automatic GitHub updates are off by default and follow the saved GitHub channel. \fB\-\-auto\-update on\fR saves \fBauto_update: true\fR in the existing host oc\-box configuration, retaining settings such as \fBpass_env\fR\&. Normal installed \fBstart\fR launches check before Podman/workspace setup and, when updated, continue with the same arguments. No background daemon, active\-session update, or automatic check for list/status/terminal/reset/purge is introduced. Direct source\-checkout launches skip automatic updates. A concurrent check does not block another normal launcher. Network/download failures are reported and the normal launch continues with the installed version; explicit upgrade failures return nonzero. \fB\-\-auto\-update on|off\fR cannot be combined with either channel selector or \fB\-\-check\fR; select a channel and enable automatic updates in separate commands. Enabling them trusts future releases on that channel, not signed release artifacts.
 .PP
 Fetch/checkout/install subprocesses have a clean, positive\-allowlisted environment. Global/system Git config, helpers, hooks, external protocols, provider tokens, SSH agents, and user proxy variables are not used by the public download. HTTPS is required; shell commands or a custom upstream URL are not accepted. Use manual source installation for a reviewed alternate deployment. Updates inside a container are refused because its private HOME is not the host installation. Git is required for public updates; build tools are not.
+.PP
+Exact \fBv1.6.60\fR needs one plain \fBoc\-box upgrade\fR to obtain channel support before using the new flags. Pre\-feature 1.7 installations must rerun the channel\-aware bootstrap, since their updater may retain an ahead\-of\-master build. Neither bridge requires workspace reset or session reimport. See \fBdocs/\:update\-channels.md\fR for migration and publication policy.
 .SS secrets
 .PP
 Manage an optional encrypted credential vault on the host. This command never starts Podman or copies secrets into the development environment. V1's legacy env\-file default is unchanged. V2 workspaces without an explicit credential policy use this global vault first: all current entries are delivered on each normal owning start/reset/import/web, including the first project launch. Use the literal \fBsecrets\fR command first, followed by one action and, for set or remove, an uppercase environment name. Values and passphrases are accepted only through masked controlling\-terminal prompts, never argv, stdin, or environment password settings. Host\-only; do not run it inside a development container.
@@ -497,9 +507,9 @@ oc\-box \-\-status \-\-json > status.json
 Print oc\-box version, author Paulo Dias and email, OpenAI coding\-assistant contribution, GPL\-3.0\-or\-later licensing, and source commit. No Podman or workspace is required. Use alone, without lifecycle selectors/options.
 .SS \-\-version
 .PP
-Print oc\-box's commit\-derived version and exit without Podman. The format is \fB1.6.N+gHASH\fR, with N the full\-history commit count minus 29 (the original 1.0.0 baseline). Each later commit advances N; shallow history cannot supply a release identity. Tracked uncommitted changes add \fB\&.dirty\fR\&. Untracked files do not. Installed copies retain their installation\-time identity in \fBbuild\-info.json\fR; reinstall to update it. This is separate from the host OpenCode version matched inside containers. Use alone, for example: \fBoc\-box \-\-version\fR\&.
+Print oc\-box's commit\-derived version and exit without Podman. Current stable format is \fB1.6.N+gHASH\fR; development format is \fB1.7.N.dev0+gHASH\fR, with N the full\-history commit count minus 29 (the original 1.0.0 baseline). Each later commit advances N; shallow history cannot supply a release identity. Tracked uncommitted changes add \fB\&.dirty\fR\&. Untracked files do not. Installed copies retain their installation\-time identity in \fBbuild\-info.json\fR; reinstall to update it. This is separate from the host OpenCode version matched inside containers. Use alone, for example: \fBoc\-box \-\-version\fR\&.
 .PP
-The OpenCode V2\-compatible 1.5 series and the 1.6 refactoring series retain the same commit\-derived patch count; a first published patch is not required to be zero. Installed older copies keep their original 0.1/1.0/1.5 identity. PyPI distribution metadata uses only \fB1.6.N\fR, because public PyPI versions cannot contain the local \fB+gHASH\fR suffix. Its packaged build\-info still includes the full source identity displayed by this command, so the exact Git commit is retained even in a wheel/source distribution installed without Git. Existing 0.1/1.0 installations retain their original embedded identity until upgraded through their usual channel. The absolute commit count remains in metadata for upgrade ordering; no workspace reset or database migration is required for the version\-series transition.
+The OpenCode V2\-compatible 1.5 series and the 1.6 refactoring series retain the same commit\-derived patch count; a first published patch is not required to be zero. Installed older copies keep their original 0.1/1.0/1.5 identity. PyPI distribution metadata uses \fB1.6.N\fR or \fB1.7.N.dev0\fR, because public PyPI versions cannot contain the local \fB+gHASH\fR suffix. Its packaged build\-info still includes the full source identity displayed by this command, so the exact Git commit is retained even in a wheel/source distribution installed without Git. Existing 0.1/1.0 installations retain their original embedded identity until upgraded through their usual channel. The absolute commit count remains in metadata for older\-updater compatibility; no workspace reset or database migration is required for the version\-series transition.
 .SS \-\-distro NAME
 .PP
 Choose a supported distro for a new environment. The default matches the host ID when supported; openSUSE Tumbleweed/Slowroll use Tumbleweed, other openSUSE variants use Leap, and unknown hosts fall back to Tumbleweed. The image is a distribution userland, not an exact clone of host packages or snapshot date. Changing an existing workspace requires \fBreset \-\-distro NAME\fR\&.
@@ -512,10 +522,16 @@ oc\-box reset \-\-project ~/devel/demo \-\-distro debian
 .fi
 .SS \-\-check
 .PP
-With \fBupgrade\fR, report whether the public GitHub commit differs from the installed version without installing it. Returns success when a version is available or the installation is current; it is not an update\-available exit code. Network errors return nonzero. Cannot be combined with \fB\-\-auto\-update\fR, workspace selectors, or other commands. Example: \fBoc\-box upgrade \-\-check\fR\&.
+With \fBupgrade\fR, preview the selected published release without installing it or changing the saved channel. May be combined with \fB\-\-stable\fR or \fB\-\-devel\fR\&. Returns success when a version is available or the installation is current; it is not an update\-available exit code. Network errors return nonzero. Cannot be combined with \fB\-\-auto\-update\fR, workspace selectors, or other commands. Example: \fBoc\-box upgrade \-\-check\fR\&.
+.SS \-\-stable
+.PP
+With \fBupgrade\fR, explicitly select published stable releases from \fBmaster\fR (not unpublished branch HEAD). A successful selection is saved for that installation owner unless \fB\-\-check\fR is given. Mutually exclusive with \fB\-\-devel\fR and \fB\-\-auto\-update on|off\fR; rejected on every other command, including implicit start. An explicit switch to an older stable release warns about the downgrade and does not roll back workspace/session state. Example: \fBoc\-box upgrade \-\-stable\fR\&.
+.SS \-\-devel
+.PP
+With \fBupgrade\fR, explicitly select published development prereleases from \fBdevel\fR, not arbitrary development commits. A successful selection is saved for that installation owner unless \fB\-\-check\fR is given. Uses the same PyPI project for package\-managed installations. Mutually exclusive with \fB\-\-stable\fR and \fB\-\-auto\-update on|off\fR; rejected on every other command, including implicit start. Example: \fBoc\-box upgrade \-\-devel \-\-check\fR\&.
 .SS \-\-auto\-update on|off
 .PP
-With \fBupgrade\fR, persistently enable or disable automatic updates before normal installed launches. The default is off. This setting itself performs no download or installation and preserves other keys in \fB~/\:.config/\:oc\-box/\:config.json\fR (or its XDG equivalent). Cannot be combined with \fB\-\-check\fR or workspace actions. Example: \fBoc\-box upgrade \-\-auto\-update on\fR\&.
+With \fBupgrade\fR, persistently enable or disable automatic updates before normal installed launches. The default is off. This setting itself performs no download or installation and preserves other keys in \fB~/\:.config/\:oc\-box/\:config.json\fR (or its XDG equivalent). Follows the saved GitHub release channel; it does not select one. Cannot be combined with \fB\-\-check\fR, \fB\-\-stable\fR, \fB\-\-devel\fR or workspace actions. Package\-managed installations reject \fBon\fR; \fBoff\fR gives manager guidance without changing GitHub settings. Example: \fBoc\-box upgrade \-\-auto\-update on\fR\&.
 .SS \-\-new
 .PP
 Start a new root conversation while retaining the same container and files. Use with start (the default) or reset. Mutually exclusive with \fB\-\-resume\fR and \fB\-\-import\-session\fR\&. Example: \fBoc\-box \-\-project ~/\:devel/\:demo \-\-new\fR\&.
@@ -873,7 +889,9 @@ Separate password creation minimums can be saved in the same JSON object:
 .PP
 Each defaults to 8 and accepts an integer from 8 to 1024. They set a minimum character count, not an exact size; all passphrases remain bounded to 1024 UTF\-8 bytes. \fB\-\-min\-passphrase\-length N\fR overrides the relevant setting for one creation/change. Invalid policy fails before vault unlock or backup lifecycle changes. Existing passwords and recipient\-encrypted backups do not consult these creation settings. Preserve your other keys when editing this file.
 .PP
-The same JSON object can include \fB"auto_update": true\fR to opt in to anonymous GitHub checks/installation before normal installed launches, or use \fBoc\-box upgrade \-\-auto\-update on\fR\&. The setting is off by default and is not forwarded into the container. \fBOC_BOX_UPDATE_CHECKED=1\fR is an internal one\-launch guard used when restarting the host launcher after automatic installation; it prevents recursion, not authentication or a workspace identity override.
+The same JSON object can include \fB"auto_update": true\fR to opt in to anonymous GitHub checks/installation before normal installed launches, or use \fBoc\-box upgrade \-\-auto\-update on\fR\&. The setting is off by default and is not forwarded into the container. A successful explicit channel selection saves the GitHub choice as \fBupdate_channel\fR (\fBstable\fR or \fBdevel\fR), or a package\-owner\-specific choice under \fBpackage_update_channels\fR\&. Missing choices default to stable. Use \fBupgrade \-\-stable\fR/\fB\-\-devel\fR rather than copying an owner key between installations; \fB\-\-check\fR does not write these settings. Channel settings preserve unrelated keys and are not workspace credential policies.
+.PP
+\fBOC_BOX_UPDATE_CHECKED=1\fR is an internal one\-launch guard used when restarting the host launcher after automatic installation; it prevents recursion, not authentication or a workspace identity override.
 .PP
 Forwarded credential/custom environment values are passed through the Podman client's environment, not embedded in its process arguments. They are still accessible to container processes and same\-user environment inspection. Copied configuration and auth can also contain secrets; only supply credentials the agent should use. See SECURITY.md for the documented trust boundary.
 .SS Native V2 provider and MCP environment references
@@ -1159,7 +1177,7 @@ The framework's OS package is normally \fBbash\-completion\fR on all seven suppo
 .PP
 GitHub/source installs place it in \fB~/\:.local/\:share/\:bash\-completion/\:completions/\:oc\-box\fR and refresh it on upgrades. They also retain a release\-local copy at \fBcompletions/\:oc\-box\fR\&. Wheels contain the same package resource and install another copy under their Python environment's \fBshare/\:bash\-completion/\:completions/\:oc\-box\fR; uv/pipx private environments may not be on Bash's autoload search path, so use either activation method above. From a source checkout, \fBsource completions/\:oc\-box\fR works directly in Bash.
 .PP
-Completion suggests commands, context\-appropriate options, vault actions, distros/aliases, doctor features, auto\-update and credential\-mode choices. Credential modes include \fBenv\fR, \fBselected\fR, and \fBvault\fR; \fB\-\-no\-vault\fR is offered for start/reset/web only (including the default start context). Completion does not inspect the OpenCode major version or whether a service is already active; the command itself rejects V1 or attached\-client use of \fB\-\-no\-vault\fR\&. \fB\-\-project\fR completes directories; backup archive inputs, \fB\-\-output\fR, and \fB\-\-identity\fR complete paths, including spaces. Both \fB\-\-option VALUE\fR and \fB\-\-option=VALUE\fR are supported. Press Tab after \fBoc\-box \fR or \fBoc\-box backup \-\-\fR to see candidates. Completion uses only Bash builtins and local pathname expansion: it does not run oc\-box on each Tab, query Podman, contact providers, read vault contents, or guess passwords, credential names, session/workspace IDs, or model identifiers.
+Completion suggests commands, context\-appropriate options, vault actions, distros/aliases, doctor features, upgrade channel selectors, auto\-update and credential\-mode choices. Credential modes include \fBenv\fR, \fBselected\fR, and \fBvault\fR; \fB\-\-no\-vault\fR is offered for start/reset/web only (including the default start context). Completion does not inspect the OpenCode major version or whether a service is already active; the command itself rejects V1 or attached\-client use of \fB\-\-no\-vault\fR\&. \fB\-\-project\fR completes directories; backup archive inputs, \fB\-\-output\fR, and \fB\-\-identity\fR complete paths, including spaces. Both \fB\-\-option VALUE\fR and \fB\-\-option=VALUE\fR are supported. Press Tab after \fBoc\-box \fR or \fBoc\-box backup \-\-\fR to see candidates. Completion uses only Bash builtins and local pathname expansion: it does not run oc\-box on each Tab, query Podman, contact providers, read vault contents, or guess passwords, credential names, session/workspace IDs, or model identifiers.
 .SS Python package installations
 .PP
 Selected releases are available at https://pypi.org/project/oc\-box/. Choose one package\-managed CLI installation, not system pip:
@@ -1189,10 +1207,13 @@ On later visits, activate it again or call \fB~/\:.venvs/\:oc\-box/\:bin/\:oc\-b
 .PP
 Podman, OpenCode, Linux/cgroup configuration, and device drivers are external host requirements, not Python dependencies. Package installation never creates the curl installer's \fB~/\:.local/\:share/\:oc\-box\fR release tree or a competing global wrapper. pipx/uv expose the package's console entrypoint in their normal bin directory. \fBpython \-m oc_box\fR is also available inside the package environment.
 .PP
-Upgrade through the owner of the installation:
+\fBoc\-box upgrade\fR delegates to the verified owner of the installed environment; channel selectors and \fB\-\-check\fR also work for packages. Direct manager commands remain available:
 .PP
 .nf
 .fam C
+oc\-box upgrade \-\-check
+oc\-box upgrade \-\-devel
+oc\-box upgrade \-\-stable
 pipx upgrade oc\-box
 uv tool upgrade oc\-box
 # Inside the installed virtual environment:
@@ -1200,7 +1221,7 @@ python \-m pip install \-\-upgrade oc\-box
 .fam T
 .fi
 .PP
-The regular GitHub/curl installer and updater remain supported. Both channels read the same workspace registry, projects, and private containers. If several launchers exist, use \fBcommand \-v oc\-box\fR to check which PATH entry is selected; avoid keeping conflicting launchers in the same bin location. Source commits continue to publish on GitHub independently of selected PyPI releases.
+The regular GitHub/curl installer and updater remain supported. Both methods read the same workspace registry, projects, and private containers. If several launchers exist, use \fBcommand \-v oc\-box\fR to check which PATH entry is selected; avoid keeping conflicting launchers in the same bin location. Source commits continue to publish on GitHub independently of selected PyPI releases.
 .PP
 Wheels include runtime scripts, prebuilt manuals, license/notice, and source metadata in the isolated \fBoc_box\fR namespace. Manuals also install under the Python environment's \fBshare/\:man/\:man1\fR and \fBshare/\:info\fR directories; tool\-manager environments are not necessarily in the host readers' default search path. For example, after activating the relevant environment:
 .PP
@@ -1214,13 +1235,23 @@ info \-\-file "$VIRTUAL_ENV/share/info/oc\-box.info"
 No source checkout, setuptools, documentation build tools, or third\-party Python runtime dependency is required to use an installed wheel. For building or publishing, see CONTRIBUTING.md: GitHub's \fBpublish.yml\fR workflow uses the \fBpypi\fR environment and PyPI Trusted Publishing without long\-lived upload tokens.
 .SS GitHub/curl installations
 .PP
-One\-line installation from the public GitHub branch requires curl, Git, and Python 3.10+ already available on the host. It installs oc\-box, not Podman or host OpenCode, and executes the downloaded installer as your user:
+One\-line installation of a published stable GitHub release requires curl, Git, and Python 3.10+ already available on the host. It installs oc\-box, not Podman or host OpenCode, and executes the downloaded installer as your user:
 .PP
 .nf
 .fam C
 curl \-fsSL \-\-proto '=https' \-\-tlsv1.2 https://raw.githubusercontent.com/groopcd/oc\-box/master/install.sh | sh
 .fam T
 .fi
+.PP
+The bootstrap defaults to stable. Pass \fBsh \-s \-\- \-\-stable\fR explicitly, or use \fBsh \-s \-\- \-\-devel\fR to select a published development prerelease. It supports \fB\-\-with\-vault\fR alongside either channel selector:
+.PP
+.nf
+.fam C
+curl \-fsSL \-\-proto '=https' \-\-tlsv1.2 https://raw.githubusercontent.com/groopcd/oc\-box/master/install.sh | sh \-s \-\- \-\-devel \-\-with\-vault
+.fam T
+.fi
+.PP
+\fB\-\-stable\fR and \fB\-\-devel\fR cannot be combined. Current stable 1.6 does not have a \fB\-\-with\-tui\fR option; development support is separate. Channel\-aware bootstrap selects published releases, not whichever commit happens to be branch HEAD.
 .PP
 To inspect before execution instead of piping to a shell:
 .PP

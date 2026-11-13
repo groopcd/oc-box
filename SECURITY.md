@@ -301,21 +301,27 @@ not an incremental store or running-process checkpoint.
 
 ## Installation and updates
 
-The curl bootstrap and `oc-box upgrade` trust the code published at the public
-`https://github.com/groopcd/oc-box` master branch over HTTPS. This is not a signed
-release or reproducible-build verification scheme. Review the installer or use
-a reviewed source checkout if you need to inspect code before execution.
+The curl bootstrap and `oc-box upgrade` trust releases published at the public
+`https://github.com/groopcd/oc-box` repository over HTTPS. Stable releases are
+associated with `master`; explicitly selected development prereleases are
+associated with `devel`. Neither channel installs unpublished moving HEAD.
+The bootstrap entrypoint itself is downloaded code and must also be trusted.
+This is not a signed release or reproducible-build verification scheme. Review
+the installer or use a reviewed source checkout if you need to inspect code
+before execution.
 
 Upgrades use an anonymous HTTPS Git fetch in a temporary HOME with global/system
 Git config, credential helpers, hooks, and non-HTTPS Git transports disabled.
 Provider/publishing tokens, shell/loader hooks, and arbitrary host environment
-variables are not inherited. The fetched commit is pinned and checked, with full
-history for the version count. Its installer then runs as the host user with a
+variables are not inherited. Anonymous bounded release discovery precedes the
+fetch. The release tag's commit and channel branch membership are verified, with
+full history for the version count. Its installer then runs as the host user with a
 clean environment to stage the new program and prebuilt manuals in `~/.local`.
 No sudo, GitHub token, project script, or submodule is needed. A compromise of
 the upstream account/source is still a software-supply-chain risk.
 
-Automatic updates are explicit opt-in and run only before normal installed
+Automatic GitHub updates are explicit opt-in, follow the installation's saved
+channel (stable if none), and run only before normal installed
 launches, never while an agent is working. Failed network checks fall back to
 the installed version. Installation validates its source files and stages a
 complete versioned copy before switching the launcher. Old running launchers
@@ -327,10 +333,25 @@ do not modify project source checkouts, workspace registries, private container
 volumes, or OpenCode credentials. A host-container boundary is not bypassed to
 update the host: use the host terminal.
 
+`--check` previews a channel without installation or preference changes.
+An explicit channel switch can select an older version and warns about the
+downgrade. It does not roll back workspace/session state or reverse schema
+changes made by newer code. Retained old release directories are not data
+backups. Keep suitable encrypted backups and check downgrade compatibility.
+Root and container upgrade invocations are refused before network, manager,
+or settings changes.
+
 Python-package installs use a separate `oc_box` namespace and packaged resource
 marker. They do not execute the GitHub self-updater or write the source
-installer's global wrapper/release tree. Upgrade them through pipx, uv, or pip
-in their environment. The build workflow and PyPI publishing job are separate;
+installer's global wrapper/release tree. Explicit `oc-box upgrade` delegates
+only after verifying the owning pipx, uv tool, or dedicated virtual environment;
+ambiguous/system/user-site ownership refuses with manager guidance. Source
+editable installs must update their checkout separately. Manager execution is
+an explicit host operation, not a background package updater. Package channel
+preferences are isolated from the GitHub preference; package automatic updates
+remain disabled and never change GitHub automatic-update settings.
+Stable and `.dev0` releases use the same `oc-box` PyPI project.
+The build workflow and PyPI publishing job are separate;
 only the latter receives GitHub OIDC permissions and exchanges them for PyPI's
 short-lived upload credential. No permanent PyPI token is required. Publishing
 is limited to selected reviewed releases/manual dispatches, not pull requests.

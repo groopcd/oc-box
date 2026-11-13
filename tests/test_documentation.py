@@ -101,6 +101,7 @@ class DocumentationTests(unittest.TestCase):
             "CONTRIBUTING.md",
             "SECURITY.md",
             "docs/cli.md",
+            "docs/update-channels.md",
             "docs/opencode-2.md",
         ):
             with self.subTest(name=name):

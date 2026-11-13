@@ -28,6 +28,42 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
+### Update-channel gates
+
+Stable/devel select published releases, not moving branch HEAD, across both
+GitHub/curl and package-owned installations. Preserve separate coverage for:
+
+- CLI mutual exclusion, upgrade-only selectors (including implicit start),
+  read-only `--check`, channel dispatch and root/container refusal before any
+  network, manager, or preference changes (`tests/test_upgrade_cli.py`).
+- Anonymous bounded release discovery, final/prerelease classification, highest
+  public-version selection, tag/commit/branch verification, no silent downgrade,
+  explicit downgrade warning, unchanged preferences on failure/preview, and
+  saved per-owner channel choices. Keep old updater/installer bridge callers.
+- Verified pipx/uv/dedicated-venv ownership, ambiguous/system/user-site/editable
+  refusals, supported-extra retention, manager failure, same-project `.dev0`
+  selection, no GitHub installer or GitHub-setting changes from package paths,
+  and disabled automatic package updates. Ownership/discovery imports stay
+  stdlib-only.
+- Bootstrap default/explicit channel selection, selector conflict,
+  `--with-vault`, anonymous clean environment and target-supported extras;
+  stable 1.6 must not acquire a development-only `--with-tui` requirement.
+- Completion/parser parity and generated manuals, wheel/sdist source identity,
+  matching final/prerelease tags and publication branch checks.
+
+The initial channel-capable stable 1.6 release belongs on `master`; later 1.7
+development releases belong on `devel` without merging that line into master.
+An explicit program downgrade is not workspace/session rollback. Test it with
+private synthetic installations, never by resetting a real workspace.
+
+Channel publication retains every existing source/package/native, build-only,
+applicable seven-distro and external-host gate in the
+[publication checklist](../CONTRIBUTING.md#release-gate-and-publication-checklist).
+For runtime/history/lifecycle/credential changes, obtain relevant fresh host
+evidence on the clean integrated candidate; a development prerelease is not an
+exception. Channel fixtures, build-only artifacts and unit/native results add
+no live Podman acceptance. Earlier host evidence below stays unchanged.
+
 ### Ubuntu CI package bootstrap
 
 `tools/ci_ubuntu_apt.py` generates a temporary, CI-only APT configuration for

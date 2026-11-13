@@ -79,14 +79,15 @@ V2 launches need Linux anonymous-memory file support even with `--no-vault`.
 Older uv-managed Python builds without `os.memfd_create` use a compatible libc
 fallback; see [private capture troubleshooting](docs/cli.md#private-output-capture-and-uv-python).
 
-Install on the **host as your regular user**, without sudo. Choose one channel:
+Install on the **host as your regular user**, without sudo. Choose one
+installation method:
 
 | Method | Install | Update |
 | --- | --- | --- |
 | **pipx — isolated CLI from [PyPI](https://pypi.org/project/oc-box/)** | `pipx install oc-box` | `pipx upgrade oc-box` |
 | **uv — isolated CLI from PyPI** | `uv tool install oc-box` | `uv tool upgrade oc-box` |
 | **pip — inside an activated virtual environment** | `python -m pip install oc-box` | `python -m pip install --upgrade oc-box` |
-| **GitHub — latest development branch** | One-line installer below | `oc-box upgrade` |
+| **GitHub — published stable release by default** | One-line installer below | `oc-box upgrade` |
 
 ### Install from PyPI
 
@@ -131,7 +132,8 @@ no need for `sudo pip` or a system/user-site pip installation.
 
 ### Install from GitHub or source
 
-The existing one-line installer remains available for the latest GitHub code:
+The one-line installer selects the latest published **stable release**, not the
+moving branch HEAD:
 
 ```sh
 curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh
@@ -139,9 +141,20 @@ curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/
 
 This downloads and runs the public installer; it trusts the published GitHub
 source. To inspect it first, download `install.sh`, review it, and run `sh
-install.sh`. Git clones the full public branch history anonymously into a
+install.sh`. Git clones the full public history anonymously into a
 temporary directory so installed versions retain their accurate commit count.
 It does not use or save your GitHub/provider tokens.
+
+Select a published development prerelease explicitly, optionally with vault support:
+
+```sh
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-vault
+```
+
+The bootstrap accepts mutually exclusive `--stable` and `--devel`; no selector
+means stable. Current stable 1.6 has no `--with-tui` option; development support
+for that extra is separate. See [update channels](docs/update-channels.md) for
+release selection, saved preferences, and the older-version bridge.
 
 Alternatively, install from a source checkout:
 
@@ -154,23 +167,30 @@ oc-box --version
 
 ### Upgrade PyPI installations
 
-The PyPI and GitHub channels use the same code and workspace format. Choose
-the package manager that owns your CLI installation when upgrading it:
+PyPI and GitHub are installation methods, each supporting stable/devel release
+channels. A channel-aware `oc-box upgrade` delegates to the verified pipx, uv tool,
+or dedicated virtual environment that owns the running package installation:
 
 ```sh
+oc-box upgrade --check
+oc-box upgrade --stable
+oc-box upgrade --devel --check
+# Direct manager commands remain available:
 pipx upgrade oc-box
 uv tool upgrade oc-box
 # Inside the installation's virtual environment:
 python -m pip install --upgrade oc-box
 ```
 
-`oc-box upgrade` detects Python-package installations and prints the appropriate
-command; it does not overwrite package-managed files or create a competing
-GitHub-installed launcher. GitHub/curl installations retain `oc-box upgrade` and
-opt-in automatic GitHub updates. If both channels are installed, check
-`command -v oc-box` to select the intended launcher. PyPI package versions use
-`1.6.N`, while `oc-box --version` also records `+gHASH` for source provenance.
-Published PyPI releases are selected separately from ordinary GitHub commits.
+`oc-box upgrade` never overwrites package files through the GitHub installer or
+creates a competing launcher. An ambiguous/system/user-site installation refuses
+and gives manager guidance instead; editable installs must update their checkout.
+Package automatic updating remains disabled, and package commands do not change
+GitHub automatic-update settings. If both installation methods are present, check
+`command -v oc-box` to select the intended launcher. Stable PyPI versions use
+`1.6.N` and development releases use `1.7.N.dev0` in the same `oc-box` project;
+`oc-box --version` also records `+gHASH` for source provenance. Series numbers
+do not define a channel: a later stable 1.7 is possible.
 Packaged manuals are in the package's `docs/` and the tool environment's
 `share/man`/`share/info`; those directories may need explicit reader paths.
 
@@ -260,14 +280,24 @@ launchers before reinstalling. The pinned-release guarantee applies afterward.
 ### Upgrade from GitHub
 
 ```sh
-oc-box upgrade --check       # Check for a changed published version
-oc-box upgrade               # Install the current public GitHub master commit
+oc-box upgrade --check       # Preview the saved channel (stable by default)
+oc-box upgrade               # Install the selected channel's published release
+oc-box upgrade --devel --check  # Preview development without saving a change
+oc-box upgrade --devel       # Explicitly switch to published development releases
+oc-box upgrade --stable      # Switch back, with a warning if this is a downgrade
 oc-box upgrade --auto-update on
 oc-box upgrade --auto-update off
 ```
 
-Automatic updates are **opt-in**. When enabled, normal installed `oc-box` starts
-check GitHub before opening a workspace, install a changed version, and continue
+Stable releases come from `master`; development prereleases come from `devel`.
+Neither channel follows unpublished branch commits. An explicit successful
+channel selection is saved per installation owner; no saved choice means stable.
+`--check` previews without installing or changing preferences. Channel selectors
+apply only to `upgrade` and cannot be combined with `--auto-update on|off`.
+
+Automatic GitHub updates are **opt-in** and follow the saved channel. When
+enabled, normal installed `oc-box` starts check before opening a workspace,
+install a changed release, and continue
 with the same arguments. Network/update failures print a message and continue
 with the installed version. There is no background daemon or update during an
 active session. Informational commands, maintenance terminals, reset/purge, and
@@ -275,11 +305,18 @@ direct source-checkout launches do not perform automatic checks.
 
 Upgrades replace only the installed launcher/modules/manuals. They do not pull
 into or change a source checkout, reset containers, delete workspaces, touch
-provider credentials, or change the host OpenCode version. A locally installed
-commit ahead of the published branch is retained. No GitHub token is required;
-updates use the fixed public HTTPS upstream without global Git config, helpers,
-hooks, or forwarded environment secrets. This follows the development branch,
-not signed release artifacts; see [SECURITY.md](SECURITY.md).
+provider credentials, or change the host OpenCode version. A normal upgrade does
+not silently downgrade. An explicit channel switch can install an older release,
+with a warning: it is **not a rollback of workspace/session state**. No GitHub
+token is required; updates use the fixed public HTTPS upstream without global
+Git config, helpers,
+hooks, or forwarded environment secrets. Published releases are not signed
+artifacts; see [SECURITY.md](SECURITY.md).
+
+**Older launchers:** exact `v1.6.60` needs one plain `oc-box upgrade` first to
+obtain channel support; its old parser does not accept the new flags.
+Pre-feature 1.7 builds must rerun the channel-aware bootstrap to select a
+published release. Do not reset a workspace to change the launcher channel.
 
 ## Quick start
 
@@ -772,8 +809,9 @@ info --file "$HOME/.local/share/info/oc-box.info"
 
 Readers are host packages (`man` and `info` on openSUSE). See
 [CONTRIBUTING.md](CONTRIBUTING.md) to regenerate the manuals from `docs/cli.md`.
-`oc-box --version` uses `1.6.N+gHASH`. The 1.5 and 1.6 series retain N's original 1.0.0
-baseline (full-history commit count minus 29), so commits continue advancing N
+Stable `oc-box --version` uses `1.6.N+gHASH`; development uses `1.7.N.dev0+gHASH`.
+Channels and version series are independent. The 1.5 and 1.6 series retain N's
+original 1.0.0 baseline (full-history commit count minus 29), so commits continue advancing N
 automatically rather than restarting at zero. Installed copies retain their
 source version until upgraded or reinstalled. Existing 0.1/1.0 installations
 upgrade through their usual channel; no workspace reset or history migration is
