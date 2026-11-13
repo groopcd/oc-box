@@ -2,7 +2,7 @@ name: Package and source checks
 
 on:
   push:
-    branches: [master, 'feature/**']
+    branches: [master, devel, 'feature/**']
   pull_request:
 
 permissions:

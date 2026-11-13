@@ -10,6 +10,7 @@ import zipfile
 
 from oc_box import installation, oc_box
 from tools import check_package
+from tools.check_release import source_identity
 
 APP = Path(__file__).resolve().parents[1]
 
@@ -21,6 +22,8 @@ class PackagingTests(unittest.TestCase):
             "distribution_version": "1.6.1",
             "commit": "abcdef0" * 5 + "abcde",
             "commit_count": 30,
+            "release_channel": "stable",
+            "dirty": False,
         }
         wheel_names = {
             "oc_box/" + name
@@ -40,6 +43,7 @@ class PackagingTests(unittest.TestCase):
             "NOTICE",
             "completions/oc-box",
             "build-info.json",
+            "PKG-INFO",
             *(
                 path.relative_to(APP).as_posix()
                 for directory in ("src", "tests", "tools", "docs")
@@ -57,6 +61,9 @@ class PackagingTests(unittest.TestCase):
                     "opencode_compat.py",
                     "opencode_v2_io.py",
                     "workspace_service.py",
+                    "version_info.py",
+                    "build-info.json",
+                    "distribution.json",
                     "docs/cli.md",
                     "docs/opencode-2.md",
                     "docs/oc-box.1",
@@ -75,6 +82,9 @@ class PackagingTests(unittest.TestCase):
                     "tests/test_ci_ubuntu_apt.py",
                     "tests/smoke_session_sync_v2.py",
                     "tests/smoke_v2.py",
+                    "tools/check_release.py",
+                    "tests/test_release_channels.py",
+                    "src/oc_box/version_info.py",
                 )
             ),
         )
@@ -95,20 +105,47 @@ class PackagingTests(unittest.TestCase):
                         )
                         for name in sorted(wheel_names):
                             if kind != "wheel" or name != omitted:
+                                contents = ""
+                                if name.endswith("build-info.json"):
+                                    contents = json.dumps(build)
+                                elif name == "oc_box/version_info.py":
+                                    contents = (
+                                        'VERSION_SERIES = "1.6"\n'
+                                        'RELEASE_CHANNEL = "stable"\n'
+                                        "VERSION_BASE_COMMIT_COUNT = 29\n"
+                                    )
+                                elif name == "oc_box/distribution.json":
+                                    contents = json.dumps(
+                                        {
+                                            "installer": "python-package",
+                                            "name": "oc-box",
+                                            "version": "1.6.1",
+                                        }
+                                    )
                                 archive.writestr(
                                     name,
-                                    json.dumps(build)
-                                    if name.endswith("build-info.json")
-                                    else "",
+                                    contents,
                                 )
                     with tarfile.open(source, "w:gz") as archive:
                         for name in sorted(source_names):
                             if kind != "sdist" or name != omitted:
-                                content = (
-                                    json.dumps(build).encode()
-                                    if name == "build-info.json"
-                                    else b""
-                                )
+                                content = b""
+                                if name == "build-info.json":
+                                    content = json.dumps(
+                                        {
+                                            key: value
+                                            for key, value in build.items()
+                                            if key != "distribution_version"
+                                        }
+                                    ).encode()
+                                elif name == "src/oc_box/version_info.py":
+                                    content = (
+                                        b'VERSION_SERIES = "1.6"\n'
+                                        b'RELEASE_CHANNEL = "stable"\n'
+                                        b"VERSION_BASE_COMMIT_COUNT = 29\n"
+                                    )
+                                elif name == "PKG-INFO":
+                                    content = b"Name: oc-box\nVersion: 1.6.1\n"
                                 member = tarfile.TarInfo("oc_box-1.6.1/" + name)
                                 member.size = len(content)
                                 archive.addfile(member, io.BytesIO(content))
@@ -122,6 +159,61 @@ class PackagingTests(unittest.TestCase):
                         self.assertEqual(
                             str(error.exception), omitted.removeprefix("oc_box/")
                         )
+
+    def test_artifact_channel_grammar_and_provenance_matrix(self):
+        for channel in ("stable", "devel"):
+            source = (
+                'VERSION_SERIES = "1.7"\n'
+                f'RELEASE_CHANNEL = "{channel}"\n'
+                "VERSION_BASE_COMMIT_COUNT = 29\n"
+            )
+            public = "1.7.23" + (".dev0" if channel == "devel" else "")
+            build = {
+                "version": public + "+gabcdef0",
+                "commit": "abcdef0" * 5 + "abcde",
+                "commit_count": 52,
+                "release_channel": channel,
+                "dirty": False,
+            }
+            with self.subTest(channel=channel):
+                check_package.check_build_identity(build, source, public)
+                check_package.check_build_identity(
+                    {**build, "dirty": True, "version": build["version"] + ".dirty"},
+                    source,
+                    public,
+                )
+            changes = (
+                {"release_channel": "stable" if channel == "devel" else "devel"},
+                {"commit_count": 53},
+                {"commit_count": True},
+                {"commit": "b" * 40},
+                {"dirty": "false"},
+                {"version": public + "+gwrong"},
+            )
+            for change in changes:
+                with self.subTest(channel=channel, change=change):
+                    with self.assertRaises(AssertionError):
+                        check_package.check_build_identity(
+                            {**build, **change}, source, public
+                        )
+            for invalid in (
+                "1.7.23.dev1",
+                "1.7.23rc1",
+                "1.7.23a1",
+                "1.7.23.post1",
+                "1.7.23+local",
+            ):
+                with self.subTest(channel=channel, invalid=invalid):
+                    with self.assertRaises(AssertionError):
+                        check_package.check_build_identity(build, source, invalid)
+        for identity in (
+            'VERSION_SERIES = "1.7"\nRELEASE_CHANNEL = "rc"\nVERSION_BASE_COMMIT_COUNT = 29\n',
+            'VERSION_SERIES = "1.7"\nRELEASE_CHANNEL = "stable"\nVERSION_BASE_COMMIT_COUNT = 30\n',
+            'VERSION_SERIES = "1.7"\nRELEASE_CHANNEL = "stable"\nVERSION_BASE_COMMIT_COUNT = True\n',
+        ):
+            with self.subTest(identity=identity):
+                with self.assertRaises(ValueError):
+                    source_identity(identity)
 
     def test_console_entrypoint_preserves_readable_error_and_interrupt_handling(self):
         with (

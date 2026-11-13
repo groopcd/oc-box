@@ -2,7 +2,7 @@ name: Distro dependency checks
 
 on:
   push:
-    branches: [master, 'feature/**']
+    branches: [master, devel, 'feature/**']
   pull_request:
   workflow_dispatch:
 

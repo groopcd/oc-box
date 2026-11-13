@@ -29,6 +29,9 @@ class VersionTests(unittest.TestCase):
         baseline = patch.object(version, "VERSION_BASE_COMMIT_COUNT", 1)
         baseline.start()
         self.addCleanup(baseline.stop)
+        channel = patch.object(version, "RELEASE_CHANNEL", "stable")
+        channel.start()
+        self.addCleanup(channel.stop)
         self.git_env = {
             **os.environ,
             "GIT_AUTHOR_NAME": "Fixture",
@@ -57,6 +60,7 @@ class VersionTests(unittest.TestCase):
         self.git("commit", "-m", "First")
         first = version.get_version_info(self.root)
         self.assertEqual(first["commit_count"], 1)
+        self.assertEqual(first["release_channel"], "stable")
         self.assertTrue(first["version"].startswith(version.VERSION_SERIES + ".0+g"))
         self.assertEqual(version.public_version(first), version.VERSION_SERIES + ".0")
         source.write_text("second")
@@ -121,6 +125,49 @@ class VersionTests(unittest.TestCase):
         self.assertEqual(before["version"].replace("1.5.", "1.6.", 1), after["version"])
         for name in ("commit", "commit_count", "dirty"):
             self.assertEqual(before[name], after[name])
+
+    def test_devel_identity_uses_same_patch_count_and_source_commit(self):
+        self.git("init")
+        (self.root / "source").write_text("fixture")
+        self.git("add", "source")
+        self.git("commit", "-m", "Fixture")
+        stable = version.get_version_info(self.root)
+        with patch.object(version, "RELEASE_CHANNEL", "devel"):
+            devel = version.get_version_info(self.root)
+            self.assertEqual(
+                version.public_version(devel), version.public_version(stable) + ".dev0"
+            )
+            (self.root / "source").write_text("modified")
+            dirty = version.get_version_info(self.root)
+            self.assertEqual(dirty["version"], devel["version"] + ".dirty")
+        self.assertEqual(devel["release_channel"], "devel")
+        self.assertEqual(devel["version"], stable["version"].replace("+g", ".dev0+g"))
+        for field in ("commit", "commit_count", "dirty"):
+            self.assertEqual(stable[field], devel[field])
+        # A Git-less installed development release retains its source identity,
+        # even when read by stable-series code.
+        with patch.object(version, "source_root", return_value=self.root / "installed"):
+            installed = self.root / "installed"
+            installed.mkdir()
+            (installed / "build-info.json").write_text(json.dumps(devel))
+            self.assertEqual(version.get_version_info(installed), devel)
+
+    def test_channel_is_not_an_environment_override_and_unknown_source_fails(self):
+        with patch.dict(
+            os.environ, {"RELEASE_CHANNEL": "devel", "OC_BOX_RELEASE_CHANNEL": "devel"}
+        ):
+            self.assertEqual(
+                version.get_version_info(self.root)["release_channel"], "stable"
+            )
+        with patch.object(version, "RELEASE_CHANNEL", "candidate"):
+            with self.assertRaisesRegex(ValueError, "Unknown source release channel"):
+                version.get_version_info(self.root)
+        with patch.object(version, "RELEASE_CHANNEL", "devel"):
+            unknown = version.get_version_info(self.root)
+            self.assertEqual(
+                unknown["version"], version.VERSION_SERIES + ".0.dev0+unknown"
+            )
+            self.assertEqual(unknown["release_channel"], "devel")
 
     def test_installed_copy_keeps_source_version_without_git(self):
         home = self.root / "home"

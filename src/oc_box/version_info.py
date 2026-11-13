@@ -10,6 +10,8 @@ else:
     from paths import source_root
 
 VERSION_SERIES = "1.6"
+# A source-controlled identity, never an environment/build-time override.
+RELEASE_CHANNEL = "stable"
 # Retain the original stable patch-count baseline across minor-series changes.
 # Absolute counts still order upgrades from installed 0.1/1.0-series launchers.
 VERSION_BASE_COMMIT_COUNT = 29
@@ -24,8 +26,17 @@ def public_version(build):
     return build["version"].split("+", 1)[0]
 
 
+def source_version(patch):
+    """Derive the public identity from this source's tracked release channel."""
+    if RELEASE_CHANNEL not in ("stable", "devel"):
+        raise ValueError("Unknown source release channel")
+    suffix = ".dev0" if RELEASE_CHANNEL == "devel" else ""
+    return f"{VERSION_SERIES}.{patch}{suffix}"
+
+
 def get_version_info(root):
     root = source_root(root)
+    unknown_version = source_version(0) + "+unknown"
     if (root / ".git").exists():
 
         def git(*args):
@@ -47,11 +58,12 @@ def get_version_info(root):
             commit = git("rev-parse", "HEAD")
             dirty = bool(git("status", "--porcelain", "--untracked-files=no"))
             return {
-                "version": f"{VERSION_SERIES}.{patch}+g{commit[:7]}"
+                "version": f"{source_version(patch)}+g{commit[:7]}"
                 + (".dirty" if dirty else ""),
                 "commit": commit,
                 "commit_count": count,
                 "dirty": dirty,
+                "release_channel": RELEASE_CHANNEL,
             }
         except (OSError, ValueError, subprocess.SubprocessError):
             pass
@@ -62,10 +74,11 @@ def get_version_info(root):
     except (OSError, ValueError):
         pass
     return {
-        "version": f"{VERSION_SERIES}.0+unknown",
+        "version": unknown_version,
         "commit": None,
         "commit_count": None,
         "dirty": False,
+        "release_channel": RELEASE_CHANNEL,
     }
 
 

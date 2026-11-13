@@ -6,6 +6,7 @@ the source distribution without version-bump files or local-version suffixes.
 
 import json
 from pathlib import Path
+import re
 import shutil
 import sys
 
@@ -24,6 +25,26 @@ if BUILD.get("commit_count") is None or BUILD.get("commit") is None:
         "Building oc-box requires full Git history or embedded source-distribution build metadata."
     )
 PUBLIC_VERSION = version.public_version(BUILD)
+if (
+    BUILD.get("release_channel") != version.RELEASE_CHANNEL
+    or type(BUILD["commit_count"]) is not int
+    or BUILD["commit_count"] < version.VERSION_BASE_COMMIT_COUNT
+    or not isinstance(BUILD["commit"], str)
+    or not re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", BUILD["commit"])
+    or type(BUILD.get("dirty")) is not bool
+    or BUILD["version"]
+    != (
+        version.source_version(
+            BUILD["commit_count"] - version.VERSION_BASE_COMMIT_COUNT
+        )
+        + "+g"
+        + BUILD["commit"][:7]
+        + (".dirty" if BUILD["dirty"] else "")
+    )
+):
+    raise RuntimeError(
+        "Build metadata does not match the tracked source channel and identity."
+    )
 
 
 class BuildPackage(build_py):

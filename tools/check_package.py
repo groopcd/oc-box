@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Verify built wheel/sdist contents and real isolated wheel CLI behavior.
 
-Run with a directory containing one wheel and sdist; needs no project checkout
+Run with a directory containing one wheel and sdist; needs no runtime package
 imports, credentials, OpenCode, or Podman. Installs only into a temporary venv.
 """
 
@@ -17,6 +17,30 @@ import tempfile
 import venv
 import zipfile
 
+if __package__:
+    from .check_release import source_identity
+else:
+    from check_release import source_identity
+
+
+def check_build_identity(build, source, version):
+    """Prove public/channel/source provenance, including sdist rebuild identity."""
+    series, channel, baseline = source_identity(source)
+    assert re.fullmatch(r"\d+\.\d+\.\d+(?:\.dev0)?", version), version
+    assert build.get("release_channel") == channel, "release_channel"
+    count = build.get("commit_count")
+    assert type(count) is int and count >= baseline, "commit_count"
+    commit = build.get("commit")
+    assert isinstance(commit, str) and re.fullmatch(
+        r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit
+    ), "commit"
+    assert type(build.get("dirty")) is bool, "dirty"
+    expected = f"{series}.{count - baseline}" + (".dev0" if channel == "devel" else "")
+    assert version == expected, "distribution_version"
+    assert build.get("version") == expected + "+g" + commit[:7] + (
+        ".dirty" if build["dirty"] else ""
+    ), "version"
+
 
 def check_archives(directory):
     """Validate distribution contents without installing or running the wheel."""
@@ -26,12 +50,15 @@ def check_archives(directory):
         raise ValueError("Expected exactly one wheel and source distribution")
     with zipfile.ZipFile(wheels[0]) as wheel:
         names = set(wheel.namelist())
-        metadata_path = next(
+        metadata_paths = [
             name for name in names if name.endswith(".dist-info/METADATA")
-        )
+        ]
+        assert len(metadata_paths) == 1, "wheel METADATA"
+        metadata_path = metadata_paths[0]
         metadata = BytesParser().parsebytes(wheel.read(metadata_path))
         version = metadata["Version"]
-        assert re.fullmatch(r"\d+\.\d+\.\d+", version), version
+        assert wheels[0].name.split("-")[:2] == ["oc_box", version], "wheel filename"
+        assert sources[0].name == f"oc_box-{version}.tar.gz", "sdist filename"
         assert metadata["Name"] == "oc-box"
         assert metadata["Requires-Python"] == ">=3.10"
         assert metadata["License-Expression"] == "GPL-3.0-or-later"
@@ -89,14 +116,25 @@ def check_archives(directory):
         )
         build = json.loads(wheel.read("oc_box/build-info.json"))
         assert build["distribution_version"] == version
-        assert build["version"].startswith(version + "+g")
+        version_source = wheel.read("oc_box/version_info.py").decode()
+        check_build_identity(build, version_source, version)
+        distribution = json.loads(wheel.read("oc_box/distribution.json"))
+        assert distribution == {
+            "installer": "python-package",
+            "name": "oc-box",
+            "version": version,
+        }, "distribution.json"
     with tarfile.open(sources[0], "r:gz") as source:
         root = source.getnames()[0].split("/", 1)[0]
+        assert root == "oc_box-" + version, "sdist root"
         build_file = source.extractfile(root + "/build-info.json")
         assert build_file is not None
         original = json.load(build_file)
-        assert original["commit"] == build["commit"]
-        assert original["commit_count"] == build["commit_count"]
+        assert original == {
+            name: value
+            for name, value in build.items()
+            if name != "distribution_version"
+        }, "sdist build-info.json"
         for name in (
             "pyproject.toml",
             "setup.py",
@@ -113,6 +151,8 @@ def check_archives(directory):
             "tests/plugin_bridge_fixture.mjs",
             "tests/copied_plugin_bytes.mjs",
             "tools/check_package.py",
+            "tools/check_release.py",
+            "tests/test_release_channels.py",
             "tools/ci_ubuntu_apt.py",
             "tools/test_v2_podman.py",
             "tools/migrate_host_plugins.py",
@@ -130,6 +170,7 @@ def check_archives(directory):
             "src/oc_box/plugin_compat.py",
             "src/oc_box/plugin_bridge.js",
             "src/oc_box/paths.py",
+            "src/oc_box/version_info.py",
             "docs/oc-box.info",
             "docs/opencode-2.md",
             "completions/oc-box",
@@ -137,6 +178,15 @@ def check_archives(directory):
             "NOTICE",
         ):
             assert root + "/" + name in source.getnames(), name
+        version_file = source.extractfile(root + "/src/oc_box/version_info.py")
+        assert version_file is not None
+        sdist_version_source = version_file.read().decode()
+        assert sdist_version_source == version_source, "version_info.py"
+        check_build_identity(original, sdist_version_source, version)
+        package_file = source.extractfile(root + "/PKG-INFO")
+        assert package_file is not None
+        package = BytesParser().parsebytes(package_file.read())
+        assert package["Name"] == "oc-box" and package["Version"] == version, "PKG-INFO"
     return wheels[0], build
 
 
