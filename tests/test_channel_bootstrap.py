@@ -57,6 +57,7 @@ class ChannelBootstrapTests(unittest.TestCase):
         self.real_git = shutil.which("git")
         self.git_log = self.root / "git.jsonl"
         self.api_log = self.root / "api.jsonl"
+        self.python_log = self.root / "python.jsonl"
         self.installed = self.root / "installer.json"
         self.api_spec = self.root / "api.json"
         self.discovery = {"latest": release("v1.6.51"), "pages": [[]]}
@@ -90,6 +91,7 @@ class ChannelBootstrapTests(unittest.TestCase):
             textwrap.dedent(
                 f"""\
                 import json, os, pathlib, subprocess, sys
+                # --with-tui in a comment does not mean this parser supports it.
                 source = pathlib.Path(__file__).parent
                 def git(*args):
                     return subprocess.check_output(
@@ -117,6 +119,13 @@ class ChannelBootstrapTests(unittest.TestCase):
         self.git("commit", "--quiet", "-am", "Moving master fixture")
         self.git("checkout", "--quiet", "-b", "devel")
         (self.remote / "identity").write_text("devel-published")
+        implementation = self.remote / "src/oc_box/install.py"
+        implementation.parent.mkdir(parents=True)
+        implementation.write_text(
+            'SUPPORTED_OPTION = "--with-tui"\n'
+            'raise RuntimeError("The capability probe must not execute installer code")\n'
+        )
+        self.git("add", "src/oc_box/install.py")
         self.git("commit", "--quiet", "-am", "Published development fixture")
         self.devel_commit = self.git("rev-parse", "HEAD")
         for tag in ("v1.7.52.dev0", "v1.7.9.dev0", "v1.7.10.dev0"):
@@ -154,6 +163,10 @@ class ChannelBootstrapTests(unittest.TestCase):
                     assert any(command in args for command in (
                         "rev-parse", "merge-base", "checkout",
                     )), "Unexpected Git command"
+                spec = json.loads(pathlib.Path({str(self.api_spec)!r}).read_text())
+                if "rev-parse" in args and "git_commit" in spec:
+                    sys.stdout.write(spec["git_commit"])
+                    sys.exit(0)
                 args = [{str(self.remote)!r} if arg == {UPSTREAM!r} else arg for arg in args]
                 result = subprocess.run(
                     [{self.real_git!r}, "-c", "protocol.file.allow=always", *args],
@@ -172,7 +185,11 @@ class ChannelBootstrapTests(unittest.TestCase):
                 f"""\
                 import io, json, os, pathlib, socket, sys
                 from urllib import error, request
-                if sys.argv[1:3] != ["-I", "-"]:
+                with pathlib.Path({str(self.python_log)!r}).open("a") as log:
+                    log.write(json.dumps({{
+                        "argv": sys.argv[1:], "env": dict(os.environ),
+                    }}) + "\\n")
+                if sys.argv[1:3] != ["-I", "-"] or sys.argv[3] not in ("stable", "devel"):
                     os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])
                 code = sys.stdin.read()
                 spec = json.loads(pathlib.Path({str(self.api_spec)!r}).read_text())
@@ -258,6 +275,7 @@ class ChannelBootstrapTests(unittest.TestCase):
     def assert_refused(self, result, message=None):
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertFalse(self.installed.exists())
+        self.assertFalse((self.home / ".local/bin/oc-box").exists())
         self.assertNotIn("synthetic-private-error", result.stderr)
         if message:
             self.assertIn(message, result.stderr)
@@ -290,6 +308,8 @@ class ChannelBootstrapTests(unittest.TestCase):
         self.assertEqual(installed["env"]["XDG_CONFIG_HOME"], str(self.config))
         self.assertEqual(installed["env"]["HOME"], str(self.home))
         self.assert_sanitized(installed["env"])
+        for call in self.records(self.python_log):
+            self.assert_sanitized(call["env"])
         api = self.records(self.api_log)
         self.assertEqual([call["url"] for call in api], [RELEASES + "/latest"])
         for call in api:
@@ -365,6 +385,8 @@ class ChannelBootstrapTests(unittest.TestCase):
         self.assertEqual(installed["count"], "3")
         self.assertEqual(installed["head"], "HEAD")
         self.assertEqual(installed["shallow"], "false")
+        for call in self.records(self.python_log):
+            self.assert_sanitized(call["env"])
         clone = next(
             call["argv"]
             for call in self.records(self.git_log)
@@ -376,12 +398,11 @@ class ChannelBootstrapTests(unittest.TestCase):
             [RELEASES + f"?per_page=100&page={page}" for page in (1, 2)],
         )
 
-    def test_invalid_options_and_stable_tui_refuse_before_discovery(self):
+    def test_invalid_and_contradictory_options_refuse_before_discovery(self):
         for args in (
             ("--stable", "--devel"),
             ("--devel", "--stable"),
-            ("--with-tui",),
-            ("--stable", "--with-tui", "--with-vault"),
+            ("--stable", "--with-tui", "--devel"),
             ("--branch", "foreign"),
             ("--release-version", "9.0.0"),
         ):
@@ -390,8 +411,95 @@ class ChannelBootstrapTests(unittest.TestCase):
                 self.assert_refused(result)
                 self.assertFalse(self.api_log.exists())
                 self.assertFalse(self.git_log.exists())
-                if "--with-tui" in args:
-                    self.assertIn("stable installers do not support", result.stderr)
+
+    def test_legacy_stable_without_tui_refuses_after_verified_checkout(self):
+        for args in (
+            ("--with-tui",),
+            ("--stable", "--with-tui", "--with-vault"),
+        ):
+            with self.subTest(args=args):
+                result = self.run_bootstrap(*args)
+                self.assert_refused(result, "does not support --with-tui")
+                self.assertTrue(self.api_log.exists())
+                commands = self.records(self.git_log)
+                self.assertTrue(any("merge-base" in call["argv"] for call in commands))
+                self.assertTrue(any("checkout" in call["argv"] for call in commands))
+                for call in self.records(self.python_log):
+                    self.assert_sanitized(call["env"])
+
+    def test_promoted_stable_accepts_tui_when_package_installer_supports_it(self):
+        self.git("merge", "--quiet", "--ff-only", self.devel_commit)
+        self.git("tag", "v1.7.52")
+        self.discovery["latest"] = release("v1.7.52")
+        result = self.run_bootstrap("--stable", "--with-tui")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = json.loads(self.installed.read_text())
+        self.assertEqual(
+            installed["argv"],
+            ["--stable", "--release-version", "1.7.52", "--with-tui"],
+        )
+        self.assertEqual(installed["commit"], self.devel_commit)
+
+    def test_tui_capability_falls_back_to_root_installer(self):
+        with (self.remote / "install.py").open("a") as installer:
+            installer.write('SUPPORTED_OPTION = "--with-tui"\n')
+        self.git("commit", "--quiet", "-am", "Root installer supports TUI")
+        self.git("tag", "v1.7.53")
+        self.discovery["latest"] = release("v1.7.53")
+        result = self.run_bootstrap("--with-tui")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(self.installed.read_text())["argv"],
+            ["--stable", "--release-version", "1.7.53", "--with-tui"],
+        )
+
+    def test_devel_tui_checks_package_installer_not_root_or_channel(self):
+        self.git("checkout", "--quiet", "devel")
+        with (self.remote / "install.py").open("a") as installer:
+            installer.write('SUPPORTED_OPTION = "--with-tui"\n')
+        (self.remote / "src/oc_box/install.py").write_text(
+            "# A comment mentioning --with-tui is not an option declaration.\n"
+            'DOCUMENTATION = "Mentioning --with-tui inside prose is not enough."\n'
+            'raise RuntimeError("Do not execute the installer to inspect it")\n'
+        )
+        self.git("commit", "--quiet", "-am", "Development installer without TUI")
+        self.git("tag", "v1.7.53.dev0")
+        self.discovery["pages"] = [[release("v1.7.53.dev0", prerelease=True)]]
+        self.assert_refused(
+            self.run_bootstrap("--devel", "--with-tui"), "does not support --with-tui"
+        )
+        self.assertTrue(
+            any("checkout" in call["argv"] for call in self.records(self.git_log))
+        )
+
+    def test_malformed_installer_capability_probe_refuses_without_execution(self):
+        self.git("checkout", "--quiet", "devel")
+        (self.remote / "src/oc_box/install.py").write_text(
+            'SUPPORTED_OPTION = "--with-tui"\nthis is not valid Python!\n'
+        )
+        self.git("commit", "--quiet", "-am", "Malformed development installer")
+        self.git("tag", "v1.7.53.dev0")
+        self.discovery["pages"] = [[release("v1.7.53.dev0", prerelease=True)]]
+        self.assert_refused(
+            self.run_bootstrap("--devel", "--with-tui"), "Cannot inspect"
+        )
+
+    def test_invalid_resolved_commit_ids_refuse_before_lineage_or_checkout(self):
+        for commit in (
+            "",
+            "a" * 39,
+            "a" * 41,
+            "A" * 40,
+            "--help",
+            "a" * 40 + "\n" + "b" * 40,
+            "a" * 39 + " ",
+        ):
+            with self.subTest(commit=commit):
+                self.discovery["git_commit"] = commit
+                self.assert_refused(self.run_bootstrap(), "commit ID is invalid")
+                for call in self.records(self.git_log):
+                    self.assertNotIn("merge-base", call["argv"])
+                    self.assertNotIn("checkout", call["argv"])
 
     def test_invalid_stable_release_never_clones(self):
         for record in (

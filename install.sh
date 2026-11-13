@@ -20,15 +20,11 @@ main() {
             --with-vault) with_vault=true ;;
             --with-tui) with_tui=true ;;
             *)
-                printf '%s\n' 'Usage: sh install.sh [--stable|--devel] [--with-vault] [--with-tui (devel only)]' >&2
+                printf '%s\n' 'Usage: sh install.sh [--stable|--devel] [--with-vault] [--with-tui (if supported by the selected release)]' >&2
                 exit 2
                 ;;
         esac
     done
-    if [ "$with_tui" = true ] && [ "$channel" != devel ]; then
-        printf '%s\n' '--with-tui requires --devel; stable installers do not support it.' >&2
-        exit 2
-    fi
     if [ "$(id -u)" = 0 ]; then
         printf '%s\n' 'Run the oc-box installer as your regular host user, without sudo.' >&2
         exit 1
@@ -145,12 +141,49 @@ PY
     public_git -C "$work/source" fetch --quiet --no-tags "$upstream" \
         "refs/tags/$tag:refs/tags/$tag"
     commit=$(public_git -C "$work/source" rev-parse --verify "refs/tags/$tag^{commit}")
+    case "$commit" in
+        ''|*[!0123456789abcdef]*)
+            printf '%s\n' 'Downloaded release commit ID is invalid; nothing was installed.' >&2
+            exit 1
+            ;;
+    esac
+    if [ "${#commit}" -ne 40 ]; then
+        printf '%s\n' 'Downloaded release commit ID is invalid; nothing was installed.' >&2
+        exit 1
+    fi
     if ! public_git -C "$work/source" merge-base --is-ancestor \
         "$commit" "refs/remotes/origin/$branch"; then
         printf 'Published release %s is not on the required %s branch; nothing was installed.\n' "$tag" "$branch" >&2
         exit 1
     fi
     public_git -C "$work/source" checkout --quiet --detach "$commit"
+    if [ "$with_tui" = true ]; then
+        # Features belong to the verified release, not its update channel.
+        # Inspect parser literals without importing or executing installer code.
+        env -i PATH="$PATH" HOME="$work" PYTHONNOUSERSITE=1 \
+            python3 -I - "$work/source" <<'PY'
+import ast
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1])
+implementation = source / "src/oc_box/install.py"
+if not implementation.exists():
+    implementation = source / "install.py"
+try:
+    tree = ast.parse(implementation.read_text(encoding="utf-8"))
+except (OSError, SyntaxError, UnicodeError):
+    sys.exit("Cannot inspect the selected release installer; nothing was installed.")
+if not any(
+    isinstance(node, ast.Constant) and node.value == "--with-tui"
+    for node in ast.walk(tree)
+):
+    sys.exit(
+        "The selected release installer does not support --with-tui; "
+        "nothing was installed."
+    )
+PY
+    fi
     set -- "--$channel" --release-version "$version"
     if [ "$with_vault" = true ]; then set -- "$@" --with-vault; fi
     if [ "$with_tui" = true ]; then set -- "$@" --with-tui; fi
