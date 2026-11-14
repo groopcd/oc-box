@@ -532,10 +532,16 @@ def result(
     require(primary is None or primary in CATEGORIES, "report-schema")
     require(all(item in CATEGORIES for item in secondary), "report-schema")
     require(
-        all(type(code) is int and -255 <= code <= 255 for code in exits),
+        len(exits) <= len(LAUNCH_STAGES)
+        and all(type(code) is int and -255 <= code <= 255 for code in exits),
         "report-schema",
     )
-    if primary is None and (set(checks) != CHECKS or not all(checks.values())):
+    if primary is None and (
+        set(checks) != CHECKS
+        or not all(checks.values())
+        or tuple(exits) != EXPECTED_EXITS
+        or stage != "complete"
+    ):
         primary = "missing-checks"
     return {
         "format": FORMAT,
@@ -546,6 +552,8 @@ def result(
         "native": native,
         "checks": checks,
         "launcher_exit_codes": list(exits),
+        "launcher_stages": list(LAUNCH_STAGES[: len(exits)]),
+        "expected_launcher_exit_codes": list(EXPECTED_EXITS),
         "primary_category": primary,
         "secondary_categories": list(secondary),
         "failure_trace": list(failure_trace),
@@ -1834,7 +1842,7 @@ def recovery_result(
     failure_trace=(),
     observations=None,
 ):
-    """Separate evidence: never add recovery claims to the retained 42-check report."""
+    """Separate evidence: never add recovery claims to the stable baseline report."""
     require(case in RECOVERY_CHECKS, "report-schema")
     require(
         stage
@@ -2816,7 +2824,7 @@ def parser():
     value.add_argument(
         "--history-recovery-case",
         choices=tuple(RECOVERY_CHECKS),
-        help="opt-in fresh recovery gate, separate from the unchanged default 42-check run",
+        help="opt-in fresh recovery gate, separate from the stable default 33-check run",
     )
     return value
 

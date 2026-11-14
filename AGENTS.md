@@ -71,7 +71,7 @@ their checkout ownership distinct from unrelated source and flat installations.
   Never clear an uncertain start without verified transition completion, resume
   work, refresh credentials, create replacement resources or infer host acceptance
   from local native/process fixtures. The focused host recovery gate is additional
-  to the retained 42-check history/readiness runner, not a relabeling of it.
+  to the stable 33-check history/readiness runner, not a relabeling of it.
 - `session_terminal.py`: native persistent V2 session shell PTY client with
   authenticated WebSocket framing, resize/checkpoint replay and Ctrl-] detach.
   Reuse the session terminal, never replace it with the mini chat interface.
@@ -290,6 +290,17 @@ docs/testing.md. Combined accepted scope is 60 scripted synthetic host checks
 real-provider, network-containment, exhaustive fault/race or native 2.2.7 host
 acceptance. Preserve the earlier failure; fix-branch integration and stable
 publication remain separately authorized/gated.
+
+The bounded stable 1.6 backport replays only e04535ab, 7f7915b5, d736bc1b,
+60df6697, 670480d6 and dcc04823 onto c336b419d5760c771d869de436ca6c328af8cc73.
+It retains VERSION_SERIES 1.6 and baseline 29, without the 1.7 TUI/sharing or
+archived-root automatic-resume features. Its default host harness retains the
+stable 33 checks and ordered exits [0,0,0,1,0]; the 12/six recovery gates remain
+separate. No new external-host acceptance exists for this backport or a later
+channel-integrated candidate. The historical 42+18 results above retain their
+exact d736bc1/60df669 identities and scopes, not acceptance of backported source.
+Freeze the integrated candidate and repeat relevant host history/recovery and
+lifecycle/vault gates before stable publication. No live Podman runs in oc-box.
 
 The global-vault fixture's initial host run failed during the first owning
 launch, not an accepted pass.

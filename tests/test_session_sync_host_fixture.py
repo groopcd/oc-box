@@ -403,8 +403,28 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             digest,
             native,
             exits=(0, 0, 0, 1, 0),
+            stage="complete",
         )
         self.assertEqual(report["status"], "PASS")
+        self.assertEqual(report["launcher_stages"], list(runner.LAUNCH_STAGES))
+        self.assertEqual(report["expected_launcher_exit_codes"], [0, 0, 0, 1, 0])
+        for exits, stage in (
+            ((), "complete"),
+            ((0, 0, 0, 1), "complete"),
+            ((0, 0, 0, 0, 0), "complete"),
+            ((0, 1, 0, 0, 0), "complete"),
+            (runner.EXPECTED_EXITS, "recovery-sync"),
+        ):
+            with self.subTest(exits=exits, stage=stage):
+                incomplete = runner.result(
+                    dict.fromkeys(runner.CHECKS, True),
+                    identity,
+                    digest,
+                    native,
+                    exits=exits,
+                    stage=stage,
+                )
+                self.assertEqual(incomplete["status"], "FAIL")
         self.assertIn(
             "transient completed-job row (not required or claimed)",
             report["not_covered"],
@@ -416,6 +436,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             ({}, "private-sentinel", (), ()),
             ({}, None, ("private-sentinel",), ()),
             ({}, None, (), (True,)),
+            ({}, None, (), (0,) * 6),
         ):
             with (
                 self.subTest(checks=checks, primary=primary),
@@ -432,6 +453,13 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 self.assertRaisesRegex(runner.Refusal, "report-schema"),
             ):
                 runner.result({}, bad, digest, native)
+        with self.assertRaisesRegex(runner.Refusal, "report-schema"):
+            runner.result(
+                {},
+                {**identity, "version": "1.7.51+g" + self.commit[:7]},
+                digest,
+                native,
+            )
 
     def test_error_categories_never_include_native_exception_contents(self):
         for error, expected in (
@@ -1568,13 +1596,17 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         identity = {
             "commit": self.commit,
             "commit_count": 80,
-            "version": "1.7.51+g" + self.commit[:7],
+            "version": "1.6.51+g" + self.commit[:7],
             "dirty": False,
             "sha256": {"src/oc_box/history_reader.py": "c" * 64},
         }
         native = {"version": "2.2.6", "sha256": "d" * 64}
         self.assertEqual(len(runner.CHECKS), 33)
         self.assertEqual(runner.EXPECTED_EXITS, (0, 0, 0, 1, 0))
+        self.assertEqual(
+            runner.LAUNCH_STAGES,
+            ("graph", "readiness", "background", "shell", "recovery-sync"),
+        )
         for case, count in (("snapshot", 12), ("stop-cancel", 6)):
             observations = {
                 "cancelled_pairs": 2,
