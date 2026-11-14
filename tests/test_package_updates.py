@@ -499,7 +499,19 @@ class ManagerSafetyTests(unittest.TestCase):
                 updates._manager(self.prefix, self.before, self.work, self.env)[2],
                 ["vault"],
             )
+            # uv records the exact interpreter selector written by our own
+            # delegation. It must remain reusable, not admit other interpreters.
+            receipt.write_text(
+                basic + "python = " + json.dumps(str(self.prefix / "bin/python")) + "\n"
+            )
+            self.assertEqual(
+                updates._manager(self.prefix, self.before, self.work, self.env)[2],
+                ["vault"],
+            )
             for value in (
+                basic + 'python = "/foreign/bin/python"\n',
+                basic + 'python = "3.13"\n',
+                basic + 'python = ["unverified"]\n',
                 basic + '[tool.options]\nindex-url = "https://private.invalid"\n',
                 basic + '[tool.options]\nresolution = "lowest"\n',
                 basic.replace('name="oc-box", extras=', 'name="other", extras='),

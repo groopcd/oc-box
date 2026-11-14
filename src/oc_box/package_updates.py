@@ -325,7 +325,8 @@ def _manager(prefix, before, work, env):
             requirements = tool["requirements"]
             if (
                 set(receipt) != {"tool"}
-                or set(tool) - {"requirements", "entrypoints", "options"}
+                or set(tool) - {"requirements", "entrypoints", "options", "python"}
+                or ("python" in tool and tool["python"] != str(prefix / "bin/python"))
                 or not _uv_options(tool.get("options", {}))
                 or len(requirements) != 1
                 or set(requirements[0]) - {"name", "extras", "specifier"}
