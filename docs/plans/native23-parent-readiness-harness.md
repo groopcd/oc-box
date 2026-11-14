@@ -61,6 +61,17 @@ child provider phases must not accidentally consume a new parent request as
 the next child phase. Determine and test actual native 2.3 ordering/notices;
 keep child background-running, completion-notice, wake and quiet safeguards.
 
+Private native observation found three child and two parent requests in that
+background stage. The first parent wake occurs while the shell job is running;
+the second follows the child's final acknowledgement. Both projected notices
+have `metadata.state = completed`, but their XML states are respectively
+`running` and `completed`. The running notice contains the idle marker plus
+native's actual shell summary; the final request retains that earlier frame.
+Match fresh notices to projected data and the bound child/command/result.
+Do not equate metadata state with XML state, require all retained frames to
+be completed, or discard prior foreground-stage parent history. These are
+private native observations, not host acceptance.
+
 ## Validation and host handoff
 
 Native preparation must invoke the corrected readiness/background methods and
