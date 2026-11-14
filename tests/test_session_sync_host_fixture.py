@@ -203,6 +203,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             "oc_box.workspace_service",
             "tools",
             "tools.test_global_vault_podman",
+            "tools.native_host_profile",
         ):
             for namespace in (False, True):
                 module = ModuleType(name)
@@ -1219,7 +1220,9 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
                 source.assert_not_called()
                 allocate.assert_not_called()
         loaded = SimpleNamespace(
-            fixture=SimpleNamespace(host_guard=Mock()),
+            fixture=SimpleNamespace(
+                host_guard=Mock(), NATIVE_VERSIONS=runner.NATIVE_VERSIONS
+            ),
             box=SimpleNamespace(DISTROS={"tumbleweed": None}),
             interactive=SimpleNamespace(
                 native_binary=lambda _path: self.source / "node_modules/.bin/opencode"
@@ -1589,6 +1592,183 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         value.timeout.diagnostic = "History wait timeout: phase=poll-delay; last complete observation: foreground=0, jobs-running=0, jobs-completed=0, jobs-error=0, jobs-cancelled=1."
         value.cancelled_pairs, value.elapsed, value.owner_closed = 2, 30, True
         return value
+
+    def test_exact_profiles_thread_to_current_harness_without_changing_default_checks(
+        self,
+    ):
+        old = self.harness()
+        current = runner.build_harness(
+            old.loaded, self.parent, old.binary, old.runner, native_version="2.3.0"
+        )
+        self.assertEqual(current.native["version"], "2.3.0")
+        self.assertEqual(current.native["path"], str(old.binary))
+        self.assertEqual(current.native["sha256"], runner.file_hash(old.binary))
+        self.assertEqual(len(runner.CHECKS), 33)
+        self.assertEqual(runner.EXPECTED_EXITS, (0, 0, 0, 1, 0))
+        self.assertIn("tools/native_host_profile.py", runner.DONORS)
+        for version in ("2.2.7", "2.3.1", "2"):
+            with self.subTest(version=version), self.assertRaises(runner.Refusal):
+                runner.Harness(
+                    old.loaded,
+                    self.parent,
+                    old.binary,
+                    old.runner,
+                    native_version=version,
+                )
+
+    def test_current_recovery_setup_holds_real_job_without_reload_or_release(self):
+        old = self.harness()
+        h = runner.RecoveryHarness(
+            old.loaded,
+            self.parent,
+            old.binary,
+            old.runner,
+            "snapshot",
+            native_version="2.3.0",
+        )
+        h.baseline_ids = {"ses_selected", "ses_baseline"}
+        h.box.session_state = Mock(return_value={"sessions": list(h.baseline_ids)})
+        h.f.verify_owned_resources = Mock(return_value={"Id": "c" * 64})
+        h.container_id = "c" * 64
+        h.owner = SimpleNamespace(
+            _history_source=SimpleNamespace(stop_token="synthetic")
+        )
+        h.provider = SimpleNamespace(requests=2, errors=0)
+        h.data = {"project": "/synthetic/project"}
+        h.box.container_project = lambda _data: "/synthetic/project"
+        job = {
+            "id": "job_held",
+            "sessionID": "ses_selected",
+            "kind": "shell",
+            "status": "running",
+        }
+        h.request = Mock(
+            side_effect=lambda method, route: {
+                "/api/session/active": {"data": {}},
+                "/api/experimental/job": {"data": [job]},
+            }[route]
+        )
+        h.export = Mock(return_value={"messages": [{"text": "FOREGROUND_IDLE_MARKER"}]})
+        h.metadata = lambda source=True: (
+            {"jobs": [["durable-held-row"]], "starts": "x"} if source else {"jobs": []}
+        )
+        gate = SimpleNamespace(command=lambda: "synthetic held shell", release=Mock())
+        with (
+            patch.object(runner, "FileGate", return_value=gate),
+            patch.object(runner, "Worker"),
+        ):
+            self.assertEqual(h.held_running("ses_selected"), 0)
+        self.assertTrue(h.provider.background["background"])
+        self.assertEqual(h.job, job)
+        self.assertEqual(h.retained_status, "running")
+        gate.release.assert_not_called()
+        self.assertTrue(all(call.args[0] == "GET" for call in h.request.call_args_list))
+        self.assertFalse(
+            any("reload" in call.args[1] for call in h.request.call_args_list)
+        )
+
+    def test_current_reproduction_requires_running_pairs_and_complete_original_timeout(
+        self,
+    ):
+        old = self.harness()
+        for defect in (
+            None,
+            "cancelled diagnostic",
+            "no pairs",
+            "short wait",
+            "owner alive",
+        ):
+            h = runner.RecoveryHarness(
+                old.loaded,
+                self.parent,
+                old.binary,
+                old.runner,
+                "snapshot",
+                native_version="2.3.0",
+            )
+            h.box.HistoryWaitTimeout = type("HistoryWaitTimeout", (Exception,), {})
+            h.timeout = h.box.HistoryWaitTimeout()
+            h.timeout.recovery_eligible = True
+            h.timeout.diagnostic = "History wait timeout: phase=poll-delay; last complete observation: foreground=0, jobs-running=1, jobs-completed=0, jobs-error=0, jobs-cancelled=0."
+            h.running_pairs, h.elapsed, h.owner_closed = 2, 30, True
+            if defect == "cancelled diagnostic":
+                h.timeout.diagnostic = h.timeout.diagnostic.replace(
+                    "jobs-running=1", "jobs-running=0"
+                )
+            elif defect == "no pairs":
+                h.running_pairs = 0
+            elif defect == "short wait":
+                h.elapsed = 1
+            elif defect == "owner alive":
+                h.owner_closed = False
+            with self.subTest(defect=defect):
+                if defect is None:
+                    h.reproduction()
+                else:
+                    with self.assertRaises(runner.Refusal):
+                        h.reproduction()
+
+    def test_current_recovery_report_does_not_relabel_cancelled_job_evidence(self):
+        identity = {
+            "commit": self.commit,
+            "commit_count": 80,
+            "version": "1.6.51+g" + self.commit[:7],
+            "dirty": False,
+            "sha256": {"src/oc_box/history_reader.py": "c" * 64},
+        }
+        native = {"version": "2.3.0", "sha256": "d" * 64, "path": "/synthetic/native"}
+        for case in runner.RECOVERY_CHECKS:
+            observations = {
+                "cancelled_pairs": 0,
+                "running_pairs": 2,
+                "native_client_exit": 1,
+                "restarts": int(case == "snapshot"),
+                "reader_leases": int(case == "snapshot"),
+                "prepare_calls": 0,
+                "auth_calls": 0,
+                "provider_requests": 2,
+                "shell_starts": 1,
+                "explicit_stop_exit_code": 0 if case == "stop-cancel" else None,
+                "recovery_calls": 1,
+                "snapshot_completed": int(case == "snapshot"),
+            }
+
+            def report(observed):
+                return runner.recovery_result(
+                    case,
+                    dict.fromkeys(runner.RECOVERY_CHECKS[case], True),
+                    identity,
+                    "e" * 64,
+                    native,
+                    exits=(0, 1),
+                    stage="complete",
+                    observations=observed,
+                )
+
+            current = report(observations)
+            self.assertEqual(current["status"], "PASS")
+            self.assertEqual(current["launcher_stages"], ["primer", "held_running"])
+            self.assertIn("2.3.0", current["scope"])
+            for missing in ("running_pairs", "native_client_exit"):
+                self.assertEqual(
+                    report({k: v for k, v in observations.items() if k != missing})[
+                        "status"
+                    ],
+                    "FAIL",
+                )
+            for key, wrong in (
+                ("running_pairs", 0),
+                ("cancelled_pairs", 2),
+                ("native_client_exit", 0),
+                ("restarts", 2),
+                ("reader_leases", 2),
+                ("prepare_calls", 1),
+                ("auth_calls", 1),
+                ("provider_requests", 3),
+            ):
+                self.assertEqual(
+                    report({**observations, key: wrong})["status"], "FAIL", key
+                )
 
     def test_recovery_reports_keep_default_evidence_separate_and_require_real_counts(
         self,
@@ -2091,6 +2271,57 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             h.observe_shutdown(owner)
         self.assertIs(raised.exception, error)
         self.assertFalse(h.closed.is_set())
+
+    def test_current_owner_shutdown_finishes_native_client_before_recovery_admission(
+        self,
+    ):
+        old = self.harness()
+        for exit_code in (1, 0, None):
+            h = runner.RecoveryHarness(
+                old.loaded,
+                self.parent,
+                old.binary,
+                old.runner,
+                "snapshot",
+                native_version="2.3.0",
+            )
+            h.stage, h.returned_at, h.data = "held_running", time.monotonic() - 30, {}
+            h.service.live_connection = lambda: None
+            h.service.socket_path = lambda *_: self.parent / "absent-socket"
+            owner = SimpleNamespace(
+                child=SimpleNamespace(returncode=0),
+                clients=0,
+                thread=SimpleNamespace(is_alive=lambda: False),
+                listener=SimpleNamespace(fileno=lambda: -1),
+                _history_timeout=object(),
+            )
+            calls = []
+
+            def close(actual):
+                self.assertIs(actual, owner)
+                self.assertFalse(h.closed.is_set())
+                calls.append("owner-closed")
+                return "actual-shutdown-result"
+
+            def join(timeout):
+                self.assertEqual(timeout, 10)
+                self.assertFalse(h.closed.is_set())
+                calls.append("native-client-finished")
+                return exit_code
+
+            h.raw_shutdown = close
+            h.client = SimpleNamespace(join=join)
+            with self.subTest(exit_code=exit_code):
+                if exit_code == 1:
+                    self.assertEqual(
+                        h.observe_shutdown(owner), "actual-shutdown-result"
+                    )
+                    self.assertTrue(h.closed.is_set())
+                else:
+                    with self.assertRaises(runner.Refusal):
+                        h.observe_shutdown(owner)
+                    self.assertFalse(h.closed.is_set())
+                self.assertEqual(calls, ["owner-closed", "native-client-finished"])
 
     def test_scheduler_probe_is_read_only_and_refuses_every_row_not_only_due_work(self):
         import sqlite3

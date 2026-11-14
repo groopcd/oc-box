@@ -4,7 +4,7 @@
 Usage from the repository root:
   python3 -B tests/smoke_global_vault_host_helpers.py --opencode-v2 /path/to/opencode
 
-Uses unmodified 2.2.6, exact fixture helpers and private synthetic state. Provider
+Uses an exact unmodified native profile, fixture helpers and private synthetic state. Provider
 transport alone is adapted to host loopback instead of the Podman gateway. No
 Podman, operator credentials/config/history, vault delivery, full backups or
 interactive TUI are used or certified. Every generated root is outside the
@@ -277,6 +277,7 @@ def main(argv=None):
     parser = Arguments(description=__doc__)
     parser.add_argument("--repo", type=Path, default=APP)
     parser.add_argument("--opencode-v2", type=Path, required=True)
+    parser.add_argument("--native-version", choices=("2.2.6", "2.3.0"), default="2.2.6")
     args = parser.parse_args(argv)
     phase = "PREPARE"
     old_umask = os.umask(0o077)
@@ -320,7 +321,7 @@ def main(argv=None):
         with fixture.private_output(), patch.dict(os.environ, isolated, clear=True):
             fixture.prepare_root(root, "tumbleweed")
             phase = "HOST_SEED"
-            fixture.prepare_native_cli(root, binary)
+            fixture.prepare_native_cli(root, binary, native_version=args.native_version)
             # Exact helper: direct native binary + native_env(root, '2') +
             # private bridge; never the selector that clears bridge auth.
             seed = fixture.seed_native_history(root, binary)
@@ -359,7 +360,7 @@ def main(argv=None):
                     "id": secrets.token_hex(16),
                     "home": str(home),
                     "project": str(root / "source-a"),
-                    "opencode_version": fixture.NATIVE_VERSION,
+                    "opencode_version": args.native_version,
                 }
                 # Production archive generation performs the real plugin-path
                 # rewrite and creates the generated Build helper/profile.
@@ -368,7 +369,7 @@ def main(argv=None):
                 for relative in (".local/share", ".local/state", ".cache"):
                     (home / relative).mkdir(parents=True, mode=0o700)
                 content = fixture.box.container_build_config(
-                    fixture.NATIVE_VERSION, home=str(home)
+                    args.native_version, home=str(home)
                 )
                 # Sole transport adaptation: no Podman gateway exists here.
                 # fixture_config, TOOL_SOURCE, MCP and NATIVE_PROBE are unchanged.
@@ -474,7 +475,10 @@ def main(argv=None):
                 {
                     "status": "passed",
                     "checks": checks,
-                    "native_version": fixture.NATIVE_VERSION,
+                    "native_version": args.native_version,
+                    "native": fixture.recorded_native(
+                        root, expected=args.native_version, binary=binary, verify=True
+                    ),
                     "source_identity": fixture.get_version_info(repo),
                     "session_id": ident,
                     "scope": (

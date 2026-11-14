@@ -40,7 +40,10 @@ DONORS = (
     "tools/test_global_vault_podman.py",
     "tools/test_v2_podman.py",
     "tools/test_interactive_podman.py",
+    "tools/native_host_profile.py",
 )
+# Keep discovery stdlib-only until the host guard and audited source import.
+NATIVE_VERSIONS = ("2.2.6", "2.3.0")
 CHECKS = frozenset(
     (
         "private_store",
@@ -519,8 +522,14 @@ def result(
     )
     require(
         isinstance(native, dict)
-        and set(native) == {"version", "sha256"}
-        and native["version"] == "2.2.6"
+        and set(native) in ({"version", "sha256"}, {"version", "sha256", "path"})
+        and native["version"] in NATIVE_VERSIONS
+        and (
+            "path" not in native
+            and native["version"] == "2.2.6"
+            or isinstance(native.get("path"), str)
+            and Path(native["path"]).is_absolute()
+        )
         and isinstance(native["sha256"], str)
         and re.fullmatch(r"[0-9a-f]{64}", native["sha256"]),
         "report-schema",
@@ -875,11 +884,16 @@ class PairObserver:
 
 
 class Harness:
-    def __init__(self, loaded, root, binary, runner):
+    def __init__(self, loaded, root, binary, runner, *, native_version="2.2.6"):
         self.loaded, self.f = loaded, loaded.fixture
         self.box, self.service = loaded.box, loaded.service
         self.root, self.binary, self.runner = root, binary, runner
-        self.native = {"version": self.f.NATIVE_VERSION, "sha256": file_hash(binary)}
+        require(native_version in NATIVE_VERSIONS, "invalid-options")
+        self.native = {
+            "version": native_version,
+            "path": str(binary),
+            "sha256": file_hash(binary),
+        }
         self.checks, self.exits, self.secondary = {}, [], []
         self.stage = "preparation"
         self.progress = lambda _name: None
@@ -1777,7 +1791,9 @@ class Harness:
         self.validate(initial=True)
         self.check("private_store")
         self.stage = "native-version"
-        self.f.prepare_native_cli(self.root, self.binary)
+        self.f.prepare_native_cli(
+            self.root, self.binary, native_version=self.native["version"]
+        )
         self.check("native_version")
         self.launch(self.graph)
         self.launch(self.readiness)
@@ -1852,6 +1868,7 @@ def recovery_result(
             "native-version",
             "primer",
             "cancelled",
+            "held_running",
             "complete",
         ),
         "report-schema",
@@ -1879,6 +1896,8 @@ def recovery_result(
         set(observations)
         <= {
             "cancelled_pairs",
+            "running_pairs",
+            "native_client_exit",
             "restarts",
             "reader_leases",
             "prepare_calls",
@@ -1906,13 +1925,25 @@ def recovery_result(
         "recovery_calls": 1,
         "snapshot_completed": int(case == "snapshot"),
     }
+    if native["version"] == "2.3.0":
+        expected["native_client_exit"] = 1
     if primary is None and (
         set(checks) != RECOVERY_CHECKS[case]
         or not all(checks.values())
         or tuple(exits) != (0, 1)
         or stage != "complete"
-        or type(observations.get("cancelled_pairs")) is not int
-        or observations["cancelled_pairs"] < 2
+        or type(
+            observations.get(
+                "cancelled_pairs" if native["version"] == "2.2.6" else "running_pairs"
+            )
+        )
+        is not int
+        or observations[
+            "cancelled_pairs" if native["version"] == "2.2.6" else "running_pairs"
+        ]
+        < 2
+        or native["version"] == "2.3.0"
+        and observations.get("cancelled_pairs") != 0
         or any(
             key not in observations or observations[key] != value
             for key, value in expected.items()
@@ -1936,11 +1967,16 @@ def recovery_result(
         "status": "PASS" if primary is None and not secondary else "FAIL",
         "checks": checks,
         "launcher_exit_codes": list(exits),
-        "launcher_stages": ["primer", "cancelled"][: len(exits)],
+        "launcher_stages": [
+            "primer",
+            "cancelled" if native["version"] == "2.2.6" else "held_running",
+        ][: len(exits)],
         "expected_launcher_exit_codes": [0, 1],
         "primary_category": primary,
         "observations": observations,
-        "scope": "Fresh synthetic external-host persisted-history recovery; native 2.2.6 only. Not interactive UI, inference, security or general lifecycle acceptance.",
+        "scope": "Fresh synthetic external-host persisted-history recovery; exact native "
+        + native["version"]
+        + " profile. Not interactive UI, inference, security or general lifecycle acceptance.",
         "observers": [
             "forwarding engine results",
             "forwarding recovery call and completion result",
@@ -2071,7 +2107,7 @@ class FileGate:
         code = (
             "import pathlib,sys,time\np=pathlib.Path(sys.argv[1])\n"
             "with (p/'starts').open('ab') as f:f.write(b'x')\n"
-            "deadline=time.monotonic()+90\n"
+            "deadline=time.monotonic()+180\n"
             "while not (p/'release').exists() and time.monotonic()<deadline:time.sleep(.02)\n"
             "assert (p/'release').exists()\nprint('SYNTHETIC_HISTORY_BG_DONE')\n"
         )
@@ -2087,9 +2123,8 @@ class FileGate:
 class RecoveryHarness(Harness):
     """Opt-in case using normal owning launches; no recovery implementation mocks."""
 
-    def __init__(self, loaded, root, binary, runner, case):
-        super().__init__(loaded, root, binary, runner)
-        require(self.native["version"] == "2.2.6", "native-changed")
+    def __init__(self, loaded, root, binary, runner, case, *, native_version="2.2.6"):
+        super().__init__(loaded, root, binary, runner, native_version=native_version)
         require(case in RECOVERY_CHECKS, "invalid-options")
         self.case = case
         self.closed = threading.Event()
@@ -2099,6 +2134,7 @@ class RecoveryHarness(Harness):
         self.reader_attempts = 0
         self.stop_observed = False
         self.prepares = self.auth = self.host_fences = self.cancelled_pairs = 0
+        self.running_pairs = 0
         self.source_fence = self.guards = False
         self.holder = self.stopper = self.stop_worker = self.client = None
         self.returned_at = None
@@ -2270,7 +2306,7 @@ class RecoveryHarness(Harness):
     def observe_api(self, box, data, connection, method, route, value=None, **options):
         response = self.raw_api(box, data, connection, method, route, value, **options)
         if (
-            self.stage == "cancelled"
+            self.stage in ("cancelled", "held_running")
             and self.returned_at is not None
             and not self.closed.is_set()
             and method == "GET"
@@ -2286,15 +2322,25 @@ class RecoveryHarness(Harness):
                     and jobs[0].get("id") == self.job["id"]
                     and jobs[0].get("sessionID") == self.job["sessionID"]
                     and jobs[0].get("kind") == "shell"
-                    and jobs[0].get("status") == "cancelled"
+                    and jobs[0].get("status") == self.retained_status
                 ):
-                    self.cancelled_pairs += 1
+                    if self.retained_status == "cancelled":
+                        self.cancelled_pairs += 1
+                    else:
+                        self.running_pairs += 1
                 self.idle_pair = False
         return response
 
     def observe_shutdown(self, owner):
         result = self.raw_shutdown(owner)
-        if self.stage == "cancelled":
+        if self.stage in ("cancelled", "held_running"):
+            if self.native["version"] == "2.3.0":
+                # The native run client waits for the held background job.
+                # Closing the real owner disconnects it naturally; finish that
+                # existing client BEFORE recovery can stop the whole container.
+                # Never kill/release the actual job or substitute an API result.
+                require(self.client is not None)
+                require(self.client.join(10) == 1, "launcher-exit")
             self.timeout = getattr(owner, "_history_timeout", None)
             self.elapsed = (
                 time.monotonic() - self.returned_at if self.returned_at else 0
@@ -2492,6 +2538,19 @@ class RecoveryHarness(Harness):
         self.check("explicit_stop_success")
 
     def cancelled(self, selected):
+        require(self.native["version"] == "2.2.6")
+        return self.retained_job(selected, reload_cancel=True)
+
+    def held_running(self, selected):
+        """2.3 drains jobs on reload: hold real work through the ordinary timeout."""
+        require(self.native["version"] == "2.3.0")
+        return self.retained_job(selected, reload_cancel=False)
+
+    @property
+    def retained_status(self):
+        return "cancelled" if self.native["version"] == "2.2.6" else "running"
+
+    def retained_job(self, selected, *, reload_cancel):
         self.control_env = dict(os.environ)
         require(set(self.box.session_state(self.path)["sessions"]) == self.baseline_ids)
         info = self.f.verify_owned_resources(self.root, self.data)
@@ -2530,8 +2589,9 @@ class RecoveryHarness(Harness):
         require("FOREGROUND_IDLE_MARKER" in json.dumps(self.export(selected)))
         self.job_rows = self.metadata()["jobs"]
         require(len(self.job_rows) == 1 and self.metadata()["starts"] == "x")
-        require(self.request("POST", "/api/location/reload") is None)
-        self.gate.release()
+        if reload_cancel:
+            require(self.request("POST", "/api/location/reload") is None)
+            self.gate.release()
 
         def cancelled_idle():
             active, jobs = inventory()
@@ -2539,7 +2599,9 @@ class RecoveryHarness(Harness):
                 active == {}
                 and len(jobs) == 1
                 and jobs[0].get("id") == self.job["id"]
-                and jobs[0].get("status") == "cancelled"
+                and jobs[0].get("sessionID") == selected
+                and jobs[0].get("kind") == "shell"
+                and jobs[0].get("status") == self.retained_status
             )
 
         self.until(cancelled_idle)
@@ -2577,13 +2639,19 @@ class RecoveryHarness(Harness):
         require(
             isinstance(self.timeout, self.box.HistoryWaitTimeout)
             and self.timeout.recovery_eligible is True
-            and self.cancelled_pairs >= 2
+            and (
+                self.cancelled_pairs >= 2
+                if self.native["version"] == "2.2.6"
+                else self.running_pairs >= 2 and self.cancelled_pairs == 0
+            )
             and self.elapsed >= 29
             and self.owner_closed
         )
         require(
             self.timeout.diagnostic.endswith(
                 "foreground=0, jobs-running=0, jobs-completed=0, jobs-error=0, jobs-cancelled=1."
+                if self.native["version"] == "2.2.6"
+                else "foreground=0, jobs-running=1, jobs-completed=0, jobs-error=0, jobs-cancelled=0."
             )
         )
 
@@ -2649,7 +2717,12 @@ class RecoveryHarness(Harness):
         self.stage = "private-store"
         self.validate(initial=True)
         self.stage = "native-version"
-        self.f.prepare_native_cli(self.root, self.binary, history_recovery=True)
+        self.f.prepare_native_cli(
+            self.root,
+            self.binary,
+            history_recovery=True,
+            native_version=self.native["version"],
+        )
         self.launch_case(self.primer, 0)
         # Native's supported path-only query does not construct a service or DB.
         # Pin its actual selector result, not an assumed native channel filename.
@@ -2685,7 +2758,12 @@ class RecoveryHarness(Harness):
         self.baseline_state = self.box.session_file(self.path).read_bytes()
         self.returned_at = None
         try:
-            self.launch_case(self.cancelled, 1)
+            callback = (
+                self.cancelled
+                if self.native["version"] == "2.2.6"
+                else self.held_running
+            )
+            self.launch_case(callback, 1)
         finally:
             finish_actions(
                 (
@@ -2764,6 +2842,8 @@ class RecoveryHarness(Harness):
     def observations(self):
         return {
             "cancelled_pairs": self.cancelled_pairs,
+            "running_pairs": self.running_pairs,
+            "native_client_exit": self.client.value if self.client else None,
             "restarts": len(self.starts),
             "reader_leases": self.reader_attempts,
             "prepare_calls": self.prepares,
@@ -2820,6 +2900,7 @@ def parser():
     value.add_argument("--work-dir", type=Path, required=True)
     value.add_argument("--temp-dir", type=Path)
     value.add_argument("--opencode-v2", type=Path, required=True)
+    value.add_argument("--native-version", choices=NATIVE_VERSIONS, default="2.2.6")
     value.add_argument("--distro", default="tumbleweed")
     value.add_argument(
         "--history-recovery-case",
@@ -2829,10 +2910,13 @@ def parser():
     return value
 
 
-def build_harness(loaded, root, binary, digest, recovery_case=None):
+def build_harness(
+    loaded, root, binary, digest, recovery_case=None, *, native_version="2.2.6"
+):
+    options = {} if native_version == "2.2.6" else {"native_version": native_version}
     if recovery_case is None:
-        return Harness(loaded, root, binary, digest)
-    return RecoveryHarness(loaded, root, binary, digest, recovery_case)
+        return Harness(loaded, root, binary, digest, **options)
+    return RecoveryHarness(loaded, root, binary, digest, recovery_case, **options)
 
 
 def main(argv=None):
@@ -2859,6 +2943,7 @@ def main(argv=None):
         require(file_hash(__file__) == runner_digest, "source-changed")
         f = loaded.fixture
         f.host_guard()
+        require(tuple(f.NATIVE_VERSIONS) == NATIVE_VERSIONS, "source-changed")
         require(args.distro in loaded.box.DISTROS, "invalid-options")
         binary = loaded.interactive.native_binary(args.opencode_v2)
         require(not binary.is_relative_to(loaded.source), "placement")
@@ -2877,7 +2962,12 @@ def main(argv=None):
         root.chmod(0o700)
         print("Retained history root: " + str(root), file=output)
         harness = build_harness(
-            loaded, root, binary, runner_digest, args.history_recovery_case
+            loaded,
+            root,
+            binary,
+            runner_digest,
+            args.history_recovery_case,
+            native_version=args.native_version,
         )
         harness.distro = args.distro
         harness.progress = lambda name: print(

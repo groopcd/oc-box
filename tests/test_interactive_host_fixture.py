@@ -79,7 +79,39 @@ class InteractiveHostFixtureTests(unittest.TestCase):
         self.addCleanup(manager.__exit__, None, None, None)
         return value
 
-    def prepare_native(self, root, binary):
+    def test_current_profile_secondary_requires_the_recorded_owner_version(self):
+        path, data = self.record()
+        data["opencode_version"] = "2.3.0"
+        box.atomic_json(path, data)
+        fixture.write_json_new(
+            self.root / "native-profile.json",
+            fixture.native_identity(self.binary, "2.3.0"),
+        )
+        metadata = self.root / "interactive.json"
+        metadata.unlink()  # Synthetic setup only; production never rewrites it.
+        ui.write_metadata(self.root, self.source, self.binary, native_version="2.3.0")
+        original = metadata.read_bytes()
+        self.assertEqual(
+            ui.validate_interactive(self.root, self.source, native_version="2.3.0"),
+            (self.root, self.binary),
+        )
+        with self.assertRaisesRegex(fixture.FixtureError, "native-selector"):
+            ui.validate_interactive(self.root, self.source)
+        self.assertEqual(metadata.read_bytes(), original)
+        self.assertEqual(
+            ui.parser()
+            .parse_args(
+                ["tui", "--fixture", str(self.root), "--native-version", "2.3.0"]
+            )
+            .native_version,
+            "2.3.0",
+        )
+
+    def prepare_native(self, root, binary, **options):
+        self.assertIn(
+            options.get("native_version", fixture.NATIVE_VERSION),
+            fixture.NATIVE_VERSIONS,
+        )
         for name in ("config", "data", "state", "cache"):
             (root / ("host-" + name + "-2")).mkdir(mode=0o700)
         fixture.write_json_new(root / "executables.json", {"2": str(binary)})
@@ -534,7 +566,7 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             patch.object(
                 fixture,
                 "check_native_version",
-                side_effect=lambda *a: order.append("native"),
+                side_effect=lambda *a, **kw: order.append("native"),
             ),
             patch.object(
                 fixture,
@@ -1031,7 +1063,8 @@ class InteractiveHostFixtureTests(unittest.TestCase):
             order.append("podman")
             return real_podman(root, binary)
 
-        def native(root, binary):
+        def native(root, binary, **options):
+            self.assertEqual(options, {"native_version": "2.2.6"})
             order.append("native")
             self.prepare_native(root, binary)
 

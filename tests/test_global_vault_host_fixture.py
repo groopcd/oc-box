@@ -23,6 +23,69 @@ spec.loader.exec_module(fixture)
 
 
 class GlobalVaultHostFixtureTests(unittest.TestCase):
+    def test_native_version_options_are_exact_and_keep_legacy_defaults(self):
+        self.assertEqual(fixture.parser().parse_args([]).native_version, "2.2.6")
+        self.assertEqual(
+            fixture.parser().parse_args(["--native-version", "2.3.0"]).native_version,
+            "2.3.0",
+        )
+        for version in ("2", "2.2.7", "2.3.1"):
+            with self.subTest(version=version), self.assertRaises(SystemExit):
+                fixture.parser().parse_args(["--native-version", version])
+
+    def test_current_selector_records_actual_version_path_and_hash_without_relabeling(
+        self,
+    ):
+        self.complete_fixture_metadata()
+        binary = Path(sys.executable).resolve()
+        with (
+            patch.object(
+                fixture, "check_native_version", return_value="2.3.0"
+            ) as probe,
+            patch.object(box, "run", return_value=SimpleNamespace(stdout="2.3.0\n")),
+        ):
+            fixture.prepare_native_cli(self.root, binary, native_version="2.3.0")
+        probe.assert_called_once_with(self.root, binary, "2", expected="2.3.0")
+        original = (self.root / "native-profile.json").read_bytes()
+        identity = fixture.recorded_native(
+            self.root, expected="2.3.0", binary=binary, verify=True
+        )
+        self.assertEqual(identity, fixture.native_identity(binary, "2.3.0"))
+        with self.assertRaisesRegex(fixture.FixtureError, "native-profile"):
+            fixture.recorded_native(self.root, expected="2.2.6")
+        with self.assertRaisesRegex(fixture.FixtureError, "native-profile"):
+            fixture.recorded_native(self.root, binary=Path("/another/native"))
+        self.assertEqual((self.root / "native-profile.json").read_bytes(), original)
+        self.assertEqual(fixture.NATIVE_VERSION, "2.2.6")
+
+    def test_source_retry_current_profile_requires_original_identity_and_boot(self):
+        path, data, _ = self.retained_source()
+        binary = Path(sys.executable).resolve()
+        data["opencode_version"] = "2.3.0"
+        box.atomic_json(path, data)
+        fixture.write_json_new(
+            self.root / "native-profile.json", fixture.native_identity(binary, "2.3.0")
+        )
+        before = fixture.source_evidence_digests(self.root, path)
+        self.assertIn("native-profile.json", before)
+        with patch.object(box, "run") as run:
+            fixture.validate_source_retry(self.root, native_version="2.3.0")
+            with self.assertRaises(fixture.FixtureError):
+                fixture.validate_source_retry(self.root)
+            (self.root / "podman-tmp/alive").write_bytes(
+                b"00000000-0000-0000-0000-000000000002\n"
+            )
+            with self.assertRaisesRegex(fixture.FixtureError, "retry-runtime-boot"):
+                fixture.validate_source_retry(self.root, native_version="2.3.0")
+        run.assert_not_called()
+        self.assertEqual(fixture.source_evidence_digests(self.root, path), before)
+
+    def test_legacy_evidence_cannot_be_promoted_to_current_profile(self):
+        self.retained_source()
+        with self.assertRaisesRegex(fixture.FixtureError, "native-profile"):
+            fixture.validate_source_retry(self.root, native_version="2.3.0")
+        self.assertFalse((self.root / "native-profile.json").exists())
+
     def setUp(self):
         preferred = Path("/tmp/opencode")
         temporary = tempfile.TemporaryDirectory(
@@ -972,7 +1035,7 @@ with patch.object(fixture,'host_guard'), patch.object(fixture,'diagnose',return_
 from unittest.mock import patch
 spec=importlib.util.spec_from_file_location('fixture',sys.argv[1])
 fixture=importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
-def fail(root,*args):
+def fail(root,*args,**kwargs):
     with fixture.first_launch_trace(root) as trace:
         with trace.checkpoint('config-reload'):
             raise KeyError(sys.argv[3])

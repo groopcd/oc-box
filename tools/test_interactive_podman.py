@@ -100,7 +100,13 @@ def parser():
     value.add_argument(
         "--opencode-v2",
         type=Path,
-        help="Explicit unmodified OpenCode 2.2.6; fresh owner only",
+        help="Explicit unmodified executable matching --native-version; fresh owner only",
+    )
+    value.add_argument(
+        "--native-version",
+        choices=fixture.NATIVE_VERSIONS,
+        default=fixture.NATIVE_VERSION,
+        help="Exact profile; secondary clients must select the original owner's version",
     )
     value.add_argument(
         "--distro",
@@ -212,7 +218,8 @@ def fresh_parent(path):
     return parent
 
 
-def write_metadata(root, source, binary):
+def write_metadata(root, source, binary, *, native_version=fixture.NATIVE_VERSION):
+    fixture.require(native_version in fixture.NATIVE_VERSIONS, "native-selector")
     fixture.write_json_new(
         root / "interactive.json",
         {
@@ -221,7 +228,7 @@ def write_metadata(root, source, binary):
             "projects": ["source-a"],
             "source": source,
             "native": {
-                "version": fixture.NATIVE_VERSION,
+                "version": native_version,
                 "path": str(binary),
                 "sha256": file_hash(binary),
                 "interpreter": sys.executable,
@@ -230,7 +237,7 @@ def write_metadata(root, source, binary):
     )
 
 
-def validate_interactive(root, source):
+def validate_interactive(root, source, *, native_version=fixture.NATIVE_VERSION):
     """File-only validation, including the full helper's selector/registry guards."""
     fixture.require(root.is_absolute(), "fixture-root")
     root = fixture.validate_fixture(root, allow_unrecorded=True)
@@ -253,7 +260,8 @@ def validate_interactive(root, source):
     fixture.require(
         isinstance(native, dict)
         and set(native) == {"version", "path", "sha256", "interpreter"}
-        and native["version"] == fixture.NATIVE_VERSION
+        and native["version"] == native_version
+        and native["version"] in fixture.NATIVE_VERSIONS
         and isinstance(native["path"], str)
         and Path(native["path"]).is_absolute()
         and isinstance(native["interpreter"], str)
@@ -261,6 +269,7 @@ def validate_interactive(root, source):
         "native-selector",
     )
     binary = native_binary(Path(native["path"]))
+    fixture.recorded_native(root, expected=native_version, binary=binary, verify=True)
     fixture.require(
         not binary.is_relative_to(root) and file_hash(binary) == native["sha256"],
         "native-changed",
@@ -383,19 +392,30 @@ def report_value(mode, source, outcome, category, code, state=None, secondary=()
 
 def save_report(root, mode, source, outcome, category, code, state=None, secondary=()):
     path = root / ("interactive-" + mode + "-" + secrets.token_hex(8) + "-report.json")
-    fixture.write_json_new(
-        path, report_value(mode, source, outcome, category, code, state, secondary)
-    )
+    value = report_value(mode, source, outcome, category, code, state, secondary)
+    # Native identity is immutable per owner; do not infer it from this client's
+    # defaults or relabel manual observations as native acceptance.
+    metadata = fixture.safe_path(root, "interactive.json", optional=True)
+    if metadata.exists():
+        value["native"] = fixture.private_json(root, "interactive.json")["native"]
+    fixture.write_json_new(path, value)
     print("Interactive-only report: " + str(path), flush=True)
 
 
-def print_commands(root):
+def print_commands(root, *, native_version=fixture.NATIVE_VERSION):
     command = shlex.join([sys.executable, "-B", str(Path(__file__).resolve())])
     print("Retained interactive-only root: " + str(root), flush=True)
     print("Wait for the owning TUI to be ready; in other HOST terminals:", flush=True)
     for mode in ("tui", "terminal", "web", "stop"):
         print(
-            "  " + command + " " + mode + " --fixture " + shlex.quote(str(root)),
+            "  "
+            + command
+            + " "
+            + mode
+            + " --fixture "
+            + shlex.quote(str(root))
+            + " --native-version "
+            + native_version,
             flush=True,
         )
     print(
@@ -420,7 +440,7 @@ def own(args, source):
     podman = Path(discovered).resolve(strict=True)
     root = Path(tempfile.mkdtemp(prefix=fixture.PREFIX + "interactive-", dir=parent))
     root.chmod(0o700)
-    print_commands(root)
+    print_commands(root, native_version=args.native_version)
     state = provider_state()
     outcome, category, code = "failed", "preparation", 1
     primary_failure = False
@@ -445,8 +465,12 @@ def own(args, source):
                 with fixture.private_output():
                     stack.enter_context(fixture.temporary_location(root, args.temp_dir))
                     fixture.validate_store(root)
-                    fixture.prepare_native_cli(root, binary)
-                    write_metadata(root, source, binary)
+                    fixture.prepare_native_cli(
+                        root, binary, native_version=args.native_version
+                    )
+                    write_metadata(
+                        root, source, binary, native_version=args.native_version
+                    )
                     port = stack.enter_context(provider(state))
                     fixture.write_json_new(
                         root / "config/opencode/opencode.json",
@@ -505,7 +529,9 @@ def attach(args, source):
     # All checks before engine access are file-only. In-flight owners may not
     # have populated fixture-ids.json yet; record only after full resource proof.
     with fixture.private_output():
-        root, binary = validate_interactive(args.fixture, source)
+        root, binary = validate_interactive(
+            args.fixture, source, native_version=args.native_version
+        )
         fixture.require_runtime_boot(root)
     outcome, category, code = "failed", "validation", 1
     try:
@@ -513,7 +539,9 @@ def attach(args, source):
             with fixture.temporary_location(root):
                 with fixture.private_output():
                     fixture.validate_store(root, allow_unrecorded=True)
-                    fixture.check_native_version(root, binary, "2")
+                    fixture.check_native_version(
+                        root, binary, "2", expected=args.native_version
+                    )
                     records = fixture.workspace_records(root)
                     fixture.require(set(records) == {"source-a"}, "workspace-allowlist")
                     path, data = records["source-a"]
