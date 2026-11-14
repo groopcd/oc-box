@@ -170,6 +170,8 @@ def check_archives(directory):
             "tests/copied_plugin_bytes.mjs",
             "tools/check_package.py",
             "tools/check_release.py",
+            "tools/check_release_artifacts.py",
+            "tests/test_release_artifacts.py",
             "tests/test_release_channels.py",
             "tools/ci_ubuntu_apt.py",
             "tools/test_v2_podman.py",

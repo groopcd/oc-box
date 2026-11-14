@@ -435,7 +435,13 @@ release CI. Keep published 1.6.60 and earlier tags/artifacts unchanged.
    Publishing to PyPI; do not start a second upload. Wait for successful build
    and publish jobs, including any environment approval. Download that run's
    `python-distributions` artifact and attach its exact wheel and sdist, plus a
-   `SHA256SUMS` file, to the GitHub Release.
+   `SHA256SUMS` file and `validated-identity.json`, to the GitHub Release. The
+   workflow revalidates the frozen clean source after testing/building, binds
+   both archives to its saved source identity, and checks existing package
+   assets against those exact bytes before publication. Conflicting assets
+   require investigation, never an automatic overwrite or silent replacement.
+   Only wheel/sdist files are passed to PyPI; the identity and checksum files
+   remain verification evidence.
 7. Download the public PyPI files and compare their hashes with the GitHub assets
    and checksum file. Re-run `tools/check_package.py DISTDIR --with-vault`, verify
    an isolated installed CLI reports the accepted full `+gHASH` identity, and

@@ -127,6 +127,12 @@ GitHub assets and the same project's PyPI files must agree. Do not select or
 advertise moving HEAD as a release. A later branch/evidence commit does not
 silently become an updater target.
 
+The publishing workflow retains the validated clean identity through testing
+and rechecks it against the final wheel and sdist. Existing GitHub package
+assets must match the built files by checksum. Its output bundle includes
+`validated-identity.json` and `SHA256SUMS`; only the verified distributions go
+to PyPI. Attach those same distributions and evidence to the GitHub release.
+
 See [the publication checklist](../CONTRIBUTING.md#release-gate-and-publication-checklist),
 [test strategy](testing.md), [CLI reference](cli.md#upgrade), and
 [security model](../SECURITY.md#installation-and-updates). This policy records

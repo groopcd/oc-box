@@ -29,7 +29,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
-      publish_validated: ${{ steps.release.outputs.publish_validated }}
+      publish_validated: ${{ steps.artifacts.outputs.publish_validated }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -63,14 +63,15 @@ jobs:
               if name.endswith('.py'):
                   py_compile.compile(str(source_file('.', name)), doraise=True)
           PY
-          python tools/check_release.py
           if [[ "$PUBLISH_REQUESTED" == true ]]; then
             test -n "$RELEASE_TAG"
             gh api --hostname github.com "repos/groopcd/oc-box/releases/tags/$RELEASE_TAG" \
               > "$RUNNER_TEMP/oc-box-release.json"
             python tools/check_release.py --publish --tag "$RELEASE_TAG" \
-              --release-json "$RUNNER_TEMP/oc-box-release.json"
-            echo 'publish_validated=true' >> "$GITHUB_OUTPUT"
+              --release-json "$RUNNER_TEMP/oc-box-release.json" \
+              > "$RUNNER_TEMP/oc-box-validated-identity.json"
+          else
+            python tools/check_release.py > "$RUNNER_TEMP/oc-box-validated-identity.json"
           fi
       - name: Run source regression tests
         run: '"$RUNNER_TEMP/oc-box-build/bin/python" -B -m unittest discover -s tests -v'
@@ -80,10 +81,31 @@ jobs:
           "$RUNNER_TEMP/oc-box-build/bin/python" -m twine check dist/*
       - name: Verify isolated package installation and resources
         run: python tools/check_package.py dist --with-vault
+      - name: Revalidate clean source and bind exact release artifacts
+        id: artifacts
+        env:
+          PUBLISH_REQUESTED: ${{ github.event_name == 'release' || inputs.publish }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          args=(dist --identity "$RUNNER_TEMP/oc-box-validated-identity.json")
+          if [[ "$PUBLISH_REQUESTED" == true ]]; then
+            gh api --hostname github.com "repos/groopcd/oc-box/releases/tags/$RELEASE_TAG" \
+              > "$RUNNER_TEMP/oc-box-release-final.json"
+            args+=(--release-json "$RUNNER_TEMP/oc-box-release-final.json")
+          fi
+          python tools/check_release_artifacts.py "${args[@]}"
+          if [[ "$PUBLISH_REQUESTED" == true ]]; then
+            echo 'publish_validated=true' >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: python-distributions
-          path: dist/*
+          path: |
+            dist/oc_box-*.whl
+            dist/oc_box-*.tar.gz
+            dist/validated-identity.json
+            dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 7
 
@@ -101,6 +123,39 @@ jobs:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: python-distributions
-          path: dist
+          path: release-artifacts
+      - name: Verify transferred identity and checksums; select only distributions
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import re
+          import shutil
+          bundle = Path("release-artifacts")
+          identity = json.loads((bundle / "validated-identity.json").read_text())
+          version = identity["distribution_version"]
+          assert isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+(?:\.dev0)?", version)
+          assert identity["publish_validated"] is True and identity["dirty"] is False
+          packages = {f"oc_box-{version}-py3-none-any.whl", f"oc_box-{version}.tar.gz"}
+          expected = packages | {"validated-identity.json"}
+          lines = (bundle / "SHA256SUMS").read_text().splitlines()
+          assert len(lines) == len(expected)
+          observed = set()
+          for line in lines:
+              digest, name = line.split("  ")
+              assert name in expected and name not in observed
+              assert re.fullmatch(r"[0-9a-f]{64}", digest)
+              assert hashlib.sha256((bundle / name).read_bytes()).hexdigest() == digest
+              observed.add(name)
+          assert observed == expected
+          assert {path.name for path in bundle.iterdir()} == expected | {"SHA256SUMS"}
+          destination = Path("dist")
+          destination.mkdir()
+          for name in sorted(packages):
+              shutil.copyfile(bundle / name, destination / name)
+          PY
       - name: Publish with PyPI Trusted Publishing
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
+        with:
+          packages-dir: dist/
