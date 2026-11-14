@@ -169,7 +169,18 @@ def native_env(root, major):
     return env
 
 
-def check_native_version(root, binary, major):
+def check_native_version(root, binary, major, *, expected=None):
+    # Existing dual-major fixtures retain their exact historical defaults.
+    # New profiles must opt in to a fixed supported release before any probe.
+    if expected is not None and major == "2":
+        from tools.native_host_profile import check_native_version as check_profile
+
+        return check_profile(root, binary, major, expected=expected)
+    if major not in NATIVE_VERSIONS:
+        raise ValueError("Unsupported native fixture major")
+    expected = NATIVE_VERSIONS[major] if expected is None else expected
+    if expected != NATIVE_VERSIONS[major]:
+        raise ValueError("Unsupported pinned native fixture release")
     result = box.run(
         [str(binary), "--version"],
         env=native_env(root, major),
@@ -182,11 +193,11 @@ def check_native_version(root, binary, major):
         found = compat.version(result.stdout)
     except ValueError as exc:
         raise ValueError(
-            f"Native fixture executable {binary} did not report a supported release version; expected {NATIVE_VERSIONS[major]}."
+            f"Native fixture executable {binary} did not report a supported release version; expected {expected}."
         ) from exc
-    if found != NATIVE_VERSIONS[major]:
+    if found != expected:
         raise ValueError(
-            f"Native fixture executable mismatch: expected {NATIVE_VERSIONS[major]}, detected {found}, path {binary}. No test container was started; check or reinstall this separate test executable."
+            f"Native fixture executable mismatch: expected {expected}, detected {found}, path {binary}. No test container was started; check or reinstall this separate test executable."
         )
     return found
 
