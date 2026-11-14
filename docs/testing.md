@@ -317,6 +317,45 @@ reviewed reports below), and that exact commit was published as stable v1.6.51.
 Mainline source updates and build-only distribution artifacts do not establish
 that acceptance or trigger a stable release by themselves.
 
+### Parented-readiness harness correction
+
+The first external current-native baseline attempt on clean
+`9a6e99ad01b3bf02e19edb3ec9d7ab3289d40f22` / `1.6.94+g9a6e99a`,
+runner SHA-256
+`96ae30ae0b6e9b726443c507ca17e128bb9ef91bb1dab8a751ceaa06f8516087`,
+failed during readiness with primary and secondary `worker-timeout`.
+Its report records 14 of 33 checks and only the graph launcher exit zero.
+It remains **failed evidence**, not partial acceptance of the full baseline.
+The retained store/report must not be moved, overwritten or replayed.
+
+A separately identified private native reproduction used the unchanged
+readiness method, real CLI/API inventories and production history waiter.
+Native 2.3 completed the child, projected a subagent-completion notice into
+the parent and woke the parent's foreground execution. The old one-request
+provider contract rejected parent requests before headers, causing retries
+while the real global waiter correctly remained pending. The fixture's
+60-second join could expire before the waiter's unchanged 90-second deadline.
+The unparented 2.3 and parented 2.2.6 controls did not exhibit this mechanism.
+
+The host report did not record final inventories/provider counters, so the
+private reproduction is a matching causal mechanism—not a retroactive direct
+observation of that host run's internal state or new host acceptance.
+
+Correction work belongs in a separately identified **harness checkout**,
+outside the still-frozen application source. Require strict version-specific
+parent-completion handling and genuine child/parent activity observations,
+unchanged production quiet/job/export guards, and bounded fixed diagnostics.
+The background stage also has a parented child; verify its actual native
+notification ordering rather than silently treating a parent request as a
+child phase. Do not remove parenting or merely increase a timeout to obtain
+success.
+
+Before a fresh host run, validate the corrected native readiness/background
+methods on 2.3 and legacy 2.2.6 and review the source/runner hashes separately.
+Keep the failed attempt and all previous evidence intact. Any passing
+preparation is local native/process evidence only; the complete source-bound
+host gates remain required.
+
 ### Current native 2.3.0 profile
 
 The current 1.6 candidate extends the isolated history reader to the exact
