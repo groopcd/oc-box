@@ -216,6 +216,25 @@ See `docs/plans/native-2.3-recovery.md`. This preparation records no new native
 or external-host acceptance. Freeze and validate the new integrated source,
 then require applicable source-bound host reports before stable publication.
 
+## Frozen-source parent-readiness harness
+
+This branch corrects only the native 2.3 synthetic provider/oracles after a
+failed host baseline. Application runtime and frozen donor helpers remain at
+9a6e99ad01b3bf02e19edb3ec9d7ab3289d40f22 (1.6.94); do not advance or rebuild
+that candidate merely to fix the external harness. The failed report/store
+remain failed evidence, and main 1.7 remains outside scope.
+
+Require strict actual parent-completion handling, original 33 baseline checks
+plus 12 current-native structured checks, fixed bounded diagnostics and real
+global quiet-pair/job/export safeguards. Preserve the legacy 2.2.6 one-plus-three
+request contract. Native preparation uses a separately pinned source worktree;
+callback rigs are not host ownership/lifecycle/archive proof.
+
+Publish this reviewed harness separately, never tag or upload it as the stable
+application. Fresh host runs must record the frozen source and corrected runner
+identities independently. No retained-store replay, relaxed native readiness,
+production timeout increase or relabeling of the first failed run is permitted.
+
 ## Documentation maintenance
 
 Update `docs/cli.md` when command-line behavior changes, then regenerate with

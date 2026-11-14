@@ -356,6 +356,31 @@ Keep the failed attempt and all previous evidence intact. Any passing
 preparation is local native/process evidence only; the complete source-bound
 host gates remain required.
 
+The corrected native 2.3 report retains its original **33 baseline checks**
+and additionally requires **12 structured child/parent readiness checks**.
+Foreground requires one child and one parent provider request; background
+requires three child and two parent requests. Genuine held activity and
+two final quiet pairs remain mandatory. The legacy 2.2.6 contract stays at
+one foreground plus three background requests without parent wakeups.
+Unexpected, duplicated or mismatched parent notices remain failures.
+
+Use the separate readiness probe to validate the corrected runner against
+the still-frozen runtime, with both native-created and seeded parent modes:
+
+```bash
+python3 -B tests/smoke_session_sync_readiness_v2.py \
+  --source /path/to/clean/frozen/source \
+  --expect-commit 9a6e99ad01b3bf02e19edb3ec9d7ab3289d40f22 \
+  --opencode /path/to/opencode2 --native-version 2.3.0 \
+  --parent-mode native
+# Repeat with --parent-mode seeded; use 2.2.6 for the legacy native control.
+```
+
+The probe adapts only local execution/addressing, FIFO placement and explicitly
+limited lease/archive callbacks. It neither runs Podman nor establishes owner,
+lifecycle, archive or release acceptance. Reports bind source, runner, probe and
+native hashes and include fixed-schema failure observations.
+
 ### Current native 2.3.0 profile
 
 The current 1.6 candidate extends the isolated history reader to the exact
