@@ -44,6 +44,193 @@ DONORS = (
 )
 # Keep discovery stdlib-only until the host guard and audited source import.
 NATIVE_VERSIONS = ("2.2.6", "2.3.0")
+FOREGROUND_RESULT = "SYNTHETIC_HISTORY_FOREGROUND_DONE"
+PARENT_RESULT = "SYNTHETIC_HISTORY_PARENT_ACK"
+HISTORY_WAIT_SECONDS = 90
+NATIVE_RUN_SECONDS = 120
+CONTAINER_RUN_SECONDS = 150
+READINESS_PHASES = (
+    "not-started",
+    "child-hold",
+    "parent-hold",
+    "quiet",
+    "transcripts",
+    "complete",
+    "initial-parent-hold",
+    "background-hold",
+    "child-wake",
+    "final-parent-hold",
+)
+WORKER_STATES = ("not-started", "running", "complete", "failed")
+
+
+def readiness_diagnostics():
+    """Fixed schema only; no payloads, identifiers, native errors or commands."""
+    return {
+        "phase": "not-started",
+        "native_worker": "not-started",
+        "history_worker": "not-started",
+        "native_failure": "none",
+        "history_failure": "none",
+        "provider_failure": "none",
+        **dict.fromkeys(
+            (
+                "provider_requests",
+                "provider_errors",
+                "foreground_requests",
+                "parent_requests",
+                "child_pairs",
+                "parent_pairs",
+                "quiet_pairs",
+                "query_errors",
+                "foreground_count",
+                "jobs_running",
+                "jobs_completed",
+                "jobs_error",
+                "jobs_cancelled",
+            ),
+            0,
+        ),
+        **dict.fromkeys(
+            (
+                "last_pair_valid",
+                "child_active",
+                "parent_active",
+                "native_exit_zero",
+                "child_transcript",
+                "parent_transcript",
+                "parent_notice",
+                "parent_wait_pending",
+            ),
+            False,
+        ),
+    }
+
+
+def validate_readiness(value):
+    validate_activity_diagnostics(value, readiness_diagnostics())
+
+
+def background_diagnostics():
+    return {
+        **readiness_diagnostics(),
+        **dict.fromkeys(
+            (
+                "background_requests",
+                "background_parent_requests",
+                "background_pairs",
+                "wake_pairs",
+                "initial_parent_pairs",
+                "final_parent_pairs",
+            ),
+            0,
+        ),
+        **dict.fromkeys(
+            (
+                "initial_parent_notice",
+                "final_parent_notice",
+                "initial_parent_wait_pending",
+                "final_parent_wait_pending",
+                "shell_notice",
+            ),
+            False,
+        ),
+    }
+
+
+def validate_activity_diagnostics(value, template):
+    require(
+        isinstance(value, dict) and value.keys() == template.keys(), "report-schema"
+    )
+    for key, default in template.items():
+        item = value[key]
+        if isinstance(default, bool):
+            valid = type(item) is bool
+        elif isinstance(default, int):
+            valid = type(item) is int and 0 <= item <= 1_000_000
+        elif key.endswith("_failure"):
+            valid = isinstance(item, str) and item in ("none", *CATEGORIES)
+        else:
+            valid = isinstance(item, str) and item in (
+                READINESS_PHASES if key == "phase" else WORKER_STATES
+            )
+        require(valid, "report-schema")
+
+
+def activity_complete(value):
+    return (
+        value["phase"] == "complete"
+        and value["native_worker"] == value["history_worker"] == "complete"
+        and value["native_exit_zero"]
+        and value["quiet_pairs"] >= 2
+        and value["last_pair_valid"]
+        and value["native_failure"]
+        == value["history_failure"]
+        == value["provider_failure"]
+        == "none"
+        and value["query_errors"]
+        == value["provider_errors"]
+        == value["foreground_count"]
+        == value["jobs_running"]
+        == value["jobs_completed"]
+        == value["jobs_error"]
+        == value["jobs_cancelled"]
+        == 0
+        and not value["child_active"]
+        and not value["parent_active"]
+    )
+
+
+def additional_checks(readiness, background):
+    foreground = readiness or readiness_diagnostics()
+    jobs = background or background_diagnostics()
+    return {
+        "foreground_complete_child_and_parent": foreground["child_transcript"]
+        and foreground["parent_transcript"],
+        "foreground_parent_notice": foreground["parent_notice"],
+        "foreground_same_waiter_parent_hold": foreground["parent_wait_pending"]
+        and foreground["parent_pairs"] >= 4,
+        "foreground_child_hold": foreground["child_pairs"] >= 4,
+        "foreground_provider_contract": (
+            foreground["provider_requests"] == 2
+            and foreground["foreground_requests"] == foreground["parent_requests"] == 1
+        ),
+        "foreground_final_quiet": activity_complete(foreground),
+        "background_complete_child_and_parent": jobs["child_transcript"]
+        and jobs["parent_transcript"],
+        "background_both_parent_notices": jobs["initial_parent_notice"]
+        and jobs["final_parent_notice"],
+        "background_same_waiter_both_parent_holds": (
+            jobs["initial_parent_wait_pending"]
+            and jobs["final_parent_wait_pending"]
+            and jobs["initial_parent_pairs"] >= 4
+            and jobs["final_parent_pairs"] >= 4
+        ),
+        "background_job_and_child_wake_holds": jobs["background_pairs"] >= 4
+        and jobs["wake_pairs"] >= 4
+        and jobs["shell_notice"],
+        "background_provider_contract": (
+            jobs["background_requests"] == 3
+            and jobs["background_parent_requests"] == 2
+            and jobs["provider_requests"] == 7
+        ),
+        "background_final_quiet": activity_complete(jobs),
+    }
+
+
+def completion_notice(child, result=FOREGROUND_RESULT, *, state="completed"):
+    require(
+        isinstance(child, str) and re.fullmatch(r"ses_[A-Za-z0-9_]+", child),
+        "provider-contract",
+    )
+    require(state in ("running", "completed"), "provider-contract")
+    return (
+        f'<subagent sessionID="{child}" state="{state}" description="{child}">\n'
+        + result
+        + "\n</subagent>"
+    )
+
+
 CHECKS = frozenset(
     (
         "private_store",
@@ -462,7 +649,13 @@ def result(
     *,
     stage="preparation",
     failure_trace=(),
+    readiness=None,
+    background=None,
 ):
+    if readiness is not None:
+        validate_readiness(readiness)
+    if background is not None:
+        validate_activity_diagnostics(background, background_diagnostics())
     require(stage in STAGES, "report-schema")
     require(
         isinstance(failure_trace, (list, tuple))
@@ -545,11 +738,15 @@ def result(
         and all(type(code) is int and -255 <= code <= 255 for code in exits),
         "report-schema",
     )
+    extra = (
+        additional_checks(readiness, background) if native["version"] == "2.3.0" else {}
+    )
     if primary is None and (
         set(checks) != CHECKS
         or not all(checks.values())
         or tuple(exits) != EXPECTED_EXITS
         or stage != "complete"
+        or not all(extra.values())
     ):
         primary = "missing-checks"
     return {
@@ -566,6 +763,9 @@ def result(
         "primary_category": primary,
         "secondary_categories": list(secondary),
         "failure_trace": list(failure_trace),
+        "readiness_observations": readiness,
+        "background_observations": background,
+        "additional_checks": extra,
         "scope": SCOPE,
         "not_covered": [
             "transient completed-job row (not required or claimed)",
@@ -583,10 +783,11 @@ def result(
 class Worker:
     """Bounded explicit-connection work; exceptions never escape into reports."""
 
-    def __init__(self, callback):
+    def __init__(self, callback, *, budget=None):
         self.done = threading.Event()
         self.error = None
         self.value = None
+        self.deadline = time.monotonic() + budget if budget is not None else None
 
         def run():
             try:
@@ -605,6 +806,12 @@ class Worker:
         if self.error is not None:
             raise Refusal("worker-failed") from self.error
         return self.value
+
+    def join_deadline(self):
+        # Never let an outer join expire before the real operation's deadline.
+        # Five seconds are cleanup/scheduling grace, not extra readiness time.
+        require(self.deadline is not None, "oracle")
+        return self.join(max(0, self.deadline - time.monotonic()) + 5)
 
 
 def expect_refusal(callback, exception):
@@ -652,9 +859,27 @@ class Provider:
     def __init__(self):
         self.entered, self.release = threading.Event(), threading.Event()
         self.woken, self.wake_release = threading.Event(), threading.Event()
+        self.parent_entered, self.parent_release = threading.Event(), threading.Event()
+        self.foreground_version, self.foreground_child = "2.2.6", None
+        self.foreground_requests = self.parent_requests = 0
+        self.parent_notices = []
+        self.background_bound = False
+        self.background_parent_requests = 0
+        self.background_idle_entered, self.background_idle_release = (
+            threading.Event(),
+            threading.Event(),
+        )
+        self.background_final_entered, self.background_final_release = (
+            threading.Event(),
+            threading.Event(),
+        )
+        self.background_idle_notice = self.background_final_notice = None
+        self.background_shell_id = None
+        self.lock = threading.Lock()
         self.background = None
         self.background_requests = 0
         self.requests = self.errors = 0
+        self.failure = "none"
         outer = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -692,7 +917,8 @@ class Provider:
                         and body.get("model") == "gpt-history",
                         "provider-contract",
                     )
-                    outer.requests += 1
+                    with outer.lock:
+                        outer.requests += 1
                     delta, finish = outer.reply(body)
                     self.send_response(200)
                     self.send_header("Content-Type", "text/event-stream")
@@ -717,8 +943,11 @@ class Provider:
                         )
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
-                except BaseException:  # noqa: BLE001 -- Never log native provider payloads.
-                    outer.errors += 1
+                except BaseException as error:  # noqa: BLE001 -- Never log native provider payloads.
+                    with outer.lock:
+                        outer.errors += 1
+                        if outer.failure == "none":
+                            outer.failure = category(error)
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.server.daemon_threads = True
@@ -728,6 +957,9 @@ class Provider:
     def close(self):
         self.release.set()
         self.wake_release.set()
+        self.parent_release.set()
+        self.background_idle_release.set()
+        self.background_final_release.set()
         closer = Worker(self.server.shutdown)
         try:
             closer.join(3)
@@ -736,12 +968,209 @@ class Provider:
             self.thread.join(3)
         require(not self.thread.is_alive(), "provider-shutdown")
 
+    def bind_foreground(self, version, child, parent_messages=()):
+        require(
+            version in NATIVE_VERSIONS
+            and self.requests
+            == self.errors
+            == self.foreground_requests
+            == self.parent_requests
+            == 0,
+            "provider-contract",
+        )
+        completion_notice(child)
+        self.foreground_version, self.foreground_child = version, child
+        self.parent_notices = self.projected_parent_notices(parent_messages)
+
+    @staticmethod
+    def projected_parent_notices(messages):
+        return [
+            item["text"]
+            for item in messages
+            if item.get("type") == "synthetic"
+            and item.get("metadata", {}).get("source") == "subagent"
+        ]
+
+    def parent_request(self, messages, notice):
+        frames = [
+            item.get("content")
+            for item in messages
+            if item.get("role") == "user"
+            and isinstance(item.get("content"), str)
+            and item["content"].startswith("<subagent ")
+        ]
+        require(
+            messages
+            and messages[-1] == {"role": "user", "content": notice}
+            and frames == [*self.parent_notices, notice],
+            "provider-contract",
+        )
+        self.parent_notices.append(notice)
+
+    def bind_background(self, version, child, settings, parent_messages):
+        require(
+            version in NATIVE_VERSIONS
+            and version == self.foreground_version
+            and not self.background_bound
+            and self.background is None
+            and self.background_requests
+            == self.background_parent_requests
+            == self.errors
+            == 0
+            and self.requests == (2 if version == "2.3.0" else 1),
+            "provider-contract",
+        )
+        completion_notice(child)
+        self.background_bound = True
+        self.background_version, self.background_child = version, child
+        self.background_offset = self.requests
+        self.background = settings
+        self.parent_notices = self.projected_parent_notices(parent_messages)
+
+    def background_parent(self, body):
+        """Two native 2.3 parent phases, never counted as child tool requests."""
+        messages = body.get("messages", [])
+        latest = messages[-1].get("content") if messages else None
+        if not (
+            self.background_version == "2.3.0"
+            and isinstance(latest, str)
+            and latest.startswith("<subagent ")
+        ):
+            return None
+        with self.lock:
+            require(
+                self.requests
+                == self.background_offset
+                + self.background_requests
+                + self.background_parent_requests
+                + 1,
+                "provider-contract",
+            )
+            if self.background_parent_requests == 0:
+                require(self.background_requests == 2, "provider-contract")
+                child = self.background_child
+                prefix = completion_notice(child, "", state="running").split("\n", 1)[0]
+                match = re.fullmatch(
+                    re.escape(
+                        prefix
+                        + "\nFOREGROUND_IDLE_MARKER\n\nBackground work still running:\n- shell ("
+                    )
+                    + r"(sh_[A-Za-z0-9]+)"
+                    + re.escape("): " + self.background["command"] + "\n</subagent>"),
+                    latest,
+                )
+                require(match is not None, "provider-contract")
+                self.background_shell_id = match[1]
+                self.background_idle_notice = latest
+                entered, release = (
+                    self.background_idle_entered,
+                    self.background_idle_release,
+                )
+                answer = "SYNTHETIC_HISTORY_BG_PARENT_IDLE_ACK"
+            else:
+                require(
+                    self.background_parent_requests == 1
+                    and self.background_requests == 3
+                    and self.background_idle_release.is_set()
+                    and self.wake_release.is_set()
+                    and latest
+                    == completion_notice(self.background_child, "REAL_WAKE_ACK_MARKER"),
+                    "provider-contract",
+                )
+                self.background_final_notice = latest
+                entered, release = (
+                    self.background_final_entered,
+                    self.background_final_release,
+                )
+                answer = "SYNTHETIC_HISTORY_BG_PARENT_FINAL_ACK"
+            self.parent_request(messages, latest)
+            self.background_parent_requests += 1
+        entered.set()
+        require(release.wait(90), "gate-timeout")
+        return {"content": answer}, "stop"
+
     def reply(self, body):
         if self.background is None:
-            require(self.requests == 1, "provider-contract")
-            self.entered.set()
-            require(self.release.wait(90), "gate-timeout")
-            return {"content": "SYNTHETIC_HISTORY_FOREGROUND_DONE"}, "stop"
+            with self.lock:
+                phase = self.foreground_requests + self.parent_requests
+                if phase == 0:
+                    require(self.requests == 1, "provider-contract")
+                    messages = body.get("messages", [])
+                    require(
+                        messages
+                        and messages[-1]
+                        == {"role": "user", "content": "SYNTHETIC_HISTORY_FOREGROUND"},
+                        "provider-contract",
+                    )
+                    self.foreground_requests += 1
+                else:
+                    require(
+                        self.foreground_version == "2.3.0"
+                        and self.foreground_child is not None
+                        and phase == 1
+                        and self.requests == 2
+                        and self.release.is_set(),
+                        "provider-contract",
+                    )
+                    messages = body.get("messages", [])
+                    self.parent_request(
+                        messages, completion_notice(self.foreground_child)
+                    )
+                    self.parent_requests += 1
+            if phase == 0:
+                self.entered.set()
+                require(self.release.wait(90), "gate-timeout")
+                return {"content": FOREGROUND_RESULT}, "stop"
+            self.parent_entered.set()
+            require(self.parent_release.wait(90), "gate-timeout")
+            return {"content": PARENT_RESULT}, "stop"
+        if self.background_bound:
+            parent = self.background_parent(body)
+            if parent is not None:
+                return parent
+            with self.lock:
+                phase = self.background_requests + 1
+                require(
+                    self.requests
+                    == self.background_offset + phase + self.background_parent_requests
+                    and self.background_parent_requests
+                    == (int(self.background_version == "2.3.0") if phase == 3 else 0),
+                    "provider-contract",
+                )
+                messages = body.get("messages", [])
+                require(
+                    not any(
+                        item.get("role") == "user"
+                        and isinstance(item.get("content"), str)
+                        and item["content"].startswith("<subagent ")
+                        for item in messages
+                    ),
+                    "provider-contract",
+                )
+                if phase == 1:
+                    require(
+                        messages
+                        and messages[-1]
+                        == {"role": "user", "content": "SYNTHETIC_HISTORY_BACKGROUND"},
+                        "provider-contract",
+                    )
+                elif phase == 2:
+                    require(
+                        messages and messages[-1].get("role") == "tool",
+                        "provider-contract",
+                    )
+                elif phase == 3:
+                    require(
+                        messages
+                        and messages[-1].get("role") == "user"
+                        and isinstance(messages[-1].get("content"), str)
+                        and messages[-1]["content"].startswith("<shell ")
+                        and (
+                            self.background_version == "2.2.6"
+                            or self.background_idle_release.is_set()
+                        ),
+                        "provider-contract",
+                    )
         self.background_requests += 1
         phase = self.background_requests
         require(phase <= 3, "provider-contract")
@@ -824,35 +1253,128 @@ class Provider:
 class PairObserver:
     """Forward real CLI requests unchanged; retain only boolean pair counts."""
 
-    def __init__(self, original, session):
+    def __init__(self, original, session, *, parent=None):
         self.original, self.session = original, session
+        self.parent = parent
         self.thread = None
         self.phase = "background"
         self.condition = threading.Condition()
-        self.counts = {"foreground": 0, "background": 0, "wake": 0, "quiet": 0}
+        self.counts = {
+            "foreground": 0,
+            "parent": 0,
+            "parent-running": 0,
+            "background": 0,
+            "wake": 0,
+            "quiet": 0,
+        }
         self.active = None
+        self.last = readiness_diagnostics()
+        self.query_errors = 0
 
     def __call__(self, box, data, connection, method, target, value=None, **options):
-        response = self.original(
-            box, data, connection, method, target, value, **options
-        )
+        try:
+            response = self.original(
+                box, data, connection, method, target, value, **options
+            )
+        except BaseException:
+            if threading.get_ident() == self.thread:
+                self.query_errors += 1
+                self.active = None
+            raise
         if threading.get_ident() == self.thread and method == "GET":
             with self.condition:
+                valid_session = getattr(
+                    box,
+                    "valid_session_id",
+                    lambda value: (
+                        isinstance(value, str)
+                        and re.fullmatch(r"ses[A-Za-z0-9_-]+", value) is not None
+                    ),
+                )
                 if target == "/api/session/active":
                     active = (
                         response.get("data") if isinstance(response, dict) else None
                     )
+                    valid_active = isinstance(active, dict) and all(
+                        valid_session(ident)
+                        and isinstance(state, dict)
+                        and state.get("type") == "running"
+                        for ident, state in active.items()
+                    )
                     self.active = (
                         active == {},
                         isinstance(active, dict) and self.session in active,
+                        isinstance(active, dict) and self.parent in active,
+                        len(active) if valid_active else None,
                     )
                 elif target == "/api/experimental/job" and self.active is not None:
                     jobs = response.get("data") if isinstance(response, dict) else None
-                    idle, running = self.active
-                    if self.phase == "foreground" and running:
+                    idle, running, parent, count = self.active
+                    valid = (
+                        count is not None
+                        and isinstance(jobs, list)
+                        and all(
+                            isinstance(item, dict)
+                            and isinstance(item.get("id"), str)
+                            and bool(item["id"])
+                            and valid_session(item.get("sessionID"))
+                            and item.get("kind") in ("shell", "subagent", "image")
+                            and item.get("status")
+                            in ("running", "completed", "error", "cancelled")
+                            for item in jobs
+                        )
+                    )
+                    self.last["last_pair_valid"] = valid
+                    if valid:
+                        self.last.update(
+                            foreground_count=count,
+                            child_active=running,
+                            parent_active=parent,
+                            **{
+                                "jobs_" + status: sum(
+                                    item["status"] == status for item in jobs
+                                )
+                                for status in (
+                                    "running",
+                                    "completed",
+                                    "error",
+                                    "cancelled",
+                                )
+                            },
+                        )
+                    if (
+                        self.phase == "foreground"
+                        and valid
+                        and running
+                        and count == 1
+                        and jobs == []
+                    ):
                         self.counts["foreground"] += 1
                     if (
+                        self.phase == "parent"
+                        and valid
+                        and parent
+                        and not running
+                        and count == 1
+                        and jobs == []
+                    ):
+                        self.counts["parent"] += 1
+                    if (
+                        self.phase == "parent-running"
+                        and valid
+                        and parent
+                        and not running
+                        and count == 1
+                        and isinstance(jobs, list)
+                        and len(jobs) == 1
+                        and jobs[0].get("sessionID") == self.session
+                        and jobs[0].get("kind") == "shell"
+                        and jobs[0].get("status") == "running"
+                    ):
+                        self.counts["parent-running"] += 1
+                    if (
                         self.phase == "background"
+                        and valid
                         and idle
                         and isinstance(jobs, list)
                         and any(
@@ -863,9 +1385,9 @@ class PairObserver:
                         )
                     ):
                         self.counts["background"] += 1
-                    if self.phase == "wake" and running and jobs == []:
+                    if self.phase == "wake" and valid and running and jobs == []:
                         self.counts["wake"] += 1
-                    if self.phase == "quiet" and idle and jobs == []:
+                    if self.phase == "quiet" and valid and idle and jobs == []:
                         self.counts["quiet"] += 1
                     self.active = None
                     self.condition.notify_all()
@@ -895,6 +1417,8 @@ class Harness:
             "sha256": file_hash(binary),
         }
         self.checks, self.exits, self.secondary = {}, [], []
+        self.readiness_observations = readiness_diagnostics()
+        self.background_observations = background_diagnostics()
         self.stage = "preparation"
         self.progress = lambda _name: None
         self.provider = None
@@ -1415,11 +1939,19 @@ class Harness:
         require(terminal["status"] == "running")
         self.service.wait_history(self.box, self.data, self.connection, timeout=15)
         self.check("idle_pty_readiness")
+        parent_before = self.export(selected)["messages"]
         child = self.seed("ses_history_foreground", parent=selected)
-        worker = Worker(lambda: self.native_run(child, "SYNTHETIC_HISTORY_FOREGROUND"))
-        observer = PairObserver(self.service.api, child)
+        self.provider.bind_foreground(self.native["version"], child, parent_before)
+        worker = Worker(
+            lambda: self.native_run(child, "SYNTHETIC_HISTORY_FOREGROUND"),
+            budget=CONTAINER_RUN_SECONDS,
+        )
+        observer = PairObserver(self.service.api, child, parent=selected)
         observer.phase = "foreground"
         waiter = None
+        observations = self.readiness_observations
+        observations["phase"] = "child-hold"
+
         try:
             require(self.provider.entered.wait(30), "gate-timeout")
             require(
@@ -1432,32 +1964,63 @@ class Harness:
             def wait():
                 observer.thread = threading.get_ident()
                 return self.service.wait_history(
-                    self.box, self.data, self.connection, timeout=90, interval=0.1
+                    self.box,
+                    self.data,
+                    self.connection,
+                    timeout=HISTORY_WAIT_SECONDS,
+                    interval=0.1,
                 )
 
             # One real waiter must remain pending across several ACTUAL pairs
             # showing the child foreground-active, never merely hit a short
             # deadline. Only then is the provider response released.
             with patch.object(self.service, "api", observer):
-                waiter = Worker(wait)
+                waiter = Worker(wait, budget=HISTORY_WAIT_SECONDS)
                 observer.wait("foreground", 4, waiter)
                 self.check("foreground_wait_pending")
+                if self.native["version"] == "2.3.0":
+                    with observer.condition:
+                        observer.phase = "parent"
+                else:
+                    with observer.condition:
+                        observer.phase = "quiet"
                 self.provider.release.set()
-                waiter.join(60)
+                if self.native["version"] == "2.3.0":
+                    observations["phase"] = "parent-hold"
+                    require(self.provider.parent_entered.wait(30), "gate-timeout")
+                    observer.wait("parent", 4, waiter)
+                    require(self.provider.errors == 0, "provider-contract")
+                    observations["parent_wait_pending"] = True
+                with observer.condition:
+                    observer.phase = "quiet"
+                observations["phase"] = "quiet"
+                self.provider.parent_release.set()
+                waiter.join_deadline()
+                require(observer.counts["quiet"] >= 2)
         finally:
-            finish_actions(
-                (
-                    self.provider.release.set,
-                    lambda: require(worker.join(30) == 0),
-                    lambda: waiter.join(20) if waiter else None,
-                ),
-                self.secondary,
-            )
-        require("SYNTHETIC_HISTORY_FOREGROUND_DONE" in json.dumps(self.export(child)))
+            try:
+                finish_actions(
+                    (
+                        self.provider.release.set,
+                        self.provider.parent_release.set,
+                        lambda: require(worker.join_deadline() == 0),
+                        lambda: waiter.join_deadline() if waiter else None,
+                    ),
+                    self.secondary,
+                )
+            finally:
+                self.capture_activity(observations, observer, worker, waiter)
         require(
-            self.provider.requests == 1 and self.provider.errors == 0,
+            self.provider.requests == (2 if self.native["version"] == "2.3.0" else 1)
+            and self.provider.foreground_requests == 1
+            and self.provider.parent_requests
+            == (1 if self.native["version"] == "2.3.0" else 0)
+            and self.provider.errors == 0,
             "provider-contract",
         )
+        observations["phase"] = "transcripts"
+        self.foreground_transcripts(child, selected, parent_before)
+        observations["phase"] = "complete"
         self.check("foreground_recovery")
         self.sync()
         before = self.box.session_file(self.path).read_bytes()
@@ -1485,6 +2048,143 @@ class Harness:
         require(entered.wait(10), "gate-timeout")
         return 0
 
+    def foreground_transcripts(self, child, parent, before):
+        """Compare complete native projection/export and exact synthetic turns."""
+        values = {ident: self.native_messages(ident) for ident in (child, parent)}
+
+        def completed(messages, text):
+            assistants = [item for item in messages if item.get("type") == "assistant"]
+            require(
+                len(assistants) == 1
+                and assistants[0].get("time", {}).get("completed") is not None
+                and assistants[0].get("finish") == "stop"
+                and assistants[0].get("agent") == "build"
+                and assistants[0].get("model", {}).get("id") == "gpt-history"
+                and assistants[0]["model"].get("providerID") == "fixture"
+                and assistants[0].get("content") == [{"type": "text", "text": text}]
+            )
+            require(
+                all(
+                    item.get("type")
+                    in (
+                        "user",
+                        "synthetic",
+                        "assistant",
+                        "idle",
+                        "model-switched",
+                        "agent-switched",
+                    )
+                    and (
+                        item.get("type") != "idle" or item.get("outcome") == "succeeded"
+                    )
+                    for item in messages
+                )
+            )
+
+        messages = values[child]
+        require(
+            [item.get("text") for item in messages if item.get("type") == "user"]
+            == ["SYNTHETIC_" + child, "SYNTHETIC_HISTORY_FOREGROUND"]
+        )
+        require(not any(item.get("type") == "synthetic" for item in messages))
+        completed(messages, FOREGROUND_RESULT)
+        self.readiness_observations["child_transcript"] = True
+        messages = values[parent]
+        require(messages[: len(before)] == before)
+        tail = messages[len(before) :]
+        if self.native["version"] == "2.2.6":
+            require(tail == [] and not self.provider.parent_entered.is_set())
+        else:
+            notices = [item for item in tail if item.get("type") == "synthetic"]
+            require(
+                len(notices) == 1
+                and notices[0].get("metadata")
+                == {
+                    "source": "subagent",
+                    "childID": child,
+                    "agent": "build",
+                    "state": "completed",
+                }
+                and notices[0].get("description") == child
+                and notices[0].get("text") == completion_notice(child)
+                and not any(item.get("type") == "user" for item in tail)
+                and tail.index(notices[0])
+                < next(
+                    index
+                    for index, item in enumerate(tail)
+                    if item.get("type") == "assistant"
+                )
+            )
+            self.readiness_observations["parent_notice"] = True
+            completed(tail, PARENT_RESULT)
+        self.readiness_observations["parent_transcript"] = True
+
+    def native_messages(self, ident):
+        exported = self.export(ident)
+        messages = exported["messages"]
+        require(
+            exported["info"]["id"] == ident
+            and messages
+            == self.request(
+                "GET", "/api/session/" + ident + "/message?order=asc&limit=100"
+            )["data"]
+            and all(isinstance(item.get("id"), str) and item["id"] for item in messages)
+            and len({item["id"] for item in messages}) == len(messages)
+        )
+        return messages
+
+    def capture_activity(self, observations, observer, worker, waiter):
+        def state(item):
+            if item is None:
+                return "not-started"
+            if not item.done.is_set():
+                return "running"
+            return "failed" if item.error is not None else "complete"
+
+        with observer.condition:
+            for key in (
+                "last_pair_valid",
+                "foreground_count",
+                "child_active",
+                "parent_active",
+                "jobs_running",
+                "jobs_completed",
+                "jobs_error",
+                "jobs_cancelled",
+            ):
+                observations[key] = observer.last[key]
+            observations.update(
+                native_worker=state(worker),
+                history_worker=state(waiter),
+                native_exit_zero=worker.done.is_set()
+                and worker.error is None
+                and worker.value == 0,
+                provider_requests=self.provider.requests,
+                provider_errors=self.provider.errors,
+                foreground_requests=self.provider.foreground_requests,
+                parent_requests=self.provider.parent_requests,
+                child_pairs=observer.counts["foreground"],
+                parent_pairs=observer.counts["parent"],
+                quiet_pairs=observer.counts["quiet"],
+                query_errors=observer.query_errors,
+                native_failure=category(worker.error)
+                if worker.error is not None
+                else "none",
+                history_failure=category(waiter.error)
+                if waiter and waiter.error is not None
+                else "none",
+                provider_failure=self.provider.failure,
+            )
+            if "background_requests" in observations:
+                observations.update(
+                    background_requests=self.provider.background_requests,
+                    background_parent_requests=self.provider.background_parent_requests,
+                    background_pairs=observer.counts["background"],
+                    wake_pairs=observer.counts["wake"],
+                    initial_parent_pairs=observer.counts["parent-running"],
+                    final_parent_pairs=observer.counts["parent"],
+                )
+
     def native_run(self, ident, prompt):
         code = "import json,subprocess,sys\ns=json.load(sys.stdin)\na=[s['binary'],'run','--server',s['url'],'--session',s['session'],'--model','fixture/gpt-history','--agent','build']\np=subprocess.run(a,input=s['prompt'],text=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=120)\nprint(json.dumps({'exit':p.returncode}))\n"
         return json.loads(
@@ -1496,7 +2196,7 @@ class Harness:
                     "session": ident,
                     "prompt": prompt,
                 },
-                timeout=150,
+                timeout=CONTAINER_RUN_SECONDS,
             )
         )["exit"]
 
@@ -1508,16 +2208,25 @@ class Harness:
             time.sleep(0.05)
 
     def background(self, selected):
+        parent_before = self.export(selected)["messages"]
         ident = self.seed("ses_history_background", parent=selected)
         gate = ShellGate(self, marker="SYNTHETIC_HISTORY_BG_DONE")
-        self.provider.background = {
+        settings = {
             "command": gate.command(),
             "workdir": self.box.container_project(self.data),
             "background": True,
         }
-        client = Worker(lambda: self.native_run(ident, "SYNTHETIC_HISTORY_BACKGROUND"))
+        self.provider.bind_background(
+            self.native["version"], ident, settings, parent_before
+        )
+        client = Worker(
+            lambda: self.native_run(ident, "SYNTHETIC_HISTORY_BACKGROUND"),
+            budget=CONTAINER_RUN_SECONDS,
+        )
         waiter = None
-        observer = PairObserver(self.service.api, ident)
+        observer = PairObserver(self.service.api, ident, parent=selected)
+        observations = self.background_observations
+        observations["phase"] = "background-hold"
 
         def inventory():
             active = self.service.api(
@@ -1527,6 +2236,17 @@ class Harness:
                 self.box, self.data, self.connection, "GET", "/api/experimental/job"
             )["data"]
             return active, jobs
+
+        def wait():
+            observer.thread = threading.get_ident()
+            # ONE real waiter spans both parent holds, shell completion and child wake.
+            return self.service.wait_history(
+                self.box,
+                self.data,
+                self.connection,
+                timeout=HISTORY_WAIT_SECONDS,
+                interval=0.1,
+            )
 
         try:
 
@@ -1540,23 +2260,41 @@ class Harness:
                     and jobs[0].get("status") == "running"
                 )
 
-            self.until(running_idle)
-            # Native run remains attached while background jobs exist, even
-            # though its foreground drain is idle. Join only after the wakeup.
-            _, jobs = inventory()
-            shell_id, job_id = jobs[0]["shellID"], jobs[0]["id"]
-            require("FOREGROUND_IDLE_MARKER" in json.dumps(self.export(ident)))
-            self.check("background_running_idle")
-
-            def wait():
-                observer.thread = threading.get_ident()
-                # ONE real waiter spans native job completion and foreground wake.
-                return self.service.wait_history(
-                    self.box, self.data, self.connection, timeout=90, interval=0.1
-                )
-
             with patch.object(self.service, "api", observer):
-                waiter = Worker(wait)
+                if self.native["version"] == "2.3.0":
+                    observations["phase"] = "initial-parent-hold"
+                    require(
+                        self.provider.background_idle_entered.wait(30), "gate-timeout"
+                    )
+                    active, jobs = inventory()
+                    require(
+                        set(active) == {selected}
+                        and len(jobs) == 1
+                        and jobs[0].get("sessionID") == ident
+                        and jobs[0].get("kind") == "shell"
+                        and jobs[0].get("status") == "running"
+                        and jobs[0].get("shellID") == self.provider.background_shell_id
+                    )
+                    self.background_parent_notices(
+                        selected, ident, parent_before, final=False
+                    )
+                    observations["initial_parent_notice"] = True
+                    observer.phase = "parent-running"
+                    waiter = Worker(wait, budget=HISTORY_WAIT_SECONDS)
+                    observer.wait("parent-running", 4, waiter)
+                    observations["initial_parent_wait_pending"] = True
+                    with observer.condition:
+                        observer.phase = "background"
+                    self.provider.background_idle_release.set()
+                self.until(running_idle)
+                # CLI stays attached while the real background shell exists.
+                _, jobs = inventory()
+                shell_id, job_id = jobs[0]["shellID"], jobs[0]["id"]
+                require("FOREGROUND_IDLE_MARKER" in json.dumps(self.export(ident)))
+                self.check("background_running_idle")
+                observations["phase"] = "background-hold"
+                if waiter is None:
+                    waiter = Worker(wait, budget=HISTORY_WAIT_SECONDS)
                 observer.wait("background", 4, waiter)
                 self.check("background_job_wait")
                 gate.release()
@@ -1569,6 +2307,7 @@ class Harness:
                 self.until(woke)
                 with observer.condition:
                     observer.phase = "wake"
+                observations["phase"] = "child-wake"
                 observer.wait("wake", 4, waiter)
                 messages = self.request(
                     "GET", "/api/session/" + ident + "/message?order=asc&limit=100"
@@ -1589,16 +2328,38 @@ class Harness:
                 )
                 require("SYNTHETIC_HISTORY_BG_DONE" in notices[0].get("text", ""))
                 self.check("background_notice_wakeup")
+                observations["shell_notice"] = True
+                with observer.condition:
+                    observer.phase = (
+                        "parent" if self.native["version"] == "2.3.0" else "quiet"
+                    )
+                self.provider.wake_release.set()
+                if self.native["version"] == "2.3.0":
+                    observations["phase"] = "final-parent-hold"
+                    require(
+                        self.provider.background_final_entered.wait(30), "gate-timeout"
+                    )
+                    observer.wait("parent", 4, waiter)
+                    self.background_parent_notices(
+                        selected, ident, parent_before, final=True
+                    )
+                    observations["final_parent_notice"] = True
+                    observations["final_parent_wait_pending"] = True
                 with observer.condition:
                     observer.phase = "quiet"
-                self.provider.wake_release.set()
-                waiter.join(30)
-                require(client.join(20) == 0)
+                observations["phase"] = "quiet"
+                self.provider.background_final_release.set()
+                waiter.join_deadline()
+                require(client.join_deadline() == 0)
                 require(observer.counts["quiet"] >= 2)
                 require(inventory() == ({}, []))
-                self.check("background_final_quiet")
             require(
-                self.provider.background_requests == 3 and self.provider.errors == 0,
+                self.provider.background_requests == 3
+                and self.provider.errors == 0
+                and self.provider.background_parent_requests
+                == (2 if self.native["version"] == "2.3.0" else 0)
+                and self.provider.requests
+                == (7 if self.native["version"] == "2.3.0" else 4),
                 "provider-contract",
             )
             exported = self.export(ident)
@@ -1606,19 +2367,152 @@ class Harness:
                 notices[0] in exported["messages"]
                 and "REAL_WAKE_ACK_MARKER" in json.dumps(exported)
             )
+            observations["phase"] = "transcripts"
+            self.background_transcripts(ident, selected, parent_before, notices[0])
+            observations["phase"] = "complete"
+            self.check("background_final_quiet")
             self.sync()
             self.verify_archive(ident)
             return 0
         finally:
-            finish_actions(
-                (
-                    gate.release,
-                    self.provider.wake_release.set,
-                    lambda: client.join(20),
-                    lambda: waiter.join(20) if waiter else None,
-                ),
-                self.secondary,
+            try:
+                finish_actions(
+                    (
+                        gate.release,
+                        self.provider.wake_release.set,
+                        self.provider.background_idle_release.set,
+                        self.provider.background_final_release.set,
+                        client.join_deadline,
+                        lambda: waiter.join_deadline() if waiter else None,
+                    ),
+                    self.secondary,
+                )
+            finally:
+                self.capture_activity(observations, observer, client, waiter)
+
+    def background_parent_notices(self, parent, child, before, *, final):
+        messages = self.request(
+            "GET", "/api/session/" + parent + "/message?order=asc&limit=100"
+        )["data"]
+        require(messages[: len(before)] == before)
+        tail = messages[len(before) :]
+        notices = [item for item in tail if item.get("type") == "synthetic"]
+        expected = [self.provider.background_idle_notice]
+        if final:
+            expected.append(self.provider.background_final_notice)
+        require(
+            len(notices) == len(expected)
+            and len({item.get("id") for item in notices}) == len(expected)
+            and all(
+                isinstance(item.get("id"), str)
+                and item["id"]
+                and item.get("metadata")
+                == {
+                    "source": "subagent",
+                    "childID": child,
+                    "agent": "build",
+                    "state": "completed",
+                }
+                and item.get("description") == child
+                and item.get("text") == text
+                for item, text in zip(notices, expected)
             )
+        )
+        return notices
+
+    def background_transcripts(self, child, parent, before, shell_notice):
+        messages = self.native_messages(child)
+        require(
+            [item.get("text") for item in messages if item.get("type") == "user"]
+            == ["SYNTHETIC_" + child, "SYNTHETIC_HISTORY_BACKGROUND"]
+        )
+        require(
+            [item for item in messages if item.get("type") == "synthetic"]
+            == [shell_notice]
+        )
+        assistants = [item for item in messages if item.get("type") == "assistant"]
+        require(
+            len(assistants) == 3
+            and all(
+                item.get("time", {}).get("completed") is not None
+                and item.get("agent") == "build"
+                and item.get("model", {}).get("id") == "gpt-history"
+                and item["model"].get("providerID") == "fixture"
+                for item in assistants
+            )
+        )
+        tools = [
+            part
+            for item in assistants
+            for part in item.get("content", [])
+            if part.get("type") == "tool"
+        ]
+        require(
+            len(tools) == 1
+            and tools[0].get("name") == "shell"
+            and tools[0].get("id") == "call_history_background"
+            and tools[0].get("state", {}).get("status") == "completed"
+            and tools[0]["state"].get("input") == self.provider.background
+            and assistants[0].get("content") == [tools[0]]
+            and assistants[1].get("finish") == assistants[2].get("finish") == "stop"
+            and assistants[1].get("content")
+            == [{"type": "text", "text": "FOREGROUND_IDLE_MARKER"}]
+            and assistants[2].get("content")
+            == [{"type": "text", "text": "REAL_WAKE_ACK_MARKER"}]
+        )
+        require(
+            all(
+                item.get("type")
+                in (
+                    "user",
+                    "assistant",
+                    "synthetic",
+                    "idle",
+                    "model-switched",
+                    "agent-switched",
+                )
+                and (item.get("type") != "idle" or item.get("outcome") == "succeeded")
+                for item in messages
+            )
+        )
+        self.background_observations["child_transcript"] = True
+        messages = self.native_messages(parent)
+        require(messages[: len(before)] == before)
+        if self.native["version"] == "2.2.6":
+            require(messages == before)
+        else:
+            self.background_parent_notices(parent, child, before, final=True)
+            tail = messages[len(before) :]
+            require(
+                [item.get("type") for item in tail if item.get("type") != "idle"]
+                == ["synthetic", "assistant", "synthetic", "assistant"]
+                and all(
+                    item.get("type") != "idle" or item.get("outcome") == "succeeded"
+                    for item in tail
+                )
+            )
+            assistants = [
+                item
+                for item in messages[len(before) :]
+                if item.get("type") == "assistant"
+            ]
+            require(
+                len(assistants) == 2
+                and all(
+                    item.get("time", {}).get("completed") is not None
+                    and item.get("finish") == "stop"
+                    and item.get("agent") == "build"
+                    and item.get("model", {}).get("id") == "gpt-history"
+                    and item["model"].get("providerID") == "fixture"
+                    for item in assistants
+                )
+                and [item.get("content") for item in assistants]
+                == [
+                    [{"type": "text", "text": "SYNTHETIC_HISTORY_BG_PARENT_IDLE_ACK"}],
+                    [{"type": "text", "text": "SYNTHETIC_HISTORY_BG_PARENT_FINAL_ACK"}],
+                ]
+            )
+        self.background_observations["parent_transcript"] = True
 
     def shell(self, _selected):
         require(
@@ -2998,6 +3892,28 @@ def main(argv=None):
                 provider.close()
             except BaseException as error:  # noqa: BLE001 -- Keep shutdown failures secondary.
                 secondary.append(category(error))
+            if harness is not None and not args.history_recovery_case:
+                # Include late retry/unexpected-request errors through shutdown,
+                # without rewriting the earlier foreground-stage snapshot.
+                observations = (
+                    harness.background_observations
+                    if harness.background_observations["phase"] != "not-started"
+                    else harness.readiness_observations
+                )
+                observations.update(
+                    provider_requests=provider.requests,
+                    provider_errors=provider.errors,
+                    provider_failure=provider.failure,
+                )
+                if provider.errors or (
+                    harness.stage == "complete"
+                    and provider.requests
+                    != (7 if harness.native["version"] == "2.3.0" else 4)
+                ):
+                    if primary is None:
+                        primary = "provider-contract"
+                    else:
+                        secondary.append("provider-contract")
         if harness is not None:
             try:
                 secondary.extend(harness.secondary)
@@ -3011,7 +3927,12 @@ def main(argv=None):
                         )
                     )
                     if args.history_recovery_case
-                    else result
+                    else lambda *values, **options: result(
+                        *values,
+                        **options,
+                        readiness=harness.readiness_observations,
+                        background=harness.background_observations,
+                    )
                 )
                 report = report_function(
                     harness.checks,

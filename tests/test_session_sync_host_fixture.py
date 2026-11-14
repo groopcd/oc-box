@@ -887,6 +887,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             "data": [
                 {
                     "sessionID": ident,
+                    "id": "job_fixture",
                     "kind": "shell",
                     "status": "running",
                     "command": "private-sentinel",
@@ -930,7 +931,8 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         observer(None, {}, {}, "GET", "/api/session/active")
         self.assertIsNone(observer.active)
         self.assertEqual(
-            set(observer.counts), {"foreground", "background", "wake", "quiet"}
+            set(observer.counts),
+            {"foreground", "parent", "parent-running", "background", "wake", "quiet"},
         )
 
     def test_pair_waiter_cannot_finish_early_or_skip_required_pairs(self):
@@ -952,6 +954,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             "background": True,
         }
         provider.background_requests = 0
+        provider.background_bound = False
         provider.woken, provider.wake_release = threading.Event(), threading.Event()
         provider.wake_release.set()
         body = {
@@ -1051,6 +1054,16 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             wake_release=threading.Event(),
             background_requests=3,
             errors=0,
+            background_parent_requests=0,
+            requests=4,
+            foreground_requests=1,
+            parent_requests=0,
+            failure="none",
+            background_idle_release=threading.Event(),
+            background_final_release=threading.Event(),
+        )
+        harness.provider.bind_background = lambda _version, _child, settings, _before: (
+            setattr(harness.provider, "background", settings)
         )
         harness.provider.woken.set()
         job_released = threading.Event()
@@ -1076,6 +1089,7 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             }
         )
         harness.sync, harness.verify_archive = Mock(), Mock()
+        harness.background_transcripts = Mock()
 
         def api(_box, _data, _connection, _method, target, _value=None, **_options):
             if target == "/api/session/active":
@@ -1118,9 +1132,9 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         test = self
 
         class ObservedWorker(original_worker):
-            def __init__(self, callback):
+            def __init__(self, callback, **options):
                 self.client = callback.__name__ == "<lambda>"
-                super().__init__(callback)
+                super().__init__(callback, **options)
 
             def join(self, timeout=20):
                 if self.client:
@@ -1393,7 +1407,15 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
 
         polls = []
         harness.provider = SimpleNamespace(
-            entered=threading.Event(), release=Gate(), requests=1, errors=0
+            entered=threading.Event(),
+            release=Gate(),
+            requests=1,
+            errors=0,
+            bind_foreground=Mock(),
+            foreground_requests=1,
+            parent_requests=0,
+            parent_release=threading.Event(),
+            failure="none",
         )
         harness.provider.entered.set()
 
@@ -1422,9 +1444,8 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
         harness.service.api = api
         harness.service.wait_history = history_wait
         harness.native_run = lambda *_: 0 if harness.provider.release.wait(5) else 1
-        harness.export = Mock(
-            return_value={"marker": "SYNTHETIC_HISTORY_FOREGROUND_DONE"}
-        )
+        harness.export = Mock(return_value={"messages": []})
+        harness.foreground_transcripts = Mock()
         harness.sync = Mock(side_effect=runner.Refusal("stop-after-foreground"))
         with (
             patch.dict(
@@ -1473,6 +1494,994 @@ class SessionHistoryHostFixtureTests(unittest.TestCase):
             runner.load_source(self.source, self.commit)
         self.assertEqual(order[0], "isolate")
         self.assertEqual(len(order), 3)
+
+    def foreground_provider(self, version="2.3.0"):
+        provider = runner.Provider.__new__(runner.Provider)
+        provider.lock = threading.Lock()
+        provider.background = None
+        provider.requests = provider.errors = 0
+        provider.foreground_requests = provider.parent_requests = 0
+        provider.foreground_version, provider.foreground_child = "2.2.6", None
+        provider.background_bound = False
+        provider.background_requests = provider.background_parent_requests = 0
+        for name in (
+            "entered",
+            "release",
+            "parent_entered",
+            "parent_release",
+            "woken",
+            "wake_release",
+            "background_idle_entered",
+            "background_idle_release",
+            "background_final_entered",
+            "background_final_release",
+        ):
+            setattr(provider, name, threading.Event())
+        provider.bind_foreground(version, "ses_history_foreground")
+        provider.release.set()
+        provider.parent_release.set()
+        return provider
+
+    def bound_background_provider(self, version="2.3.0"):
+        provider = self.foreground_provider(version)
+        self.provider_request(
+            provider, [{"role": "user", "content": "SYNTHETIC_HISTORY_FOREGROUND"}]
+        )
+        before = []
+        if version == "2.3.0":
+            notice = runner.completion_notice("ses_history_foreground")
+            self.provider_request(provider, [{"role": "user", "content": notice}])
+            before = [
+                {
+                    "type": "synthetic",
+                    "metadata": {"source": "subagent"},
+                    "text": notice,
+                }
+            ]
+        settings = {
+            "command": "printf SYNTHETIC",
+            "workdir": "/synthetic/project",
+            "background": True,
+        }
+        provider.bind_background(version, "ses_history_background", settings, before)
+        provider.background_idle_release.set()
+        provider.background_final_release.set()
+        provider.wake_release.set()
+        return provider
+
+    def background_child_request(self, provider, phase):
+        if phase == 1:
+            body = {
+                "messages": [
+                    {"role": "user", "content": "SYNTHETIC_HISTORY_BACKGROUND"}
+                ],
+                "tools": [
+                    {
+                        "function": {
+                            "name": "shell",
+                            "parameters": {
+                                "properties": {
+                                    "command": {"type": "string"},
+                                    "workdir": {"type": "string"},
+                                    "background": {"type": "boolean"},
+                                }
+                            },
+                        }
+                    }
+                ],
+            }
+        else:
+            body = {"messages": [{"role": "tool", "content": "SYNTHETIC_RUNNING_JOB"}]}
+            if phase == 3:
+                body["messages"].append(
+                    {
+                        "role": "user",
+                        "content": '<shell state="completed">SYNTHETIC_HISTORY_BG_DONE</shell>',
+                    }
+                )
+        provider.requests += 1
+        return provider.reply(body)
+
+    def background_parent_body(self, provider, *, final=False):
+        child = "ses_history_background"
+        text = (
+            runner.completion_notice(child, "REAL_WAKE_ACK_MARKER")
+            if final
+            else runner.completion_notice(
+                child,
+                "FOREGROUND_IDLE_MARKER\n\nBackground work still running:\n- shell (sh_fixture): "
+                + provider.background["command"],
+                state="running",
+            )
+        )
+        return {
+            "messages": [
+                # Existing parent tools cannot determine request routing.
+                {"role": "tool", "content": "OLD_PARENT_TOOL"},
+                *(
+                    {"role": "user", "content": item}
+                    for item in provider.parent_notices
+                ),
+                {"role": "user", "content": text},
+            ]
+        }
+
+    def reply_body(self, provider, body):
+        provider.requests += 1
+        return provider.reply(body)
+
+    def test_background_protocol_keeps_child_three_and_distinct_parent_two(self):
+        for version in runner.NATIVE_VERSIONS:
+            with self.subTest(version=version):
+                provider = self.bound_background_provider(version)
+                self.assertEqual(
+                    self.background_child_request(provider, 1)[1], "tool_calls"
+                )
+                self.assertEqual(
+                    self.background_child_request(provider, 2),
+                    ({"content": "FOREGROUND_IDLE_MARKER"}, "stop"),
+                )
+                if version == "2.3.0":
+                    self.assertEqual(
+                        self.reply_body(
+                            provider, self.background_parent_body(provider)
+                        ),
+                        ({"content": "SYNTHETIC_HISTORY_BG_PARENT_IDLE_ACK"}, "stop"),
+                    )
+                    self.assertEqual(provider.background_shell_id, "sh_fixture")
+                    self.assertEqual(provider.background_requests, 2)
+                self.assertEqual(
+                    self.background_child_request(provider, 3),
+                    ({"content": "REAL_WAKE_ACK_MARKER"}, "stop"),
+                )
+                if version == "2.3.0":
+                    body = self.background_parent_body(provider, final=True)
+                    self.assertEqual(
+                        self.reply_body(provider, body),
+                        ({"content": "SYNTHETIC_HISTORY_BG_PARENT_FINAL_ACK"}, "stop"),
+                    )
+                    self.assertEqual(
+                        len(provider.parent_notices), 3
+                    )  # foreground + idle + final
+                    with self.assertRaisesRegex(runner.Refusal, "provider-contract"):
+                        self.reply_body(provider, body)
+                self.assertEqual(provider.background_requests, 3)
+                self.assertEqual(
+                    provider.background_parent_requests, 2 if version == "2.3.0" else 0
+                )
+
+    def test_background_idle_parent_rejects_wrong_notice_summary_command_and_history(
+        self,
+    ):
+        for defect in (
+            "foreign child",
+            "foreign title",
+            "wrong XML state",
+            "wrong result",
+            "wrong command",
+            "wrong shell",
+            "extra summary",
+            "duplicate latest",
+            "unknown old notice",
+            "missing old foreground notice",
+            "wrong role",
+        ):
+            with self.subTest(defect=defect):
+                provider = self.bound_background_provider()
+                self.background_child_request(provider, 1)
+                self.background_child_request(provider, 2)
+                body = self.background_parent_body(provider)
+                message = body["messages"][-1]
+                if defect == "foreign child":
+                    message["content"] = message["content"].replace(
+                        'sessionID="ses_history_background"', 'sessionID="ses_foreign"'
+                    )
+                elif defect == "foreign title":
+                    message["content"] = message["content"].replace(
+                        'description="ses_history_background"', 'description="other"'
+                    )
+                elif defect == "wrong XML state":
+                    message["content"] = message["content"].replace(
+                        'state="running"', 'state="completed"'
+                    )
+                elif defect == "wrong result":
+                    message["content"] = message["content"].replace(
+                        "FOREGROUND_IDLE_MARKER", "WRONG"
+                    )
+                elif defect == "wrong command":
+                    message["content"] += "; EXTRA_COMMAND"
+                elif defect == "wrong shell":
+                    message["content"] = message["content"].replace(
+                        "sh_fixture", "job_wrong"
+                    )
+                elif defect == "extra summary":
+                    message["content"] = message["content"].replace(
+                        "\n</subagent>", "\n- shell (sh_other): extra\n</subagent>"
+                    )
+                elif defect == "duplicate latest":
+                    body["messages"].insert(-1, copy.deepcopy(message))
+                elif defect == "unknown old notice":
+                    body["messages"].insert(
+                        0,
+                        {
+                            "role": "user",
+                            "content": runner.completion_notice("ses_foreign"),
+                        },
+                    )
+                elif defect == "missing old foreground notice":
+                    del body["messages"][1]
+                else:
+                    message["role"] = "tool"
+                with self.assertRaisesRegex(runner.Refusal, "provider-contract"):
+                    self.reply_body(provider, body)
+                self.assertEqual(provider.background_parent_requests, 0)
+                self.assertFalse(provider.background_idle_entered.is_set())
+                self.assertEqual(provider.background_requests, 2)
+
+    def test_background_parent_and_child_refuse_wrong_phase_duplicates_and_early_release(
+        self,
+    ):
+        for defect in (
+            "early idle",
+            "early final",
+            "duplicate idle",
+            "early child wake",
+            "wrong final result",
+            "duplicate final frame",
+            "legacy parent",
+        ):
+            with self.subTest(defect=defect):
+                provider = self.bound_background_provider(
+                    "2.2.6" if defect == "legacy parent" else "2.3.0"
+                )
+                self.background_child_request(provider, 1)
+                if defect != "early idle":
+                    self.background_child_request(provider, 2)
+                if defect in ("early idle", "legacy parent"):
+                    body = self.background_parent_body(provider)
+                else:
+                    self.reply_body(provider, self.background_parent_body(provider))
+                    if defect == "early child wake":
+                        provider.background_idle_release.clear()
+                        with self.assertRaisesRegex(
+                            runner.Refusal, "provider-contract"
+                        ):
+                            self.background_child_request(provider, 3)
+                        continue
+                    if defect not in ("early final", "duplicate idle"):
+                        self.background_child_request(provider, 3)
+                    body = self.background_parent_body(
+                        provider, final=defect != "duplicate idle"
+                    )
+                    if defect == "wrong final result":
+                        body["messages"][-1]["content"] = body["messages"][-1][
+                            "content"
+                        ].replace("REAL_WAKE_ACK_MARKER", "WRONG")
+                    elif defect == "duplicate final frame":
+                        body["messages"].insert(-1, copy.deepcopy(body["messages"][-1]))
+                with self.assertRaisesRegex(runner.Refusal, "provider-contract"):
+                    self.reply_body(provider, body)
+                self.assertFalse(provider.background_final_entered.is_set())
+
+    def provider_request(self, provider, messages):
+        provider.requests += 1
+        return provider.reply({"messages": messages})
+
+    def test_foreground_provider_exact_version_specific_protocol(self):
+        for version in runner.NATIVE_VERSIONS:
+            with self.subTest(version=version):
+                provider = self.foreground_provider(version)
+                self.assertEqual(
+                    self.provider_request(
+                        provider,
+                        [
+                            {
+                                "role": "user",
+                                "content": "SYNTHETIC_HISTORY_FOREGROUND",
+                            }
+                        ],
+                    ),
+                    ({"content": runner.FOREGROUND_RESULT}, "stop"),
+                )
+                notice = [
+                    {
+                        "role": "user",
+                        "content": runner.completion_notice("ses_history_foreground"),
+                    }
+                ]
+                if version == "2.2.6":
+                    with self.assertRaisesRegex(runner.Refusal, "provider-contract"):
+                        self.provider_request(provider, notice)
+                    self.assertFalse(provider.parent_entered.is_set())
+                else:
+                    self.assertEqual(
+                        self.provider_request(provider, notice),
+                        ({"content": runner.PARENT_RESULT}, "stop"),
+                    )
+                    self.assertEqual(provider.parent_requests, 1)
+                    with self.assertRaisesRegex(runner.Refusal, "provider-contract"):
+                        self.provider_request(provider, notice)
+                self.assertEqual(provider.foreground_requests, 1)
+
+    def test_foreground_parent_provider_rejects_foreign_seed_result_and_duplicate(self):
+        expected = runner.completion_notice("ses_history_foreground")
+        for content, role, duplicate in (
+            (runner.completion_notice("ses_foreign"), "user", False),
+            ("SYNTHETIC_ses_history_foreground", "user", False),
+            (expected.replace(runner.FOREGROUND_RESULT, "WRONG_RESULT"), "user", False),
+            (expected.replace('state="completed"', 'state="running"'), "user", False),
+            (
+                expected.replace(
+                    'description="ses_history_foreground"', 'description="other"'
+                ),
+                "user",
+                False,
+            ),
+            (expected + "\nextra", "user", False),
+            (expected, "tool", False),
+            (expected, "user", True),
+        ):
+            with self.subTest(content=content, role=role, duplicate=duplicate):
+                provider = self.foreground_provider()
+                self.provider_request(
+                    provider,
+                    [{"role": "user", "content": "SYNTHETIC_HISTORY_FOREGROUND"}],
+                )
+                message = {"role": role, "content": content}
+                with self.assertRaisesRegex(runner.Refusal, "provider-contract"):
+                    self.provider_request(
+                        provider, [message, message] if duplicate else [message]
+                    )
+                self.assertEqual(provider.parent_requests, 0)
+                self.assertFalse(provider.parent_entered.is_set())
+        provider = self.foreground_provider()
+        provider.requests = 1
+        with self.assertRaisesRegex(runner.Refusal, "provider-contract"):
+            provider.reply({"messages": [{"role": "user", "content": expected}]})
+
+    def transcript_harness(self, version="2.3.0"):
+        harness = self.harness()
+        harness.native["version"] = version
+        harness.provider = SimpleNamespace(parent_entered=threading.Event())
+        child, parent = "ses_history_foreground", "ses_parent"
+        before = [{"id": "msg_parent_seed", "type": "user", "text": "seed"}]
+
+        def assistant(ident, text):
+            return {
+                "id": ident,
+                "type": "assistant",
+                "agent": "build",
+                "model": {"providerID": "fixture", "id": "gpt-history"},
+                "time": {"created": 1, "completed": 2},
+                "finish": "stop",
+                "content": [{"type": "text", "text": text}],
+            }
+
+        messages = {
+            child: [
+                {"id": "msg_seed", "type": "user", "text": "SYNTHETIC_" + child},
+                {
+                    "id": "msg_prompt",
+                    "type": "user",
+                    "text": "SYNTHETIC_HISTORY_FOREGROUND",
+                },
+                assistant("msg_child_result", runner.FOREGROUND_RESULT),
+            ],
+            parent: copy.deepcopy(before),
+        }
+        if version == "2.3.0":
+            messages[parent].extend(
+                [
+                    {
+                        "id": "msg_notice",
+                        "type": "synthetic",
+                        "description": child,
+                        "metadata": {
+                            "source": "subagent",
+                            "childID": child,
+                            "agent": "build",
+                            "state": "completed",
+                        },
+                        "text": runner.completion_notice(child),
+                    },
+                    assistant("msg_parent_result", runner.PARENT_RESULT),
+                ]
+            )
+        harness.export = lambda ident: {
+            "info": {"id": ident},
+            "messages": copy.deepcopy(messages[ident]),
+        }
+        harness.request = lambda _method, route: {
+            "data": copy.deepcopy(messages[route.split("/")[3]])
+        }
+        return harness, messages, child, parent, before
+
+    def test_foreground_complete_projection_and_export_are_both_required(self):
+        for version in runner.NATIVE_VERSIONS:
+            harness, _messages, child, parent, before = self.transcript_harness(version)
+            harness.foreground_transcripts(child, parent, before)
+            self.assertTrue(harness.readiness_observations["child_transcript"])
+            self.assertTrue(harness.readiness_observations["parent_transcript"])
+            self.assertEqual(
+                harness.readiness_observations["parent_notice"], version == "2.3.0"
+            )
+        for defect in (
+            "wrong child result",
+            "unfinished child",
+            "foreign child metadata",
+            "wrong parent result",
+            "changed parent prefix",
+            "duplicate notice",
+            "missing notice identifier",
+            "projection differs",
+            "extra child turn",
+        ):
+            with self.subTest(defect=defect):
+                harness, messages, child, parent, before = self.transcript_harness()
+                if defect == "wrong child result":
+                    messages[child][-1]["content"][0]["text"] = "wrong"
+                elif defect == "unfinished child":
+                    del messages[child][-1]["time"]["completed"]
+                elif defect == "foreign child metadata":
+                    messages[parent][1]["metadata"]["childID"] = "ses_foreign"
+                elif defect == "wrong parent result":
+                    messages[parent][-1]["content"][0]["text"] = "wrong"
+                elif defect == "changed parent prefix":
+                    messages[parent][0]["text"] = "changed"
+                elif defect == "duplicate notice":
+                    messages[parent].append(copy.deepcopy(messages[parent][1]))
+                elif defect == "missing notice identifier":
+                    del messages[parent][1]["id"]
+                elif defect == "projection differs":
+                    harness.request = lambda *_: {"data": []}
+                else:
+                    messages[child].append(
+                        {"id": "msg_extra", "type": "user", "text": "extra"}
+                    )
+                with self.assertRaises(runner.Refusal):
+                    harness.foreground_transcripts(child, parent, before)
+                self.assertFalse(harness.readiness_observations["parent_transcript"])
+
+    def background_transcript_harness(self, version="2.3.0"):
+        harness, messages, old_child, parent, before = self.transcript_harness(version)
+        base = messages.pop(old_child)[-1]
+        child = "ses_history_background"
+        settings = {
+            "command": "printf SYNTHETIC",
+            "workdir": "/synthetic/project",
+            "background": True,
+        }
+        idle = runner.completion_notice(
+            child,
+            "FOREGROUND_IDLE_MARKER\n\nBackground work still running:\n- shell (sh_fixture): "
+            + settings["command"],
+            state="running",
+        )
+        final = runner.completion_notice(child, "REAL_WAKE_ACK_MARKER")
+        harness.provider = SimpleNamespace(
+            background=settings,
+            background_idle_notice=idle,
+            background_final_notice=final,
+        )
+
+        def assistant(ident, text):
+            return {
+                **copy.deepcopy(base),
+                "id": ident,
+                "content": [{"type": "text", "text": text}],
+            }
+
+        tool = {
+            "id": "call_history_background",
+            "type": "tool",
+            "name": "shell",
+            "state": {"status": "completed", "input": copy.deepcopy(settings)},
+        }
+        shell = {
+            "id": "msg_shell_notice",
+            "type": "synthetic",
+            "text": "SYNTHETIC_HISTORY_BG_DONE",
+            "metadata": {
+                "source": "shell",
+                "state": "completed",
+                "exit": 0,
+                "shellID": "sh_fixture",
+                "jobID": "sh_fixture",
+            },
+        }
+        messages[child] = [
+            {"id": "msg_bg_seed", "type": "user", "text": "SYNTHETIC_" + child},
+            {
+                "id": "msg_bg_prompt",
+                "type": "user",
+                "text": "SYNTHETIC_HISTORY_BACKGROUND",
+            },
+            {**copy.deepcopy(base), "id": "msg_tool_result", "content": [tool]},
+            assistant("msg_bg_idle", "FOREGROUND_IDLE_MARKER"),
+            copy.deepcopy(shell),
+            assistant("msg_bg_wake", "REAL_WAKE_ACK_MARKER"),
+        ]
+        messages[parent] = copy.deepcopy(before)
+        if version == "2.3.0":
+
+            def notice(ident, text):
+                return {
+                    "id": ident,
+                    "type": "synthetic",
+                    "description": child,
+                    "text": text,
+                    "metadata": {
+                        "source": "subagent",
+                        "childID": child,
+                        "agent": "build",
+                        "state": "completed",
+                    },
+                }
+
+            messages[parent].extend(
+                [
+                    notice("msg_bg_parent_idle_notice", idle),
+                    assistant(
+                        "msg_bg_parent_idle", "SYNTHETIC_HISTORY_BG_PARENT_IDLE_ACK"
+                    ),
+                    notice("msg_bg_parent_final_notice", final),
+                    assistant(
+                        "msg_bg_parent_final", "SYNTHETIC_HISTORY_BG_PARENT_FINAL_ACK"
+                    ),
+                ]
+            )
+        return harness, messages, child, parent, before, shell
+
+    def test_background_exact_complete_transcripts_and_both_notice_identifiers(self):
+        for version in runner.NATIVE_VERSIONS:
+            harness, _messages, child, parent, before, shell = (
+                self.background_transcript_harness(version)
+            )
+            harness.background_transcripts(child, parent, before, shell)
+            self.assertTrue(harness.background_observations["child_transcript"])
+            self.assertTrue(harness.background_observations["parent_transcript"])
+        for defect in (
+            "wrong command",
+            "unfinished child",
+            "wrong child wake",
+            "wrong notice child",
+            "idle XML falsely completed",
+            "duplicate notice ID",
+            "wrong parent answer",
+            "changed prefix",
+            "extra parent turn",
+            "projection differs",
+        ):
+            with self.subTest(defect=defect):
+                harness, messages, child, parent, before, shell = (
+                    self.background_transcript_harness()
+                )
+                if defect == "wrong command":
+                    messages[child][2]["content"][0]["state"]["input"]["command"] = (
+                        "unexpected"
+                    )
+                elif defect == "unfinished child":
+                    del messages[child][-1]["time"]["completed"]
+                elif defect == "wrong child wake":
+                    messages[child][-1]["content"][0]["text"] = "unexpected"
+                elif defect == "wrong notice child":
+                    messages[parent][1]["metadata"]["childID"] = "ses_foreign"
+                elif defect == "idle XML falsely completed":
+                    messages[parent][1]["text"] = messages[parent][1]["text"].replace(
+                        'state="running"', 'state="completed"'
+                    )
+                elif defect == "duplicate notice ID":
+                    messages[parent][3]["id"] = messages[parent][1]["id"]
+                elif defect == "wrong parent answer":
+                    messages[parent][-1]["content"][0]["text"] = "unexpected"
+                elif defect == "changed prefix":
+                    messages[parent][0]["text"] = "changed"
+                elif defect == "extra parent turn":
+                    messages[parent].append(
+                        {"id": "msg_extra", "type": "user", "text": "extra"}
+                    )
+                else:
+                    harness.request = lambda *_: {"data": []}
+                with self.assertRaises(runner.Refusal):
+                    harness.background_transcripts(child, parent, before, shell)
+                self.assertFalse(harness.background_observations["parent_transcript"])
+
+    def test_join_deadline_preserves_operation_budget_and_bounded_cleanup(self):
+        worker = runner.Worker.__new__(runner.Worker)
+        worker.deadline = 190
+        worker.join = Mock(return_value=7)
+        for now, expected in ((100, 95), (185, 10), (200, 5)):
+            with (
+                self.subTest(now=now),
+                patch.object(runner.time, "monotonic", return_value=now),
+            ):
+                self.assertEqual(worker.join_deadline(), 7)
+                worker.join.assert_called_with(expected)
+        self.assertEqual(runner.HISTORY_WAIT_SECONDS, 90)
+        self.assertEqual(runner.NATIVE_RUN_SECONDS, 120)
+        self.assertEqual(runner.CONTAINER_RUN_SECONDS, 150)
+        worker.deadline = None
+        with self.assertRaises(runner.Refusal):
+            worker.join_deadline()
+
+    def test_readiness_diagnostics_schema_rejects_private_and_unbounded_data(self):
+        value = runner.readiness_diagnostics()
+        runner.validate_readiness(value)
+        for key, item in (
+            ("phase", "private-sentinel"),
+            ("native_worker", "private-sentinel"),
+            ("provider_requests", True),
+            ("provider_errors", -1),
+            ("quiet_pairs", 1_000_001),
+            ("parent_notice", 1),
+            ("sessionID", "private-sentinel"),
+            ("provider_failure", "private-sentinel"),
+        ):
+            with (
+                self.subTest(key=key),
+                self.assertRaisesRegex(runner.Refusal, "report-schema"),
+            ):
+                runner.validate_readiness({**value, key: item})
+
+    def test_current_report_cannot_pass_without_exact_parent_readiness_evidence(self):
+        identity = {
+            "commit": self.commit,
+            "commit_count": 80,
+            "version": "1.6.51+g" + self.commit[:7],
+            "dirty": False,
+            "sha256": {"src/oc_box/oc_box.py": "c" * 64},
+        }
+        native = {"version": "2.3.0", "sha256": "e" * 64, "path": "/synthetic/native"}
+        evidence = runner.readiness_diagnostics()
+        evidence.update(
+            phase="complete",
+            native_worker="complete",
+            history_worker="complete",
+            provider_requests=2,
+            foreground_requests=1,
+            parent_requests=1,
+            child_pairs=4,
+            parent_pairs=4,
+            quiet_pairs=2,
+            last_pair_valid=True,
+            native_exit_zero=True,
+            child_transcript=True,
+            parent_transcript=True,
+            parent_notice=True,
+            parent_wait_pending=True,
+        )
+        background = self.complete_background_diagnostics()
+
+        def report(readiness):
+            return runner.result(
+                dict.fromkeys(runner.CHECKS, True),
+                identity,
+                "d" * 64,
+                native,
+                exits=runner.EXPECTED_EXITS,
+                stage="complete",
+                readiness=readiness,
+                background=background,
+            )
+
+        self.assertEqual(report(evidence)["status"], "PASS")
+        for missing in (
+            None,
+            *(
+                {**evidence, key: value}
+                for key, value in (
+                    ("child_pairs", 3),
+                    ("parent_pairs", 3),
+                    ("quiet_pairs", 1),
+                    ("provider_requests", 3),
+                    ("provider_errors", 1),
+                    ("query_errors", 1),
+                    ("parent_notice", False),
+                    ("parent_transcript", False),
+                    ("child_transcript", False),
+                    ("native_exit_zero", False),
+                    ("parent_wait_pending", False),
+                    ("phase", "parent-hold"),
+                )
+            ),
+        ):
+            self.assertEqual(report(missing)["primary_category"], "missing-checks")
+
+    def complete_background_diagnostics(self):
+        value = runner.background_diagnostics()
+        value.update(
+            phase="complete",
+            native_worker="complete",
+            history_worker="complete",
+            provider_requests=7,
+            foreground_requests=1,
+            parent_requests=1,
+            background_requests=3,
+            background_parent_requests=2,
+            background_pairs=4,
+            wake_pairs=4,
+            initial_parent_pairs=4,
+            final_parent_pairs=4,
+            quiet_pairs=2,
+            last_pair_valid=True,
+            native_exit_zero=True,
+            child_transcript=True,
+            parent_transcript=True,
+            shell_notice=True,
+            initial_parent_notice=True,
+            final_parent_notice=True,
+            initial_parent_wait_pending=True,
+            final_parent_wait_pending=True,
+        )
+        return value
+
+    def test_background_evidence_rejects_missing_hold_errors_or_nonquiet_final_pair(
+        self,
+    ):
+        valid = self.complete_background_diagnostics()
+        checks = runner.additional_checks(None, valid)
+        self.assertTrue(
+            all(value for key, value in checks.items() if key.startswith("background_"))
+        )
+        for key, value in (
+            ("initial_parent_pairs", 3),
+            ("final_parent_pairs", 3),
+            ("background_pairs", 3),
+            ("wake_pairs", 3),
+            ("quiet_pairs", 1),
+            ("background_requests", 4),
+            ("background_parent_requests", 1),
+            ("provider_requests", 8),
+            ("provider_errors", 1),
+            ("query_errors", 1),
+            ("initial_parent_notice", False),
+            ("final_parent_notice", False),
+            ("initial_parent_wait_pending", False),
+            ("final_parent_wait_pending", False),
+            ("child_transcript", False),
+            ("parent_transcript", False),
+            ("shell_notice", False),
+            ("foreground_count", 1),
+            ("jobs_running", 1),
+            ("jobs_cancelled", 1),
+            ("last_pair_valid", False),
+            ("history_worker", "failed"),
+            ("native_exit_zero", False),
+            ("history_failure", "operation-failed"),
+            ("provider_failure", "provider-contract"),
+        ):
+            with self.subTest(key=key):
+                evidence = {**valid, key: value}
+                runner.validate_activity_diagnostics(
+                    evidence, runner.background_diagnostics()
+                )
+                checks = runner.additional_checks(None, evidence)
+                self.assertFalse(
+                    all(
+                        value
+                        for key, value in checks.items()
+                        if key.startswith("background_")
+                    )
+                )
+        for key, value in (
+            ("command", "private-sentinel"),
+            ("initial_parent_notice", "private-sentinel"),
+            ("background_requests", -1),
+            ("native_failure", "private-sentinel"),
+        ):
+            with (
+                self.subTest(key=key),
+                self.assertRaisesRegex(runner.Refusal, "report-schema"),
+            ):
+                runner.validate_activity_diagnostics(
+                    {**valid, key: value}, runner.background_diagnostics()
+                )
+
+    def test_initial_parent_pair_requires_actual_parent_only_and_one_bound_running_job(
+        self,
+    ):
+        observer = runner.PairObserver(Mock(), "ses_child", parent="ses_parent")
+        observer.phase, observer.thread = "parent-running", threading.get_ident()
+        job = {
+            "id": "job_fixture",
+            "sessionID": "ses_child",
+            "kind": "shell",
+            "status": "running",
+        }
+        running = {"type": "running"}
+        for active, jobs, expected in (
+            ({"ses_child": running}, [job], 0),
+            ({"ses_parent": running, "ses_child": running}, [job], 0),
+            ({"ses_parent": running}, [], 0),
+            ({"ses_parent": running}, [{**job, "status": "completed"}], 0),
+            ({"ses_parent": running}, [{**job, "sessionID": "ses_other"}], 0),
+            ({"ses_parent": running}, [job, job], 0),
+            ({"ses_parent": running}, [job], 1),
+        ):
+            for route, data in (
+                ("/api/session/active", active),
+                ("/api/experimental/job", jobs),
+            ):
+                observer.original.return_value = {"data": data}
+                observer(None, {}, {}, "GET", route)
+            self.assertEqual(observer.counts["parent-running"], expected)
+
+    def test_background_failure_keeps_initial_error_and_fixed_worker_diagnostics(self):
+        harness = self.harness()
+        harness.native["version"] = "2.3.0"
+        harness.data, harness.connection = {}, {}
+        harness.box.container_project = lambda _data: "/synthetic/project"
+        harness.export = Mock(return_value={"messages": []})
+        harness.seed = Mock(return_value="ses_history_background")
+        harness.native_run = lambda *_: 0
+        harness.service.api = Mock()
+        harness.provider = SimpleNamespace(
+            bind_background=Mock(),
+            background_idle_entered=Mock(wait=lambda _: False),
+            background_idle_release=threading.Event(),
+            background_final_release=threading.Event(),
+            wake_release=threading.Event(),
+            requests=5,
+            errors=2,
+            failure="provider-contract",
+            foreground_requests=1,
+            parent_requests=1,
+            background_requests=2,
+            background_parent_requests=1,
+        )
+        gate = SimpleNamespace(
+            command=lambda: "synthetic-command",
+            release=Mock(side_effect=OSError("private-sentinel")),
+        )
+        with (
+            patch.object(runner, "ShellGate", return_value=gate),
+            self.assertRaisesRegex(runner.Refusal, "gate-timeout"),
+        ):
+            harness.background("ses_parent")
+        self.assertEqual(harness.secondary, ["io-error"])
+        self.assertNotIn("background_final_quiet", harness.checks)
+        value = harness.background_observations
+        runner.validate_activity_diagnostics(value, runner.background_diagnostics())
+        self.assertEqual(value["phase"], "initial-parent-hold")
+        self.assertEqual(value["history_worker"], "not-started")
+        self.assertEqual(value["background_parent_requests"], 1)
+        self.assertEqual(value["provider_errors"], 2)
+        self.assertNotIn("private-sentinel", json.dumps(value))
+
+    def test_readiness_failure_preserves_primary_and_captures_fixed_diagnostics(self):
+        harness = self.harness()
+        harness.data, harness.connection = {}, {}
+        harness.box.container_project = lambda _data: "/synthetic/project"
+        harness.seed = Mock(return_value="ses_history_foreground")
+        harness.export = Mock(return_value={"messages": []})
+        harness.native_run = lambda *_: 0
+        harness.provider = SimpleNamespace(
+            bind_foreground=Mock(),
+            entered=Mock(wait=lambda _: False),
+            release=threading.Event(),
+            parent_release=Mock(set=Mock(side_effect=OSError("private-sentinel"))),
+            requests=1,
+            errors=3,
+            foreground_requests=1,
+            parent_requests=0,
+            failure="provider-contract",
+        )
+        harness.service.api = Mock()
+        harness.service.wait_history = Mock()
+        terminal = SimpleNamespace(choose_terminal=lambda *_: {"status": "running"})
+        with (
+            patch.dict(
+                sys.modules,
+                {
+                    "oc_box": SimpleNamespace(session_terminal=terminal),
+                    "oc_box.session_terminal": terminal,
+                },
+            ),
+            self.assertRaisesRegex(runner.Refusal, "gate-timeout"),
+        ):
+            harness.readiness("ses_parent")
+        self.assertEqual(harness.secondary, ["io-error"])
+        self.assertNotIn("foreground_recovery", harness.checks)
+        value = harness.readiness_observations
+        runner.validate_readiness(value)
+        self.assertEqual(value["phase"], "child-hold")
+        self.assertEqual(value["history_worker"], "not-started")
+        self.assertEqual(value["provider_errors"], 3)
+        self.assertEqual(value["provider_failure"], "provider-contract")
+        self.assertNotIn("private-sentinel", json.dumps(value))
+
+    def test_http_provider_errors_are_counted_without_payload_diagnostics(self):
+        import http.client
+
+        provider = runner.Provider()
+        try:
+            provider.bind_foreground("2.3.0", "ses_history_foreground")
+            provider.release.set()
+            connection = http.client.HTTPConnection(
+                "127.0.0.1", provider.server.server_port, timeout=3
+            )
+            try:
+                connection.request(
+                    "POST",
+                    "/v1/chat/completions",
+                    json.dumps(
+                        {
+                            "stream": True,
+                            "model": "gpt-history",
+                            "messages": [
+                                {"role": "user", "content": "private-sentinel"}
+                            ],
+                        }
+                    ),
+                )
+                with self.assertRaises(http.client.RemoteDisconnected):
+                    connection.getresponse()
+            finally:
+                connection.close()
+            self.assertEqual(provider.requests, 1)
+            self.assertEqual(provider.errors, 1)
+            self.assertEqual(provider.failure, "provider-contract")
+            self.assertFalse(provider.entered.is_set())
+        finally:
+            provider.close()
+
+    def test_parent_pair_observer_cannot_credit_child_foreign_activity_or_jobs(self):
+        observer = runner.PairObserver(Mock(), "ses_child", parent="ses_parent")
+        observer.phase, observer.thread = "parent", threading.get_ident()
+        running = {"type": "running"}
+        for active, jobs, expected in (
+            ({"ses_child": running}, [], 0),
+            ({"ses_foreign": running}, [], 0),
+            ({"ses_parent": running, "ses_foreign": running}, [], 0),
+            ({"ses_parent": running}, [{"status": "running"}], 0),
+            ({"ses_parent": running}, [], 1),
+        ):
+            for route, data in (
+                ("/api/session/active", active),
+                ("/api/experimental/job", jobs),
+            ):
+                observer.original.return_value = {"data": data}
+                observer(None, {}, {}, "GET", route)
+            self.assertEqual(observer.counts["parent"], expected)
+        failure = ValueError("private-sentinel")
+        observer.original.side_effect = failure
+        with self.assertRaises(ValueError) as raised:
+            observer(None, {}, {}, "GET", "/api/session/active")
+        self.assertIs(raised.exception, failure)
+        self.assertEqual(observer.query_errors, 1)
+        self.assertNotIn("private-sentinel", json.dumps(observer.last))
+
+    def test_pair_diagnostics_never_validate_malformed_native_inventory_fields(self):
+        job = {
+            "id": "job_fixture",
+            "sessionID": "ses_child",
+            "kind": "shell",
+            "status": "running",
+        }
+        for active, jobs in (
+            ([], []),
+            ({"ses_parent": {}}, []),
+            ({"foreign": {"type": "running"}}, []),
+            ({"ses_parent": {"type": "running"}}, [{**job, "id": ""}]),
+            ({"ses_parent": {"type": "running"}}, [{**job, "sessionID": "foreign"}]),
+            ({"ses_parent": {"type": "running"}}, [{**job, "kind": "unknown"}]),
+            ({"ses_parent": {"type": "running"}}, [{**job, "status": "unknown"}]),
+        ):
+            with self.subTest(active=active, jobs=jobs):
+                observer = runner.PairObserver(Mock(), "ses_child", parent="ses_parent")
+                observer.thread, observer.phase = (
+                    threading.get_ident(),
+                    "parent-running",
+                )
+                for route, value in (
+                    ("/api/session/active", active),
+                    ("/api/experimental/job", jobs),
+                ):
+                    response = {"data": value}
+                    observer.original.return_value = response
+                    self.assertIs(observer(None, {}, {}, "GET", route), response)
+                self.assertFalse(observer.last["last_pair_valid"])
+                self.assertEqual(sum(observer.counts.values()), 0)
 
     def test_failure_trace_reports_only_code_locations_never_messages(self):
         def inner():
