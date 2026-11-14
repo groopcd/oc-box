@@ -43,7 +43,7 @@ jobs:
         run: |
           apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
           chmod 755 "$apt_root"
-          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config")
+          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config" --mirror azure --force-ipv4)
           sudo apt-get -c "$apt_config" update
           sudo apt-get -c "$apt_config" install -y --no-install-recommends age
           python -m venv "$RUNNER_TEMP/oc-box-build"

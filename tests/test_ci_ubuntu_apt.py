@@ -82,6 +82,58 @@ class UbuntuAptConfigTests(unittest.TestCase):
                     {config, sources, parts, output / "ca-certificates.crt"},
                 )
 
+    def test_allowlisted_mirror_suite_and_ipv4_matrix(self):
+        mirrors = {
+            "edge": "https://mirrors.edge.kernel.org/ubuntu",
+            "azure": "https://azure.archive.ubuntu.com/ubuntu",
+            "ubuntu": "https://archive.ubuntu.com/ubuntu",
+        }
+        self.assertEqual(apt.MIRROR, mirrors["edge"])
+        self.assertEqual(apt.MIRRORS, mirrors)
+        for mirror, uri in mirrors.items():
+            for codename in ("noble", "resolute"):
+                for force_ipv4 in (False, True):
+                    with self.subTest(
+                        mirror=mirror, codename=codename, force_ipv4=force_ipv4
+                    ):
+                        output = self.root / f"{mirror}-{codename}-{force_ipv4}"
+                        settings = config_values(
+                            self.generate(
+                                output,
+                                codename=codename,
+                                mirror=mirror,
+                                force_ipv4=force_ipv4,
+                            )
+                        )
+                        sources = Path(settings["Dir::Etc::sourcelist"])
+                        fields = dict(
+                            line.split(": ", 1)
+                            for line in sources.read_text().splitlines()
+                        )
+                        self.assertEqual(
+                            fields,
+                            {
+                                "Types": "deb",
+                                "URIs": uri,
+                                "Suites": " ".join(
+                                    codename + suffix
+                                    for suffix in (
+                                        "",
+                                        "-updates",
+                                        "-backports",
+                                        "-security",
+                                    )
+                                ),
+                                "Components": "main restricted universe multiverse",
+                                "Signed-By": "/usr/share/keyrings/ubuntu-archive-keyring.gpg",
+                            },
+                        )
+                        if force_ipv4:
+                            self.assertEqual(settings["Acquire::ForceIPv4"], "true")
+                        else:
+                            self.assertNotIn("Acquire::ForceIPv4", settings)
+                        self.assertNotIn("Acquire::ForceIPv6", settings)
+
     def test_automatic_os_release_matrix(self):
         cases = {
             "version_codename": ("ID=ubuntu\nVERSION_CODENAME=noble\n", "noble"),
@@ -120,7 +172,6 @@ class UbuntuAptConfigTests(unittest.TestCase):
                 self.assertTrue(config.is_file())
 
     def test_security_and_bounded_acquisition_settings(self):
-        settings = config_values(self.generate())
         expected = {
             "APT::Update::Error-Mode": "any",
             "Acquire::Retries": "2",
@@ -135,9 +186,89 @@ class UbuntuAptConfigTests(unittest.TestCase):
             "Acquire::Check-Valid-Until": "true",
             "Acquire::Check-Date": "true",
         }
-        for key, value in expected.items():
-            with self.subTest(setting=key):
-                self.assertEqual(settings[key], value)
+        path_keys = {
+            "Dir::Etc::sourcelist",
+            "Dir::Etc::sourceparts",
+            "Acquire::https::CaInfo",
+        }
+        for mode, options in (
+            ("default", {}),
+            ("azure_ipv4", {"mirror": "azure", "force_ipv4": True}),
+        ):
+            with self.subTest(mode=mode):
+                settings = config_values(self.generate(self.root / mode, **options))
+                actual = {
+                    key: value
+                    for key, value in settings.items()
+                    if key not in path_keys
+                }
+                wanted = dict(expected)
+                if options:
+                    wanted["Acquire::ForceIPv4"] = "true"
+                self.assertEqual(actual, wanted)
+                self.assertEqual(set(settings), set(wanted) | path_keys)
+                ca_copy = Path(settings["Acquire::https::CaInfo"])
+                self.assertEqual(ca_copy.read_bytes(), self.ca.read_bytes())
+
+    def test_explicit_default_options_preserve_generated_contents(self):
+        implicit = self.generate()
+        explicit = self.generate(
+            self.root / "explicit", mirror="edge", force_ipv4=False
+        )
+        self.assertEqual(
+            (implicit.parent / "ubuntu.sources").read_bytes(),
+            (explicit.parent / "ubuntu.sources").read_bytes(),
+        )
+        self.assertEqual(
+            implicit.read_text().replace(str(implicit.parent), "OUTPUT"),
+            explicit.read_text().replace(str(explicit.parent), "OUTPUT"),
+        )
+
+    def test_invalid_mirror_and_ipv4_options_refuse_before_reads_or_writes(self):
+        marker = self.root / "must-not-be-created"
+        attacks = (
+            "unknown",
+            "Azure",
+            "",
+            None,
+            [],
+            {},
+            "https://archive.ubuntu.com/ubuntu",
+            "https://user:secret@archive.ubuntu.com/ubuntu",
+            "http://azure.archive.ubuntu.com/ubuntu",
+            "azure\nAcquire::https::Verify-Peer false;",
+            f"$(touch {marker})",
+            f"`touch {marker}`",
+            f"azure;touch {marker}",
+            "../azure",
+        )
+        for attack in attacks:
+            with self.subTest(mirror=attack):
+                with (
+                    patch.object(Path, "read_text") as read_text,
+                    patch.object(Path, "read_bytes") as read_bytes,
+                    self.assertRaisesRegex(
+                        apt.ConfigError,
+                        "^supported Ubuntu mirrors are edge, azure and ubuntu$",
+                    ),
+                ):
+                    self.generate(mirror=attack)
+                read_text.assert_not_called()
+                read_bytes.assert_not_called()
+                self.assertEqual(set(self.root.iterdir()), {self.ca, self.os_release})
+        for value in ("true", "false", "", None, 0, 1, [], {}):
+            with self.subTest(force_ipv4=value):
+                with (
+                    patch.object(Path, "read_text") as read_text,
+                    patch.object(Path, "read_bytes") as read_bytes,
+                    self.assertRaisesRegex(
+                        apt.ConfigError, "^IPv4-only acquisition must be a boolean$"
+                    ),
+                ):
+                    self.generate(force_ipv4=value)
+                read_text.assert_not_called()
+                read_bytes.assert_not_called()
+                self.assertEqual(set(self.root.iterdir()), {self.ca, self.os_release})
 
     def test_ca_copy_is_byte_exact_and_original_inputs_are_immutable(self):
         originals = {}
@@ -326,13 +457,24 @@ class UbuntuAptConfigTests(unittest.TestCase):
     def test_cli_prints_only_absolute_config_path_or_fixed_error(self):
         real_generate = apt.generate
 
-        def generate_for_fixture(output, *, codename):
-            return real_generate(output, codename=codename, ca_bundle=self.ca)
+        def generate_for_fixture(output, *, codename, mirror, force_ipv4):
+            return real_generate(
+                output,
+                codename=codename,
+                mirror=mirror,
+                force_ipv4=force_ipv4,
+                ca_bundle=self.ca,
+            )
 
         stdout, stderr = io.StringIO(), io.StringIO()
-        with patch.object(apt, "generate", side_effect=generate_for_fixture):
+        with patch.object(
+            apt, "generate", side_effect=generate_for_fixture
+        ) as generated:
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
                 code = apt.main(["--output", str(self.output), "--codename", "noble"])
+        generated.assert_called_once_with(
+            self.output, codename="noble", mirror="edge", force_ipv4=False
+        )
         self.assertEqual(code, 0)
         self.assertEqual(stdout.getvalue(), str(self.output / "apt.conf") + "\n")
         self.assertEqual(stderr.getvalue(), "")
@@ -351,6 +493,17 @@ class UbuntuAptConfigTests(unittest.TestCase):
             [],
             ["--output", str(self.output), "--codename", "payload\nsecret"],
             ["--output", str(self.output), "--mirror", "https://example.invalid"],
+            ["--output", str(self.output), "--mirror", "Azure"],
+            ["--output", str(self.output), "--mirror", "azure\nsecret"],
+            [
+                "--output",
+                str(self.output),
+                "--mirror",
+                "https://user:secret@archive.ubuntu.com/ubuntu",
+            ],
+            ["--output", str(self.output), "--mirror", "azure;touch secret"],
+            ["--output", str(self.output), "--force-ipv4", "false"],
+            ["--output", str(self.output), "--force-ipv4=secret"],
         ):
             with self.subTest(argv=argv):
                 stdout, stderr = io.StringIO(), io.StringIO()
@@ -367,32 +520,78 @@ class UbuntuAptConfigTests(unittest.TestCase):
                 )
                 self.assertFalse(self.output.exists())
 
+    def test_cli_allowlisted_mirror_and_ipv4_options_reach_generator(self):
+        for mirror in ("edge", "azure", "ubuntu"):
+            for force_ipv4 in (False, True):
+                with self.subTest(mirror=mirror, force_ipv4=force_ipv4):
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    argv = [
+                        "--output",
+                        str(self.output),
+                        "--codename",
+                        "noble",
+                        "--mirror",
+                        mirror,
+                    ]
+                    if force_ipv4:
+                        argv.append("--force-ipv4")
+                    with (
+                        patch.object(
+                            apt, "generate", return_value=self.output / "apt.conf"
+                        ) as generated,
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        code = apt.main(argv)
+                    self.assertEqual(code, 0)
+                    generated.assert_called_once_with(
+                        self.output,
+                        codename="noble",
+                        mirror=mirror,
+                        force_ipv4=force_ipv4,
+                    )
+                    self.assertEqual(
+                        stdout.getvalue(), str(self.output / "apt.conf") + "\n"
+                    )
+                    self.assertEqual(stderr.getvalue(), "")
+
     @unittest.skipUnless(shutil.which("apt-config"), "optional installed APT parser")
     def test_installed_apt_config_parser_reads_generated_values(self):
-        config = self.generate(self.root / "APT parser with spaces")
-        expected = config_values(config)
-        pairs = [("VALUE" + str(index), key) for index, key in enumerate(expected)]
         env = dict(os.environ)
         env.pop("APT_CONFIG", None)
-        result = subprocess.run(
-            [
-                shutil.which("apt-config"),
-                "-c",
-                str(config),
-                "shell",
-                *(part for pair in pairs for part in pair),
-            ],
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-            env=env,
-        )
-        actual = dict(
-            shlex.split(line.rstrip(";"))[0].split("=", 1)
-            for line in result.stdout.splitlines()
-        )
-        self.assertEqual(actual, {variable: expected[key] for variable, key in pairs})
+        for mode, options in (
+            ("default", {}),
+            ("azure_ipv4", {"mirror": "azure", "force_ipv4": True}),
+        ):
+            with self.subTest(mode=mode):
+                config = self.generate(
+                    self.root / ("APT parser with spaces " + mode), **options
+                )
+                expected = config_values(config)
+                pairs = [
+                    ("VALUE" + str(index), key) for index, key in enumerate(expected)
+                ]
+                result = subprocess.run(
+                    [
+                        shutil.which("apt-config"),
+                        "-c",
+                        str(config),
+                        "shell",
+                        *(part for pair in pairs for part in pair),
+                    ],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                    env=env,
+                )
+                actual = dict(
+                    shlex.split(line.rstrip(";"))[0].split("=", 1)
+                    for line in result.stdout.splitlines()
+                )
+                self.assertEqual(
+                    actual, {variable: expected[key] for variable, key in pairs}
+                )
 
 
 if __name__ == "__main__":
