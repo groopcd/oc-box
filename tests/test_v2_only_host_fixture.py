@@ -3,10 +3,13 @@
 import contextlib
 import copy
 import io
+import importlib.util
 import json
+import marshal
 import os
 from pathlib import Path
 import subprocess
+import struct
 import sys
 import tempfile
 import unittest
@@ -227,6 +230,7 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
                     },
                 ),
                 patch.object(box, "run", side_effect=version_probe),
+                patch.object(safety, "isolated_env", side_effect=legacy.isolated_env),
                 patch.object(fixture, "validate_store") as store,
                 patch.object(box, "check_backend") as backend,
                 patch.object(safety, "seed_native_history") as seed,
@@ -377,6 +381,156 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
         prepare.assert_not_called()
         seed.assert_not_called()
         engine.assert_not_called()
+
+    def test_real_backend_preflight_uses_verified_private_selectors_and_environment(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name in ("bin", "temporary", "runtime"):
+                (root / name).mkdir(mode=0o700)
+            for name in ("podman", "opencode"):
+                target = root / "bin" / name
+                target.write_text("#!/bin/sh\nexit 99\n")
+                target.chmod(0o700)
+            expected = safety.isolated_env(
+                root,
+                {
+                    "PATH": "/ambient/bin",
+                    "XDG_RUNTIME_DIR": str(root / "runtime"),
+                },
+            )
+            profile = {"version": "2.3.0", "path": "/native", "sha256": "a" * 64}
+            phases = []
+
+            def assert_environment(phase):
+                phases.append(phase)
+                self.assertEqual(dict(os.environ), expected)
+                self.assertEqual(
+                    fixture.shutil.which("podman"), str(root / "bin/podman")
+                )
+                self.assertEqual(
+                    fixture.shutil.which("opencode"), str(root / "bin/opencode")
+                )
+                self.assertNotIn("PROVIDER_API_KEY", os.environ)
+
+            def probe(command, **kwargs):
+                assert_environment("backend-info")
+                self.assertEqual(
+                    command,
+                    ["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+                )
+                self.assertEqual(kwargs["env"], expected)
+                self.assertEqual(
+                    kwargs["env"]["CONTAINERS_STORAGE_CONF"],
+                    str(root / "config/containers/storage.conf"),
+                )
+                self.assertEqual(
+                    kwargs["env"]["CONTAINERS_CONF"],
+                    str(root / "config/containers/containers.conf"),
+                )
+                return subprocess.CompletedProcess(command, 0, "true", "")
+
+            def prepare(*args):
+                assert_environment("native-selector")
+                return root / "bin/opencode", profile
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "PATH": "/ambient/bin",
+                        "HOME": "/normal/host-home",
+                        "CONTAINERS_STORAGE_CONF": "/normal/store.conf",
+                        "CONTAINERS_CONF": "/normal/containers.conf",
+                        "PROVIDER_API_KEY": "must-not-forward",
+                    },
+                    clear=True,
+                ),
+                patch.object(safety, "isolated_env", return_value=expected),
+                patch.object(fixture, "prepare_native_cli", side_effect=prepare),
+                patch.object(
+                    fixture,
+                    "validate_store",
+                    side_effect=lambda *a, **k: assert_environment("verified-store"),
+                ),
+                patch.object(
+                    box.dependencies,
+                    "require",
+                    side_effect=lambda feature: assert_environment("dependencies"),
+                ),
+                patch.object(os, "geteuid", return_value=1000),
+                patch.object(box, "run", side_effect=probe) as engine,
+                patch.object(
+                    fixture.crypto,
+                    "tools",
+                    side_effect=lambda: assert_environment("crypto-tools"),
+                ),
+                patch.object(
+                    fixture.vault,
+                    "crypto",
+                    side_effect=lambda: assert_environment("vault-prerequisite"),
+                ),
+                patch.object(
+                    safety,
+                    "seed_native_history",
+                    side_effect=lambda *a: (
+                        assert_environment("native-seed") or {"seed": True}
+                    ),
+                ),
+            ):
+                result = fixture.prepare_launch(
+                    root, Path("/native"), "2.3.0", fixture.new_report("2.3.0")
+                )
+                self.assertEqual(os.environ["HOME"], "/normal/host-home")
+            self.assertEqual(result[-1], expected)
+            self.assertEqual(
+                phases,
+                [
+                    "native-selector",
+                    "verified-store",
+                    "dependencies",
+                    "backend-info",
+                    "crypto-tools",
+                    "vault-prerequisite",
+                    "native-seed",
+                ],
+            )
+            engine.assert_called_once()
+
+    def test_initial_store_refusal_never_reaches_backend_or_resource_inspection(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "temporary").mkdir(mode=0o700)
+            with (
+                patch.object(
+                    safety,
+                    "isolated_env",
+                    return_value={
+                        "PATH": str(root / "bin"),
+                        "TMPDIR": str(root / "temporary"),
+                    },
+                ),
+                patch.dict(os.environ, {"TMPDIR": str(root / "temporary")}),
+                patch.object(
+                    fixture, "prepare_native_cli", return_value=(Path("/native"), {})
+                ),
+                patch.object(
+                    fixture,
+                    "validate_store",
+                    side_effect=safety.FixtureError("private-store"),
+                ),
+                patch.object(box.dependencies, "require") as dependencies,
+                patch.object(box, "run") as engine,
+                patch.object(safety, "verify_owned_resources") as inspect,
+                patch.object(safety, "seed_native_history") as seed,
+                self.assertRaises(safety.FixtureError),
+            ):
+                fixture.prepare_launch(
+                    root, Path("/native"), "2.3.0", fixture.new_report("2.3.0")
+                )
+            for operation in (dependencies, engine, inspect, seed):
+                operation.assert_not_called()
 
     def test_profile_orchestration_keeps_both_restore_kinds_rotation_reset_and_refusal(
         self,
@@ -990,6 +1144,254 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
                 safety.private_json(roots[0], "result.json"),
                 {"status": "first-failure"},
             )
+
+
+class V2OnlySourcePreflightTests(unittest.TestCase):
+    """Private tiny Git repositories and stdlib bootstrap only; no host fixture."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix="oc-box-source-unit-")
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name)
+        for relative in fixture._SOURCE_REQUIRED:
+            target = self.root / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("# checked synthetic source\n")
+        (self.root / "tools/test_v2_podman.py").write_text("VALUE='checked-source'\n")
+        (self.root / ".gitignore").write_text("__pycache__/\n*.pyc\n*.ignored\n")
+        self.git("init", "-q")
+        self.git("add", ".")
+        self.git(
+            "-c",
+            "user.name=Paulo Dias",
+            "-c",
+            "user.email=paulo.miguel.dias@gmail.com",
+            "commit",
+            "-qm",
+            "Synthetic source fixture",
+        )
+
+    def git(self, *arguments):
+        return subprocess.check_output(
+            [
+                fixture.shutil.which("git", path=os.defpath),
+                "-c",
+                "core.fsmonitor=false",
+                "-C",
+                str(self.root),
+                *arguments,
+            ],
+            stderr=subprocess.PIPE,
+            env={
+                "PATH": os.defpath,
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_CONFIG_NOSYSTEM": "1",
+            },
+            timeout=15,
+        )
+
+    def bootstrap_probe(self):
+        # Execute only the driver's stdlib prelude in a separate process. The
+        # unit-only host-guard mock never invokes main/run or any Podman path.
+        prelude = (
+            Path(fixture.__file__)
+            .read_text()
+            .split("\nsys.path.insert(0, str(APP))", 1)[0]
+        )
+        program = """
+import importlib,json,pathlib,sys
+namespace={'__name__':'offline_bootstrap_probe','__file__':sys.argv[2]}
+exec(compile(sys.argv[3],sys.argv[2],'exec'),namespace)
+namespace['_early_host_guard']=lambda:None
+root=pathlib.Path(sys.argv[1])
+try:
+ identity=namespace['_prepare_cli_imports'](root)
+ sys.path[:0]=[str(root/'src'),str(root)]
+ module=importlib.import_module('tools.test_v2_podman')
+ namespace['_source_import_guard'](root,identity['sha256'])
+ print(json.dumps({'value':module.VALUE,'fresh_cache':sys.pycache_prefix is not None}))
+except namespace['SourceError'] as error:
+ print(str(error))
+ sys.exit(7)
+"""
+        return subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-c",
+                program,
+                str(self.root),
+                fixture.__file__,
+                prelude,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def poisoned_bytecode(self, source, marker):
+        code = compile(
+            "from pathlib import Path\nPath("
+            + repr(str(marker))
+            + ").write_text('EXECUTED')\nVALUE='poison'\n",
+            str(source),
+            "exec",
+        )
+        info = source.stat()
+        return (
+            importlib.util.MAGIC_NUMBER
+            + struct.pack("<III", 0, int(info.st_mtime), info.st_size)
+            + marshal.dumps(code)
+        )
+
+    def test_ordinary_import_does_not_establish_a_cli_acceptance_binding(self):
+        self.assertIsNone(fixture._CLI_SOURCE)
+        with self.assertRaisesRegex(fixture.SourceError, "cli-preflight-required"):
+            fixture.source_identity()
+
+    def test_early_host_guard_precedes_git_bytecode_or_project_import_setup(self):
+        with (
+            patch.object(
+                fixture,
+                "_early_host_guard",
+                side_effect=fixture.SourceError("host-only"),
+            ),
+            patch.object(fixture, "_source_snapshot") as snapshot,
+            patch.object(fixture.tempfile, "TemporaryDirectory") as cache,
+            self.assertRaises(fixture.SourceError),
+        ):
+            fixture._prepare_cli_imports(self.root)
+        snapshot.assert_not_called()
+        cache.assert_not_called()
+
+    def test_untracked_tools_initializer_is_rejected_before_it_executes(self):
+        marker = self.root / "initializer-executed"
+        (self.root / "tools/__init__.py").write_text(
+            "from pathlib import Path\nfrom oc_box import credentials\n"
+            "credentials.has_unlocked_values=lambda:False\n"
+            "Path(" + repr(str(marker)) + ").write_text('EXECUTED')\n"
+        )
+        result = self.bootstrap_probe()
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertIn("clean-source-required", result.stdout)
+        self.assertFalse(marker.exists())
+
+    def test_startup_removes_checkout_paths_before_stdlib_import_even_for_driver_alias(
+        self,
+    ):
+        marker = self.root / "stdlib-shadow-executed"
+        (self.root / "tools/json.py").write_text(
+            "from pathlib import Path\nPath("
+            + repr(str(marker))
+            + ").write_text('EXECUTED')\n"
+        )
+        startup = Path(fixture.__file__).read_text().split("\nimport argparse", 1)[0]
+        with tempfile.TemporaryDirectory() as aliases:
+            alias = Path(aliases) / "driver.py"
+            alias.symlink_to(self.root / "tools/test_v2_lifecycle_podman.py")
+            program = """
+import sys
+root=sys.argv[1]
+sys.path[:0]=[root+'/tools',root+'/src',root]
+namespace={'__name__':'__main__','__file__':sys.argv[2]}
+exec(compile(sys.argv[3],sys.argv[2],'exec'),namespace)
+assert namespace['_startup_root']==root
+import json
+assert not json.__file__.startswith(root+'/')
+"""
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-B",
+                    "-c",
+                    program,
+                    str(self.root),
+                    str(alias),
+                    startup,
+                ],
+                capture_output=True,
+                timeout=15,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(marker.exists())
+
+    def test_matching_ignored_poison_pycache_cannot_shadow_checked_source(self):
+        source = self.root / "tools/test_v2_podman.py"
+        marker = self.root / "poison-executed"
+        cached = (
+            source.parent
+            / "__pycache__"
+            / (source.stem + "." + sys.implementation.cache_tag + ".pyc")
+        )
+        cached.parent.mkdir()
+        cached.write_bytes(self.poisoned_bytecode(source, marker))
+        before = cached.read_bytes()
+        result = self.bootstrap_probe()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        self.assertEqual(
+            json.loads(result.stdout), {"value": "checked-source", "fresh_cache": True}
+        )
+        self.assertFalse(marker.exists())
+        self.assertEqual(cached.read_bytes(), before)
+
+    def test_ignored_legacy_sourceless_initializer_is_rejected_before_execution(self):
+        source = self.root / "tools/test_v2_podman.py"
+        marker = self.root / "legacy-bytecode-executed"
+        (self.root / "tools/__init__.pyc").write_bytes(
+            self.poisoned_bytecode(source, marker)
+        )
+        result = self.bootstrap_probe()
+        self.assertEqual(result.returncode, 7, result.stderr)
+        self.assertIn("ignored-source", result.stdout)
+        self.assertFalse(marker.exists())
+
+    def test_assume_unchanged_cannot_hide_modified_tracked_runtime_from_head_blob_check(
+        self,
+    ):
+        baseline = fixture._source_snapshot(self.root)
+        target = self.root / "src/oc_box/credentials.py"
+        self.git(
+            "update-index", "--assume-unchanged", "--", "src/oc_box/credentials.py"
+        )
+        target.write_text("has_unlocked_values=lambda:False\n")
+        self.assertEqual(
+            self.git("status", "--porcelain", "--untracked-files=all"), b""
+        )
+        with self.assertRaisesRegex(fixture.SourceError, "source-changed"):
+            fixture._source_snapshot(self.root)
+        self.assertIn("src/oc_box/credentials.py", baseline["sha256"])
+
+    def test_ignored_root_import_shadow_is_not_exempt_from_the_source_preflight(self):
+        (self.root / ".git/info/exclude").write_text("json.py\n")
+        (self.root / "json.py").write_text("raise RuntimeError('must not import')\n")
+        with self.assertRaisesRegex(fixture.SourceError, "ignored-source"):
+            fixture._source_snapshot(self.root)
+
+    def test_final_source_identity_rechecks_original_bootstrap_and_module_origins(self):
+        checked = fixture._source_snapshot(self.root)
+        build = {
+            "commit": checked["commit"],
+            "commit_count": checked["commit_count"],
+            "dirty": False,
+        }
+        with (
+            patch.object(fixture, "APP", self.root),
+            patch.object(fixture, "_CLI_SOURCE", checked),
+            patch.object(fixture, "_source_import_guard") as imports,
+            patch.object(legacy, "get_version_info", return_value=build),
+        ):
+            result = fixture.source_identity()
+            self.assertEqual(result["sha256"], checked["sha256"])
+            imports.assert_called_once_with(self.root, checked["sha256"])
+            (self.root / "untracked-note").write_text("refuse final source drift")
+            with self.assertRaises(fixture.SourceError):
+                fixture.source_identity()
+
+    def test_shallow_source_refuses_before_import(self):
+        head = self.git("rev-parse", "HEAD")
+        (self.root / ".git/shallow").write_bytes(head)
+        with self.assertRaisesRegex(fixture.SourceError, "clean-source-required"):
+            fixture._source_snapshot(self.root)
 
 
 if __name__ == "__main__":

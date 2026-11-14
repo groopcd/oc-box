@@ -11,26 +11,270 @@ only. There is deliberately no resume/retry, V1 binary or fake migration.
 Global-vault coverage belongs to the separate global-vault fixture: running
 this profile neither runs nor establishes that gate. No interactive UI, real
 provider, OAuth, network-containment or security acceptance is claimed.
+
+CLI source binding assumes a trusted Python interpreter/site-packages and system
+Git, a reviewed full-history checkout and no concurrent checkout writers. Invoke
+this script directly, not through an unchecked package entrypoint. Before project
+imports it rejects dirty/untracked source, checks tracked HEAD blobs and isolates
+bytecode. Ordinary library imports establish no host-acceptance binding.
 """
 
-import argparse
-import json
+import sys
 import os
+
+# Script-directory/PYTHONPATH entries inside the checkout must not shadow the
+# stdlib used for preflight (for example tools/json.py). External interpreter
+# startup/site-packages remain an explicit trusted prerequisite, not a sandbox.
+if __name__ == "__main__":
+    _startup_root = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
+    sys.path[:] = [
+        item
+        for item in sys.path
+        if item
+        and os.path.commonpath((os.path.realpath(item), _startup_root)) != _startup_root
+    ]
+
+import argparse
+import hashlib
+import importlib.machinery
+import json
 from pathlib import Path
 import re
 import secrets
 import shutil
+import stat
 import subprocess
-import sys
 import tempfile
+import types
 from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
+_CLI_SOURCE = None
+_CLI_CACHE = None
+_SOURCE_REQUIRED = frozenset(
+    {
+        "src/oc_box/__init__.py",
+        "src/oc_box/oc_box.py",
+        "src/oc_box/credentials.py",
+        "tools/test_v2_lifecycle_podman.py",
+        "tools/test_v2_podman.py",
+        "tools/test_global_vault_podman.py",
+        "tools/native_host_profile.py",
+    }
+)
+_EGG_METADATA = frozenset(
+    {
+        "PKG-INFO",
+        "SOURCES.txt",
+        "dependency_links.txt",
+        "entry_points.txt",
+        "requires.txt",
+        "top_level.txt",
+    }
+)
+
+
+class SourceError(Exception):
+    """Fixed pre-import source refusal; never expose Git output or paths."""
+
+
+def _source_require(condition, category):
+    if not condition:
+        raise SourceError(category)
+
+
+def _early_host_guard():
+    _source_require(
+        os.geteuid() != 0
+        and os.environ.get("OC_BOX_CONTAINER") != "1"
+        and not Path("/.dockerenv").exists()
+        and not Path("/run/.containerenv").exists(),
+        "host-only",
+    )
+
+
+def _source_path(path):
+    path = Path(path).absolute()
+    _source_require(
+        ".." not in path.parts and not any(c in str(path) for c in "\0\r\n"),
+        "source-path",
+    )
+    for ancestor in (*reversed(path.parents), path):
+        info = ancestor.lstat()
+        _source_require(not stat.S_ISLNK(info.st_mode), "source-path")
+    return path
+
+
+def _source_git(source, *arguments):
+    # Never use fixture selectors, ambient Git credential/config overrides or
+    # executable hooks/fsmonitor from the candidate's repository configuration.
+    binary = shutil.which("git", path=os.defpath)
+    _source_require(binary and Path(binary).is_absolute(), "source-git")
+    return subprocess.run(
+        [
+            binary,
+            "-c",
+            "core.fsmonitor=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-C",
+            str(source),
+            *arguments,
+        ],
+        env={
+            "PATH": os.defpath,
+            "LANG": "C.UTF-8",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+        },
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        check=True,
+        timeout=15,
+    ).stdout
+
+
+def _source_snapshot(source):
+    """Pure stdlib/Git verification against HEAD, not the mutable Git index."""
+    source = _source_path(source)
+    commit = (
+        _source_git(source, "rev-parse", "--verify", "HEAD^{commit}").decode().strip()
+    )
+    _source_require(
+        re.fullmatch(r"[0-9a-f]{40}", commit) is not None
+        and _source_git(source, "rev-parse", "--show-toplevel").decode().strip()
+        == str(source)
+        and _source_git(source, "rev-parse", "--is-shallow-repository").strip()
+        == b"false"
+        and not _source_git(source, "status", "--porcelain", "--untracked-files=all"),
+        "clean-source-required",
+    )
+    ignored = _source_git(
+        source,
+        "ls-files",
+        "--others",
+        "--ignored",
+        "--exclude-standard",
+        "-z",
+    ).split(b"\0")
+    for item in filter(None, ignored):
+        relative = item.decode()
+        # A fresh pycache_prefix makes these ignored caches unreadable to the
+        # importer. Legacy sourceless .pyc and ignored source/extensions refuse.
+        _source_require(
+            (relative.endswith(".pyc") and "/__pycache__/" in "/" + relative)
+            or (
+                relative.startswith("src/oc_box.egg-info/")
+                and relative.rsplit("/", 1)[-1] in _EGG_METADATA
+            ),
+            "ignored-source",
+        )
+        _source_path(source / relative)
+    records = _source_git(source, "ls-tree", "-r", "-z", "HEAD")
+    hashes = {}
+    for record in filter(None, records.split(b"\0")):
+        header, name = record.split(b"\t", 1)
+        mode, kind, blob = header.split()
+        relative = name.decode()
+        _source_require(
+            mode in (b"100644", b"100755") and kind == b"blob", "source-entry"
+        )
+        path = _source_path(source / relative)
+        actual_mode = path.stat().st_mode
+        _source_require(
+            stat.S_ISREG(actual_mode)
+            and bool(actual_mode & 0o111) == (mode == b"100755"),
+            "source-entry",
+        )
+        content = path.read_bytes()
+        actual = hashlib.sha1(
+            b"blob " + str(len(content)).encode() + b"\0" + content
+        ).hexdigest()
+        _source_require(actual.encode() == blob, "source-changed")
+        hashes[relative] = hashlib.sha256(content).hexdigest()
+    _source_require(_SOURCE_REQUIRED <= hashes.keys(), "source-incomplete")
+    return {
+        "commit": commit,
+        "commit_count": int(_source_git(source, "rev-list", "--count", "HEAD")),
+        "sha256": hashes,
+    }
+
+
+def _source_import_guard(source, tracked):
+    for name, module in tuple(sys.modules.items()):
+        filename = getattr(module, "__file__", None)
+        if name == "tools" or name.startswith("tools."):
+            expected = source / "tools"
+        elif name == "oc_box" or name.startswith("oc_box."):
+            expected = source / "src/oc_box"
+        else:
+            expected = None
+        locations = [filename] if filename else list(getattr(module, "__path__", ()))
+        if expected is not None:
+            _source_require(
+                locations
+                and all(
+                    Path(item).resolve().is_relative_to(expected) for item in locations
+                ),
+                "source-shadowing",
+            )
+        if filename:
+            resolved = Path(filename).resolve()
+            if resolved.is_relative_to(source):
+                _source_require(
+                    resolved.relative_to(source).as_posix() in tracked,
+                    "source-shadowing",
+                )
+
+
+def _prepare_cli_imports(source):
+    global _CLI_CACHE
+    _early_host_guard()  # Before Git, project import, placement or native/engine calls.
+    identity = _source_snapshot(source)
+    _source_import_guard(source, identity["sha256"])
+    _CLI_CACHE = tempfile.TemporaryDirectory(prefix="oc-box-v2-only-bytecode-")
+    sys.dont_write_bytecode = True
+    sys.pycache_prefix = _CLI_CACHE.name
+    # tools is a namespace in this reviewed checkout. Do not let an unrelated
+    # site-packages tools/__init__.py run while resolving its checked modules.
+    _source_require("tools/__init__.py" not in identity["sha256"], "source-namespace")
+    if "tools" not in sys.modules:
+        namespace = types.ModuleType("tools")
+        namespace.__path__ = [str(source / "tools")]
+        namespace.__package__ = "tools"
+        namespace.__spec__ = importlib.machinery.ModuleSpec(
+            "tools", None, is_package=True
+        )
+        sys.modules["tools"] = namespace
+    return identity
+
+
+if __name__ == "__main__":
+    try:
+        _CLI_SOURCE = _prepare_cli_imports(APP)
+    except BaseException as error:
+        print(
+            "V2-only lifecycle pre-import refusal: "
+            + (str(error) if isinstance(error, SourceError) else "source-preflight")
+            + ".",
+            file=sys.stderr,
+        )
+        raise SystemExit(130 if isinstance(error, KeyboardInterrupt) else 1) from None
+
 sys.path.insert(0, str(APP))
 sys.path.insert(0, str(APP / "src"))
 from tools import test_v2_podman as legacy
 from tools import test_global_vault_podman as safety
 from tools import native_host_profile as profiles
+
+if _CLI_SOURCE is not None:
+    try:
+        _source_import_guard(APP, _CLI_SOURCE["sha256"])
+        _source_require(_source_snapshot(APP) == _CLI_SOURCE, "source-changed")
+    except BaseException:
+        print("V2-only lifecycle pre-import refusal: source-imports.", file=sys.stderr)
+        raise SystemExit(1) from None
 
 box, backups, crypto = legacy.box, legacy.backups, legacy.crypto
 vault, credentials, compat = legacy.vault, legacy.credentials, legacy.compat
@@ -367,21 +611,21 @@ def record_ids(root):
 
 
 def source_identity():
+    _source_require(_CLI_SOURCE is not None, "cli-preflight-required")
+    checked = _source_snapshot(APP)
+    _source_require(checked == _CLI_SOURCE, "source-changed")
+    _source_import_guard(APP, checked["sha256"])
+    build = legacy.get_version_info(APP)
+    _source_require(
+        build.get("commit") == checked["commit"]
+        and build.get("commit_count") == checked["commit_count"]
+        and build.get("dirty") is False,
+        "source-version",
+    )
     return {
-        "build": legacy.get_version_info(APP),
-        "sha256": {
-            str(path.relative_to(APP)): binary_hash(path)
-            for path in sorted(
-                [
-                    *list((APP / "src/oc_box").glob("*.py")),
-                    *list((APP / "src/oc_box").glob("*.js")),
-                    APP / "tools/test_v2_podman.py",
-                    APP / "tools/test_global_vault_podman.py",
-                    APP / "tools/native_host_profile.py",
-                    Path(__file__).resolve(),
-                ]
-            )
-        },
+        "build": build,
+        "sha256": checked["sha256"],
+        "binding": "CLI pre-import HEAD blobs, clean full history, isolated bytecode; trusted interpreter/Git and no concurrent writers required",
     }
 
 
@@ -478,6 +722,26 @@ def sentinel_check_program(os_file=OS_FILE):
     )
 
 
+def prepare_launch(root, binary, version, report):
+    env = safety.isolated_env(root)
+    env["TMPDIR"] = str(
+        safety.existing_directory(os.environ.get("TMPDIR", str(root / "temporary")))
+    )
+    with patch.dict(os.environ, env, clear=True):
+        wrapper, profile = prepare_native_cli(root, binary, version)
+        report["native"] = profile
+        # A refusal here must not reach backend probes, registry resources,
+        # native history import or owning operations.
+        validate_store(root, fresh=True, temporary=Path(env["TMPDIR"]))
+        box.check_backend(feature="launch", env=env)
+        crypto.tools()
+        vault.crypto()
+        report["checks"]["private-store-native-selector"] = True
+        baseline = safety.seed_native_history(root, binary)
+        report["checks"]["native-v2-host-seed"] = True
+    return wrapper, profile, baseline, env
+
+
 def run(root, binary, version, distro, report):
     safety.host_guard()
     source = source_identity()
@@ -486,19 +750,7 @@ def run(root, binary, version, distro, report):
         "clean-source-required",
     )
     report["source"] = source
-    wrapper, profile = prepare_native_cli(root, binary, version)
-    report["native"] = profile
-    validate_store(
-        root,
-        fresh=True,
-        temporary=Path(os.environ.get("TMPDIR", str(root / "temporary"))),
-    )
-    box.check_backend(feature="launch")
-    crypto.tools()
-    vault.crypto()
-    report["checks"]["private-store-native-selector"] = True
-    baseline = safety.seed_native_history(root, binary)
-    report["checks"]["native-v2-host-seed"] = True
+    wrapper, profile, baseline, env = prepare_launch(root, binary, version, report)
     password = secrets.token_urlsafe(32)
     state = {
         "key": "fixture-" + secrets.token_urlsafe(24),
@@ -509,10 +761,6 @@ def run(root, binary, version, distro, report):
     server, worker = legacy.make_provider(state)
     active = {"name": "source-a", "stage": "first", "required": baseline}
     try:
-        env = safety.isolated_env(root)
-        env["TMPDIR"] = str(
-            safety.existing_directory(os.environ.get("TMPDIR", str(root / "temporary")))
-        )
         with (
             patch.dict(os.environ, env, clear=True),
             patch.object(vault, "vault_path", return_value=root / "vault/vault.json"),
