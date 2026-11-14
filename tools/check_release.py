@@ -9,11 +9,12 @@ No network access, Git mutation, or publication is performed by this validator.
 
 import argparse
 import ast
-from datetime import datetime
+import hashlib
 import json
-from pathlib import Path
 import re
 import subprocess
+from datetime import datetime
+from pathlib import Path
 
 
 SOURCE = "src/oc_box/version_info.py"
@@ -66,6 +67,8 @@ def validate(root, *, publish=False, tag=None, release=None):
         raise ValueError("Full Git history is required")
     if git("status", "--porcelain", "--untracked-files=normal"):
         raise ValueError("A clean source checkout is required")
+    if git("hash-object", "--no-filters", SOURCE) != git("rev-parse", "HEAD:" + SOURCE):
+        raise ValueError("Version source differs from the committed source")
     # Read the committed blob, not an environment override or generated file.
     series, channel, baseline = source_identity(git("show", "HEAD:" + SOURCE))
     count = int(git("rev-list", "--count", "HEAD"))
@@ -114,6 +117,8 @@ def validate(root, *, publish=False, tag=None, release=None):
         "commit": commit,
         "commit_count": count,
         "release_channel": channel,
+        "dirty": False,
+        "source_sha256": hashlib.sha256((root / SOURCE).read_bytes()).hexdigest(),
         "tag": expected_tag,
         "publish_validated": publish,
     }
