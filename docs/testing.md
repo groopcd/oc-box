@@ -363,12 +363,25 @@ uv run --isolated --no-project --with cryptography python -I -B \
   tools/test_global_vault_podman.py \
   --opencode-v2 /path/to/opencode2 --native-version 2.3.0 \
   --work-dir /path/to/fresh-fixtures --temp-dir /path/to/private-temp
+
+uv run --isolated --no-project --with cryptography python -I -B \
+  tools/test_v2_lifecycle_podman.py \
+  --opencode-v2 /path/to/opencode2 --native-version 2.3.0 \
+  --work-dir /path/to/fresh-fixtures --temp-dir /path/to/private-temp
 ```
 
-The global-vault invocation runs from the pinned candidate checkout. The
+The global-vault and V2-only lifecycle invocations run from the pinned candidate
+checkout. The
 current-V2 lifecycle gate additionally requires full **and portable** restore,
 same-session/history preservation, reset/OS distinction and wrong-passphrase
 refusal before deletion. Global-vault full restore alone is insufficient.
+
+The lifecycle profile emits its own V2-only report with ten named check groups.
+It has no V1 requirement, no resume/retry mode and no claim that the old
+dual-major six-stage fixture ran. Retain the original failed report/store and
+start a separately identified fresh run after diagnosis; do not overwrite
+encrypted evidence. `--cleanup` validates only the recorded private fixture
+and stopped, owned resources; it is not general storage cleanup.
 
 Keep the old dual-major lifecycle fixture for legacy migration/downgrade work.
 A current V2-only report must explicitly exclude unrun V1 migration/reopen and
