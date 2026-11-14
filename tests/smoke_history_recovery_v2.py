@@ -42,6 +42,142 @@ from oc_box import history_reader, history_recovery
 
 
 CANARY = "SYNTHETIC_HISTORY_RECOVERY_AMBIENT"
+PR_SET_CHILD_SUBREAPER = 36
+PR_GET_CHILD_SUBREAPER = 37
+
+
+@contextlib.contextmanager
+def subreaper():
+    """Linux-only fixture hygiene; restore the caller's flag even on failure."""
+    require(sys.platform == "linux", "The native recovery fixture requires Linux.")
+    libc = ctypes.CDLL(None, use_errno=True)
+    previous = ctypes.c_int()
+    require(
+        libc.prctl(PR_GET_CHILD_SUBREAPER, ctypes.byref(previous), 0, 0, 0) == 0
+        and previous.value in (0, 1),
+        "Could not read the fixture subreaper state.",
+    )
+    try:
+        require(
+            libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0,
+            "Could not enable fixture subreaper.",
+        )
+        yield
+    finally:
+        require(
+            libc.prctl(PR_SET_CHILD_SUBREAPER, previous.value, 0, 0, 0) == 0,
+            "Could not restore the fixture subreaper state.",
+        )
+
+
+def process_identity(pid):
+    """Read only one known PID, never scan or select unrelated processes."""
+    root = Path(f"/proc/{pid}")
+    require(root.stat().st_uid == os.getuid(), "Synthetic process ownership changed.")
+    fields = (root / "stat").read_text().rsplit(")", 1)[1].split()
+    require(fields[0] not in ("Z", "X"), "Synthetic process is no longer live.")
+    return int(fields[1]), int(fields[19])  # parent PID and start ticks
+
+
+def shell_identity(pid, argv, project, producer):
+    root = Path(f"/proc/{pid}")
+    identity = process_identity(pid)
+    require(
+        (root / "cmdline").read_bytes()
+        == b"\0".join(os.fsencode(arg) for arg in argv) + b"\0"
+        and (root / "cwd").readlink() == project.resolve(),
+        "Synthetic shell command or directory changed.",
+    )
+    parent, visited = identity[0], {pid}
+    for _ in range(32):
+        require(
+            parent > 1 and parent not in visited, "Synthetic shell ancestry changed."
+        )
+        visited.add(parent)
+        ancestor = process_identity(parent)
+        if parent == producer.pid:
+            require(
+                producer.poll() is None,
+                "Private producer stopped before shell binding.",
+            )
+            return identity, ancestor[1]
+        parent = ancestor[0]
+    raise FixtureFailure("Synthetic shell ancestry exceeded its bound.")
+
+
+@contextlib.contextmanager
+def bound_shell(pidfile, argv, project, producer):
+    """Bind the live owned shell BEFORE producer death; never signal a bare PID."""
+    descriptor = None
+    try:
+        try:
+            require(
+                sys.platform == "linux"
+                and hasattr(os, "pidfd_open")
+                and hasattr(signal, "pidfd_send_signal")
+                and hasattr(os, "P_PIDFD"),
+                "The native recovery fixture requires Linux pidfd bindings.",
+            )
+            value = pidfile.read_text()
+            require(
+                value.isascii() and value.isdecimal() and len(value) <= 10,
+                "Invalid synthetic shell PID.",
+            )
+            pid = int(value)
+            require(1 < pid < 2**31, "Invalid synthetic shell PID.")
+            before = shell_identity(pid, argv, project, producer)
+            descriptor = os.pidfd_open(pid, 0)
+            require(
+                shell_identity(pid, argv, project, producer) == before,
+                "Synthetic shell identity changed while binding.",
+            )
+            signal.pidfd_send_signal(descriptor, 0, None, 0)
+        except (OSError, ValueError, IndexError):
+            raise FixtureFailure(
+                "Could not bind the live owned synthetic shell."
+            ) from None
+        yield descriptor
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def stop_bound_shell(descriptor):
+    """Signal/reap only the pidfd-bound child, including native-parent reaping."""
+    try:
+        with contextlib.suppress(ProcessLookupError):
+            signal.pidfd_send_signal(descriptor, signal.SIGKILL, None, 0)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                status = os.waitid(os.P_PIDFD, descriptor, os.WEXITED | os.WNOHANG)
+            except ChildProcessError:
+                # The native intermediary may already have reaped the shell.
+                # pidfd fdinfo reports -1 only after that bound process is reaped;
+                # never consult a possibly reused /proc/<pid> for this decision.
+                fields = [
+                    line.split(":", 1)[1].strip()
+                    for line in Path(f"/proc/self/fdinfo/{descriptor}")
+                    .read_text()
+                    .splitlines()
+                    if line.startswith("Pid:")
+                ]
+                require(
+                    len(fields) == 1, "Could not verify the bound shell's reap state."
+                )
+                if fields == ["-1"]:
+                    return
+            else:
+                if status is not None:
+                    return
+            require(
+                time.monotonic() < deadline, "Held shell was not stopped and reaped."
+            )
+            time.sleep(0.02)
+    except (OSError, ValueError):
+        raise FixtureFailure(
+            "Could not stop and reap the bound synthetic shell."
+        ) from None
 
 
 def environment(root):
@@ -399,32 +535,26 @@ def exercise(binary, root):
                 require(
                     producer.poll() is None, "Private producer stopped prematurely."
                 )
-                os.killpg(producer.pid, signal.SIGKILL)
-                require(
-                    producer.wait(timeout=5) == -signal.SIGKILL,
-                    "Private producer was not killed and reaped.",
-                )
-                # This test process is a Linux subreaper; the native shell is a
-                # real descendant, never a fabricated durable job. Stop/reap it
-                # separately so no historical producer survives reader startup.
-                held_pid = int(shell_pid.read_text())
-                with contextlib.suppress(ProcessLookupError):
-                    os.kill(held_pid, signal.SIGKILL)
-                deadline = time.monotonic() + 5
-                while True:
-                    try:
-                        reaped, _ = os.waitpid(held_pid, os.WNOHANG)
-                    except ChildProcessError:
-                        reaped = (
-                            held_pid if not Path(f"/proc/{held_pid}").exists() else 0
-                        )
-                    if reaped == held_pid:
-                        break
+                with bound_shell(
+                    shell_pid,
+                    [
+                        sys.executable,
+                        str(script),
+                        str(gate),
+                        str(starts),
+                        str(shell_pid),
+                    ],
+                    project,
+                    producer,
+                ) as held:
+                    os.killpg(producer.pid, signal.SIGKILL)
                     require(
-                        time.monotonic() < deadline,
-                        "Held shell was not stopped and reaped.",
+                        producer.wait(timeout=5) == -signal.SIGKILL,
+                        "Private producer was not killed and reaped.",
                     )
-                    time.sleep(0.02)
+                    # The subreaper owns orphaned descendants. The still-open
+                    # pidfd binds this exact shell even if its old PID is reused.
+                    stop_bound_shell(held)
         # This is intentionally only the native LOCAL process boundary.
         require(not old.alive(), "Original native server was not closed before Reader.")
         stop_client()
@@ -680,13 +810,12 @@ def exercise(binary, root):
 def main(binary, temp_dir=None):
     previous = os.umask(0o077)
     try:
-        # Reap real orphaned native shell descendants after the private producer
-        # is killed. This is process-fixture hygiene, not a container-stop proof.
-        libc = ctypes.CDLL(None, use_errno=True)
-        require(libc.prctl(36, 1, 0, 0, 0) == 0, "Could not enable fixture subreaper.")
-        with tempfile.TemporaryDirectory(
-            prefix="oc-box-history-recovery-v2-", dir=temp_dir
-        ) as temporary:
+        with (
+            subreaper(),
+            tempfile.TemporaryDirectory(
+                prefix="oc-box-history-recovery-v2-", dir=temp_dir
+            ) as temporary,
+        ):
             exercise(str(Path(binary).resolve()), Path(temporary))
     except FixtureFailure:
         raise
