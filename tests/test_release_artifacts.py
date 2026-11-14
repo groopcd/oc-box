@@ -16,6 +16,11 @@ from contextlib import redirect_stderr
 from pathlib import Path
 from unittest.mock import patch
 from urllib.error import URLError
+from urllib.request import (
+    AbstractBasicAuthHandler,
+    AbstractDigestAuthHandler,
+    ProxyHandler,
+)
 
 from tools import check_release
 from tools import check_release_artifacts as artifacts
@@ -772,6 +777,53 @@ class AnonymousAssetDownloadTests(unittest.TestCase):
         ):
             with self.subTest(response=response), self.assertRaises(ValueError):
                 self.download(response)
+
+    def test_real_opener_ignores_ambient_proxies_and_has_no_auth_handlers(self):
+        hostile = {
+            "HTTP_PROXY": "http://synthetic-user:synthetic-password@http-proxy.invalid:8080",
+            "HTTPS_PROXY": "http://synthetic-user:synthetic-password@https-proxy.invalid:8080",
+            "ALL_PROXY": "http://synthetic-user:synthetic-password@all-proxy.invalid:8080",
+            "NO_PROXY": "",
+        }
+        for case in ("upper", "lower"):
+            observed = []
+            environment = {
+                name if case == "upper" else name.lower(): value
+                for name, value in hostile.items()
+            }
+
+            def offline_open(opener, request, timeout, observed=observed):
+                observed.append((opener, request, timeout))
+                return self.response(b"abc")
+
+            with (
+                self.subTest(case=case),
+                patch.dict(os.environ, environment, clear=True),
+                patch(
+                    "urllib.request.OpenerDirector.open",
+                    autospec=True,
+                    side_effect=offline_open,
+                ),
+            ):
+                digest = artifacts.download_digest("v1.6.0", "oc_box-1.6.0.tar.gz", 3)
+                self.assertEqual(digest, hashlib.sha256(b"abc").hexdigest())
+                self.assertEqual(len(observed), 1)
+                opener, request, timeout = observed[0]
+                self.assertEqual(timeout, 20)
+                self.assertIsNone(request.get_header("Authorization"))
+                self.assertIsNone(request.get_header("Proxy-authorization"))
+                self.assertTrue(
+                    any(
+                        isinstance(handler, artifacts.CanonicalRedirect)
+                        for handler in opener.handlers
+                    )
+                )
+                for handler in opener.handlers:
+                    if isinstance(handler, ProxyHandler):
+                        self.assertEqual(handler.proxies, {})
+                    self.assertNotIsInstance(
+                        handler, (AbstractBasicAuthHandler, AbstractDigestAuthHandler)
+                    )
 
     def test_redirect_origin_and_selector_refusal_matrix(self):
         for url in (

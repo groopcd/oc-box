@@ -26,7 +26,7 @@ from email.parser import BytesParser
 from http.client import HTTPException
 from pathlib import Path
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 if __package__:
     from . import check_release
@@ -340,8 +340,11 @@ def download_digest(tag, name, size):
         refuse("Invalid canonical GitHub asset selector")
     url = f"https://github.com/groopcd/oc-box/releases/download/{tag}/{name}"
     request = Request(url, headers={"User-Agent": "oc-box-release-artifact-check"})
-    # A fresh opener has no authentication handler and receives no tokens.
-    with build_opener(CanonicalRedirect()).open(request, timeout=20) as response:
+    # Disable ambient proxy discovery, including proxy credentials. A fresh
+    # opener has no authentication handler and receives no tokens.
+    with build_opener(ProxyHandler({}), CanonicalRedirect()).open(
+        request, timeout=20
+    ) as response:
         if not allowed_download_url(response.geturl()):
             refuse("GitHub asset origin requires independent verification")
         if response.status != 200:
