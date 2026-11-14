@@ -46,7 +46,7 @@ def fetch_json(url):
     if not (
         url == "https://pypi.org/simple/oc-box/"
         or re.fullmatch(r"https://pypi\.org/pypi/oc-box/[\d.]+(?:dev0)?/json", url)
-        or url == GITHUB_RELEASES
+        or url in (GITHUB_RELEASES, GITHUB_RELEASES + "/latest")
         or re.fullmatch(re.escape(GITHUB_RELEASES) + r"\?per_page=100&page=\d+", url)
     ):
         raise ChannelError("Release discovery refused an unexpected endpoint.")
@@ -72,6 +72,36 @@ def fetch_json(url):
 
 
 def available_releases():
+    try:
+        return _release_inventory()
+    except ChannelError as inventory_error:
+        # A development-catalog failure must not block a verified stable
+        # upgrade. /latest is GitHub's separately maintained final-release view.
+        try:
+            record = fetch_json(GITHUB_RELEASES + "/latest")
+            if not isinstance(record, dict):
+                raise ChannelError("Unexpected GitHub stable release response.")
+            tag = record.get("tag_name")
+            if not isinstance(tag, str) or not tag.startswith("v"):
+                raise ChannelError("Unexpected GitHub stable release response.")
+            version = tag[1:]
+            if (
+                record.get("draft") is not False
+                or record.get("prerelease") is not False
+                or "+" in version
+                or version_channel(version) != "stable"
+            ):
+                raise ChannelError("Unexpected GitHub stable release response.")
+        except ChannelError:
+            raise inventory_error
+        return {
+            "stable": {"version": version, "tag": tag, "channel": "stable"},
+            "devel": None,
+            "devel_check_failed": True,
+        }
+
+
+def _release_inventory():
     """Return the highest published release per channel, not API date ordering."""
     selected = {"stable": None, "devel": None}
     for page in range(1, 11):
@@ -129,6 +159,8 @@ def load_settings():
 def save_settings(settings):
     if not isinstance(settings, dict):
         raise ChannelError("oc-box config must be a JSON object.")
+    if config_path().is_symlink():
+        raise ChannelError("The oc-box config must not be a symlink.")
     try:
         atomic_file(
             config_path(), (json.dumps(settings, indent=2) + "\n").encode(), 0o600
@@ -138,7 +170,7 @@ def save_settings(settings):
 
 
 def _validate(channel):
-    if channel not in CHANNEL_BRANCHES:
+    if not isinstance(channel, str) or channel not in CHANNEL_BRANCHES:
         raise ChannelError("The update channel must be 'stable' or 'devel'.")
     return channel
 
@@ -160,6 +192,21 @@ def selected_channel(requested=None, *, owner="github"):
 
 def remember_channel(channel, *, owner="github"):
     _validate(channel)
+
+    def change(settings):
+        if owner == "github":
+            settings["update_channel"] = channel
+        else:
+            packages = settings.setdefault("package_update_channels", {})
+            if not isinstance(packages, dict):
+                raise ChannelError("Invalid Python-package update preferences.")
+            packages[owner] = channel
+
+    mutate_settings(change)
+
+
+def mutate_settings(change):
+    """Serialize a read/modify/write without losing unrelated preferences."""
     target = config_path()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -168,13 +215,7 @@ def remember_channel(channel, *, owner="github"):
         ) as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             settings = load_settings()
-            if owner == "github":
-                settings["update_channel"] = channel
-            else:
-                packages = settings.setdefault("package_update_channels", {})
-                if not isinstance(packages, dict):
-                    raise ChannelError("Invalid Python-package update preferences.")
-                packages[owner] = channel
+            change(settings)
             save_settings(settings)
     except OSError as exc:
         raise ChannelError("Cannot save oc-box update preferences.") from exc

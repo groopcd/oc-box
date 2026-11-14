@@ -71,7 +71,8 @@ selection and verified ownership checks in `oc-box upgrade`.
 
 ## Bootstrap and older installations
 
-The channel-aware bootstrap defaults to a published stable release:
+The channel-aware bootstrap reuses the saved GitHub channel. A first installation
+without a preference defaults to a published stable release:
 
 ```sh
 curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --stable --with-vault
@@ -81,6 +82,15 @@ Use `--devel` instead of `--stable` for a published development prerelease.
 `--with-vault` is optional and compatible with either selector. The bootstrap
 script's source URL is not the target release: fetching its entrypoint from
 `master` does not mean installing moving master HEAD.
+Repeating the bootstrap without a selector does not reset a saved development
+choice. Selecting an older launcher warns that workspace/session state is not
+rolled back.
+
+Package-manager delegation requires recognized receipts and options. Unsupported
+versions or custom options receive manual guidance; uv receipt parsing requires
+Python 3.11+. Plain pip does not record requested extras, so an installation
+advertising extras cannot be updated automatically without guessing what to
+preserve. Automatic targets require a compatible, unyanked universal wheel.
 
 - **Exact `v1.6.60`:** run one plain `oc-box upgrade` first. That published
   launcher's old parser does not accept `--stable`/`--devel`; its existing

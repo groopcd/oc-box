@@ -3,7 +3,7 @@
 set -eu
 
 main() {
-    channel=stable
+    channel=
     selected_channel=
     with_vault=false
     with_tui=false
@@ -38,9 +38,10 @@ main() {
     trap 'rm -rf -- "$work"' EXIT HUP INT TERM
     # There is no trusted downloaded helper yet. Keep discovery stdlib-only,
     # anonymous, bounded and consistent with the installer's channel grammar.
-    version=$(env -i PATH="$PATH" HOME="$work" PYTHONNOUSERSITE=1 \
-        python3 -I - "$channel" <<'PY'
+    selection=$(env -i PATH="$PATH" HOME="$work" PYTHONNOUSERSITE=1 \
+        python3 -I - "$channel" "${XDG_CONFIG_HOME-"$HOME/.config"}/oc-box/config.json" <<'PY'
 import json
+from pathlib import Path
 import re
 import sys
 from urllib import error, request
@@ -59,6 +60,29 @@ class Refusal(Exception):
 class NoRedirect(request.HTTPRedirectHandler):
     def redirect_request(self, *args, **kwargs):
         raise Refusal("Release discovery refused an unexpected redirect.")
+
+
+def selected_channel(requested, filename):
+    target = Path(filename)
+    if target.is_symlink():
+        raise Refusal("The oc-box config must not be a symlink; nothing was installed.")
+    try:
+        if target.exists():
+            with target.open("rb") as stream:
+                body = stream.read(1024 * 1024 + 1)
+            if len(body) > 1024 * 1024:
+                raise ValueError()
+            settings = json.loads(body)
+        else:
+            settings = {}
+        if not isinstance(settings, dict):
+            raise ValueError()
+        saved = settings.get("update_channel", "stable")
+        if not isinstance(saved, str) or saved not in ("stable", "devel"):
+            raise ValueError()
+    except (OSError, ValueError):
+        raise Refusal("Cannot validate oc-box channel preferences; nothing was installed.") from None
+    return requested or saved
 
 
 def fetch(url):
@@ -114,13 +138,16 @@ def discover(channel):
 
 
 try:
-    print(discover(sys.argv[1]))
+    channel = selected_channel(sys.argv[1], sys.argv[2])
+    print(channel + " " + discover(channel))
 except Refusal as exc:
     sys.exit(str(exc))
 except (OSError, ValueError, error.URLError):
     sys.exit("Public release discovery failed; nothing was installed.")
 PY
     )
+    channel=${selection%% *}
+    version=${selection#* }
     case "$channel" in
         stable) branch=master ;;
         devel) branch=devel ;;

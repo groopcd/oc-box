@@ -90,6 +90,8 @@ def check_archives(directory):
             "terminal_ui.py",
             "status_report.py",
             "updater.py",
+            "update_channels.py",
+            "package_updates.py",
             "installation.py",
             "version_info.py",
             "paths.py",
@@ -101,6 +103,7 @@ def check_archives(directory):
             "docs/oc-box.info",
             "docs/opencode-2.md",
             "docs/host-plugins.md",
+            "docs/update-channels.md",
             "completions/oc-box",
             "build-info.json",
             "distribution.json",
@@ -141,6 +144,14 @@ def check_archives(directory):
             "install.py",
             "src/_oc_box_build.py",
             "tests/test_updater.py",
+            "tests/test_update_channels.py",
+            "tests/test_channel_updater.py",
+            "tests/test_channel_installer.py",
+            "tests/test_channel_bootstrap.py",
+            "tests/test_package_updates.py",
+            "tests/test_upgrade_cli.py",
+            "src/oc_box/update_channels.py",
+            "src/oc_box/package_updates.py",
             "tests/test_session_terminal.py",
             "tests/test_session_sync.py",
             "tests/test_private_memory.py",
@@ -245,7 +256,18 @@ def check(directory, *, with_vault=False):
         assert "WORKSPACE ID" in run(cli, "list")
         assert "tumbleweed" in run(cli, "distros")
         assert json.loads(run(cli, "--status", "--json"))["workspaces"] == []
-        assert "Python-package managed" in run(cli, "upgrade")
+        # Ownership detection is offline. Explicit upgrade now delegates to the
+        # verified package manager, so do not mutate/query public release state
+        # merely to validate an artifact (and root CLI upgrades are refused).
+        assert "Python-package managed" in run(
+            python,
+            "-c",
+            "from oc_box import oc_box,updater; "
+            "assert updater.package_managed(oc_box.APP); "
+            "print(updater.package_upgrade_message())",
+        )
+        assert "--devel" in run(cli, "--help")
+        assert "--stable" in run(cli, "--help")
         assert "--import-session" in run(cli, "--help")
         completion = environment / "share/bash-completion/completions/oc-box"
         assert completion.is_file()

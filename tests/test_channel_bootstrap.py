@@ -189,7 +189,7 @@ class ChannelBootstrapTests(unittest.TestCase):
                     log.write(json.dumps({{
                         "argv": sys.argv[1:], "env": dict(os.environ),
                     }}) + "\\n")
-                if sys.argv[1:3] != ["-I", "-"] or sys.argv[3] not in ("stable", "devel"):
+                if sys.argv[1:3] != ["-I", "-"] or sys.argv[3] not in ("", "stable", "devel"):
                     os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])
                 code = sys.stdin.read()
                 spec = json.loads(pathlib.Path({str(self.api_spec)!r}).read_text())
@@ -351,6 +351,43 @@ class ChannelBootstrapTests(unittest.TestCase):
         self.assertEqual(
             installed["env"]["XDG_CONFIG_HOME"], str(self.home / ".config")
         )
+
+    def test_repeat_bootstrap_uses_saved_channel_and_explicit_selector_overrides_it(
+        self,
+    ):
+        target = self.config / "oc-box/config.json"
+        target.parent.mkdir()
+        target.write_text('{"update_channel":"devel","pass_env":["SETTING"]}')
+        self.discovery["pages"] = [[release("v1.7.52.dev0", prerelease=True)]]
+        result = self.run_bootstrap()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = json.loads(self.installed.read_text())
+        self.assertEqual(
+            installed["argv"], ["--devel", "--release-version", "1.7.52.dev0"]
+        )
+        self.assertEqual(installed["commit"], self.devel_commit)
+        self.assertEqual(json.loads(target.read_text())["pass_env"], ["SETTING"])
+        result = self.run_bootstrap("--stable")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(
+            json.loads(self.installed.read_text())["commit"], self.stable_commit
+        )
+
+    def test_invalid_saved_channel_preferences_refuse_before_discovery(self):
+        target = self.config / "oc-box/config.json"
+        target.parent.mkdir()
+        for content in (
+            '{"update_channel":[]}',
+            '{"update_channel":"foreign"}',
+            "[]",
+            "{broken",
+        ):
+            target.write_text(content)
+            with self.subTest(content=content):
+                self.assert_refused(self.run_bootstrap(), "channel preferences")
+                self.assertFalse(self.api_log.exists())
+                self.assertFalse(self.git_log.exists())
+                self.assertEqual(target.read_text(), content)
 
     def test_devel_uses_numeric_maximum_across_complete_pages_and_supports_extras(self):
         ignored = release("v99.0.0.dev0", draft=True, prerelease=True)

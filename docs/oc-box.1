@@ -261,6 +261,8 @@ The stable channel selects published final releases associated with \fBmaster\fR
 .PP
 Curl/source\-installed copies use the fixed public GitHub repository. Python\-package copies instead delegate explicit upgrades to their verified pipx, uv tool, or dedicated virtual\-environment manager, using releases of the same \fBoc\-box\fR PyPI project. An ambiguous, system, or user\-site installation refuses with manager guidance, rather than guessing or installing through GitHub. Editable installs must update their source checkout separately. Package\-managed normal launches never perform GitHub automatic updates. They reject \fB\-\-auto\-update on\fR; \fB\-\-auto\-update off\fR prints package guidance and does not modify the GitHub installation's setting.
 .PP
+Delegation is conservative: unsupported receipt versions/custom manager options require manual commands. uv receipt verification needs Python 3.11 or newer. Plain pip does not record requested extras, so an installation advertising extras needs manual guidance rather than guessing which features to preserve. Automatic targets must provide a compatible, unyanked universal wheel.
+.PP
 .nf
 .fam C
 oc\-box upgrade \-\-check
@@ -1243,7 +1245,7 @@ curl \-fsSL \-\-proto '=https' \-\-tlsv1.2 https://raw.githubusercontent.com/gro
 .fam T
 .fi
 .PP
-The bootstrap defaults to stable. Pass \fBsh \-s \-\- \-\-stable\fR explicitly, or use \fBsh \-s \-\- \-\-devel\fR to select a published development prerelease. It supports \fB\-\-with\-vault\fR alongside either channel selector:
+The bootstrap uses the saved GitHub channel, defaulting to stable on a first installation. Pass \fBsh \-s \-\- \-\-stable\fR explicitly to select stable, or use \fBsh \-s \-\- \-\-devel\fR to select a published development prerelease. It supports \fB\-\-with\-vault\fR alongside either channel selector:
 .PP
 .nf
 .fam C

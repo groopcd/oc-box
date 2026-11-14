@@ -33,10 +33,28 @@ class UpdateTests(unittest.TestCase):
         self.identity.start()
         self.addCleanup(self.identity.stop)
         self.env = patch.dict(
-            os.environ, {"XDG_CONFIG_HOME": str(self.home / ".config")}
+            os.environ,
+            {"XDG_CONFIG_HOME": str(self.home / ".config"), "OC_BOX_CONTAINER": ""},
         )
         self.env.start()
         self.addCleanup(self.env.stop)
+        regular_user = patch.object(updater.os, "geteuid", return_value=1000)
+        regular_user.start()
+        self.addCleanup(regular_user.stop)
+        releases = patch.object(
+            updater,
+            "available_releases",
+            return_value={
+                "stable": {
+                    "version": "1.6.99999",
+                    "tag": "v1.6.99999",
+                    "channel": "stable",
+                },
+                "devel": None,
+            },
+        )
+        self.releases = releases.start()
+        self.addCleanup(releases.stop)
 
     def test_up_to_date_and_check_only_never_install_or_fetch_history(self):
         commit = "a" * 40
@@ -48,13 +66,13 @@ class UpdateTests(unittest.TestCase):
                     updater,
                     "current_install",
                     return_value={
-                        "version": "0.1.1",
+                        "version": "1.6.99999",
                         "commit": current,
                         "dirty": False,
                     },
                 ),
                 patch.object(
-                    updater, "git", return_value=commit + "\trefs/heads/master"
+                    updater, "git", return_value=commit + "\trefs/tags/v1.6.99999"
                 ) as git,
                 contextlib.redirect_stdout(io.StringIO()) as out,
             ):
@@ -129,7 +147,7 @@ class UpdateTests(unittest.TestCase):
         network.assert_not_called()
 
     def test_downloaded_identity_mismatch_never_runs_the_installer(self):
-        answers = ["a" * 40 + "\trefs/heads/master", "", "", "b" * 40, "2", ""]
+        answers = ["a" * 40 + "\trefs/tags/v1.6.99999", "", "", "b" * 40, "2", ""]
         with (
             patch.object(updater.os, "geteuid", return_value=1000),
             patch.object(
@@ -152,7 +170,7 @@ class UpdateTests(unittest.TestCase):
         current.mkdir(parents=True)
         (current / "vault-support.json").write_text('{"optional_crypto":true}')
         commit = "a" * 40
-        answers = [commit + "\trefs/heads/master", "", "", commit, "2", ""]
+        answers = [commit + "\trefs/tags/v1.6.99999", "", "", commit, "2", "", ""]
         with (
             patch.object(updater.os, "geteuid", return_value=1000),
             patch.object(
@@ -168,8 +186,10 @@ class UpdateTests(unittest.TestCase):
             patch.object(
                 updater,
                 "get_version_info",
-                return_value={"commit": commit, "dirty": False, "version": "1.0.0"},
+                return_value={"commit": commit, "dirty": False, "version": "1.6.99999"},
             ),
+            patch.object(updater, "verify_release_source"),
+            patch.object(updater, "installer_options", return_value={"--with-vault"}),
             patch.object(
                 updater.subprocess,
                 "run",
@@ -182,7 +202,7 @@ class UpdateTests(unittest.TestCase):
         self.assertNotIn("PERSONAL_GITHUB_TOKEN", installer.call_args.kwargs["env"])
 
     def test_installed_build_ahead_of_published_history_is_not_downgraded(self):
-        answers = ["a" * 40 + "\trefs/heads/master", "", "", "a" * 40, "2", ""]
+        answers = ["a" * 40 + "\trefs/tags/v1.6.99999", "", "", "a" * 40, "2", ""]
         with (
             patch.object(updater.os, "geteuid", return_value=1000),
             patch.object(
@@ -200,7 +220,7 @@ class UpdateTests(unittest.TestCase):
         ):
             self.assertIsNone(updater.upgrade(APP))
         install.assert_not_called()
-        self.assertIn("ahead of the published branch", output.getvalue())
+        self.assertIn("ahead of the published release", output.getvalue())
 
     def test_git_timeout_or_missing_tool_is_a_clear_bounded_failure(self):
         for error in (subprocess.TimeoutExpired([], 10), FileNotFoundError()):
@@ -229,7 +249,10 @@ class UpdateTests(unittest.TestCase):
 
     def test_auto_update_is_opt_in_skips_checkout_and_recursion(self):
         target = self.home / ".config/oc-box/config.json"
-        with patch.object(updater, "upgrade") as upgrade:
+        with (
+            patch.object(updater, "_github_upgrade") as upgrade,
+            patch.object(updater.os, "geteuid", return_value=1000),
+        ):
             self.assertIsNone(updater.automatic_upgrade(self.root))
             target.parent.mkdir(parents=True)
             target.write_text('{"auto_update":false}')
@@ -252,7 +275,8 @@ class UpdateTests(unittest.TestCase):
         settings.write_text('{"auto_update":true}')
         with (
             (target / ".upgrade.lock").open("a+") as lock,
-            patch.object(updater, "upgrade") as upgrade,
+            patch.object(updater, "_github_upgrade") as upgrade,
+            patch.object(updater.os, "geteuid", return_value=1000),
         ):
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.assertIsNone(updater.automatic_upgrade(self.root))
@@ -307,7 +331,7 @@ class UpdateTests(unittest.TestCase):
             patch.object(box, "check_backend") as backend,
         ):
             self.assertEqual(box.main(["upgrade", "--check"]), 0)
-        upgrade.assert_called_once_with(box.APP, check=True)
+        upgrade.assert_called_once_with(box.APP, check=True, channel=None)
         backend.assert_not_called()
         for args in (
             ["--check"],
@@ -324,26 +348,33 @@ class UpdateTests(unittest.TestCase):
                 box.main(["upgrade"])
 
     def test_package_managed_install_cannot_create_competing_github_launcher(self):
+        from oc_box import package_updates
+
         source = self.root / "package"
         source.mkdir()
         (source / "distribution.json").write_text('{"installer":"python-package"}')
         with (
             patch.object(updater, "git") as network,
             patch.object(updater, "update_settings") as settings,
+            patch.object(package_updates, "_inventory") as package_network,
         ):
-            with self.assertRaisesRegex(updater.UpdateError, "Python-package managed"):
+            with self.assertRaisesRegex(
+                updater.UpdateError, "No package update was attempted"
+            ):
                 updater.upgrade(source)
             self.assertIsNone(updater.automatic_upgrade(source))
             with (
                 patch.object(box, "APP", source),
-                contextlib.redirect_stdout(io.StringIO()) as output,
             ):
-                self.assertEqual(box.main(["upgrade"]), 0)
-                self.assertIn("pip", output.getvalue())
+                with self.assertRaisesRegex(
+                    box.BoxError, "No package update was attempted"
+                ):
+                    box.main(["upgrade"])
                 with self.assertRaisesRegex(box.BoxError, "cannot manage"):
                     box.main(["upgrade", "--auto-update=on"])
             network.assert_not_called()
             settings.assert_not_called()
+            package_network.assert_not_called()
         with self.assertRaisesRegex(ValueError, "Python package installer"):
             installation.install(source, self.home)
         self.assertFalse((self.home / ".local/bin/oc-box").exists())
@@ -430,18 +461,31 @@ class UpdateTests(unittest.TestCase):
     ):
         self.exercise_real_git_upgrade(src_layout=True, legacy_updater=True)
 
-    def exercise_real_git_upgrade(self, *, src_layout, legacy_updater):
+    def test_v1_6_60_updater_installs_channel_bridge_without_new_flags(self):
+        self.exercise_real_git_upgrade(src_layout=True, legacy_updater="v1.6.60")
+
+    def test_real_published_channel_round_trip_preserves_old_releases_and_history(self):
+        self.exercise_real_git_upgrade(
+            src_layout=True, legacy_updater=False, roundtrip=True
+        )
+
+    def exercise_real_git_upgrade(self, *, src_layout, legacy_updater, roundtrip=False):
         active = updater
         if legacy_updater:
+            retained = (
+                "v1.6.60:src/oc_box/updater.py"
+                if legacy_updater == "v1.6.60"
+                else "v1.5.39:updater.py"
+            )
             archived = subprocess.run(
-                ["git", "-C", str(APP), "show", "v1.5.39:updater.py"],
+                ["git", "-C", str(APP), "show", retained],
                 capture_output=True,
                 text=True,
                 timeout=10,
             )
             if archived.returncode:
                 self.skipTest(
-                    "Released updater comparison requires the full v1.5.39 Git tag."
+                    "Released updater comparison requires retained release Git tags."
                 )
             original = archived.stdout
             active = ModuleType("oc_box._released_updater_fixture")
@@ -466,9 +510,9 @@ class UpdateTests(unittest.TestCase):
             shutil.copyfile(APP / "pyproject.toml", remote / "pyproject.toml")
         version_file = installation.source_file(remote, "version_info.py")
         version_file.write_text(
-            version_file.read_text().replace(
-                "VERSION_BASE_COMMIT_COUNT = 29", "VERSION_BASE_COMMIT_COUNT = 1"
-            )
+            version_file.read_text()
+            .replace("VERSION_BASE_COMMIT_COUNT = 29", "VERSION_BASE_COMMIT_COUNT = 1")
+            .replace('RELEASE_CHANNEL = "devel"', 'RELEASE_CHANNEL = "stable"')
         )
         shutil.copytree(APP / "docs", remote / "docs")
         shutil.copytree(APP / "completions", remote / "completions")
@@ -512,6 +556,15 @@ class UpdateTests(unittest.TestCase):
         local("add", "README.md")
         local("commit", "-m", "Second")
         expected = local("rev-parse", "HEAD")
+        local("tag", "v" + VERSION_SERIES + ".1")
+        self.releases.return_value = {
+            "stable": {
+                "version": VERSION_SERIES + ".1",
+                "tag": "v" + VERSION_SERIES + ".1",
+                "channel": "stable",
+            },
+            "devel": None,
+        }
         calls = []
 
         def transport(arguments, temporary, **kwargs):
@@ -531,6 +584,9 @@ class UpdateTests(unittest.TestCase):
 
         with (
             patch.object(active.os, "geteuid", return_value=1000),
+            patch.object(
+                active, "editable_source_root", return_value=None, create=True
+            ),
             patch.object(active, "git", side_effect=transport),
             contextlib.redirect_stdout(io.StringIO()) as output,
         ):
@@ -554,6 +610,50 @@ class UpdateTests(unittest.TestCase):
             timeout=10,
         )
         self.assertEqual(output.stdout.strip(), "oc-box " + build["version"])
+        if roundtrip:
+            retained = self.home / ".local/state/oc-box/workspaces/synthetic/history"
+            retained.parent.mkdir(parents=True)
+            retained.write_text("unchanged private history")
+            local("checkout", "-b", "devel")
+            version_file.write_text(
+                version_file.read_text()
+                .replace(
+                    f'VERSION_SERIES = "{VERSION_SERIES}"', 'VERSION_SERIES = "1.7"'
+                )
+                .replace('RELEASE_CHANNEL = "stable"', 'RELEASE_CHANNEL = "devel"')
+            )
+            local("add", str(version_file))
+            local("commit", "-m", "Development channel fixture")
+            development_commit = local("rev-parse", "HEAD")
+            local("tag", "v1.7.2.dev0")
+            self.releases.return_value["devel"] = {
+                "version": "1.7.2.dev0",
+                "tag": "v1.7.2.dev0",
+                "channel": "devel",
+            }
+            with (
+                patch.object(active, "git", side_effect=transport),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                development = active.upgrade(APP, channel="devel")
+                self.assertEqual(get_version_info(target)["commit"], development_commit)
+                self.assertTrue(
+                    get_version_info(target)["version"].startswith("1.7.2.dev0+g")
+                )
+                self.assertIsNone(active.upgrade(APP))
+                stable = active.upgrade(APP, channel="stable")
+            self.assertEqual(get_version_info(target)["commit"], expected)
+            self.assertTrue(development.is_dir())
+            self.assertTrue(second.is_dir())
+            self.assertNotEqual(second, stable)
+            self.assertEqual(retained.read_text(), "unchanged private history")
+            self.assertEqual(
+                json.loads((self.home / ".config/oc-box/config.json").read_text())[
+                    "update_channel"
+                ],
+                "stable",
+            )
+            local("checkout", "master")
 
     def test_bootstrap_completes_against_an_offline_transport_with_no_credentials(self):
         # The real shell/bootstrap/installer run; only id and the public Git
@@ -582,8 +682,32 @@ class UpdateTests(unittest.TestCase):
             + " pathlib.Path(sys.argv[-1],'build-info.json').write_text(json.dumps({'version':'0.1.1+gfixture','commit':'"
             + "a" * 40
             + "','commit_count':1,'dirty':False}))\n"
+            + "elif 'rev-parse' in sys.argv:\n print('"
+            + "a" * 40
+            + "')\n"
         )
         fake_git.chmod(0o755)
+        fake_python = binary / "python3"
+        fake_python.write_text(
+            "#!"
+            + sys.executable
+            + "\n"
+            + "import io,json,os,sys\n"
+            + "from urllib import request\n"
+            + "if sys.argv[1:3] != ['-I','-']:\n os.execv("
+            + repr(sys.executable)
+            + ",["
+            + repr(sys.executable)
+            + ",*sys.argv[1:]])\n"
+            + "class Opener:\n"
+            + " def open(self,req,timeout):\n"
+            + "  assert req.full_url == 'https://api.github.com/repos/groopcd/oc-box/releases/latest'\n"
+            + "  return io.BytesIO(json.dumps({'tag_name':'v0.1.1','draft':False,'prerelease':False}).encode())\n"
+            + "request.build_opener=lambda *handlers: Opener()\n"
+            + "code=sys.stdin.read(); sys.argv=['-',*sys.argv[3:]]\n"
+            + "exec(compile(code,'<offline-bootstrap>','exec'))\n"
+        )
+        fake_python.chmod(0o755)
         command = ["sh", str(APP / "install.sh")]
         env = {
             **os.environ,

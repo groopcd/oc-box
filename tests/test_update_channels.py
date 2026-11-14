@@ -94,6 +94,18 @@ class ChannelTests(unittest.TestCase):
             with self.subTest(url=url), self.assertRaises(channels.ChannelError):
                 channels.fetch_json(url)
 
+    def test_development_discovery_failure_does_not_block_stable(self):
+        record = {"tag_name": "v1.6.100", "draft": False, "prerelease": False}
+        with patch.object(
+            channels,
+            "fetch_json",
+            side_effect=[channels.ChannelError("offline"), record],
+        ):
+            result = channels.available_releases()
+        self.assertEqual(result["stable"]["version"], "1.6.100")
+        self.assertIsNone(result["devel"])
+        self.assertTrue(result["devel_check_failed"])
+
 
 if __name__ == "__main__":
     unittest.main()

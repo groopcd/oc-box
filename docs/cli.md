@@ -544,6 +544,12 @@ Package-managed normal launches never perform GitHub automatic updates.
 They reject `--auto-update on`; `--auto-update off` prints package guidance and
 does not modify the GitHub installation's setting.
 
+Delegation is conservative: unsupported receipt versions/custom manager options
+require manual commands. uv receipt verification needs Python 3.11 or newer.
+Plain pip does not record requested extras, so an installation advertising extras
+needs manual guidance rather than guessing which features to preserve. Automatic
+targets must provide a compatible, unyanked universal wheel.
+
 ```sh
 oc-box upgrade --check
 oc-box upgrade
@@ -2459,7 +2465,8 @@ host OpenCode, and executes the downloaded installer as your user:
 curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh
 ```
 
-The bootstrap defaults to stable. Pass `sh -s -- --stable` explicitly, or use
+The bootstrap uses the saved GitHub channel, defaulting to stable on a first
+installation. Pass `sh -s -- --stable` explicitly to select stable, or use
 `sh -s -- --devel` to select a published development prerelease. It supports
 `--with-vault` alongside either channel selector:
 

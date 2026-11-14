@@ -589,7 +589,7 @@ def upgrade(root, *, check=False, channel=None):
         raise PackageUpdateError(
             "Run oc-box upgrade as your regular user, without sudo."
         )
-    if os.environ.get("OC_BOX_CONTAINER"):
+    if os.environ.get("OC_BOX_CONTAINER") == "1":
         raise PackageUpdateError(
             "Run oc-box upgrade on the host, outside the workspace container."
         )
