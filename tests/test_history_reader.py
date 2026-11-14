@@ -309,6 +309,41 @@ class EnvironmentTests(unittest.TestCase):
         self.assertEqual(box.run.call_count, 1)
         self.assertEqual(box.run.call_args.args[0], ["opencode", "--version"])
 
+    def test_exact_native_version_matrix_and_unknown_future_versions_fail_closed(self):
+        supported = ("2.2.6", "2.2.7", "2.3.0")
+        self.assertEqual(reader.SUPPORTED, frozenset(supported))
+        for release in supported:
+            for output in (release, "opencode v" + release + "\n", "v" + release):
+                with self.subTest(release=release, output=output):
+                    reader._check_version(output, release)
+            for changed in ("2.3.1", "2.4.0", "2.3.0+unknown", "2.3.0-dev"):
+                with self.subTest(release=release, changed=changed):
+                    with self.assertRaisesRegex(reader.Refusal, "unsupported-version"):
+                        reader._check_version(changed, release)
+        for unknown in ("2.2.8", "2.3.1", "2.4.0", "2.3.0+unknown", None):
+            with self.subTest(unknown=unknown):
+                box = fake_box()
+                with self.assertRaisesRegex(BoxError, "unsupported-version"):
+                    reader.assert_host_safe(
+                        box, None, {**DATA, "opencode_version": unknown}, {}, lambda: 5
+                    )
+                box.run.assert_not_called()
+
+    def test_230_destination_system_guard_precedes_all_native_commands(self):
+        box = fake_box()
+        with (
+            patch.object(
+                reader,
+                "_check_system_config",
+                side_effect=reader.Refusal("system-config"),
+            ),
+            self.assertRaisesRegex(BoxError, "system-config"),
+        ):
+            reader.assert_host_safe(
+                box, None, {**DATA, "opencode_version": "2.3.0"}, {}, lambda: 5
+            )
+        box.run.assert_not_called()
+
     def test_fence_keeps_public_store_selectors_but_no_credentials_or_execution_config(
         self,
     ):
@@ -439,6 +474,39 @@ class ReaderTests(unittest.TestCase):
         value = FakeChild(*args, **kwargs)
         self.children.append(value)
         return value
+
+    def test_230_reader_keeps_one_endpoint_command_fences_and_foreground_refusal(self):
+        lease = reader.Reader(
+            self.box, {**DATA, "opencode_version": "2.3.0"}, remaining=lambda: 4
+        )
+        child = self.child()
+        with patch.object(reader.subprocess, "Popen", return_value=child) as popen:
+            with lease:
+                self.assertEqual(popen.call_count, 1)
+                for args in (
+                    ["api", "post", "/api/session/private/prompt"],
+                    ["api", "delete", "/api/experimental/job/private"],
+                    ["api", "post", "/api/location/reload"],
+                    ["run", "private"],
+                    ["session", "list", "--standalone"],
+                    [
+                        "api",
+                        "get",
+                        "/api/session/active",
+                        "--server",
+                        "http://localhost:1",
+                    ],
+                ):
+                    with self.subTest(args=args):
+                        with self.assertRaisesRegex(BoxError, "client-command"):
+                            lease.command([self.box.CONTAINER_OPENCODE, *args])
+                self.box.run.return_value.stdout = '{"data":{"private":"running"}}'
+                with self.assertRaisesRegex(BoxError, "foreground-active"):
+                    lease.assert_idle()
+                self.box.run.return_value.stdout = '{"data":{}}'
+        self.assertEqual(json.loads(child.stdin.saved)["version"], "2.3.0")
+        self.assertIsNone(reader.current())
+        self.assertEqual(child.timeouts, [10])
 
     def test_one_private_lease_scoped_connections_idle_boundaries_and_no_election(self):
         child = self.child()
@@ -753,7 +821,15 @@ class ReaderTests(unittest.TestCase):
 
     def test_invalid_versions_deadlines_and_reentry_never_start_another_service(self):
         with patch.object(reader.subprocess, "Popen") as popen:
-            for release in ("1.19.5", "2.2.5", "2.2.8", "2.2.7+unknown"):
+            for release in (
+                "1.19.5",
+                "2.2.5",
+                "2.2.8",
+                "2.2.7+unknown",
+                "2.3.1",
+                "2.4.0",
+                "2.3.0+unknown",
+            ):
                 with (
                     self.subTest(release=release),
                     self.assertRaisesRegex(BoxError, "unsupported-version"),
@@ -893,6 +969,37 @@ class RemoteHelperTests(unittest.TestCase):
                 reader._remote(["lease", DATA["home"], "synthetic-opencode"])
         execute.assert_not_called()
         popen.assert_not_called()
+
+    def test_230_source_system_and_schedule_guards_precede_version_or_service(self):
+        for category in ("system-config", "schedule-schema", "schedule-present"):
+            with self.subTest(category=category):
+                inputs = SimpleNamespace(
+                    buffer=io.BytesIO(b'{"bridge":"public","version":"2.3.0"}\n')
+                )
+                with (
+                    patch.dict(os.environ, {}, clear=True),
+                    patch.object(reader.sys, "stdin", inputs),
+                    patch.object(
+                        reader,
+                        "_check_system_config",
+                        side_effect=reader.Refusal(category)
+                        if category == "system-config"
+                        else None,
+                    ),
+                    patch.object(
+                        reader,
+                        "_check_database",
+                        side_effect=reader.Refusal(category)
+                        if category != "system-config"
+                        else None,
+                    ),
+                    patch.object(reader.subprocess, "run") as native,
+                    patch.object(reader, "exec", create=True) as execute,
+                    self.assertRaisesRegex(reader.Refusal, category),
+                ):
+                    reader._remote(["lease", DATA["home"], "synthetic-opencode"])
+                native.assert_not_called()
+                execute.assert_not_called()
 
     def test_remote_client_uses_only_ephemeral_token_and_owns_empty_config_lifetime(
         self,

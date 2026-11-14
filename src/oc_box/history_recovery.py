@@ -214,7 +214,7 @@ def capture(box, data, info, token):
     """Use startup's existing inspection; never probe or start a healthy owner."""
     if (
         not isinstance(token, str)
-        or data.get("opencode_version") not in ("2.2.6", "2.2.7")
+        or data.get("opencode_version") not in history_reader.SUPPORTED
         or data.get("ready") is not True
         or data.get("restore_incomplete")
         or data.get("podman_args")
