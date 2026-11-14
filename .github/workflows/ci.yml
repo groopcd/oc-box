@@ -78,3 +78,24 @@ jobs:
           "$RUNNER_TEMP/global-vault-tests/bin/python" -B tests/smoke_global_vault.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           "$RUNNER_TEMP/global-vault-tests/bin/python" -B tests/smoke_build_permissions_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           "$RUNNER_TEMP/global-vault-tests/bin/python" -B tests/smoke_global_vault_host_helpers.py --opencode-v2 "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+  opencode-v2-native-2-3:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Install unmodified OpenCode 2.3.0 without a V1 dependency
+        run: |
+          apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
+          chmod 755 "$apt_root"
+          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config")
+          sudo apt-get -c "$apt_config" update
+          sudo apt-get -c "$apt_config" install -y --no-install-recommends poppler-utils
+          npm install --prefix "$RUNNER_TEMP/opencode-v2-native-2-3" --no-audit --no-fund @opencode/cli@2.3.0
+      - name: Offline V2-only native integration
+        run: |
+          python3 -B tests/smoke_v2.py --v2-only --opencode "$RUNNER_TEMP/opencode-v2-native-2-3/node_modules/.bin/opencode"

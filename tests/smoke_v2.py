@@ -1,6 +1,8 @@
 """Bounded offline tests against a separately installed, unmodified OpenCode 2.x.
 
 Usage: python3 -B tests/smoke_v2.py --opencode /path/to/v2/opencode
+Use --v2-only for native V2 checks without a V1 installation. The default keeps
+V1 migration/crash/reopen regressions and the pinned dual-version host contract.
 No host registry, credentials, providers, or managed service is touched.
 """
 
@@ -306,7 +308,7 @@ def interrupted_legacy_session(ident, project, tail):
     }
 
 
-def main(binary, legacy_plugin_dir=None):
+def main(binary, legacy_plugin_dir=None, *, include_legacy=True):
     binary = str(Path(binary).resolve())
     with tempfile.TemporaryDirectory(prefix="oc-box-native-v2-") as temporary:
         root = Path(temporary)
@@ -1102,186 +1104,207 @@ export const Fixture = async () => ({
                 flush=True,
             )
 
-            # Source V1 remains byte-identical while mainline migrates a private
-            # snapshot. Resuming V1 never points at the V2 database.
-            legacy_env = {
-                **env,
-                "XDG_DATA_HOME": str(root / "legacy-data"),
-                "XDG_CONFIG_HOME": str(root / "legacy-config"),
-            }
-            legacy_env["OPENCODE_CONFIG_CONTENT"] = (
-                '{"snapshot":false,"formatter":false,"lsp":false}'
-            )
-            legacy_env.pop("OPENCODE_CONFIG", None)
-            legacy_env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
-            legacy = {
-                "info": {
-                    "id": "ses_legacy_fixture",
-                    "directory": str(project),
-                    "projectID": "global",
-                    "version": "1.19.5",
-                    "slug": "legacy-fixture",
-                    "time": {"created": 1, "updated": 2},
-                    "title": "Legacy fixture",
-                },
-                "messages": [
-                    {
-                        "info": {
-                            "id": "msg_legacy_fixture",
-                            "sessionID": "ses_legacy_fixture",
-                            "role": "user",
-                            "agent": "build",
-                            "model": {"providerID": "fixture", "modelID": "gpt-smoke"},
-                            "time": {"created": 1},
-                        },
-                        "parts": [
-                            {
-                                "id": "prt_legacy_fixture",
-                                "sessionID": "ses_legacy_fixture",
-                                "messageID": "msg_legacy_fixture",
-                                "type": "text",
-                                "text": "Legacy text",
-                            }
-                        ],
-                    }
-                ],
-            }
-            legacy_file = root / "legacy.json"
-            legacy_file.write_text(json.dumps(legacy))
-            bounded(
-                ["opencode", "--pure", "import", str(legacy_file)], legacy_env, project
-            )
-            for name, tail in (
-                ("ses_legacy_superseded", False),
-                ("ses_legacy_tail", True),
-            ):
-                interrupted_file = root / (name + ".json")
-                interrupted_file.write_text(
-                    json.dumps(interrupted_legacy_session(name, project, tail))
+            if include_legacy:
+                # Source V1 remains byte-identical while mainline migrates a private
+                # snapshot. Resuming V1 never points at the V2 database.
+                legacy_env = {
+                    **env,
+                    "XDG_DATA_HOME": str(root / "legacy-data"),
+                    "XDG_CONFIG_HOME": str(root / "legacy-config"),
+                }
+                legacy_env["OPENCODE_CONFIG_CONTENT"] = (
+                    '{"snapshot":false,"formatter":false,"lsp":false}'
                 )
+                legacy_env.pop("OPENCODE_CONFIG", None)
+                legacy_env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+                legacy = {
+                    "info": {
+                        "id": "ses_legacy_fixture",
+                        "directory": str(project),
+                        "projectID": "global",
+                        "version": "1.19.5",
+                        "slug": "legacy-fixture",
+                        "time": {"created": 1, "updated": 2},
+                        "title": "Legacy fixture",
+                    },
+                    "messages": [
+                        {
+                            "info": {
+                                "id": "msg_legacy_fixture",
+                                "sessionID": "ses_legacy_fixture",
+                                "role": "user",
+                                "agent": "build",
+                                "model": {
+                                    "providerID": "fixture",
+                                    "modelID": "gpt-smoke",
+                                },
+                                "time": {"created": 1},
+                            },
+                            "parts": [
+                                {
+                                    "id": "prt_legacy_fixture",
+                                    "sessionID": "ses_legacy_fixture",
+                                    "messageID": "msg_legacy_fixture",
+                                    "type": "text",
+                                    "text": "Legacy text",
+                                }
+                            ],
+                        }
+                    ],
+                }
+                legacy_file = root / "legacy.json"
+                legacy_file.write_text(json.dumps(legacy))
                 bounded(
-                    ["opencode", "--pure", "import", str(interrupted_file)],
+                    ["opencode", "--pure", "import", str(legacy_file)],
                     legacy_env,
                     project,
                 )
-            killed_superseded, killed_tail, killed_originals = (
-                create_interrupted_history(legacy_env, project)
-            )
-            old_database = Path(legacy_env["XDG_DATA_HOME"]) / "opencode/opencode.db"
-            before = old_database.read_bytes()
-            migration = {
-                **legacy_env,
-                "OPENCODE_DB": "oc-box-v2.db",
-                "OPENCODE_CONFIG_CONTENT": '{"snapshots":false,"formatter":false,"update":"disable"}',
-            }
-            with patch.dict(os.environ, migration, clear=True):
-                bridge.seed_database()
-                with bridge.server(binary) as request:
-                    migrated = request(
-                        "GET", "/api/experimental/session/ses_legacy_fixture/export"
-                    )["data"]
-                    # Check both deterministically imported history and history
-                    # created by actual V1 SIGKILLs with later completed turns.
-                    for session, states in (
-                        ("ses_legacy_superseded", [False, True, False, False]),
-                        (
-                            killed_superseded,
-                            [False, True, False, False, False, True, False, False],
-                        ),
-                    ):
-                        page = request(
-                            "GET",
-                            "/api/session/" + session + "/message?limit=100&order=asc",
+                for name, tail in (
+                    ("ses_legacy_superseded", False),
+                    ("ses_legacy_tail", True),
+                ):
+                    interrupted_file = root / (name + ".json")
+                    interrupted_file.write_text(
+                        json.dumps(interrupted_legacy_session(name, project, tail))
+                    )
+                    bounded(
+                        ["opencode", "--pure", "import", str(interrupted_file)],
+                        legacy_env,
+                        project,
+                    )
+                killed_superseded, killed_tail, killed_originals = (
+                    create_interrupted_history(legacy_env, project)
+                )
+                old_database = (
+                    Path(legacy_env["XDG_DATA_HOME"]) / "opencode/opencode.db"
+                )
+                before = old_database.read_bytes()
+                migration = {
+                    **legacy_env,
+                    "OPENCODE_DB": "oc-box-v2.db",
+                    "OPENCODE_CONFIG_CONTENT": '{"snapshots":false,"formatter":false,"update":"disable"}',
+                }
+                with patch.dict(os.environ, migration, clear=True):
+                    bridge.seed_database()
+                    with bridge.server(binary) as request:
+                        migrated = request(
+                            "GET", "/api/experimental/session/ses_legacy_fixture/export"
                         )["data"]
-                        assert [
-                            item["type"] == "assistant"
-                            and item.get("time", {}).get("completed") is None
-                            for item in page
-                        ] == states, "Migrated V1 history changed shape"
-                        superseded = bridge.checked_export(request, session)
-                        count = {"assistant": sum(states)}
-                        assert superseded[bridge.INTERRUPTED] == count
-                        assert superseded["messages"] == [
-                            item
-                            for item, incomplete in zip(page, states)
-                            if not incomplete
-                        ], (
-                            "Native export did not mirror the projection minus the assistants"
-                        )
-                        archive = box.archive_session(superseded, data)
-                        assert bridge.INTERRUPTED not in archive
-                        assert (
-                            archive["info"]["metadata"]["oc-box.archive"]["interrupted"]
-                            == count
-                        )
-                        # The count must survive native destination import/export,
-                        # not merely exist in the in-memory archive dictionary.
-                        archive_file = root / "legacy-superseded-archive.json"
-                        box.atomic_json(archive_file, archive)
-                        bounded(
-                            compat.command(
-                                release, binary, ["--pure", "import", str(archive_file)]
-                            ),
-                            env,
-                            registry.parent / "controller",
-                        )
-                        with (
-                            patch.object(box, "private_host_env", return_value=env),
-                            patch.object(
-                                box,
-                                "host_command",
-                                side_effect=lambda _data, *args: compat.command(
-                                    release, binary, args
-                                ),
+                        # Check both deterministically imported history and history
+                        # created by actual V1 SIGKILLs with later completed turns.
+                        for session, states in (
+                            ("ses_legacy_superseded", [False, True, False, False]),
+                            (
+                                killed_superseded,
+                                [False, True, False, False, False, True, False, False],
                             ),
                         ):
-                            box.verify_host_archive(registry, data, archive)
-                    for session in ("ses_legacy_tail", killed_tail):
-                        try:
-                            bridge.checked_export(request, session)
-                        except bridge.FixedError as error:
-                            assert str(error) == bridge.UNSETTLED
-                        else:
-                            raise AssertionError(
-                                "Unfinished tail assistant was accepted"
+                            page = request(
+                                "GET",
+                                "/api/session/"
+                                + session
+                                + "/message?limit=100&order=asc",
+                            )["data"]
+                            assert [
+                                item["type"] == "assistant"
+                                and item.get("time", {}).get("completed") is None
+                                for item in page
+                            ] == states, "Migrated V1 history changed shape"
+                            superseded = bridge.checked_export(request, session)
+                            count = {"assistant": sum(states)}
+                            assert superseded[bridge.INTERRUPTED] == count
+                            assert superseded["messages"] == [
+                                item
+                                for item, incomplete in zip(page, states)
+                                if not incomplete
+                            ], (
+                                "Native export did not mirror the projection minus the assistants"
                             )
-            assert "Legacy text" in json.dumps(migrated)
-            assert old_database.read_bytes() == before
-            v2_database = old_database.with_name("oc-box-v2.db")
-            before_v2 = v2_database.read_bytes()
-            for arguments in (
-                ["--pure", "debug", "agent", "build"],
-                ["--pure", "session", "list", "--format", "json"],
-            ):
-                bounded(["opencode", *arguments], legacy_env, project)
-            restored_v1 = json.loads(
-                bounded(
-                    ["opencode", "--pure", "export", "ses_legacy_fixture"],
-                    legacy_env,
-                    project,
-                )
-            )
-            assert restored_v1["messages"] == legacy["messages"], (
-                "V1 reopened transcript changed"
-            )
-            for session, messages in killed_originals.items():
-                reopened = json.loads(
+                            archive = box.archive_session(superseded, data)
+                            assert bridge.INTERRUPTED not in archive
+                            assert (
+                                archive["info"]["metadata"]["oc-box.archive"][
+                                    "interrupted"
+                                ]
+                                == count
+                            )
+                            # The count must survive native destination import/export,
+                            # not merely exist in the in-memory archive dictionary.
+                            archive_file = root / "legacy-superseded-archive.json"
+                            box.atomic_json(archive_file, archive)
+                            bounded(
+                                compat.command(
+                                    release,
+                                    binary,
+                                    ["--pure", "import", str(archive_file)],
+                                ),
+                                env,
+                                registry.parent / "controller",
+                            )
+                            with (
+                                patch.object(box, "private_host_env", return_value=env),
+                                patch.object(
+                                    box,
+                                    "host_command",
+                                    side_effect=lambda _data, *args: compat.command(
+                                        release, binary, args
+                                    ),
+                                ),
+                            ):
+                                box.verify_host_archive(registry, data, archive)
+                        for session in ("ses_legacy_tail", killed_tail):
+                            try:
+                                bridge.checked_export(request, session)
+                            except bridge.FixedError as error:
+                                assert str(error) == bridge.UNSETTLED
+                            else:
+                                raise AssertionError(
+                                    "Unfinished tail assistant was accepted"
+                                )
+                assert "Legacy text" in json.dumps(migrated)
+                assert old_database.read_bytes() == before
+                v2_database = old_database.with_name("oc-box-v2.db")
+                before_v2 = v2_database.read_bytes()
+                for arguments in (
+                    ["--pure", "debug", "agent", "build"],
+                    ["--pure", "session", "list", "--format", "json"],
+                ):
+                    bounded(["opencode", *arguments], legacy_env, project)
+                restored_v1 = json.loads(
                     bounded(
-                        ["opencode", "--pure", "export", session], legacy_env, project
+                        ["opencode", "--pure", "export", "ses_legacy_fixture"],
+                        legacy_env,
+                        project,
                     )
                 )
-                assert reopened["messages"] == messages, (
-                    "V1 reopened crash-generated transcript changed"
+                assert restored_v1["messages"] == legacy["messages"], (
+                    "V1 reopened transcript changed"
                 )
-            assert v2_database.read_bytes() == before_v2, "V1 wrote the V2 database"
-            print(
-                "PASS: V2 snapshot migration leaves V1 bytes intact; reopening native V1 retains the exact transcript and leaves V2 bytes intact.",
-                flush=True,
-            )
-            print(
-                "PASS: imported and SIGKILL-generated V1 interruptions survive migration; superseded archives round-trip with counts, unfinished tails refuse and source messages remain exact.",
-                flush=True,
-            )
+                for session, messages in killed_originals.items():
+                    reopened = json.loads(
+                        bounded(
+                            ["opencode", "--pure", "export", session],
+                            legacy_env,
+                            project,
+                        )
+                    )
+                    assert reopened["messages"] == messages, (
+                        "V1 reopened crash-generated transcript changed"
+                    )
+                assert v2_database.read_bytes() == before_v2, "V1 wrote the V2 database"
+                print(
+                    "PASS: V2 snapshot migration leaves V1 bytes intact; reopening native V1 retains the exact transcript and leaves V2 bytes intact.",
+                    flush=True,
+                )
+                print(
+                    "PASS: imported and SIGKILL-generated V1 interruptions survive migration; superseded archives round-trip with counts, unfinished tails refuse and source messages remain exact.",
+                    flush=True,
+                )
+            else:
+                print(
+                    "NOT_RUN: V1 migration/snapshot/SIGKILL/reopen regressions (--v2-only).",
+                    flush=True,
+                )
             # Real foreground owner, same-user concurrent attach and browser
             # transport; only the Podman exec transport is local in this fixture.
             live_env = {
@@ -1543,18 +1566,39 @@ export const Fixture = async () => ({
             thread.join(timeout=3)
 
 
-if __name__ == "__main__":
+def run(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opencode", required=True)
+    parser.add_argument(
+        "--v2-only",
+        action="store_true",
+        help="run native V2 checks without V1 migration or the legacy dual-version host contract",
+    )
     parser.add_argument(
         "--legacy-plugin-dir",
         help="optional local V1 plugin sources copied into disposable fixture storage",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     from smoke_session_sync_v2 import main as session_sync_probe
     from smoke_history_recovery_v2 import main as history_recovery_probe
 
-    session_sync_probe(str(Path(args.opencode).resolve()))
-    history_recovery_probe(str(Path(args.opencode).resolve()))
-    main(args.opencode, args.legacy_plugin_dir)
-    host_fixture_probe(str(Path(args.opencode).resolve()))
+    binary = str(Path(args.opencode).resolve())
+    if args.v2_only:
+        print(
+            "SCOPE: V2-only offline native integration; no V1 executable or Podman lifecycle.",
+            flush=True,
+        )
+    session_sync_probe(binary)
+    history_recovery_probe(binary)
+    main(binary, args.legacy_plugin_dir, include_legacy=not args.v2_only)
+    if args.v2_only:
+        print(
+            "NOT_RUN: legacy OpenCode 1.19.5/2.2.6 host fixture contract (--v2-only).",
+            flush=True,
+        )
+    else:
+        host_fixture_probe(binary)
+
+
+if __name__ == "__main__":
+    run()
