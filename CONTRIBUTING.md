@@ -411,10 +411,19 @@ release CI. Keep published 1.6.60 and earlier tags/artifacts unchanged.
    nor the release-triggered publisher automatically checks other workflows or
    host reports; the release owner must review those gates explicitly.
 3. For history/lifecycle changes, obtain new external-host reports for the
-   focused history/readiness runner, global-vault fixture and V1/V2 lifecycle
-   fixture on the same clean candidate. Include regression-specific host cases,
-   not just the previously accepted baseline. Use only private synthetic state;
-   never bypass host-only guards from an oc-box container. Follow the
+   focused history/readiness runner, global-vault fixture and applicable
+   lifecycle profile on the same clean candidate. The current native 2.3.0
+   target uses an explicitly versioned V2-only profile: require full **and
+   portable** restore, exact history/source preservation, reset/OS-state
+   distinction and wrong-passphrase refusal before destructive actions.
+   Global-vault full restore alone does not replace that lifecycle gate.
+   Include regression-specific recovery cases, not just the previously
+   accepted baseline. Keep V1 migration/crash/reopen regressions in native CI;
+   the legacy dual-major host fixture remains available and is required for
+   changes to cross-major behavior. A current-V2-only report must explicitly
+   exclude unrun V1 migration/downgrade checks, never label them passed.
+   Use only private synthetic state; never bypass host-only guards from an
+   oc-box container. Follow the
    [history/readiness handoff](docs/testing.md#focused-historyreadiness-host-runner)
    and preserve failed attempts separately.
 4. Review the real reports, every required check, native and source identities,

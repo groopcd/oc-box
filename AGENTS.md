@@ -192,6 +192,30 @@ Explicit downgrade warnings must say that launcher replacement does not roll
 back workspace/session state. Retain only target-supported extras; stable 1.6
 has no `--with-tui`. Do not bypass root/container refusals for package updates.
 
+## Current-native 2.3 recovery preparation
+
+The user explicitly approved extending persisted-history recovery to native
+2.3.0 in a new stable 1.6 candidate. Preserve the prior 1.6.82 source and all
+earlier evidence. The main 1.7 line remains in final testing: do not advance,
+merge or publish it without renewed user authorization.
+
+Require actual native 2.3 scheduler/schema/startup and non-execution evidence,
+not only an expanded version allowlist. Keep unknown versions refused and
+retain the original 2.2.6/2.2.7 native regression cases. A 2.3 job-drained
+observation is not the old retained-cancelled-job reproduction; use honest
+version-specific preconditions and preserve all recovery fences.
+
+OpenCode 1.x is legacy coverage. Keep its native/CI regressions and old host
+fixtures. Current V2-only host validation must require no normal V1 installation
+and explicitly exclude unrun migration/downgrade checks. Its lifecycle profile
+must still exercise full/portable restore, source/history preservation, reset
+and destructive-action refusal boundaries. This is not a test-count reduction
+or a waiver of current V2 data-loss/security checks.
+
+See `docs/plans/native-2.3-recovery.md`. This preparation records no new native
+or external-host acceptance. Freeze and validate the new integrated source,
+then require applicable source-bound host reports before stable publication.
+
 ## Documentation maintenance
 
 Update `docs/cli.md` when command-line behavior changes, then regenerate with
