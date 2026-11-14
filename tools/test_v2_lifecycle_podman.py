@@ -819,8 +819,10 @@ def main(argv=None):
                 cleanup(args.cleanup)
                 return 0
             require(args.opencode_v2 is not None, "arguments")
-            binary = safety.no_symlinks(args.opencode_v2.expanduser()).resolve(
-                strict=True
+            # npm/fnm bin entries are ordinary symlinks. Pin the selected real
+            # executable, then validate its canonical path, never the alias.
+            binary = safety.no_symlinks(
+                args.opencode_v2.expanduser().resolve(strict=True)
             )
             require(
                 binary.is_file() and os.access(binary, os.X_OK), "native-executable"

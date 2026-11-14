@@ -24,6 +24,17 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
         binary.chmod(0o700)
         return binary
 
+    def npm_native_selection(self, root):
+        binary = root / "node/lib/node_modules/@opencode/cli/bin/opencode.exe"
+        binary.parent.mkdir(parents=True)
+        # A private ELF copy is metadata only; version probes remain mocked.
+        fixture.shutil.copyfile(Path(sys.executable).resolve(), binary)
+        binary.chmod(0o700)
+        alias = root / "node/bin/opencode2"
+        alias.parent.mkdir()
+        alias.symlink_to(os.path.relpath(binary, alias.parent))
+        return alias, binary
+
     @contextlib.contextmanager
     def retained(self):
         with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as temporary:
@@ -100,6 +111,146 @@ class V2OnlyHostFixtureTests(unittest.TestCase):
             self.assertFalse((root / "executables.json").exists())
             self.assertFalse((root / "native-profile.json").exists())
             self.assertFalse((root / "bin/opencode").exists())
+
+    def test_cli_npm_symlink_dispatches_and_pins_canonical_elf_without_engine_access(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            alias, binary = self.npm_native_selection(parent)
+            observed = {}
+
+            def dispatched(root, selected, version, distro, report):
+                self.assertEqual(selected, binary)
+                self.assertFalse(selected.is_symlink())
+                with selected.open("rb") as stream:
+                    self.assertEqual(stream.read(4), b"\x7fELF")
+                _, profile = fixture.prepare_native_cli(root, selected, version)
+                self.assertEqual(
+                    profile, fixture.profiles.native_identity(binary, version)
+                )
+                observed.update(root=root, profile=profile)
+                self.assertEqual(fixture.validate_fixture(root), root)
+                report["native"] = profile
+                report["status"] = "passed"
+                report["checks"] = dict.fromkeys(fixture.CHECKS, True)
+
+            with (
+                patch.object(safety, "host_guard"),
+                patch.object(
+                    safety, "private_output", side_effect=contextlib.nullcontext
+                ),
+                patch.object(
+                    fixture.shutil,
+                    "which",
+                    return_value=str(Path(sys.executable).resolve()),
+                ),
+                patch.object(fixture, "run", side_effect=dispatched) as run,
+                patch.object(
+                    box,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 0, "2.3.0", ""),
+                ) as probes,
+                patch.object(fixture, "validate_store") as store,
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                code = fixture.main(
+                    ["--opencode-v2", str(alias), "--work-dir", str(parent)]
+                )
+            self.assertEqual(code, 0)
+            run.assert_called_once()
+            store.assert_not_called()
+            self.assertEqual(probes.call_count, 2)
+            for call in probes.call_args_list:
+                self.assertEqual(call.args[0][1:], ["--version"])
+            self.assertEqual(probes.call_args_list[0].args[0][0], str(binary))
+            self.assertEqual(
+                safety.private_json(observed["root"], "native-profile.json"),
+                observed["profile"],
+            )
+
+    def test_cli_dangling_native_symlink_refuses_before_placement_probe_or_engine(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            alias = parent / "opencode2"
+            alias.symlink_to("missing-native")
+            with (
+                patch.object(safety, "host_guard"),
+                patch.object(fixture, "prepare_root") as prepare,
+                patch.object(fixture, "run") as run,
+                patch.object(fixture.shutil, "which") as discover,
+                patch.object(box, "run") as engine,
+                contextlib.redirect_stderr(io.StringIO()) as errors,
+            ):
+                code = fixture.main(
+                    ["--opencode-v2", str(alias), "--work-dir", str(parent)]
+                )
+            self.assertEqual(code, 1)
+            for operation in (prepare, run, discover, engine):
+                operation.assert_not_called()
+            self.assertNotIn(str(alias), errors.getvalue())
+
+    def test_cli_selected_symlink_target_mutation_refuses_before_store_seed_or_engine(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            parent = Path(temporary)
+            alias, binary = self.npm_native_selection(parent)
+            original_hash = fixture.binary_hash(binary)
+            calls = []
+
+            def version_probe(command, **kwargs):
+                self.assertEqual(command[1:], ["--version"])
+                calls.append(command[0])
+                if command[0] != str(binary):
+                    with binary.open("ab") as stream:
+                        stream.write(b"changed-private-test-target")
+                return subprocess.CompletedProcess(command, 0, "2.3.0", "")
+
+            with (
+                patch.object(safety, "host_guard"),
+                patch.object(
+                    safety, "private_output", side_effect=contextlib.nullcontext
+                ),
+                patch.object(
+                    fixture.shutil,
+                    "which",
+                    return_value=str(Path(sys.executable).resolve()),
+                ),
+                patch.object(
+                    fixture,
+                    "source_identity",
+                    return_value={
+                        "build": {"commit": "a" * 40, "dirty": False},
+                        "sha256": {},
+                    },
+                ),
+                patch.object(box, "run", side_effect=version_probe),
+                patch.object(fixture, "validate_store") as store,
+                patch.object(box, "check_backend") as backend,
+                patch.object(safety, "seed_native_history") as seed,
+                patch.object(legacy, "make_provider") as provider,
+                contextlib.redirect_stdout(io.StringIO()),
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                code = fixture.main(
+                    ["--opencode-v2", str(alias), "--work-dir", str(parent)]
+                )
+            self.assertEqual(code, 1)
+            for operation in (store, backend, seed, provider):
+                operation.assert_not_called()
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0], str(binary))
+            self.assertNotEqual(fixture.binary_hash(binary), original_hash)
+            roots = list(parent.glob(fixture.PREFIX + "*"))
+            self.assertEqual(len(roots), 1)
+            profile = safety.private_json(roots[0], "native-profile.json")
+            self.assertEqual(profile["path"], str(binary))
+            self.assertEqual(profile["sha256"], original_hash)
+            report = safety.private_json(roots[0], "result.json")
+            self.assertEqual(report["status"], "failed")
+            self.assertFalse(any(report["checks"].values()))
 
     def test_entrypoint_host_guard_precedes_placement_probe_import_or_engine(self):
         with (
