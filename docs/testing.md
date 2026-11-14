@@ -317,6 +317,65 @@ reviewed reports below), and that exact commit was published as stable v1.6.51.
 Mainline source updates and build-only distribution artifacts do not establish
 that acceptance or trigger a stable release by themselves.
 
+### Current native 2.3.0 profile
+
+The current 1.6 candidate extends the isolated history reader to the exact
+native release **2.3.0**, while retaining 2.2.6/2.2.7 reader regressions and
+legacy V1 native CI. This section defines preparation and required host gates;
+it records **no new external-host acceptance**.
+
+Use the explicit `--native-version 2.3.0` profile with the user's unmodified V2
+executable. The version, resolved path and hash are recorded, and retained
+retries must match their original profile. Omitted profile arguments preserve
+the old 2.2.6 default; they do not mean "whatever 2.x is installed". Never
+change a donor constant or use a V2 executable as a fake V1.
+
+Local native preparation distinguishes two recovery cases:
+
+- 2.2.6/2.2.7: the original cancelled-job-after-reload case remains unchanged.
+- 2.3.0: a real held background shell produces an actual ordinary wait timeout;
+  the private producer and shell are stopped/reaped before the native reader.
+  Complete post-barrier job, schedule, message and part rows are compared after
+  reader startup/export/shutdown. Eight source and eight destination scheduler
+  refusals include unknown statuses and committed WAL rows.
+
+The 2.3.0 local barrier is not whole-container evidence. Its source-bound host
+profile separately requires the real shell-only timeout, immutable-resource
+stop/restart, one reader/snapshot and unchanged execution counters. The stable
+baseline remains **33 checks**, five stages and exits `[0,0,0,1,0]`; the
+**12 snapshot** and **six stop-cancellation** checks remain separate. A drained
+reload observation is never relabeled as the older retained-job reproduction.
+
+From a normal unprivileged host terminal, outside containers/sandboxes, use
+separate full-history clean candidate and harness checkouts and fresh
+disk-backed fixture/temp parents:
+
+```bash
+uv run --isolated --no-project --with cryptography python -I -B \
+  /path/to/harness/tools/test_session_sync_podman.py \
+  --source /path/to/clean/candidate \
+  --expect-commit FULL_REVIEWED_CANDIDATE_COMMIT \
+  --opencode-v2 /path/to/opencode2 --native-version 2.3.0 \
+  --work-dir /path/to/fresh-fixtures --temp-dir /path/to/private-temp
+# Repeat with --history-recovery-case snapshot, then with stop-cancel.
+
+uv run --isolated --no-project --with cryptography python -I -B \
+  tools/test_global_vault_podman.py \
+  --opencode-v2 /path/to/opencode2 --native-version 2.3.0 \
+  --work-dir /path/to/fresh-fixtures --temp-dir /path/to/private-temp
+```
+
+The global-vault invocation runs from the pinned candidate checkout. The
+current-V2 lifecycle gate additionally requires full **and portable** restore,
+same-session/history preservation, reset/OS distinction and wrong-passphrase
+refusal before deletion. Global-vault full restore alone is insufficient.
+
+Keep the old dual-major lifecycle fixture for legacy migration/downgrade work.
+A current V2-only report must explicitly exclude unrun V1 migration/reopen and
+downgrade checks, interactive observations, real providers/projects, actual
+OAuth refresh and security/network-containment certification. Existing legacy
+reports and all earlier failures retain their original identities and scopes.
+
 ### Focused history/readiness host runner
 
 `tools/test_session_sync_podman.py` is a separate host harness, not an installed

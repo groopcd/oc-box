@@ -316,9 +316,9 @@ checks native exports without the original owner's activity wait and does not
 prove that its retained job disappeared. The native job-cleanup issue is not
 repaired by the diagnostic or by the persisted-history snapshot described below.
 
-For supported native 2.2.6/2.2.7 owners, a shell-only timeout can trigger **one
-post-stop persisted-history snapshot**. Two complete validated observations must
-have shown no foreground activity and only shell jobs. A later real query timeout
+For explicitly supported native 2.2.6/2.2.7/2.3.0 owners, a shell-only timeout can
+trigger **one post-stop persisted-history snapshot**. Two complete validated
+observations must have shown no foreground activity and only shell jobs. A later real query timeout
 does not manufacture an observation; a contradictory/malformed response or known
 non-timeout API error invalidates the hint. The live wait still refuses, and no
 live export is authorized by that hint.
@@ -349,7 +349,12 @@ rewritten or declared completed. **The original failure remains nonzero even whe
 snapshots are saved**, with a warning that execution was interrupted and completion
 notices/final results may be missing. Historical job rows can remain running-looking
 on the next owner; the same bounded post-stop path may save another snapshot, but
-does not make the underlying native owner healthy. This development-branch path
+does not make the underlying native owner healthy. A 2.3.0 reload may instead
+drain jobs; that does not waive ordinary readiness or prove every shutdown is
+quiet. Its native recovery regression uses an actual held background shell,
+live timeout and stopped producer, not a relabeled older cancelled-job case.
+Unknown native versions retain the ordinary timeout/manual-sync behavior.
+This candidate path
 still requires fresh external-host acceptance before stable publication.
 
 `--no-vault` is accepted only when web becomes a new V2 owner; an attached web

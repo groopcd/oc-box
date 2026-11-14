@@ -99,3 +99,4 @@ jobs:
       - name: Offline V2-only native integration
         run: |
           python3 -B tests/smoke_v2.py --v2-only --opencode "$RUNNER_TEMP/opencode-v2-native-2-3/node_modules/.bin/opencode"
+          python3 -B tests/smoke_global_vault_host_helpers.py --native-version 2.3.0 --opencode-v2 "$RUNNER_TEMP/opencode-v2-native-2-3/node_modules/.bin/opencode"

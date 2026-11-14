@@ -398,10 +398,10 @@ original owner's activity wait and does not prove that its retained job
 disappeared.  The native job-cleanup issue is not repaired by the
 diagnostic or by the persisted-history snapshot described below.
 
-For supported native 2.2.6/2.2.7 owners, a shell-only timeout can
-trigger **one post-stop persisted-history snapshot**.  Two complete
-validated observations must have shown no foreground activity and only
-shell jobs.  A later real query timeout does not manufacture an
+For explicitly supported native 2.2.6/2.2.7/2.3.0 owners, a shell-only
+timeout can trigger **one post-stop persisted-history snapshot**.  Two
+complete validated observations must have shown no foreground activity
+and only shell jobs.  A later real query timeout does not manufacture an
 observation; a contradictory/malformed response or known non-timeout API
 error invalidates the hint.  The live wait still refuses, and no live
 export is authorized by that hint.
@@ -438,8 +438,13 @@ snapshots are saved**, with a warning that execution was interrupted and
 completion notices/final results may be missing.  Historical job rows
 can remain running-looking on the next owner; the same bounded post-stop
 path may save another snapshot, but does not make the underlying native
-owner healthy.  This development-branch path still requires fresh
-external-host acceptance before stable publication.
+owner healthy.  A 2.3.0 reload may instead drain jobs; that does not
+waive ordinary readiness or prove every shutdown is quiet.  Its native
+recovery regression uses an actual held background shell, live timeout
+and stopped producer, not a relabeled older cancelled-job case.  Unknown
+native versions retain the ordinary timeout/manual-sync behavior.  This
+candidate path still requires fresh external-host acceptance before
+stable publication.
 
 ‘--no-vault’ is accepted only when web becomes a new V2 owner; an
 attached web client rejects it and never changes the owner's credential
@@ -2917,20 +2922,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2579
 Node: Commands6084
-Node: Options66051
-Node: Lifecycle and persistence86733
-Node: Distribution images88853
-Node: Sessions and recovery93728
-Node: Devices and host permissions100313
-Node: Resource reports102659
-Node: Configuration and environment104770
-Node: Files116489
-Node: Exit status121342
-Node: Examples122153
-Node: Troubleshooting124239
-Node: Installation and manuals135591
-Node: Authors and license144479
-Node: See also145086
+Node: Options66394
+Node: Lifecycle and persistence87076
+Node: Distribution images89196
+Node: Sessions and recovery94071
+Node: Devices and host permissions100656
+Node: Resource reports103002
+Node: Configuration and environment105113
+Node: Files116832
+Node: Exit status121685
+Node: Examples122496
+Node: Troubleshooting124582
+Node: Installation and manuals135934
+Node: Authors and license144822
+Node: See also145429
 
 End Tag Table
 
