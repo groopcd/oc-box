@@ -93,6 +93,183 @@ CI acceptance, and CI repair is not a new rootless-Podman host pass.
 
 ### V2 session-history synchronization
 
+#### Exit-timeout investigation (2026-11-12)
+
+A synthetic native investigation reproduced a retained-job exit timeout on
+unmodified OpenCode 2.2.6 and 2.2.7: reloading a location while a background shell
+is held can leave zero foreground sessions and one cancelled shell job. Releasing
+the shell did not consume the job or produce its completion notice; a real
+30-second production waiter still refused. Reopening could hydrate the row as
+running, while checked native export remained acceptable. Explicit sync bypasses
+the original owner's global readiness wait, so its success does not establish
+that the original or reopened job inventory was empty. This is a plausible
+mechanism for the reported all-day exit failure, not proof of that user's trigger.
+
+The first diagnostic change (`7f7915b`) preserves the 30-second budget, two quiet pairs, all job
+statuses, pending-export checks and nonzero cleanup behavior. Unit matrices cover
+retained jobs, partial/slow observations, API failure at deadline, capped count-only
+diagnostics and unchanged client exit codes/no export after refusal. It adds no
+automatic fallback, job deletion or special exemption for cancelled jobs.
+
+Idle query timing and held-stdin native checks did not reproduce a transport or
+stdin-induced timeout. Ordinary interrupted foreground/background jobs recovered
+after their synthetic work completed. These observations and native regression
+fixtures are offline/process evidence, not a live rootless-Podman pass, an all-day
+soak or acceptance of a repair. Native job cleanup remains open; the subsequent
+snapshot candidate below establishes a stronger teardown boundary rather than
+assuming a reaped host-side Podman wrapper proves the remote service stopped.
+
+#### Post-stop persisted-history snapshot candidate
+
+`history_recovery.py`, `history_reader.py` and `workspace_control.py` add a one-shot
+snapshot path after eligible shell-only timeouts. The ordinary live wait still
+fails. Eligibility is based on two prior complete validated pairs, not the final
+query phase: a tiny remaining CLI-query budget must not randomly disable the
+snapshot. A real timeout may retain those observations, but contradictory late
+responses and known non-timeout API failures invalidate them. All versions/kinds
+outside the supported 2.2.6/2.2.7 shell case retain the existing pending behavior.
+
+Unit/process matrices cover private stop intent before admission, stable locks,
+uncertain transition fences, immutable resource identity, stop/start/snapshot/stop
+ordering, one isolated reader, deadline propagation and unchanged nonzero results.
+Malformed/unsafe controls never initialize or repair themselves from readers.
+Source and destination scheduler guards inspect metadata only, use WAL-visible
+read-only SQLite connections and refuse every schedule row/unknown schema. The
+native scheduler's rewake path can run despite `-schedules`; no-schedules metadata
+and system-configuration guards are therefore prerequisites, not optional hints.
+
+`tests/smoke_history_recovery_v2.py` runs on unmodified 2.2.6 and 2.2.7. It closes
+the old **local native process**, then exercises the production reader, real
+archive/import verification, retained running-looking job metadata, no invented
+notices and source/destination scheduler refusals. Provider/shell/plugin canaries
+must not execute during the reader. It is included in `tests/smoke_v2.py`; it does
+not establish whole-container process death, actual rootless stop/start ordering
+or host acceptance. The original live timeout and nonzero result remain distinct
+from a successful checked snapshot; native job cleanup is still not repaired.
+
+The focused host runner adds opt-in `--history-recovery-case snapshot` and
+`--history-recovery-case stop-cancel`. Each invocation creates a separate fresh
+synthetic root. Their `oc-box-history-recovery-host-v2` reports require 12 and six
+checks respectively, owner exits `[0,1]` in each, and explicit-stop exit `0` in the
+cancellation case. They are **additional to**, not replacements for, the stable
+default 33-check/five-exit run. The new cases remain strictly native **2.2.6**;
+2.2.7 reader results are not mislabeled as host acceptance.
+
+Run outside oc-box as an unprivileged user, with the runner outside a clean,
+full-history candidate checkout and an existing safe work parent:
+
+```sh
+python3 -I -B /srv/oc-box-harness/tools/test_session_sync_podman.py \
+  --source /srv/oc-box-candidate --expect-commit "$CANDIDATE_COMMIT" \
+  --work-dir /srv/oc-box-acceptance --opencode-v2 /srv/native/opencode-2.2.6 \
+  --history-recovery-case snapshot
+# Repeat the same command with: --history-recovery-case stop-cancel
+```
+
+The snapshot case must exercise the actual default 30-second production refusal,
+old owner closure, full stop proof, exactly one pinned-ID restart/private reader,
+real verified host archives and final stopped state. The cancellation case uses
+independent control processes; the stop process is preloaded but cannot invoke
+the CLI until the real timeout/owner closure, then publishes intent before held
+admission is released. Missing reproduction is a failure, not a drained-job pass.
+Only forwarding observers are permitted; selector support must preserve actual
+production fences, never manufacture them. Reports retain fixed categories and
+source/native/runner identities, never argv/env/transcripts.
+
+These first two cases do not establish naturally ambiguous engine-start behavior
+or every stop-timing race. Keep unit/process fence coverage and obtain the relevant
+additional host fault/race and lifecycle/vault/history evidence before stable
+publication. Never run these fixtures here, move retained stores, delete private
+reports to make a checkout clean or overwrite earlier failed evidence.
+
+The first recovery snapshot host attempt against `d736bc1` failed the exact
+transition oracle after observing the eligible timeout and old-owner closure.
+That report remains **failed**, not an accepted snapshot. An offline regression
+identified a fixture defect: the v1 observer used any active recovery deadline to
+identify phase, so the launcher's separately budgeted outer cleanup could become
+an extra recovery inspection/stop proof. The old report does not retain those
+events and cannot exclude an additional runtime failure.
+
+The v2 fixture forwards the actual recovery function unchanged, scopes observation
+to that call/thread, and records the real boolean completion result separately.
+The seven required recovery transitions and two full-stop proofs remain strict;
+unexpected operations inside recovery still refuse. A fresh run may test the same
+clean `d736bc1` runtime with the corrected external harness and its own recorded
+runner hash. Preserve the old candidate, runner, report and retained storage.
+
+#### Reviewed focused recovery host acceptance
+
+**Stable backport scope:** the bounded six-commit backport is based on stable
+`c336b419d5760c771d869de436ca6c328af8cc73` (`v1.6.60`), retains version series
+1.6 and the shared baseline 29, and does not import the 1.7 TUI/sharing or
+archived-root automatic-resume features. Its default harness retains the stable
+33 checks, stages `graph`, `readiness`, `background`, `shell`, `recovery-sync`,
+and ordered exits `[0,0,0,1,0]`. Reports require every check, complete stage and
+those exact exits; the 12/six recovery cases remain separate. The historical
+reports below are retained verbatim with their original source, runner and scope.
+There is **no new external-host acceptance** for the stable backport or any later
+channel-integrated candidate: neither local unit/native checks nor matching core
+runtime hashes relabel the original 42+18 pass. Freeze the integrated candidate
+and repeat relevant external-host history/recovery and lifecycle/vault gates
+before stable publication. Never run the live Podman fixtures inside oc-box.
+
+Two operator-provided v2 reports passed review against clean runtime
+`d736bc1bb33ffeedee65ad3ec281de77c1e31847`, count **115**, version
+`1.7.86+gd736bc1`. All **44** runtime/donor hashes match that Git tree. Both pin
+native **2.2.6**, binary SHA-256
+`50503d24577fa4117a7c95ee85b2cd679606a87eacf20ca54ed5db5c9e1cf895`, matching the
+retained offline executable. The external runner is from `60df669`, SHA-256
+`56668d8480f08e06a630bad5f6c214793f999e59a910496a7f22c8bbfb356d20`.
+
+| Case | Reviewed results |
+| --- | --- |
+| Snapshot | 12 checks true; 34 observed cancelled-job pairs; one restart, one reader, one recovery call and completed snapshot. |
+| Stop cancellation | Six checks true; 34 pairs; no restart/reader/snapshot; one recovery call and explicit-stop exit `0`. |
+
+Both reports have owner exits `[0,1]`, zero preparation/authentication calls during
+recovery, exactly two synthetic provider requests and one shell start, no primary
+or secondary failures, and empty failure traces. Source manifest canonical-JSON
+SHA-256 is `3dd3bd86e4d5dc5b6ae3baaa13151acd2222f1021cf6a2a01d42707637db4568`.
+Report-byte SHA-256 values are:
+
+- Snapshot: `192cc00c8931f6e087a0eef8459ebd0946b8b4368c7c587336d8b554c92c062a`.
+- Stop cancellation: `bf87052f4917263779b250f7e0bef483263fd229d3f359e0b050a269810f524e`.
+
+This establishes **18 focused synthetic, scripted external-host recovery checks**
+on native 2.2.6, not completion of the interrupted work or repair of native job
+state. The original nonzero result remains intentional. The earlier v1 oracle
+failure remains failed evidence. No new baseline 42-check, lifecycle/vault,
+interactive UI, real-provider, 2.2.7 host, exhaustive fault/race or security claim
+is established by these reports. Keep raw reports private and the two fresh stores
+and old failed store intact; later documentation/harness commits do not change the
+recorded tested runtime identity.
+
+#### Reviewed baseline history/readiness host regression
+
+A separate `oc-box-session-sync-host-v1` report now passes review for the same
+clean `d736bc1bb33ffeedee65ad3ec281de77c1e31847` runtime, count 115 / version
+`1.7.86+gd736bc1`, the same 44-entry source manifest, the same external `60df669`
+runner and the same native 2.2.6 executable identified above. All **42** named
+baseline checks are true, with ordered owner exits `[0,0,0,1,0,0,0,0]`, complete
+stage, no primary/secondary failures and an empty failure trace. Report-byte
+SHA-256 is `9c94916f9e257e79c2a131df5fb25eecc50579d6358e834c36e99f0cd1749619`.
+Its baseline v1 format is distinct from the earlier failed recovery-v1 format.
+
+Together with the two recovery reports, the reviewed evidence establishes **60
+scripted synthetic external-host checks**: 42 baseline plus 12 snapshot and six
+stop-cancellation checks. The baseline adds history/readiness, child/archive
+preservation, pending-session isolation, lease handling, background notice wakeup
+and ordinary owning-start archived-root resume coverage. It does not repair the
+retained native job, make the intentional nonzero exits successful or change the
+earlier failed recovery report. Keep all raw evidence private and retained.
+
+This is not a new lifecycle/vault/backup, interactive UI, real-provider,
+network-containment, exhaustive fault/race or native 2.2.7 host pass. Stable
+publication and integration/release approval remain separate; later evidence-only
+commits do not extend the recorded tested source identity.
+
+#### History and interrupted-export contracts
+
 The changes introduced in `d638907be97f9f33d00e59da526eb046e39a3627` add paginated
 root/child discovery, independent host archives with relationship provenance,
 missing-source reconciliation, verified native imports, and refusal of incomplete

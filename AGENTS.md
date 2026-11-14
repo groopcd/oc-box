@@ -61,6 +61,17 @@ their checkout ownership distinct from unrelated source and flat installations.
   ephemeral memory only; no published container/LAN ports or shared host service.
   Owners wait for attached clients before sync/stop, and lifecycle locks remain
   exclusive against reset/purge/backup. Attach never refreshes credentials.
+- `history_recovery.py` / `history_reader.py` / `workspace_control.py`: one bounded
+  persisted-history snapshot after shell-only live timeouts, never a live readiness
+  waiver or native job cleanup. Require actual verified whole-container stop,
+  immutable same-resource restart, stop intent/admission and persistent uncertainty
+  fences. Readers are unregistered/non-executing, with source/destination scheduler
+  metadata and system-config refusals, one endpoint, unchanged checked exports and
+  host verification, separate cleanup and original nonzero/interruption warnings.
+  Never clear an uncertain start without verified transition completion, resume
+  work, refresh credentials, create replacement resources or infer host acceptance
+  from local native/process fixtures. The focused host recovery gate is additional
+  to the stable 33-check history/readiness runner, not a relabeling of it.
 - `session_terminal.py`: native persistent V2 session shell PTY client with
   authenticated WebSocket framing, resize/checkpoint replay and Ctrl-] detach.
   Reuse the session terminal, never replace it with the mini chat interface.
@@ -292,6 +303,41 @@ pending session, unchanged prior archives/checkpoint and recovery. These run
 directly inside oc-box with private synthetic state, not nested Podman. Activity
 refusal in the export bridge applies to the superseded-assistant exception, not
 universally to every export; normal owners separately wait for activity.
+Focused post-stop snapshot/stop-cancellation host acceptance is now reviewed on
+clean d736bc1bb33ffeedee65ad3ec281de77c1e31847 (1.7.86+gd736bc1, count 115),
+native 2.2.6. The external 60df669 v2 runner (SHA-256 56668d84...356d20) passed
+all 18 checks across two fresh roots; all 44 audited runtime/donor hashes match
+Git. Owner exits are [0,1] in each case, explicit stop 0; snapshot restart/reader/
+completion are 1/1/1, cancellation 0/0/0, with no preparation/auth calls or extra
+synthetic provider/shell execution. See docs/testing.md for exact evidence hashes.
+This is focused scripted synthetic host acceptance only, not native job cleanup,
+the baseline 42 checks, lifecycle/vault/UI, real inference, exhaustive fault/race
+or native 2.2.7 host acceptance. The earlier v1 oracle attempt remains failed;
+its later fixture-only correction and fresh successes do not relabel it. Keep raw
+reports private and retain every store; repeat remaining relevant integrated
+candidate gates before stable publication.
+
+The separate default history/readiness report is also now reviewed on that same
+clean d736bc1 runtime, all 44 identical audited hashes, external 60df669 runner
+and native 2.2.6: all 42 checks true, ordered exits [0,0,0,1,0,0,0,0], no primary/
+secondary failures or trace. Report SHA-256 9c94916f...49619 is recorded fully in
+docs/testing.md. Combined accepted scope is 60 scripted synthetic host checks
+(42 baseline + 18 focused recovery), not lifecycle/vault/backup, interactive UI,
+real-provider, network-containment, exhaustive fault/race or native 2.2.7 host
+acceptance. Preserve the earlier failure; fix-branch integration and stable
+publication remain separately authorized/gated.
+
+The bounded stable 1.6 backport replays only e04535ab, 7f7915b5, d736bc1b,
+60df6697, 670480d6 and dcc04823 onto c336b419d5760c771d869de436ca6c328af8cc73.
+It retains VERSION_SERIES 1.6 and baseline 29, without the 1.7 TUI/sharing or
+archived-root automatic-resume features. Its default host harness retains the
+stable 33 checks and ordered exits [0,0,0,1,0]; the 12/six recovery gates remain
+separate. No new external-host acceptance exists for this backport or a later
+channel-integrated candidate. The historical 42+18 results above retain their
+exact d736bc1/60df669 identities and scopes, not acceptance of backported source.
+Freeze the integrated candidate and repeat relevant host history/recovery and
+lifecycle/vault gates before stable publication. No live Podman runs in oc-box.
+
 The global-vault fixture's initial host run failed during the first owning
 launch, not an accepted pass.
 Use --diagnose for validated read-only checkpoints; never print raw errors/env

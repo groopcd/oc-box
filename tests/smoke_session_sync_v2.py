@@ -1,8 +1,9 @@
-"""Provider-free session-sync checks against an unmodified native OpenCode V2.
+"""Isolated session-sync checks against an unmodified native OpenCode V2.
 
 Run with TMPDIR=/tmp/opencode python3 -B tests/smoke_session_sync_v2.py
 --opencode /path/to/opencode-v2. Only transport is substituted: both databases,
 HTTP APIs, CLI import/export and production sync/archive code remain real.
+Background-job checks use a canned loopback provider, never external inference.
 This is an offline integration fixture, not host/Podman lifecycle acceptance.
 """
 
@@ -18,6 +19,7 @@ import sys
 import tempfile
 import threading
 import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
@@ -302,6 +304,421 @@ def unsettled_shell(source, host, root, data, path, sync, verify_archive):
         ),
         "Completed synthetic shell history was not retained.",
     )
+
+
+class BackgroundProvider:
+    """One real background shell, an idle parent, then a held notice wakeup."""
+
+    def __init__(self, command, project):
+        self.command, self.project = command, project
+        self.requests = self.errors = 0
+        self.woken, self.release = threading.Event(), threading.Event()
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_POST(self):
+                try:
+                    self.connection.settimeout(10)
+                    size = int(self.headers.get("Content-Length", "0"))
+                    require(
+                        self.path == "/v1/chat/completions" and 0 < size < 2_000_000,
+                        "Synthetic background provider contract changed.",
+                    )
+                    body = json.loads(self.rfile.read(size))
+                    require(
+                        body.get("stream") is True
+                        and body.get("model") == "gpt-history",
+                        "Synthetic background provider request changed.",
+                    )
+                    outer.requests += 1
+                    require(outer.requests <= 3, "Unexpected background provider turn.")
+                    if outer.requests == 1:
+                        tools = {
+                            item["function"]["name"]: item["function"]
+                            for item in body.get("tools", [])
+                        }
+                        schema = tools.get("shell", {}).get("parameters", {})
+                        require(
+                            schema.get("properties", {})
+                            .get("background", {})
+                            .get("type")
+                            == "boolean",
+                            "Native background shell schema changed.",
+                        )
+                        delta, finish = (
+                            {
+                                "tool_calls": [
+                                    {
+                                        "index": 0,
+                                        "id": "call_fixture_background",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "shell",
+                                            "arguments": json.dumps(
+                                                {
+                                                    "command": outer.command,
+                                                    "workdir": str(outer.project),
+                                                    "background": True,
+                                                }
+                                            ),
+                                        },
+                                    }
+                                ]
+                            },
+                            "tool_calls",
+                        )
+                    else:
+                        if outer.requests == 3:
+                            outer.woken.set()
+                            require(
+                                outer.release.wait(30),
+                                "Synthetic background wakeup gate timed out.",
+                            )
+                        delta, finish = (
+                            {
+                                "content": "SYNTHETIC_BACKGROUND_WAKE_ACK"
+                                if outer.requests == 3
+                                else "SYNTHETIC_BACKGROUND_PARENT_IDLE"
+                            },
+                            "stop",
+                        )
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.end_headers()
+                    for part, end in ((delta, None), ({}, finish)):
+                        payload = {
+                            "id": "chatcmpl-fixture-background",
+                            "object": "chat.completion.chunk",
+                            "model": "gpt-history",
+                            "choices": [
+                                {"index": 0, "delta": part, "finish_reason": end}
+                            ],
+                            "usage": {
+                                "prompt_tokens": 1,
+                                "completion_tokens": 1,
+                                "total_tokens": 2,
+                            },
+                        }
+                        self.wfile.write(
+                            ("data: " + json.dumps(payload) + "\n\n").encode()
+                        )
+                    self.wfile.write(b"data: [DONE]\n\n")
+                    self.wfile.flush()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # The private native server can close a held request.
+                except Exception:  # noqa: BLE001 -- Never serialize provider input.
+                    outer.errors += 1
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.server.daemon_threads = True
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+
+    def config(self, base):
+        value = json.loads(base)
+        value.update(
+            {
+                "default_agent": "build",
+                "model": "fixture/gpt-history",
+                "providers": {
+                    "fixture": {
+                        "package": "aisdk:@ai-sdk/openai-compatible",
+                        "settings": {
+                            "baseURL": f"http://127.0.0.1:{self.server.server_port}/v1",
+                            "apiKey": "synthetic-not-a-credential",
+                        },
+                        "models": {
+                            "gpt-history": {
+                                "name": "Synthetic background fixture",
+                                "limit": {"context": 32000, "output": 2000},
+                            }
+                        },
+                    }
+                },
+            }
+        )
+        value["policies"] += [
+            {"action": "provider.use", "resource": "*", "effect": "deny"},
+            {"action": "provider.use", "resource": "fixture", "effect": "allow"},
+        ]
+        return json.dumps(value)
+
+    def close(self):
+        self.release.set()
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=3)
+        require(not self.thread.is_alive(), "Background provider did not stop.")
+
+
+def background_jobs(binary, root):
+    """Exercise the real waiter/CLI without relying on an upstream job leak.
+
+    Native 2.2.6/2.2.7 retain a cancelled shell job after location reload. A newer
+    native may consume that notice: require either actual quiet success or the
+    unchanged timeout refusal with an observed cancelled job, never a waiver.
+    """
+    for mode in ("completion", "reload"):
+        case = root / mode
+        project = case / "project"
+        project.mkdir(parents=True)
+        gate, started = case / "release", case / "started"
+        script = case / "hold.py"
+        script.write_text(
+            "import pathlib,sys,time\n"
+            "gate,started=map(pathlib.Path,sys.argv[1:])\n"
+            "started.touch()\n"
+            "deadline=time.monotonic()+45\n"
+            "while not gate.exists() and time.monotonic()<deadline: time.sleep(.02)\n"
+            "if not gate.exists(): raise SystemExit(2)\n"
+            "print('SYNTHETIC_BACKGROUND_SHELL_DONE')\n"
+        )
+        env = private_environment(case / "native")
+        provider = BackgroundProvider(
+            shlex.join([sys.executable, str(script), str(gate), str(started)]), project
+        )
+        process = None
+        try:
+            env["OPENCODE_CONFIG_CONTENT"] = provider.config(
+                env["OPENCODE_CONFIG_CONTENT"]
+            )
+            with (
+                patch.dict(os.environ, env, clear=True),
+                bridge.server(binary) as source,
+                patch.object(box, "CONTAINER_OPENCODE", binary),
+                contextlib.ExitStack() as cleanup,
+            ):
+
+                def stop_client():
+                    if process and process.poll() is None:
+                        try:
+                            os.killpg(process.pid, signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        process.wait(timeout=5)
+
+                # Release both holds and reap the client BEFORE closing the
+                # private native server, including on an assertion failure.
+                cleanup.callback(stop_client)
+                cleanup.callback(provider.release.set)
+                cleanup.callback(gate.touch)
+                ident = seed(source, "ses_fixture_background_" + mode, project)
+                client_env = {**env, "OPENCODE_PASSWORD": source.endpoint["password"]}
+                queries = []
+
+                def local_client(_box, _data, connection, arguments, **_kwargs):
+                    # Preserve api(), native CLI, authentication, deadlines and
+                    # response validation; replace only the Podman boundary.
+                    require(
+                        arguments[:3] == [binary, "api", "get"]
+                        and arguments[3]
+                        in ("/api/session/active", "/api/experimental/job"),
+                        "Unexpected native history-wait command.",
+                    )
+                    queries.append(arguments[3])
+                    return box.ContainerCommand(arguments, client_env)
+
+                def inventory():
+                    return (
+                        source("GET", "/api/session/active")["data"],
+                        source("GET", "/api/experimental/job")["data"],
+                    )
+
+                def until(predicate):
+                    deadline = time.monotonic() + 15
+                    while not predicate():
+                        require(
+                            provider.errors == 0 and time.monotonic() < deadline,
+                            "Native background fixture did not reach its hold point.",
+                        )
+                        time.sleep(0.05)
+
+                def wait(timeout=3):
+                    return workspace_service.wait_history(
+                        box, {}, source.endpoint, timeout=timeout, interval=0.1
+                    )
+
+                def times_out(*, foreground=0, running=0, cancelled=0):
+                    before = len(queries)
+                    try:
+                        wait()
+                    except box.BoxError as error:
+                        require(
+                            isinstance(error, box.HistoryWaitTimeout)
+                            and str(error)
+                            == "OpenCode 2.x history wait failed (activity-timeout).",
+                            "Native background wait returned a different refusal.",
+                        )
+                        observation = (
+                            f"foreground={foreground}, jobs-running={running}, "
+                            "jobs-completed=0, jobs-error=0, "
+                            f"jobs-cancelled={cancelled}."
+                        )
+                        require(
+                            error.diagnostic.endswith(observation),
+                            "Native background wait lost its validated observation counts.",
+                        )
+                    else:
+                        return False
+                    require(
+                        queries[before:].count("/api/experimental/job") >= 2,
+                        "Native background timeout did not poll the actual jobs.",
+                    )
+                    return True
+
+                with patch.object(workspace_service, "client_command", local_client):
+                    process = subprocess.Popen(
+                        [
+                            binary,
+                            "run",
+                            "--server",
+                            source.endpoint["url"],
+                            "--session",
+                            ident,
+                            "--model",
+                            "fixture/gpt-history",
+                            "--agent",
+                            "build",
+                            "SYNTHETIC_BACKGROUND_FIXTURE",
+                        ],
+                        env=client_env,
+                        cwd=project,
+                        stdin=subprocess.DEVNULL,  # Native run requires explicit EOF.
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        start_new_session=True,
+                    )
+
+                    def idle_background():
+                        active, jobs = inventory()
+                        return (
+                            started.exists()
+                            and active == {}
+                            and len(jobs) == 1
+                            and (
+                                jobs[0].get("sessionID") == ident
+                                and jobs[0].get("kind") == "shell"
+                                and jobs[0].get("status") == "running"
+                            )
+                        )
+
+                    until(idle_background)
+                    job = inventory()[1][0]
+                    if mode == "completion":
+                        require(
+                            times_out(running=1),
+                            "Native history wait waived a held job.",
+                        )
+                        require(idle_background(), "Held background shell ended early.")
+                        gate.touch()
+                        require(
+                            provider.woken.wait(15),
+                            "Native job notice did not wake execution.",
+                        )
+                        active, jobs = inventory()
+                        require(
+                            set(active) == {ident}
+                            and active[ident].get("type") == "running"
+                            and jobs == [],
+                            "Native background completion did not hand off to foreground.",
+                        )
+                        require(
+                            times_out(foreground=1),
+                            "Native history wait waived a foreground wakeup.",
+                        )
+                        provider.release.set()
+                        wait(timeout=15)
+                        require(
+                            inventory() == ({}, []),
+                            "Native background wakeup did not settle.",
+                        )
+                        require(
+                            process.wait(timeout=10) == 0,
+                            "Native background client failed.",
+                        )
+                        value = bridge.checked_export(source, ident)
+                        notices = [
+                            message
+                            for message in value["messages"]
+                            if message.get("type") == "synthetic"
+                            and message.get("metadata", {}).get("source") == "shell"
+                        ]
+                        require(
+                            len(notices) == 1
+                            and all(
+                                notices[0].get("metadata", {}).get(key) == expected
+                                for key, expected in (
+                                    ("state", "completed"),
+                                    ("exit", 0),
+                                    ("jobID", job["id"]),
+                                    ("shellID", job["shellID"]),
+                                )
+                            )
+                            and "SYNTHETIC_BACKGROUND_SHELL_DONE"
+                            in notices[0].get("text", "")
+                            and "SYNTHETIC_BACKGROUND_WAKE_ACK"
+                            in json.dumps(value["messages"]),
+                            "Native background notice or acknowledged export changed.",
+                        )
+                        require(
+                            provider.requests == 3,
+                            "Native background wakeup turn count changed.",
+                        )
+                        print(
+                            "PASS: native V2 real background shell, completion notice, foreground wakeup and history readiness.",
+                            flush=True,
+                        )
+                    else:
+                        source("POST", "/api/location/reload")
+                        provider.release.set()
+                        gate.touch()
+                        if times_out(cancelled=1):
+                            active, jobs = inventory()
+                            require(
+                                active == {}
+                                and len(jobs) == 1
+                                and jobs[0].get("id") == job["id"]
+                                and jobs[0].get("sessionID") == ident
+                                and jobs[0].get("kind") == "shell"
+                                and jobs[0].get("status") == "cancelled",
+                                "Native reload timeout lacked an idle retained cancelled job.",
+                            )
+                            # Export acceptance is not permission to waive the
+                            # original service's nonempty readiness inventory.
+                            value = bridge.checked_export(source, ident)
+                            require(
+                                not any(
+                                    message.get("type") == "synthetic"
+                                    and message.get("metadata", {}).get("jobID")
+                                    == job["id"]
+                                    for message in value["messages"]
+                                ),
+                                "Retained reload job unexpectedly admitted its notice.",
+                            )
+                            print(
+                                "PASS: native V2 reload retained one cancelled job with idle foreground; real waiter refused despite accepted export.",
+                                flush=True,
+                            )
+                        else:
+                            require(
+                                inventory() == ({}, []),
+                                "Native reload wait accepted a nonquiet inventory.",
+                            )
+                            bridge.checked_export(source, ident)
+                            print(
+                                "PASS: native V2 reload jobs drained; real waiter required quiet inventories (drained observation).",
+                                flush=True,
+                            )
+                    require(
+                        provider.errors == 0, "Synthetic background provider failed."
+                    )
+        finally:
+            gate.touch()
+            provider.release.set()
+            provider.close()
 
 
 def exercise(binary, root):
@@ -744,6 +1161,7 @@ def exercise(binary, root):
             "PASS: native V2 fixed pending reasons, same-pass progress around a running shell, archive preservation and completed-history retry.",
             flush=True,
         )
+    background_jobs(binary, root / "background-jobs")
 
 
 def main(binary):
