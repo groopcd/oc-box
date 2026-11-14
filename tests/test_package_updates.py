@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import subprocess
 import sys
@@ -673,12 +674,75 @@ class IsolatedManagerTests(unittest.TestCase):
 
     def discovery(self, url):
         if url == updates.SIMPLE:
-            return {"files": [public_file("1.6.1"), public_file("1.6.2")]}
+            return {
+                "files": [
+                    public_file("1.6.1"),
+                    public_file("1.6.2"),
+                    public_file("1.6.3.dev0"),
+                ]
+            }
         version = url.split("/")[-2]
         return {
             "info": {"name": "oc-box", "version": version, "provides_extra": []},
             "urls": [public_file(version)],
         }
+
+    def normalize_receipt_transport(self, prefix, kind):
+        """Undo only the fixture's offline index, never manager owner/options."""
+        if kind == "pipx":
+            receipt = prefix / "pipx_metadata.json"
+            before = json.loads(receipt.read_text())
+            flags = before["main_package"]["pip_args"]
+            position = flags.index("--no-index")
+            self.assertEqual(flags.count("--no-index"), 1)
+            self.assertEqual(
+                flags[position : position + 3],
+                ["--no-index", "--find-links", str(self.wheels)],
+            )
+            after = json.loads(receipt.read_text())
+            after["main_package"]["pip_args"][position : position + 3] = [
+                "--index-url",
+                updates.INDEX,
+            ]
+            receipt.write_text(json.dumps(after))
+            normalized = json.loads(receipt.read_text())
+            self.assertEqual(
+                normalized["main_package"]["pip_args"],
+                flags[:position]
+                + ["--index-url", updates.INDEX]
+                + flags[position + 3 :],
+            )
+            normalized["main_package"]["pip_args"] = flags
+            self.assertEqual(normalized, before)
+        elif kind == "uv":
+            import tomllib
+
+            receipt = prefix / "uv-receipt.toml"
+            text = receipt.read_text()
+            before = tomllib.loads(text)
+            options = before["tool"]["options"]
+            self.assertIs(options["no-index"], True)
+            self.assertEqual(options["find-links"], [self.wheels.as_uri()])
+            offline_index = "no-index = true"
+            offline_links = "find-links = " + json.dumps([self.wheels.as_uri()])
+            self.assertEqual(text.splitlines().count(offline_index), 1)
+            self.assertEqual(text.splitlines().count(offline_links), 1)
+            receipt.write_text(
+                "\n".join(
+                    "index-url = " + json.dumps(updates.INDEX)
+                    if line == offline_index
+                    else line
+                    for line in text.splitlines()
+                    if line != offline_links
+                )
+                + "\n"
+            )
+            normalized = tomllib.loads(receipt.read_text())
+            normalized_options = normalized["tool"]["options"]
+            self.assertEqual(normalized_options.pop("index-url"), updates.INDEX)
+            normalized_options["no-index"] = True
+            normalized_options["find-links"] = [self.wheels.as_uri()]
+            self.assertEqual(normalized, before)
 
     def exercise(self, prefix, *, kind):
         python = prefix / "bin/python"
@@ -688,11 +752,20 @@ class IsolatedManagerTests(unittest.TestCase):
             )
         )
         site = package.parent
-        dist = next(
-            d
-            for d in metadata.distributions(path=[str(site)])
-            if d.metadata["Name"] == "oc-box"
-        )
+        observed_versions = []
+
+        def distribution(name):
+            self.assertEqual(name, "oc-box")
+            # Each invocation models a new launcher process, not a Distribution
+            # still pointing at the dist-info removed by the previous manager.
+            dist = next(
+                d
+                for d in metadata.distributions(path=[str(site)])
+                if d.metadata["Name"] == name
+            )
+            observed_versions.append(dist.version)
+            return dist
+
         original = updates._run
         mutations = []
 
@@ -701,8 +774,6 @@ class IsolatedManagerTests(unittest.TestCase):
             if kind == "pipx" and "install" in argv:
                 mutations.append(argv[:])
                 self.assertIn("--pip-args", argv)
-                import shlex
-
                 position = argv.index("--pip-args") + 1
                 flags = shlex.split(argv[position])
                 self.assertEqual(flags, updates.PIP_FLAGS)
@@ -738,7 +809,7 @@ class IsolatedManagerTests(unittest.TestCase):
                 "_operation_lock",
                 side_effect=lambda *a: contextlib.nullcontext(),
             ),
-            patch.object(updates.metadata, "distribution", return_value=dist),
+            patch.object(updates.metadata, "distribution", side_effect=distribution),
             patch.object(updates, "_run", side_effect=offline),
             patch.object(channels, "fetch_json", side_effect=self.discovery),
             patch.dict(
@@ -749,20 +820,67 @@ class IsolatedManagerTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             for condition in patches:
                 stack.enter_context(condition)
-            stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
-            self.assertIsNone(updates.upgrade(package))
-        self.assertEqual(len(mutations), 1)
-        fresh = json.loads(
-            original([python, "-I", "-c", updates.PROBE], self.work, self.env)
+            for channel, version, count in (
+                (None, "1.6.2", 1),
+                ("devel", "1.6.3.dev0", 2),
+                (None, "1.6.3.dev0", 2),
+                ("stable", "1.6.2", 3),
+            ):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertIsNone(updates.upgrade(package, channel=channel))
+                self.assertEqual(len(mutations), count)
+                fresh = json.loads(
+                    original([python, "-I", "-c", updates.PROBE], self.work, self.env)
+                )
+                self.assertEqual(fresh["version"], version)
+                self.assertEqual(fresh["prefix"], str(prefix))
+                self.assertFalse(fresh["direct"])
+                selected = "devel" if version.endswith(".dev0") else "stable"
+                self.assertIn(f"PyPI {selected}: {version}", output.getvalue())
+                if channel == "stable":
+                    self.assertIn(
+                        "workspace/session state is not rolled back", output.getvalue()
+                    )
+                settings = json.loads(
+                    (self.work / "config/oc-box/config.json").read_text()
+                )
+                self.assertEqual(
+                    list(settings["package_update_channels"].values()), [selected]
+                )
+                if channel is None and selected == "devel":
+                    self.assertIn("up to date", output.getvalue())
+                    if kind in ("pipx", "uv"):
+                        self.assertEqual(receipt.read_bytes(), previous_receipt)
+                else:
+                    self.assertIn("oc-box==" + version, mutations[-1])
+                    self.normalize_receipt_transport(prefix, kind)
+                    if kind == "pipx":
+                        flags = json.loads((prefix / "pipx_metadata.json").read_text())[
+                            "main_package"
+                        ]["pip_args"]
+                        self.assertEqual(
+                            flags, ["--force-reinstall", *updates.PIP_FLAGS]
+                        )
+                    elif kind == "uv":
+                        import tomllib
+
+                        options = tomllib.loads(
+                            (prefix / "uv-receipt.toml").read_text()
+                        )["tool"]["options"]
+                        self.assertEqual(options["keyring-provider"], "disabled")
+                        self.assertIs(options["no-build"], True)
+                if kind in ("pipx", "uv"):
+                    receipt = prefix / (
+                        "pipx_metadata.json" if kind == "pipx" else "uv-receipt.toml"
+                    )
+                    previous_receipt = receipt.read_bytes()
+        self.assertEqual(
+            observed_versions,
+            ["1.6.1", "1.6.2", "1.6.3.dev0", "1.6.3.dev0"],
         )
-        self.assertEqual(fresh["version"], "1.6.2")
-        self.assertEqual(fresh["prefix"], str(prefix))
-        self.assertFalse(fresh["direct"])
-        settings = json.loads((self.work / "config/oc-box/config.json").read_text())
-        self.assertEqual(list(settings["package_update_channels"].values()), ["stable"])
         return package, fresh
 
-    def test_real_private_venv_pip_replaces_wheel_and_checks_fresh_metadata(self):
+    def test_real_private_venv_pip_channel_roundtrip_checks_fresh_metadata(self):
         prefix = self.work / "private"
         self.command([sys.executable, "-m", "venv", str(prefix)])
         self.command(
@@ -784,7 +902,7 @@ class IsolatedManagerTests(unittest.TestCase):
     @unittest.skipUnless(
         shutil.which("pipx"), "An existing pipx is needed for its native fixture."
     )
-    def test_real_pipx_legacy_receipt_and_exact_pin_replacement(self):
+    def test_real_pipx_legacy_receipt_channel_roundtrip(self):
         executable = Path(shutil.which("pipx")).resolve()
         home = self.work / "pipx"
         self.env.update(
@@ -803,7 +921,10 @@ class IsolatedManagerTests(unittest.TestCase):
                 "--python",
                 sys.executable,
                 "--pip-args",
-                "--no-index --find-links " + str(self.wheels),
+                shlex.join(
+                    ["--no-index", "--find-links", str(self.wheels)]
+                    + updates.PIP_FLAGS[2:]
+                ),
                 "oc-box==1.6.1",
             ]
         )
@@ -814,8 +935,7 @@ class IsolatedManagerTests(unittest.TestCase):
             self.skipTest(
                 "This pipx receipt version is deliberately unsupported; use pipx 1.8 for the mutation fixture."
             )
-        data["main_package"]["pip_args"] = []
-        receipt.write_text(json.dumps(data))
+        self.normalize_receipt_transport(prefix, "pipx")
         with patch.dict(
             os.environ,
             {
@@ -831,7 +951,7 @@ class IsolatedManagerTests(unittest.TestCase):
     @unittest.skipIf(
         sys.version_info < (3, 11), "uv receipt parsing needs stdlib tomllib"
     )
-    def test_real_uv_owner_receipt_launcher_and_exact_pin_replacement(self):
+    def test_real_uv_owner_receipt_launcher_channel_roundtrip(self):
         self.command(
             [
                 self.uv,
@@ -846,9 +966,7 @@ class IsolatedManagerTests(unittest.TestCase):
         )
         prefix = self.work / "tools/oc-box"
         receipt = prefix / "uv-receipt.toml"
-        # Offline fixture transport must not masquerade as an accepted custom
-        # production option. Retain the actual manager-written owner/entrypoint.
-        receipt.write_text(receipt.read_text().split("[tool.options]")[0])
+        self.normalize_receipt_transport(prefix, "uv")
         with patch.object(updates.shutil, "which", return_value=str(self.uv)):
             _, fresh = self.exercise(prefix, kind="uv")
         self.assertEqual(fresh["version"], "1.6.2")
