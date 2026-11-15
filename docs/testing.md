@@ -453,6 +453,75 @@ downgrade checks, interactive observations, real providers/projects, actual
 OAuth refresh and security/network-containment certification. Existing legacy
 reports and all earlier failures retain their original identities and scopes.
 
+### Reviewed frozen-source 2.3 host reports — lifecycle still blocked
+
+Fresh, separately retained host runs were reviewed on unchanged application
+`9a6e99ad01b3bf02e19edb3ec9d7ab3289d40f22`,
+`1.6.94+g9a6e99a`, count **123**, clean full history. The history runner came
+from separate harness commit `14357e8f23ab7ada1cbc373f440bc9697a25a305`,
+SHA-256
+`3eb6af9b5bf2e8b5d838d83f6e4b89ffbadd191359454a349c58f3b85f4776cb`.
+Every report records unmodified native **2.3.0**, SHA-256
+`2e0e4656521ca56e5ba16a00d48429958b8105b3fa6466710a4350e68759381f`.
+These are reviews of user-supplied external-host evidence, not local Podman
+runs or acceptance inferred from native callback rigs.
+
+| Report | Original file SHA-256 | Reviewed result |
+| --- | --- | --- |
+| Baseline history/readiness | `71d44cb18a8dfec8ee16110c1ea523510c0021223f9685d7e1777d4f62e060f3` | **33 original + 12 structured checks** true; exits `[0,0,0,1,0]` |
+| Snapshot recovery | `ff0164bd1367f31361159f7db9dcf59b7fe58d7b301de82471f2a294a79b887c` | **12 checks** true; exits `[0,1]`; restart/reader/snapshot `1/1/1` |
+| Stop-cancellation | `b6d627ea4c4bb73dc78f0845e6679fbc4e9a078f847a0b571525d0a38574716a` | **Six checks** true; exits `[0,1]`; restart/reader/snapshot `0/0/0`; explicit stop `0` |
+| Global vault | `5998bb8c7030ea78063d2287945ef173406b811d901cf4f7138f24c7867a5799` | **13 stages** passed, including full encrypted backup/restore |
+| V2-only lifecycle | `8ad73c75b2b9643626820849365fdcd515d486ba980d4a16f63fcfad78d6c2b7` | **FAILED** with broad `fixture-error`; only private-selector and native-seed checks true |
+
+Locally reconstructed fixed-schema copies exactly match all five original
+whole-file checksums. Both primary and independent review verified all **36
+runtime/donor hashes** in each history report against the frozen source, and
+all **154 full-source hashes** in the lifecycle report. The global-vault
+report records source/native identities but has **no runtime hash map**; do
+not describe it as a 36-hashed report. Its return-zero evidence comes from
+the supplied successful command sequence proceeding to the next gate, not
+from a JSON exit-code field.
+
+Baseline workers completed across actual child/background/parent holds,
+with two final global quiet pairs in each observation set, foreground provider
+requests **two**, cumulative requests **seven**, and no provider/query errors,
+failure categories or trace. The recovery reports each record **48 running
+pairs and zero cancelled pairs**, no preparation/auth calls, two provider
+requests and one shell start. Their `durable_job_retained` label does **not**
+establish the legacy 2.2 retained-cancelled-job precondition. Snapshot remains
+one non-executing post-stop reader, never a live readiness waiver or native
+job-cleanup claim.
+
+Global-vault scope includes scripted masked prompt/TUI exit, delivery and
+rotation/reload/attach, native Build permissions, opt-out and full encrypted
+restore with stopped byte-exact and latest-host-vault/history/OS checks. It
+does **not** replace selected-policy full **and portable** restore/reset
+acceptance. The failed lifecycle report establishes neither completed host
+import nor owner, restore, reset or source-preservation acceptance.
+
+Static inspection and a bounded synthetic production-client callback probe
+found a deterministic lifecycle **harness defect**: its first start omits
+`--import-session`, although its callback requires the separate host seed's
+session ID and transcript. The passing global-vault fixture explicitly
+requests that import. The old lifecycle report discards the fixed refusal
+reason; this matching mechanism is **not proof of the exact historical
+failure substep or callback entry**.
+
+Keep the frozen application and donor helpers unchanged while correcting
+external first-start orchestration. Request the supported seed import exactly
+once, never on restart/restore/reset, and retain strict selection/transcript,
+ownership, full/portable restore, reset and refusal checks. Require separately
+identified fixed primary/secondary diagnostics and fresh source-bound host
+validation after correction. Do not replay the retained failed store.
+
+Accepted scope is **63 scripted synthetic history/readiness/recovery checks**
+plus the separate **13-stage global-vault gate**, not complete release
+acceptance, interactive UI, real inference, OAuth, network-containment,
+security certification or new legacy acceptance. The original baseline and
+lifecycle failures remain failed evidence. **Stable publication is blocked
+by the lifecycle gate; application `9a6e99a` and main 1.7 remain unchanged.**
+
 ### Focused history/readiness host runner
 
 `tools/test_session_sync_podman.py` is a separate host harness, not an installed

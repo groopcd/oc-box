@@ -235,6 +235,29 @@ application. Fresh host runs must record the frozen source and corrected runner
 identities independently. No retained-store replay, relaxed native readiness,
 production timeout increase or relabeling of the first failed run is permitted.
 
+The separately reviewed fresh current-native host reports now pass on that
+unchanged 9a6e99a application and external 14357e8 harness: baseline 33+12,
+snapshot 12, stop-cancel six, and global-vault 13 stages. Original-file hashes
+and exact scopes are recorded in docs/testing.md. Global-vault has no runtime
+hash map and its full restore is not selected-policy full/portable/reset
+lifecycle acceptance.
+Recovery observes 2.3 running pairs, not the older retained-cancelled condition.
+Keep both the original baseline failure and the new lifecycle failure intact.
+
+The current V2-only lifecycle report fails after private-selector/native-seed
+checks, before recording host import; its broad fixture-error does not identify
+the actual substep or prove owner startup. Static/synthetic inspection finds
+the first start omits --import-session while requiring the separate host seed.
+Correct only separately source-pinned external orchestration, with one actual
+supported first-start import, never repeated on restart/restore/reset. Do not
+change the frozen lifecycle/global-vault/native donors or application runtime
+merely to fix this harness. Preserve all ten lifecycle check groups and legacy
+exclusions; keep fixed primary diagnostics separate from cleanup/report failures.
+Require independent review, applicable local/native validation and a fresh
+external-host lifecycle report before publication. No retained-store retry,
+cleanup, raw-secret diagnostics, master advancement or main 1.7 work is authorized
+by this incomplete evidence.
+
 ## Documentation maintenance
 
 Update `docs/cli.md` when command-line behavior changes, then regenerate with
