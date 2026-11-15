@@ -258,6 +258,19 @@ external-host lifecycle report before publication. No retained-store retry,
 cleanup, raw-secret diagnostics, master advancement or main 1.7 work is authorized
 by this incomplete evidence.
 
+The later external d622ee0 lifecycle run fixes initial import but remains
+failed at stopped-restore after five initial check groups and two source owners.
+Its exact report hashes/scopes are recorded in docs/testing.md. The user agreed
+to one bounded diagnosis, not another broad acceptance campaign. Do not repeat
+accepted baseline/recovery/global-vault gates needlessly. Static root-mode and
+special-bit normalization can conflict with the whole-home oracle, but the
+actual historical failed predicate is unconfirmed. Keep the failed store and
+all archives intact; never repair cached selector interpreters or retry it.
+The report-bound file-only reader may compare verified registry/session/marker
+metadata with a strict retained boot fence, without engine/CLI/volume/archive
+access. It is not live readiness, current-stop proof, cleanup authorization or
+reconstruction of the lost local pre-backup home digest.
+
 ## Documentation maintenance
 
 Update `docs/cli.md` when command-line behavior changes, then regenerate with

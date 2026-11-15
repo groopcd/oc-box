@@ -558,6 +558,52 @@ security certification or new legacy acceptance. The original baseline and
 lifecycle failures remain failed evidence. **Stable publication is blocked
 by the lifecycle gate; application `9a6e99a` and main 1.7 remain unchanged.**
 
+The subsequent external lifecycle attempt used reviewed harness
+`d622ee03d1357de4676a4c5c99441f58c85867a6`, runner SHA-256
+`3f14f9543696b0dca2b228df668b0ea9d7b4484f5839db6949ad197c12e57f4c`,
+and unchanged application `9a6e99a`. Its original report SHA-256 is
+`ce8613bb75325e750af09db7bf3b8fe3ac1d00dd84a63aeb4cae8c26f1fb30a1`;
+the companion report SHA-256 is
+`164fc630cb1952574082d8c06bc2aa7beecb2e40c91802d24454739d1e64ab00`.
+Both reports remain **FAILED**, now with fixed category `stopped-restore`.
+Five initial check groups completed, including initial import, selected tools
+and same-session restart/rotation/attach. Exactly one initial import and two
+source owning starts completed; no restored owning start completed. Provider
+cleanup finished and primary/cleanup/reporting diagnostics stayed separate.
+All 154 reported source hashes match frozen Git. Neither restore kind, reset
+nor final source preservation is accepted from that report.
+
+The stopped-restore conjunction does not identify its failed member. The exact
+whole-home oracle includes root modes and child special bits, whereas archive
+extraction intentionally forces root privacy and strips special bits. Synthetic
+proof establishes a conditional oracle incompatibility, **not** that those
+conditions existed in this host run. Do not waive content/ownership checks,
+infer data loss, or repeat accepted gates merely from that static finding.
+
+`tools/diagnose_v2_stopped_restore.py` is a narrowly report-bound, file-only
+reader for this specific failed pair, not a lifecycle retry or engine selector:
+
+```bash
+python3 -I -B /path/to/reviewed/harness/tools/diagnose_v2_stopped_restore.py \
+  --root /path/to/the/audited/fixture \
+  --source /path/to/clean/frozen/source
+```
+
+It verifies original file checksums and selected fixture/registry/seed/marker
+relationships, requires a valid matching retained boot marker, and emits only
+fixed categories and current metadata-comparison booleans. Owned regular files
+are pinned before data opens; paths and generic VFS project identities are
+verified through directory descriptors. It neither executes selectors, Podman
+or OpenCode nor reads home volumes or decrypts backups. Disposable selector
+interpreters are not repaired or executed. Stale/invalid/missing boot markers
+are refusals, never permission to refresh or move a store.
+
+The historical `saved` home digest was a local variable, not a persisted
+baseline. This file allowlist cannot reconstruct it or prove the exact
+historical failed predicate, current stop, archive authentication or complete
+lifecycle acceptance. Diagnose the one unresolved comparison before deciding
+which correction and affected validation, if any, are justified.
+
 ### Focused history/readiness host runner
 
 `tools/test_session_sync_podman.py` is a separate host harness, not an installed
