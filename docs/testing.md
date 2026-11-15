@@ -544,6 +544,12 @@ hash, and shutdown/close/join once each with no alive provider worker. Fixed
 primary, cleanup and reporting failures remain separate and must all be absent.
 Source/native/runner/offline-test/helper identities are recorded separately.
 No public application tag or release assets may be produced from the harness.
+The companion is published without replacement only after private staging is
+written, flushed, fsynced and closed. Staging is deliberately retained as
+non-authoritative evidence; on success both links remain inside the fresh
+private root. The original single-link report and frozen reader are unchanged.
+Late staging failures cannot publish a final receipt. This is an atomic
+publication boundary, not an exhaustive crash-durability guarantee.
 
 Accepted scope is **63 scripted synthetic history/readiness/recovery checks**
 plus the separate **13-stage global-vault gate**, not complete release
