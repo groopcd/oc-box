@@ -2,7 +2,9 @@
 """Fresh-only HOST lifecycle adapter for the frozen 1.6.94 application.
 
 Invoke this independent file with python3 -I -B, --source and --expect-commit.
-Only the first validated source-workspace start gains --import-session. The
+Only the first validated source-workspace start gains --import-session. A fresh
+stopped-home comparison accounts for the frozen archive's metadata policy,
+without normalizing restored data or weakening exact source preservation. The
 unchanged candidate runs all ten lifecycle checks and retains its own report.
 The external receipt is atomically linked from closed private staging retained
 as non-authoritative evidence; its two links stay inside the fresh private root.
@@ -27,6 +29,7 @@ import importlib
 import importlib.machinery
 import json
 from pathlib import Path
+import re
 import shutil
 import stat
 import subprocess
@@ -75,6 +78,65 @@ SEQUENCE = (
 REPORT = "external-lifecycle-result.json"
 REPORT_STAGE_PREFIX = ".external-lifecycle-stage-"
 FORMAT = "oc-box-external-v2-lifecycle-v1"
+# Exactly the donor's six snapshot sites, before reset. No diagnostic/retry API.
+HOME_SITES = (
+    ("source-a", 2),
+    ("restored-full", 2),
+    ("source-a", 3),
+    ("restored-portable", 3),
+    ("source-a", 4),
+    ("source-a", 4),
+)
+# One aggregate-only read, with the donor's existing 30-second tool bound.
+# Its exact digest uses the identical entry schema/serialization as the donor.
+# Only the SOURCE's expected digest changes root mode and nonsymlink special
+# bits. Actual restored entries are always compared through their exact digest.
+HOME_PROGRAM = r"""
+import hashlib,json,os,pathlib,stat,sys
+root=sys.argv[1]
+source_policy=sys.argv[2]=='source'
+fd=os.open(root,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+def checksum(name,parent,info):
+    child=os.open(name,os.O_RDONLY|os.O_NOFOLLOW|os.O_NONBLOCK|os.O_CLOEXEC,dir_fd=parent)
+    with os.fdopen(child,'rb') as stream:
+        before=os.fstat(stream.fileno())
+        if (before.st_dev,before.st_ino,before.st_mode,before.st_size)!=(info.st_dev,info.st_ino,info.st_mode,info.st_size):
+            raise ValueError('changed-home')
+        value=hashlib.sha256()
+        for block in iter(lambda:stream.read(1024*1024),b''): value.update(block)
+        after=os.fstat(stream.fileno())
+        if (after.st_size,after.st_mtime_ns,after.st_ctime_ns)!=(before.st_size,before.st_mtime_ns,before.st_ctime_ns):
+            raise ValueError('changed-home')
+        return value.hexdigest()
+def digest(entries):
+    return hashlib.sha256(json.dumps(sorted(entries),ensure_ascii=True,separators=(',',':')).encode()).hexdigest()
+def fail(error): raise error
+try:
+    info=os.fstat(fd)
+    entries=[['.',stat.S_IFMT(info.st_mode),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid]]
+    expected=[entries[0][:]] if source_policy else None
+    if source_policy: expected[0][2]=0o700
+    special=0
+    for parent,dirs,files,parent_fd in os.fwalk('.',dir_fd=fd,follow_symlinks=False,onerror=fail):
+        for name in sorted(dirs+files):
+            info=os.stat(name,dir_fd=parent_fd,follow_symlinks=False)
+            entry=[str(pathlib.Path(parent,name)),stat.S_IFMT(info.st_mode),stat.S_IMODE(info.st_mode),info.st_uid,info.st_gid]
+            if stat.S_ISREG(info.st_mode): entry.append(checksum(name,parent_fd,info))
+            elif stat.S_ISLNK(info.st_mode): entry.append(os.readlink(name,dir_fd=parent_fd))
+            elif not stat.S_ISDIR(info.st_mode): raise ValueError('unsupported-home-entry')
+            entries.append(entry)
+            if not stat.S_ISLNK(info.st_mode):
+                special+=bool(entry[2]&0o7000)
+            if source_policy:
+                normalized=entry[:]
+                if not stat.S_ISLNK(info.st_mode): normalized[2]&=0o777
+                expected.append(normalized)
+    print(json.dumps(dict(exact=digest(entries),expected=digest(expected) if source_policy else None,
+                         root_mode=entries[0][2],root_owner_expected=entries[0][3:5]==[0,0],
+                         child_special_bits=special)))
+finally:
+    os.close(fd)
+"""
 # All historical host families share these prefixes/markers. Check ancestors
 # only: an ordinary common parent containing sibling fixtures remains usable.
 FIXTURE_PREFIXES = (
@@ -162,6 +224,11 @@ CATEGORIES = frozenset(
         "native-executable-changed",
         "incomplete-report",
         "launcher-exit",
+        "home-snapshot-contract",
+        "home-dual-read",
+        "home-root-mapping",
+        "restore-home-policy",
+        "source-home-preservation",
     }
 )
 
@@ -173,6 +240,63 @@ class Refusal(Exception):
 def require(condition, category):
     if not condition:
         raise Refusal(category)
+
+
+def home_probe(value, *, source=True):
+    """Validate private aggregate output; no private data in refusal messages."""
+    try:
+        require(type(value) is bytes and len(value) <= 1024, "home-snapshot-contract")
+
+        def unique(pairs):
+            result = {}
+            for key, item in pairs:
+                require(key not in result, "home-snapshot-contract")
+                result[key] = item
+            return result
+
+        result = json.loads(value, object_pairs_hook=unique)
+        require(
+            type(result) is dict
+            and result.keys()
+            == {
+                "exact",
+                "expected",
+                "root_mode",
+                "root_owner_expected",
+                "child_special_bits",
+            }
+            and all(
+                type(result[key]) is str
+                and re.fullmatch(r"[0-9a-f]{64}", result[key]) is not None
+                for key in (("exact", "expected") if source else ("exact",))
+            )
+            and (source or result["expected"] is None)
+            and type(result["root_mode"]) is int
+            and 0 <= result["root_mode"] <= 0o7777
+            and type(result["root_owner_expected"]) is bool
+            and type(result["child_special_bits"]) is int
+            and 0 <= result["child_special_bits"] <= 2_000_000,
+            "home-snapshot-contract",
+        )
+        return result
+    except (ValueError, TypeError, RecursionError):
+        raise Refusal("home-snapshot-contract") from None
+
+
+class HomeSnapshot(dict):
+    """Keep the original dictionary; delegate only role-bound comparisons."""
+
+    def __init__(self, adapter, original, probe, role, ordinal):
+        super().__init__(original)
+        self.adapter, self.original, self.probe = adapter, dict(original), probe
+        self.role, self.ordinal = role, ordinal
+
+    def __eq__(self, other):
+        # Never return NotImplemented: plain-dict fallback could waive the probe.
+        return self.adapter.compare_home(self, other)
+
+    def __ne__(self, other):
+        return not self == other
 
 
 def host_guard():
@@ -424,7 +548,7 @@ def diagnostic(error, stage, fixture=None):
 
 
 class Adapter:
-    """Forward every original operation; change only one validated argv suffix."""
+    """Forward donor operations, binding first import and stopped-home policy."""
 
     def __init__(self, fixture, parent):
         self.f = fixture
@@ -443,6 +567,10 @@ class Adapter:
         self.imports = 0
         self.provider = False
         self.cleanup = {"shutdown": 0, "close": 0, "join": 0, "worker_alive": None}
+        self.home_snapshots = []
+        self.home_comparisons = {}
+        self.source_preservations = []
+        self.home_preserved_sites = set()
 
     def fail(self, error, stage=None, *, secondary=None):
         if any(previous is error for previous in self.seen):
@@ -558,6 +686,170 @@ class Adapter:
             item["completed"] = True
             return result
 
+    def home_snapshot(self, actual, data):
+        with self.checkpoint("home-snapshot"):
+            index = len(self.home_snapshots)
+            require(
+                self.root is not None
+                and self.baseline is not None
+                and index < len(HOME_SITES),
+                "home-snapshot-contract",
+            )
+            role, launches = HOME_SITES[index]
+            require(
+                len(self.ledger) == launches
+                and all(item["completed"] for item in self.ledger),
+                "home-snapshot-contract",
+            )
+            # The frozen validator binds project markers, private registry,
+            # selected policy, resource names and restored_from source/kind.
+            records = self.f.workspace_records(self.root)
+            require(
+                role in records
+                and type(data) is dict
+                and data == records[role][1]
+                and data["project"] == str(self.root / role)
+                and not data.get("restore_incomplete"),
+                "home-snapshot-contract",
+            )
+            if role == "source-a":
+                require(not data.get("restored_from"), "home-snapshot-contract")
+            else:
+                require(
+                    data.get("restored_from", {}).get("workspace_id")
+                    == records["source-a"][1]["id"]
+                    and data["restored_from"]["kind"] == role.removeprefix("restored-"),
+                    "home-snapshot-contract",
+                )
+            # No original critical-file read or collector read until the actual
+            # owned container, mounts and private home volume are verified stopped.
+            self.f.safety.verify_owned_resources(self.root, data, stopped=True)
+            original = actual(data)
+            require(
+                type(original) is dict
+                and original.keys() == {*self.f.HOME_FILES, "complete-home-tree"}
+                and all(
+                    type(value) is str
+                    and re.fullmatch(r"[0-9a-f]{64}", value) is not None
+                    for value in original.values()
+                ),
+                "home-snapshot-contract",
+            )
+            volume = self.f.backups.owned_volume(self.f.box, data)
+            require(
+                type(volume) is dict
+                and volume.get("Name") == data["home_volume"]
+                and (volume.get("Labels") or {}).get(self.f.box.LABEL) == data["id"]
+                and self.f.safety.no_symlinks(volume["Mountpoint"])
+                == self.root
+                / "data/containers/storage/volumes"
+                / data["home_volume"]
+                / "_data",
+                "private-volume",
+            )
+            probe = home_probe(
+                self.f.crypto.small(
+                    [
+                        "podman",
+                        "unshare",
+                        sys.executable,
+                        "-I",
+                        "-B",
+                        "-c",
+                        HOME_PROGRAM,
+                        volume["Mountpoint"],
+                        "source" if index == 0 else "exact",
+                    ],
+                    timeout=30,
+                ),
+                source=index == 0,
+            )
+            require(probe["exact"] == original["complete-home-tree"], "home-dual-read")
+            # The controlled fixture creates a root-owned container home. Do not
+            # invent a generic arbitrary-root-owner mapping the archive lacks.
+            require(probe["root_owner_expected"], "home-root-mapping")
+            result = HomeSnapshot(self, original, probe, role, index)
+            self.home_snapshots.append(result)
+            return result
+
+    def compare_home(self, left, right):
+        with self.checkpoint("home-comparison"):
+            require(
+                type(left) is HomeSnapshot
+                and type(right) is HomeSnapshot
+                and left.adapter is self
+                and right.adapter is self
+                and all(
+                    0 <= item.ordinal < len(self.home_snapshots)
+                    and self.home_snapshots[item.ordinal] is item
+                    and dict(item) == item.original
+                    for item in (left, right)
+                ),
+                "home-snapshot-contract",
+            )
+            # Symmetric only for the same saved source baseline versus a later
+            # snapshot. No restored/restored or plain-dictionary fallback.
+            source, current = (left, right) if left.ordinal == 0 else (right, left)
+            require(
+                source.ordinal == 0
+                and source.role == "source-a"
+                and current.ordinal > 0,
+                "home-snapshot-contract",
+            )
+            if current.role == "source-a":
+                with self.checkpoint("source-home-preservation"):
+                    exact = current.original == source.original and all(
+                        current.probe[key] == source.probe[key]
+                        for key in (
+                            "exact",
+                            "root_mode",
+                            "root_owner_expected",
+                            "child_special_bits",
+                        )
+                    )
+                    if current.ordinal not in self.home_preserved_sites:
+                        self.source_preservations.append(exact)
+                        self.home_preserved_sites.add(current.ordinal)
+                    kind = {2: "full", 4: "portable"}.get(current.ordinal)
+                    if kind is not None:
+                        require(kind in self.home_comparisons, "home-snapshot-contract")
+                        self.home_comparisons[kind]["source_preservation_exact"] = exact
+                    require(exact, "source-home-preservation")
+                    return True
+            with self.checkpoint("restore-home-policy"):
+                kind = current.role.removeprefix("restored-")
+                require(
+                    (kind, current.ordinal) in (("full", 1), ("portable", 3)),
+                    "home-snapshot-contract",
+                )
+                critical = all(
+                    current.original[name] == source.original[name]
+                    for name in self.f.HOME_FILES
+                )
+                tree = current.probe["exact"] == source.probe["expected"]
+                private = current.probe["root_mode"] == 0o700
+                owner = current.probe["root_owner_expected"]
+                no_special = current.probe["child_special_bits"] == 0
+                expected = critical and tree and private and owner and no_special
+                self.home_comparisons[kind] = {
+                    "exact_equal": current.original == source.original,
+                    "policy_expected_matches": expected,
+                    "root_mode_changed": current.probe["root_mode"]
+                    != source.probe["root_mode"],
+                    "source_has_special_bits": source.probe["child_special_bits"] > 0
+                    or bool(source.probe["root_mode"] & 0o7000),
+                    "restored_root_private": private,
+                    "restored_root_owner_expected": owner,
+                    "restored_no_child_special_bits": no_special,
+                    "critical_files_exact": critical,
+                    "inventory_content_ordinary_metadata_matches": tree,
+                    "source_preservation_exact": self.home_comparisons.get(
+                        kind, {}
+                    ).get("source_preservation_exact"),
+                }
+                require(expected, "restore-home-policy")
+                return True
+
     def make_provider(self, actual, *args, **kwargs):
         server, worker = actual(*args, **kwargs)
         require(not self.provider, "provider-cleanup-contract")
@@ -664,6 +956,14 @@ class Adapter:
 
             stack.enter_context(patch.object(f.safety, "require", observed_require))
             stack.enter_context(patch.object(f, "require", observed_require))
+            actual_home = f.home_snapshot
+            stack.enter_context(
+                patch.object(
+                    f,
+                    "home_snapshot",
+                    side_effect=lambda data: self.home_snapshot(actual_home, data),
+                )
+            )
             actual_write = f.safety.write_json_new
 
             def write(path, value):
@@ -686,7 +986,6 @@ class Adapter:
                 (f.legacy, "verify_v2_progress", "transcript", False),
                 (f.legacy, "run_fixture_session", "native-tools", False),
                 (f, "container_python", "sentinels", False),
-                (f, "home_snapshot", "home-snapshot", False),
                 (f, "run", "fixture-run", False),
                 (f.backups, "make_backup", "backup", False),
                 (f.backups, "restore_backup", "restore", False),
@@ -730,6 +1029,17 @@ class Adapter:
             and len(self.ledger) == len(SEQUENCE)
             and all(item["completed"] for item in self.ledger),
             "import-once",
+        )
+        require(
+            len(self.home_snapshots) == len(HOME_SITES)
+            and self.home_comparisons.keys() == {"full", "portable"}
+            and all(
+                item["policy_expected_matches"] is True
+                and item["source_preservation_exact"] is True
+                for item in self.home_comparisons.values()
+            )
+            and self.source_preservations == [True, True, True],
+            "home-snapshot-contract",
         )
         require(
             self.provider
@@ -896,6 +1206,8 @@ def execute_fixture(fixture, parent, binary, distro, temporary, provenance, rech
         "first_import_verified": original_checks.get("native-v2-host-import") is True,
         "launches": adapter.ledger,
         "provider_cleanup": adapter.cleanup,
+        "home_comparisons": adapter.home_comparisons,
+        "source_home_preservations_exact": adapter.source_preservations,
         "primary_failure": adapter.primary,
         "cleanup_failures": adapter.cleanup_errors,
         "reporting_failures": adapter.reporting_errors,

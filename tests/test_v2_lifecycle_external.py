@@ -36,6 +36,16 @@ def baseline(project):
     }
 
 
+def home_evidence(adapter):
+    """Only for the pre-existing report-schema tests; no lifecycle claim."""
+    adapter.home_snapshots = [None] * len(external.HOME_SITES)
+    adapter.home_comparisons = {
+        kind: {"policy_expected_matches": True, "source_preservation_exact": True}
+        for kind in ("full", "portable")
+    }
+    adapter.source_preservations = [True, True, True]
+
+
 class ImportSelectionTests(unittest.TestCase):
     def exercise(
         self, parent, corrected, *, rejected_import=False, uncheckpointed=False
@@ -456,6 +466,7 @@ class AdapterTests(unittest.TestCase):
         adapter.ledger = [{"completed": True} for _ in external.SEQUENCE]
         adapter.provider = True
         adapter.cleanup = {"shutdown": 1, "close": 1, "join": 1, "worker_alive": False}
+        home_evidence(adapter)
         report = fixture.new_report("2.3.0")
         report.update(
             status="passed",
@@ -492,6 +503,17 @@ class AdapterTests(unittest.TestCase):
             report = self.valid_completion(adapter)
             setattr(adapter, field, value)
             with self.assertRaises(external.Refusal):
+                adapter.complete(report, 0)
+        for field, value in (
+            ("home_snapshots", []),
+            ("home_comparisons", {}),
+            ("source_preservations", [True, True]),
+            ("source_preservations", [True, True, False]),
+        ):
+            adapter = external.Adapter(fixture, Path("/example"))
+            report = self.valid_completion(adapter)
+            setattr(adapter, field, value)
+            with self.assertRaisesRegex(external.Refusal, "home-snapshot-contract"):
                 adapter.complete(report, 0)
 
     def test_installed_forwarding_records_primary_before_finally_stop_and_report(self):
@@ -702,7 +724,21 @@ class CompanionReportTests(unittest.TestCase):
             return {
                 name: (
                     root / "registry" / str(index),
-                    {"id": str(index) * 32, "project": str(root / name)},
+                    {
+                        "id": str(index) * 32,
+                        "project": str(root / name),
+                        "home_volume": "oc-box-home-" + str(index) * 32,
+                        **(
+                            {
+                                "restored_from": {
+                                    "workspace_id": "1" * 32,
+                                    "kind": name.removeprefix("restored-"),
+                                }
+                            }
+                            if index > 1
+                            else {}
+                        ),
+                    },
                 )
                 for index, name in enumerate(
                     ("source-a", "restored-full", "restored-portable"), 1
@@ -734,6 +770,31 @@ class CompanionReportTests(unittest.TestCase):
                     safety.launcher(
                         [command, "--workspace", records(root)[name][1]["id"]]
                     )
+                    # The repeated source start needs the actual loop position.
+                    launches = state.get("launches", 0) + 1
+                    state["launches"] = launches
+                    if launches == 2:
+                        saved = fixture.home_snapshot(records(root)["source-a"][1])
+                        self.assertTrue(
+                            fixture.home_snapshot(records(root)["restored-full"][1])
+                            == saved
+                        )
+                    elif launches in (3, 4):
+                        self.assertTrue(
+                            fixture.home_snapshot(records(root)["source-a"][1]) == saved
+                        )
+                        if launches == 3:
+                            self.assertTrue(
+                                fixture.home_snapshot(
+                                    records(root)["restored-portable"][1]
+                                )
+                                == saved
+                            )
+                        else:
+                            self.assertTrue(
+                                fixture.home_snapshot(records(root)["source-a"][1])
+                                == saved
+                            )
                 report.update(status="passed", native=provenance["native"])
                 report["checks"] = dict.fromkeys(external.CHECKS, True)
                 if check_change:
@@ -758,6 +819,43 @@ class CompanionReportTests(unittest.TestCase):
             patch.object(fixture, "prepare_root"),
             patch.object(fixture, "prepare_launch", side_effect=prepare),
             patch.object(fixture, "workspace_records", side_effect=records),
+            patch.object(
+                fixture,
+                "home_snapshot",
+                return_value={
+                    **dict.fromkeys(fixture.HOME_FILES, "a" * 64),
+                    "complete-home-tree": "b" * 64,
+                },
+            ),
+            patch.object(safety, "verify_owned_resources"),
+            patch.object(safety, "no_symlinks", side_effect=Path),
+            patch.object(
+                fixture.backups,
+                "owned_volume",
+                side_effect=lambda b, d: {
+                    "Name": d["home_volume"],
+                    "Labels": {box.LABEL: d["id"]},
+                    "Mountpoint": str(
+                        state["root"]
+                        / "data/containers/storage/volumes"
+                        / d["home_volume"]
+                        / "_data"
+                    ),
+                },
+            ),
+            patch.object(
+                fixture.crypto,
+                "small",
+                side_effect=lambda command, **kwargs: json.dumps(
+                    {
+                        "exact": "b" * 64,
+                        "expected": "b" * 64 if command[-1] == "source" else None,
+                        "root_mode": 0o700,
+                        "root_owner_expected": True,
+                        "child_special_bits": 0,
+                    }
+                ).encode(),
+            ),
             patch.object(safety, "launcher"),
             patch.object(
                 fixture.legacy, "make_provider", return_value=(server, worker)
@@ -813,6 +911,16 @@ class CompanionReportTests(unittest.TestCase):
             self.assertNotIn("ses_", json.dumps(report))
             self.assertEqual(len(report["launches"]), 5)
             self.assertTrue(report["first_import_verified"])
+            self.assertEqual(report["source_home_preservations_exact"], [True] * 3)
+            self.assertEqual(set(report["home_comparisons"]), {"full", "portable"})
+            self.assertTrue(
+                all(
+                    item["policy_expected_matches"]
+                    and item["source_preservation_exact"]
+                    for item in report["home_comparisons"].values()
+                )
+            )
+            self.assertNotIn("complete-home-tree", json.dumps(report))
             self.assertEqual(
                 report["provenance"]["native"]["sha256"], external.NATIVE_SHA256
             )
@@ -1016,6 +1124,552 @@ class CompanionReportTests(unittest.TestCase):
                     failure["reporting_failures"][-1]["substep"], "external-report"
                 )
                 self.assertNotIn("PRIVATE", json.dumps(failure))
+
+
+class HomePolicyTests(unittest.TestCase):
+    """Actual stdlib archive roundtrips on disposable files, not engine evidence."""
+
+    def populate(self, path, *, policy_changes=True):
+        path.mkdir()
+        for name in fixture.HOME_FILES:
+            target = path / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(b"SYNTHETIC_CRITICAL")
+        (path / "ordinary").write_bytes(b"SYNTHETIC_CONTENT")
+        (path / "ordinary").chmod(0o4755 if policy_changes else 0o755)
+        (path / "cache").mkdir(mode=0o750)
+        (path / "cache").chmod(0o1750 if policy_changes else 0o750)
+        (path / "cache/unicode-\N{SNOWMAN}").write_bytes(b"SYNTHETIC_NESTED")
+        (path / "link").symlink_to("ordinary")
+        (path / "directory-link").symlink_to("cache", target_is_directory=True)
+        (path / "dangling").symlink_to("SYNTHETIC_ABSENT")
+        os.link(path / "ordinary", path / "hardlink")
+        path.chmod(0o755 if policy_changes else 0o700)
+
+    def probe(self, path, *, source=True):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                external.HOME_PROGRAM,
+                str(path),
+                "source" if source else "exact",
+            ],
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+        return external.home_probe(result.stdout, source=source)
+
+    def original(self, path):
+        """Run the unchanged donor snapshot with only unshare transport removed."""
+
+        def invoke(command):
+            self.assertEqual(command[:2], ["podman", "unshare"])
+            return subprocess.run(
+                command[2:],
+                capture_output=True,
+                check=True,
+                timeout=30,
+            ).stdout
+
+        with (
+            patch.object(
+                fixture.backups, "owned_volume", return_value={"Mountpoint": str(path)}
+            ),
+            patch.object(
+                fixture.legacy,
+                "digest_home",
+                side_effect=lambda d, n: external.digest(path / n),
+            ),
+            patch.object(fixture.crypto, "small", side_effect=invoke),
+        ):
+            return fixture.home_snapshot({})
+
+    def snapshot(self, adapter, path, role):
+        original, probe = (
+            self.original(path),
+            self.probe(path, source=not adapter.home_snapshots),
+        )
+        self.assertEqual(original["complete-home-tree"], probe["exact"])
+        # Unit tests can run without root; the HOST collector is never granted
+        # this override. Here both synthetic roots share the caller's ownership,
+        # modeling unshare's separately guarded 0:0 mapping.
+        probe["root_owner_expected"] = True
+        value = external.HomeSnapshot(
+            adapter, original, probe, role, len(adapter.home_snapshots)
+        )
+        adapter.home_snapshots.append(value)
+        return value
+
+    def roundtrip(self, source, destination):
+        # The imported donor establishes checkout package discovery above.
+        from oc_box import backup_archive
+
+        archive = io.BytesIO()
+        with patch.object(sys, "stdout", types.SimpleNamespace(buffer=archive)):
+            backup_archive.create(source)
+        archive.seek(0)
+        destination.mkdir(mode=0o755)
+        backup_archive.extract(destination, 1024 * 1024, owners=True, stream=archive)
+
+    def test_exact_frozen_archive_roundtrip_policy_and_exact_source_preservation(self):
+        for changes in (False, True):
+            for reverse in (False, True):
+                with (
+                    self.subTest(changes=changes, reverse=reverse),
+                    tempfile.TemporaryDirectory() as name,
+                ):
+                    root = Path(name)
+                    source, restored = root / "source", root / "restored"
+                    self.populate(source, policy_changes=changes)
+                    adapter = external.Adapter(fixture, root)
+                    saved = self.snapshot(adapter, source, "source-a")
+                    self.roundtrip(source, restored)
+                    actual = self.snapshot(adapter, restored, "restored-full")
+                    self.assertTrue(saved == actual if reverse else actual == saved)
+                    self.assertTrue(actual == saved)
+                    self.assertTrue(saved == actual)
+                    self.assertFalse(actual != saved)
+                    self.assertIsNone(actual.probe["expected"])
+                    self.assertEqual(saved.original, dict(saved))
+                    self.assertEqual(self.original(source), saved.original)
+                    self.assertTrue(self.snapshot(adapter, source, "source-a") == saved)
+                    observation = adapter.home_comparisons["full"]
+                    self.assertEqual(observation["exact_equal"], not changes)
+                    self.assertEqual(observation["root_mode_changed"], changes)
+                    self.assertEqual(observation["source_has_special_bits"], changes)
+                    self.assertTrue(observation["policy_expected_matches"])
+                    self.assertTrue(observation["source_preservation_exact"])
+                    self.assertTrue(
+                        all(
+                            observation[key]
+                            for key in (
+                                "restored_root_private",
+                                "restored_root_owner_expected",
+                                "restored_no_child_special_bits",
+                                "critical_files_exact",
+                                "inventory_content_ordinary_metadata_matches",
+                            )
+                        )
+                    )
+                    self.assertTrue(
+                        all(type(value) is bool for value in observation.values())
+                    )
+                    public = json.dumps(observation)
+                    for private in (
+                        saved.probe["exact"],
+                        "SYNTHETIC",
+                        "unicode-\N{SNOWMAN}",
+                        str(root),
+                    ):
+                        self.assertNotIn(private, public)
+
+    def test_every_nonpolicy_restore_mutation_fails_without_normalizing_actual(self):
+        mutations = (
+            "content",
+            "critical",
+            "ordinary-mode",
+            "child-special",
+            "extra",
+            "missing",
+            "type",
+            "link",
+            "root-mode",
+            "root-owner",
+            "child-uid",
+            "child-gid",
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                source, restored = root / "source", root / "restored"
+                self.populate(source)
+                adapter = external.Adapter(fixture, root)
+                saved = self.snapshot(adapter, source, "source-a")
+                self.roundtrip(source, restored)
+                if mutation == "content":
+                    (restored / "ordinary").write_bytes(b"SYNTHETIC_CHANGED")
+                elif mutation == "critical":
+                    (restored / fixture.HOME_FILES[0]).write_bytes(b"SYNTHETIC_CHANGED")
+                elif mutation == "ordinary-mode":
+                    (restored / "ordinary").chmod(0o700)
+                elif mutation == "child-special":
+                    (restored / "ordinary").chmod(0o4755)
+                elif mutation == "extra":
+                    (restored / "extra").write_bytes(b"SYNTHETIC_EXTRA")
+                elif mutation == "missing":
+                    (restored / "ordinary").unlink()
+                elif mutation == "type":
+                    (restored / "ordinary").unlink()
+                    (restored / "ordinary").mkdir()
+                elif mutation == "link":
+                    (restored / "link").unlink()
+                    (restored / "link").symlink_to("hardlink")
+                elif mutation == "root-mode":
+                    restored.chmod(0o750)
+                elif mutation in ("child-uid", "child-gid") and os.geteuid() == 0:
+                    os.chown(
+                        restored / "ordinary",
+                        1 if mutation == "child-uid" else 0,
+                        1 if mutation == "child-gid" else 0,
+                    )
+                actual = self.snapshot(adapter, restored, "restored-full")
+                if mutation == "root-owner":
+                    actual.probe["root_owner_expected"] = False
+                elif mutation in ("child-uid", "child-gid") and os.geteuid() != 0:
+                    # The whole-tree digest changes under either owner change;
+                    # a nonprivileged local test cannot create that ownership.
+                    actual.probe["exact"] = "0" * 64
+                with self.assertRaisesRegex(external.Refusal, "^restore-home-policy$"):
+                    self.assertTrue(actual == saved)
+                self.assertFalse(
+                    adapter.home_comparisons["full"]["policy_expected_matches"]
+                )
+                self.assertEqual(adapter.primary["substep"], "restore-home-policy")
+
+    def test_source_root_bits_and_content_remain_exact_not_archive_normalized(self):
+        for mutation in ("root", "special", "content"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                source, restored = root / "source", root / "restored"
+                self.populate(source)
+                adapter = external.Adapter(fixture, root)
+                saved = self.snapshot(adapter, source, "source-a")
+                self.roundtrip(source, restored)
+                self.assertTrue(
+                    self.snapshot(adapter, restored, "restored-full") == saved
+                )
+                if mutation == "root":
+                    source.chmod(0o700)
+                elif mutation == "special":
+                    (source / "ordinary").chmod(0o755)
+                else:
+                    (source / "ordinary").write_bytes(b"SYNTHETIC_CHANGED")
+                with self.assertRaisesRegex(
+                    external.Refusal, "^source-home-preservation$"
+                ):
+                    self.assertTrue(self.snapshot(adapter, source, "source-a") == saved)
+                self.assertEqual(adapter.source_preservations, [False])
+                self.assertFalse(
+                    adapter.home_comparisons["full"]["source_preservation_exact"]
+                )
+
+    def test_unregistered_stale_mutated_and_plain_dictionary_comparisons_refuse(self):
+        for mutation in ("unregistered", "stale", "dictionary", "foreign", "mutated"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as name:
+                root = Path(name)
+                source, restored = root / "source", root / "restored"
+                self.populate(source, policy_changes=False)
+                adapter = external.Adapter(fixture, root)
+                saved = self.snapshot(adapter, source, "source-a")
+                self.roundtrip(source, restored)
+                actual = self.snapshot(adapter, restored, "restored-full")
+                if mutation == "unregistered":
+                    adapter.home_snapshots.pop()
+                elif mutation == "stale":
+                    actual.ordinal = 0
+                elif mutation == "dictionary":
+                    saved = dict(saved)
+                elif mutation == "foreign":
+                    actual.adapter = external.Adapter(fixture, root)
+                else:
+                    actual["complete-home-tree"] = "0" * 64
+                with self.assertRaisesRegex(
+                    external.Refusal, "^home-snapshot-contract$"
+                ):
+                    self.assertTrue(actual == saved)
+                with self.assertRaisesRegex(
+                    external.Refusal, "^home-snapshot-contract$"
+                ):
+                    self.assertTrue(saved == actual)
+
+    def test_collector_rejects_root_symlink_special_entry_and_malformed_aggregates(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source = root / "source"
+            self.populate(source)
+            alias = root / "alias"
+            alias.symlink_to(source)
+            for selected in (alias, source):
+                if selected == source:
+                    os.mkfifo(source / "fifo")
+                with self.assertRaises(subprocess.CalledProcessError):
+                    self.probe(selected)
+        good = {
+            "exact": "a" * 64,
+            "expected": "b" * 64,
+            "root_mode": 0o700,
+            "root_owner_expected": True,
+            "child_special_bits": 0,
+        }
+        bad = [
+            b"",
+            b"PRIVATE",
+            b"[]",
+            b"null",
+            b"x" * 1025,
+            b'{"exact":1,"exact":2}',
+            b'{"PRIVATE": [[[}',
+        ]
+        for field, value in (
+            ("exact", "PRIVATE"),
+            ("root_mode", True),
+            ("root_owner_expected", 1),
+            ("child_special_bits", -1),
+            ("extra", "PRIVATE"),
+        ):
+            changed = dict(good)
+            changed[field] = value
+            bad.append(json.dumps(changed).encode())
+        for value in bad:
+            with (
+                self.subTest(value_type=type(value)),
+                self.assertRaisesRegex(external.Refusal, "^home-snapshot-contract$"),
+            ):
+                external.home_probe(value)
+
+
+class HomeCollectionTests(unittest.TestCase):
+    def setup_collection(self):
+        root = Path("/example/fresh")
+        adapter, records = AdapterTests().setup_adapter(root)
+        adapter.ledger = [{"completed": True}, {"completed": True}]
+        for role, (_, data) in records.items():
+            data["home_volume"] = "oc-box-home-" + data["id"]
+            if role != "source-a":
+                data["restored_from"] = {
+                    "workspace_id": records["source-a"][1]["id"],
+                    "kind": role.removeprefix("restored-"),
+                }
+        original = {
+            **dict.fromkeys(fixture.HOME_FILES, "a" * 64),
+            "complete-home-tree": "b" * 64,
+        }
+        probe = {
+            "exact": "b" * 64,
+            "expected": "c" * 64,
+            "root_mode": 0o755,
+            "root_owner_expected": True,
+            "child_special_bits": 1,
+        }
+        return adapter, records, original, probe
+
+    @contextlib.contextmanager
+    def transport(
+        self, adapter, records, original, probe, *, stopped_error=None, mountpoint=None
+    ):
+        events = []
+        data = records["source-a"][1]
+        volume = {
+            "Name": data["home_volume"],
+            "Labels": {box.LABEL: data["id"]},
+            "Mountpoint": mountpoint
+            or str(
+                adapter.root
+                / "data/containers/storage/volumes"
+                / data["home_volume"]
+                / "_data"
+            ),
+        }
+
+        def result(name, value):
+            events.append(name)
+            return value
+
+        def stopped(root, received, *, stopped):
+            events.append("stopped")
+            self.assertEqual(root, adapter.root)
+            self.assertEqual(received, data)
+            self.assertIs(stopped, True)
+            if stopped_error:
+                raise stopped_error
+
+        with (
+            patch.object(
+                fixture,
+                "workspace_records",
+                side_effect=lambda r: result("records", records),
+            ),
+            patch.object(safety, "verify_owned_resources", side_effect=stopped),
+            patch.object(
+                fixture,
+                "home_snapshot",
+                side_effect=lambda d: result("original", dict(original)),
+            ) as donor,
+            patch.object(
+                fixture.backups,
+                "owned_volume",
+                side_effect=lambda b, d: result("volume", volume),
+            ) as owned,
+            patch.object(
+                safety, "no_symlinks", side_effect=lambda p: result("path", Path(p))
+            ),
+            patch.object(
+                fixture.crypto,
+                "small",
+                side_effect=lambda *a, **k: result("probe", json.dumps(probe).encode()),
+            ) as collect,
+            patch.object(box, "start_container") as start,
+            patch.object(fixture.legacy, "run_fixture_session") as native,
+            patch.object(fixture.legacy, "make_provider") as provider,
+            adapter.installed(),
+        ):
+            yield events, donor, owned, collect
+        start.assert_not_called()
+        native.assert_not_called()
+        provider.assert_not_called()
+
+    def test_only_fresh_original_snapshot_forwards_stopped_then_owned_volume_probe(
+        self,
+    ):
+        adapter, records, original, probe = self.setup_collection()
+        with self.transport(adapter, records, original, probe) as (
+            events,
+            donor,
+            owned,
+            collect,
+        ):
+            result = fixture.home_snapshot(records["source-a"][1])
+        self.assertEqual(
+            events, ["records", "stopped", "original", "volume", "path", "probe"]
+        )
+        donor.assert_called_once_with(records["source-a"][1])
+        owned.assert_called_once_with(box, records["source-a"][1])
+        self.assertEqual(collect.call_args.kwargs, {"timeout": 30})
+        command = collect.call_args.args[0]
+        self.assertEqual(
+            command[:7],
+            [
+                "podman",
+                "unshare",
+                sys.executable,
+                "-I",
+                "-B",
+                "-c",
+                external.HOME_PROGRAM,
+            ],
+        )
+        self.assertEqual(dict(result), original)
+        self.assertEqual(result.probe, probe)
+        self.assertEqual(result.role, "source-a")
+        self.assertEqual(adapter.home_comparisons, {})
+
+    def test_stopped_or_fresh_role_refusal_precedes_any_home_read_or_probe(self):
+        for mutation in (
+            "stopped",
+            "no-fresh-root",
+            "first-owner-only",
+            "alias-role",
+            "foreign",
+            "incomplete",
+            "source-origin",
+        ):
+            with self.subTest(mutation=mutation):
+                adapter, records, original, probe = self.setup_collection()
+                supplied = copy.deepcopy(records["source-a"][1])
+                if mutation == "no-fresh-root":
+                    adapter.root = None
+                elif mutation == "first-owner-only":
+                    adapter.ledger.pop()
+                elif mutation == "alias-role":
+                    supplied = records["restored-full"][1]
+                elif mutation == "foreign":
+                    supplied["project"] = "/foreign"
+                elif mutation in ("incomplete", "source-origin"):
+                    field = (
+                        "restore_incomplete"
+                        if mutation == "incomplete"
+                        else "restored_from"
+                    )
+                    supplied[field] = True
+                    records["source-a"][1][field] = True
+                with (
+                    self.transport(
+                        adapter,
+                        records,
+                        original,
+                        probe,
+                        stopped_error=external.Refusal("workspace-state")
+                        if mutation == "stopped"
+                        else None,
+                        mountpoint="/example/never-read",
+                    ) as (_, donor, owned, collect),
+                    self.assertRaises(external.Refusal),
+                ):
+                    fixture.home_snapshot(supplied)
+                donor.assert_not_called()
+                owned.assert_not_called()
+                collect.assert_not_called()
+
+    def test_dual_read_unknown_mapping_and_foreign_volume_fail_closed(self):
+        for mutation, category in (
+            ("dual-read", "home-dual-read"),
+            ("mapping", "home-root-mapping"),
+            ("private-volume", "private-volume"),
+            ("malformed", "home-snapshot-contract"),
+        ):
+            with self.subTest(mutation=mutation):
+                adapter, records, original, probe = self.setup_collection()
+                if mutation == "dual-read":
+                    probe["exact"] = "0" * 64
+                elif mutation == "mapping":
+                    probe["root_owner_expected"] = False
+                elif mutation == "malformed":
+                    probe["PRIVATE"] = "PRIVATE"
+                with (
+                    self.transport(
+                        adapter,
+                        records,
+                        original,
+                        probe,
+                        mountpoint="/foreign" if mutation == "private-volume" else None,
+                    ) as (_, donor, _, collect),
+                    self.assertRaisesRegex(external.Refusal, "^" + category + "$"),
+                ):
+                    fixture.home_snapshot(records["source-a"][1])
+                donor.assert_called_once()
+                self.assertEqual(collect.call_count, int(mutation != "private-volume"))
+                self.assertEqual(adapter.home_snapshots, [])
+                self.assertEqual(adapter.primary["category"], category)
+                self.assertNotIn("PRIVATE", json.dumps(adapter.primary))
+
+    def test_foreign_restore_origin_and_out_of_sequence_reads_refuse_before_transport(
+        self,
+    ):
+        for mutation in ("origin", "kind", "unexpected-launch", "extra-snapshot"):
+            with self.subTest(mutation=mutation):
+                adapter, records, original, probe = self.setup_collection()
+                with self.transport(adapter, records, original, probe) as (
+                    events,
+                    donor,
+                    owned,
+                    collect,
+                ):
+                    fixture.home_snapshot(records["source-a"][1])
+                    before = list(events)
+                    if mutation in ("origin", "kind"):
+                        field = "workspace_id" if mutation == "origin" else "kind"
+                        records["restored-full"][1]["restored_from"][field] = "foreign"
+                    elif mutation == "unexpected-launch":
+                        adapter.ledger.append({"completed": True})
+                    else:
+                        adapter.home_snapshots = [None] * len(external.HOME_SITES)
+                    with self.assertRaisesRegex(
+                        external.Refusal, "^home-snapshot-contract$"
+                    ):
+                        fixture.home_snapshot(records["restored-full"][1])
+                self.assertEqual(
+                    events,
+                    before + (["records"] if mutation in ("origin", "kind") else []),
+                )
+                self.assertEqual(donor.call_count, 1)
+                self.assertEqual(owned.call_count, 1)
+                self.assertEqual(collect.call_count, 1)
 
 
 class AtomicPublicationTests(unittest.TestCase):
