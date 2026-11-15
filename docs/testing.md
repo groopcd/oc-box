@@ -604,6 +604,26 @@ historical failed predicate, current stop, archive authentication or complete
 lifecycle acceptance. Diagnose the one unresolved comparison before deciding
 which correction and affected validation, if any, are justified.
 
+A later fresh lifecycle run reproduced `stopped-restore`, with the same two
+report hashes above; these fixed reports contain no per-run fixture IDs at that
+failure boundary. The original boot-stale store was not replayed. The bounded
+reader on the **new** root then reported a matching boot marker and all six
+metadata comparisons true: version, fresh workspace/container/home identities,
+internal project path and restored last-session selection. Source and recovered
+registry selection also agreed with the seed. This narrows the likely
+discrepancy to the home comparison but remains **current metadata consistency**,
+not proof of historical home contents, root permissions or exact failed member.
+
+Any external whole-home oracle correction must compare the exact restored tree
+against the source's **documented archive-policy result**, never normalize both
+sides or omit the home check. Preserve all regular bytes, entry inventory,
+types, symlink targets, ordinary modes and child ownership; require restored
+root privacy and reject unexpected ownership or privilege bits. Source
+preservation remains exact, including its original root mode and special bits.
+New observations must be confined to fresh, verified-owned stopped resources,
+with fixed nonsecret results and no reuse or repair of retained stores. This
+does not authorize repeating accepted history/recovery/global-vault gates.
+
 ### Focused history/readiness host runner
 
 `tools/test_session_sync_podman.py` is a separate host harness, not an installed

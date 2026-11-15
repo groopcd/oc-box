@@ -271,6 +271,18 @@ metadata with a strict retained boot fence, without engine/CLI/volume/archive
 access. It is not live readiness, current-stop proof, cleanup authorization or
 reconstruction of the lost local pre-backup home digest.
 
+The fresh release-gate retry also failed at stopped-restore. Its new-root
+file-only diagnostic passed the boot fence and all six metadata comparisons,
+including restored session selection. This narrows the discrepancy but does
+not prove historical home equality or the actual normalization differences.
+Any external home-oracle correction must preserve exact source-to-source
+checks and compare exact restored bytes/inventory/ordinary metadata against
+the documented archive-policy result. Never normalize actual restored data
+before comparing, accept arbitrary root ownership, drop whole-home coverage,
+or waive nonpolicy differences. Keep application and frozen donor bytes at9a;
+use only focused affected checks and independently review before fresh host
+lifecycle acceptance, without replaying stores or repeating accepted gates.
+
 ## Documentation maintenance
 
 Update `docs/cli.md` when command-line behavior changes, then regenerate with
