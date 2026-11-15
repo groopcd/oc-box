@@ -72,6 +72,29 @@ SEQUENCE = (
 )
 REPORT = "external-lifecycle-result.json"
 FORMAT = "oc-box-external-v2-lifecycle-v1"
+# All historical host families share these prefixes/markers. Check ancestors
+# only: an ordinary common parent containing sibling fixtures remains usable.
+FIXTURE_PREFIXES = (
+    "oc-box-v2-only-host-",
+    "oc-box-gv-host-",
+    "oc-box-live-v2-",
+    "oc-box-live-backup-",
+)
+FIXTURE_MARKERS = (
+    "fixture.json",
+    "fixture-ids.json",
+    "interactive.json",
+    "interactive-result.json",
+    "edges.json",
+    "edges-result.json",
+    "history-purpose.json",
+    "history-result.json",
+    "home-component.json",
+    "home-ready.json",
+    "home-created-source.json",
+    "home-created-destination.json",
+    REPORT,
+)
 # Only exact literal public categories may leave the exception boundary.
 CATEGORIES = frozenset(
     {
@@ -92,6 +115,7 @@ CATEGORIES = frozenset(
         "native-changed",
         "placement",
         "fresh-root",
+        "fresh-parent-required",
         "baseline-contract",
         "launch-contract",
         "import-once",
@@ -175,6 +199,21 @@ def digest(path):
         for block in iter(lambda: stream.read(1024 * 1024), b""):
             value.update(block)
     return value.hexdigest()
+
+
+def fresh_parent(path):
+    """Refuse retained evidence by lstat only; never read marker contents."""
+    parent = safe_path(Path(path).expanduser())
+    require(stat.S_ISDIR(parent.lstat().st_mode), "placement")
+    for ancestor in (parent, *parent.parents):
+        require(not ancestor.name.startswith(FIXTURE_PREFIXES), "fresh-parent-required")
+        for name in FIXTURE_MARKERS:
+            try:
+                (ancestor / name).lstat()
+            except FileNotFoundError:
+                continue
+            require(False, "fresh-parent-required")
+    return parent
 
 
 def git(source, *arguments):
@@ -308,11 +347,16 @@ def import_guard(source, identity, *, before=False):
                 )
 
 
-def load_candidate(source, identity):
+def load_candidate(source, identity, scratch):
     """Call only after all pre-import binding/placement checks; no checker bypass."""
+    scratch = fresh_parent(scratch)
+    require(not scratch.is_relative_to(source), "source-placement")
     import_guard(source, identity, before=True)
     # A new prefix prevents even timestamp-valid ignored bytecode being imported.
-    cache = tempfile.TemporaryDirectory(prefix="oc-box-external-lifecycle-bytecode-")
+    cache = tempfile.TemporaryDirectory(
+        prefix="oc-box-external-lifecycle-bytecode-",
+        dir=scratch,
+    )
     sys.dont_write_bytecode = True
     sys.pycache_prefix = cache.name
     namespace = types.ModuleType("tools")
@@ -321,10 +365,13 @@ def load_candidate(source, identity):
     namespace.__spec__ = importlib.machinery.ModuleSpec("tools", None, is_package=True)
     sys.modules["tools"] = namespace
     sys.path[:0] = [str(source / "src"), str(source)]
-    fixture = importlib.import_module("tools.test_v2_lifecycle_podman")
-    require(fixture.APP == source, "source-shadowing")
-    # The original CLI checker remains authoritative, with its real snapshot.
-    fixture._CLI_SOURCE = fixture._prepare_cli_imports(source)
+    # Ignore both cached tempfile.tempdir and ambient TMPDIR for the original
+    # checker's own allocation and any default scratch use while importing.
+    with patch.object(tempfile, "tempdir", str(scratch)):
+        fixture = importlib.import_module("tools.test_v2_lifecycle_podman")
+        require(fixture.APP == source, "source-shadowing")
+        # The original CLI checker remains authoritative, with its real snapshot.
+        fixture._CLI_SOURCE = fixture._prepare_cli_imports(source)
     require(fixture._CLI_SOURCE == identity, "source-changed")
     import_guard(source, identity)
     require(snapshot(source, COMMIT) == identity, "source-changed")
@@ -387,6 +434,7 @@ class Adapter:
         self.reporting_errors = []
         self.stage = "fixture"
         self.last_exit = None
+        self.in_cleanup = False
         self.seen = []
         self.ledger = []
         self.imports = 0
@@ -397,6 +445,8 @@ class Adapter:
         if any(previous is error for previous in self.seen):
             return
         self.seen.append(error)
+        if secondary is None and self.in_cleanup:
+            secondary = "cleanup"
         item = diagnostic(error, stage or self.stage, self.f)
         if item["exit_code"] is None and self.last_exit is not None:
             observed_stage, code = self.last_exit
@@ -411,8 +461,11 @@ class Adapter:
 
     @contextlib.contextmanager
     def checkpoint(self, stage, *, cleanup=False):
+        if cleanup:
+            self.capture_unwinding()
         previous, self.stage = self.stage, stage
         previous_exit, self.last_exit = self.last_exit, None
+        previous_cleanup, self.in_cleanup = self.in_cleanup, cleanup or self.in_cleanup
         try:
             yield
         except BaseException as error:
@@ -421,10 +474,20 @@ class Adapter:
         finally:
             self.stage = previous
             self.last_exit = previous_exit
+            self.in_cleanup = previous_cleanup
+
+    def capture_unwinding(self):
+        # __enter__ startup handlers and production finally blocks can invoke
+        # cleanup before their original exception reaches a forwarding wrapper.
+        # Do not promote an already seen cleanup/report exception to primary.
+        active = sys.exc_info()[1]
+        if active is not None and self.primary is None and not self.in_cleanup:
+            self.fail(active, self.stage)
 
     def prepare_root(self, actual, root, *args):
         with self.checkpoint("fresh-root"):
             require(self.root is None, "fresh-root")
+            fresh_parent(self.parent)
             root = safe_path(root)
             info = root.stat()
             require(
@@ -524,10 +587,11 @@ class Adapter:
     def provider_cleanup(self, name, actual, *args, **kwargs):
         self.cleanup[name] += 1
         try:
-            return actual(*args, **kwargs)
-        except BaseException as error:
+            with self.checkpoint("provider-" + name, cleanup=True):
+                return actual(*args, **kwargs)
+        except BaseException:
             # Do not let shutdown mask an earlier error or skip close/join.
-            self.fail(error, "provider-" + name, secondary="cleanup")
+            return None
 
     @contextlib.contextmanager
     def installed(self):
@@ -614,6 +678,8 @@ class Adapter:
                 (f.safety, "verify_owned_resources", "resources", False),
                 (f.safety, "selected_session", "selected-session", False),
                 (f.box, "export_container_session", "transcript", False),
+                (f.box, "import_host_session", "host-import", False),
+                (f.box, "verify_session_import", "import-verification", False),
                 (f.legacy, "verify_v2_progress", "transcript", False),
                 (f.legacy, "run_fixture_session", "native-tools", False),
                 (f, "container_python", "sentinels", False),
@@ -689,6 +755,11 @@ def preflight(args, runner):
     source = safe_path(args.source)
     identity = snapshot(source, args.expect_commit)
     require(not runner.is_relative_to(source), "source-placement")
+    parent = fresh_parent(args.work_dir)
+    temporary = fresh_parent(args.temp_dir) if args.temp_dir is not None else None
+    for directory in (parent, temporary):
+        if directory is not None:
+            require(not directory.is_relative_to(source), "source-placement")
     import_guard(source, identity, before=True)
     binary = safe_path(args.opencode_v2.expanduser().resolve(strict=True))
     require(
@@ -697,14 +768,6 @@ def preflight(args, runner):
         and digest(binary) == NATIVE_SHA256,
         "native-executable",
     )
-    parent = safe_path(args.work_dir.expanduser())
-    temporary = safe_path(args.temp_dir.expanduser()) if args.temp_dir else None
-    for directory in (parent, temporary):
-        if directory is not None:
-            require(
-                directory.is_dir() and not directory.is_relative_to(source),
-                "source-placement",
-            )
     return source, identity, binary, parent, temporary
 
 
@@ -753,6 +816,16 @@ def execute_fixture(fixture, parent, binary, distro, temporary, provenance, rech
             file=sys.stderr,
         )
         return 1
+    # Complete every integrity check before publishing a pass. There is no
+    # post-write original-report read that could leave a failed invocation with
+    # a parseable passed companion (trusted no-concurrent-writer prerequisite).
+    if report_hash is not None:
+        try:
+            require(
+                digest(adapter.root / "result.json") == report_hash, "original-report"
+            )
+        except BaseException as error:
+            adapter.fail(error, "original-report-integrity", secondary="report")
     passed = (
         adapter.primary is None
         and not adapter.cleanup_errors
@@ -787,10 +860,6 @@ def execute_fixture(fixture, parent, binary, distro, temporary, provenance, rech
     }
     try:
         fixture.safety.write_json_new(adapter.root / REPORT, result)
-        require(
-            report_hash is None or digest(adapter.root / "result.json") == report_hash,
-            "original-report",
-        )
     except BaseException as error:
         adapter.fail(error, "external-report", secondary="report")
         print(
@@ -853,7 +922,7 @@ def main(argv=None):
         probe = safe_path(runner.parents[1] / "tests/test_v2_lifecycle_external.py")
         probe_hash = digest(probe)
         source, identity, binary, parent, temporary = preflight(args, runner)
-        fixture, cache = load_candidate(source, identity)
+        fixture, cache = load_candidate(source, identity, temporary or parent)
         # The original checker has now installed its own private cache prefix.
         # Dispose our unused prefix before any fixture allocation/reporting.
         cache.cleanup()

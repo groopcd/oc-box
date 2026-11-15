@@ -37,7 +37,9 @@ def baseline(project):
 
 
 class ImportSelectionTests(unittest.TestCase):
-    def exercise(self, parent, corrected):
+    def exercise(
+        self, parent, corrected, *, rejected_import=False, uncheckpointed=False
+    ):
         """Real production export/import/selection; only external transports fake."""
         root = parent / "fixture"
         project = root / "source-a"
@@ -72,7 +74,9 @@ class ImportSelectionTests(unittest.TestCase):
             if action == "sessions":
                 value = [item["info"] for item in native.values()]
             elif action == "export":
-                value = native[settings["session"]]
+                value = copy.deepcopy(native[settings["session"]])
+                if rejected_import:
+                    value["messages"][0]["text"] = "SYNTHETIC_CHANGED_IMPORT"
             else:
                 raise AssertionError("Unexpected synthetic history transport")
             return subprocess.CompletedProcess([], 0, json.dumps(value), "")
@@ -121,7 +125,11 @@ class ImportSelectionTests(unittest.TestCase):
             patch.object(box, "detect_opencode_release", return_value="2.3.0"),
             patch.object(box, "start_container", return_value={}),
             patch.object(box, "prepare_runtime"),
-            patch.object(box, "stop_container"),
+            patch.object(
+                box,
+                "stop_container",
+                side_effect=OSError("PRIVATE_STOP") if rejected_import else None,
+            ),
             patch.object(box, "private_host_env", return_value={}),
             patch.object(
                 box, "host_command", side_effect=lambda d, *a: ["SYNTHETIC_HOST", *a]
@@ -152,7 +160,46 @@ class ImportSelectionTests(unittest.TestCase):
             for item in patches:
                 stack.enter_context(item)
             arguments = ["start", "--workspace", data["id"]]
-            if corrected:
+            if rejected_import:
+                real_import, real_verify = (
+                    box.import_host_session,
+                    box.verify_session_import,
+                )
+                with adapter.installed(), contextlib.ExitStack() as forwarding:
+                    if uncheckpointed:
+                        # Emulate an unforeseen/uncheckpointed import refusal,
+                        # while still running both unchanged production functions.
+                        forwarding.enter_context(
+                            patch.object(box, "import_host_session", real_import)
+                        )
+                        forwarding.enter_context(
+                            patch.object(box, "verify_session_import", real_verify)
+                        )
+                    with self.assertRaisesRegex(OSError, "^PRIVATE_STOP$"):
+                        adapter.launcher(delegate, arguments)
+                self.assertEqual(adapter.primary["error_class"], "box-error")
+                self.assertEqual(
+                    adapter.primary["substep"],
+                    "owning-launch" if uncheckpointed else "import-verification",
+                )
+                self.assertEqual(adapter.cleanup_errors[0]["substep"], "container-stop")
+                self.assertEqual(adapter.cleanup_errors[0]["error_class"], "os-error")
+                self.assertEqual(len(adapter.cleanup_errors), 1)
+                self.assertNotIn(
+                    "PRIVATE",
+                    json.dumps(
+                        [
+                            adapter.primary,
+                            *adapter.cleanup_errors,
+                        ]
+                    ),
+                )
+                self.assertEqual(transfers, [seed["info"]["id"]])
+                self.assertEqual(host_exports, [True])
+                self.assertEqual(created, [])
+                self.assertEqual(callbacks, [])
+                self.assertIsNone(box.session_state(path)["last"])
+            elif corrected:
                 self.assertEqual(adapter.launcher(delegate, arguments), 0)
                 self.assertEqual(transfers, [seed["info"]["id"]])
                 self.assertEqual(host_exports, [True])
@@ -180,6 +227,21 @@ class ImportSelectionTests(unittest.TestCase):
                 tempfile.TemporaryDirectory() as name,
             ):
                 self.exercise(Path(name), corrected)
+
+    def test_actual_import_verification_unwind_preserves_primary_when_stop_also_fails(
+        self,
+    ):
+        for uncheckpointed in (False, True):
+            with (
+                self.subTest(uncheckpointed=uncheckpointed),
+                tempfile.TemporaryDirectory() as name,
+            ):
+                self.exercise(
+                    Path(name),
+                    True,
+                    rejected_import=True,
+                    uncheckpointed=uncheckpointed,
+                )
 
 
 class AdapterTests(unittest.TestCase):
@@ -455,6 +517,60 @@ class AdapterTests(unittest.TestCase):
         self.assertEqual(adapter.cleanup_errors[0]["substep"], "container-stop")
         self.assertEqual(adapter.reporting_errors[0]["substep"], "original-report")
 
+    def test_actual_owner_enter_preserves_startup_error_before_failed_shutdown(self):
+        with tempfile.TemporaryDirectory() as name:
+            owner = object.__new__(service.Owner)
+            owner.box, owner.data = box, {}
+            owner.address = Path(name) / "synthetic-owner.sock"
+            startup, cleanup = OSError("PRIVATE_STARTUP"), OSError("PRIVATE_SHUTDOWN")
+            adapter = external.Adapter(fixture, Path(name))
+            command = types.SimpleNamespace(environment={})
+            with (
+                patch.object(box, "exec_command", return_value=command),
+                patch.object(
+                    box,
+                    "captured_output",
+                    side_effect=lambda **k: contextlib.nullcontext(io.BytesIO()),
+                ),
+                patch.object(subprocess, "Popen", side_effect=startup) as process,
+                patch.object(
+                    service.Owner, "shutdown", side_effect=cleanup
+                ) as shutdown,
+                adapter.installed(),
+                self.assertRaisesRegex(OSError, "^PRIVATE_SHUTDOWN$"),
+            ):
+                owner.__enter__()
+            process.assert_called_once()
+            shutdown.assert_called_once_with(owner)
+            self.assertIs(adapter.seen[0], startup)
+            self.assertIs(adapter.seen[1], cleanup)
+            self.assertEqual(adapter.primary["substep"], "owner-start")
+            self.assertEqual(adapter.cleanup_errors[0]["substep"], "owner-stop")
+            self.assertEqual(len(adapter.cleanup_errors), 1)
+            self.assertNotIn(
+                "PRIVATE", json.dumps([adapter.primary, *adapter.cleanup_errors])
+            )
+
+    def test_cleanup_repropagation_is_never_promoted_to_primary(self):
+        adapter = external.Adapter(fixture, Path("/example"))
+        cleanup = OSError("PRIVATE_CLEANUP")
+        try:
+            with adapter.checkpoint("container-stop", cleanup=True):
+                raise cleanup
+        except OSError:
+            with adapter.checkpoint("owner-stop", cleanup=True):
+                pass
+        self.assertIsNone(adapter.primary)
+        self.assertEqual(len(adapter.cleanup_errors), 1)
+        nested = external.Adapter(fixture, Path("/example"))
+        with self.assertRaises(OSError):
+            with nested.checkpoint("owner-stop", cleanup=True):
+                with nested.checkpoint("history-sync"):
+                    raise OSError("PRIVATE_NESTED_CLEANUP")
+        self.assertIsNone(nested.primary)
+        self.assertEqual(len(nested.cleanup_errors), 1)
+        self.assertEqual(nested.cleanup_errors[0]["substep"], "history-sync")
+
 
 class CompanionReportTests(unittest.TestCase):
     """Synthetic outer orchestration, not the host lifecycle or native provider."""
@@ -468,6 +584,7 @@ class CompanionReportTests(unittest.TestCase):
         alive=False,
         fail_report=None,
         check_change=False,
+        integrity_failure=None,
     ):
         state = {}
         source = {
@@ -495,6 +612,20 @@ class CompanionReportTests(unittest.TestCase):
                 else OSError("PRIVATE_SHUTDOWN")
             )
         real_write = safety.write_json_new
+        real_digest = external.digest
+
+        def checksum(path):
+            if path.name == "result.json":
+                state["original_digest_reads"] = (
+                    state.get("original_digest_reads", 0) + 1
+                )
+                if state["original_digest_reads"] == 2:
+                    if integrity_failure == "io":
+                        raise OSError("PRIVATE_INTEGRITY")
+                    if integrity_failure == "mismatch":
+                        return "0" * 64
+                self.assertLessEqual(state["original_digest_reads"], 2)
+            return real_digest(path)
 
         def write(path, value):
             if path.name == fail_report:
@@ -566,6 +697,7 @@ class CompanionReportTests(unittest.TestCase):
                 fixture.legacy, "make_provider", return_value=(server, worker)
             ),
             patch.object(safety, "write_json_new", side_effect=write),
+            patch.object(external, "digest", side_effect=checksum),
             contextlib.redirect_stdout(io.StringIO()) as output,
             contextlib.redirect_stderr(io.StringIO()) as errors,
         ):
@@ -675,6 +807,256 @@ class CompanionReportTests(unittest.TestCase):
             state = self.run_outer(Path(name), check_change=True)
             self.assertEqual(state["code"], 1)
             self.assertFalse(state["outer"]["checks"][external.CHECKS[0]])
+
+    def test_original_integrity_failures_are_resolved_before_companion_publication(
+        self,
+    ):
+        for integrity in ("io", "mismatch"):
+            for report_failure in (None, external.REPORT):
+                with (
+                    self.subTest(integrity=integrity, report_failure=report_failure),
+                    tempfile.TemporaryDirectory() as name,
+                ):
+                    state = self.run_outer(
+                        Path(name),
+                        integrity_failure=integrity,
+                        fail_report=report_failure,
+                    )
+                    self.assertEqual(state["code"], 1)
+                    self.assertEqual(state["original_digest_reads"], 2)
+                    if state["outer"] is not None:
+                        self.assertEqual(state["outer"]["status"], "failed")
+                        failures = state["outer"]["reporting_failures"]
+                        self.assertIsNone(state["outer"]["primary_failure"])
+                    else:
+                        failures = json.loads(state["stderr"].splitlines()[-1])[
+                            "reporting_failures"
+                        ]
+                    self.assertEqual(
+                        failures[0]["substep"], "original-report-integrity"
+                    )
+                    self.assertNotIn("PRIVATE", json.dumps(failures))
+                    # run_outer also requires original bytes unchanged; no
+                    # parseable passed companion may survive any of these cases.
+                    self.assertFalse(
+                        state["outer"] and state["outer"]["status"] == "passed"
+                    )
+
+
+class FreshPlacementTests(unittest.TestCase):
+    def test_retained_prefix_and_marker_ancestors_refuse_without_content_reads(self):
+        cases = [
+            (prefix + "synthetic", None, False) for prefix in external.FIXTURE_PREFIXES
+        ] + [
+            ("renamed-" + str(index), marker, symlink)
+            for index, marker in enumerate(external.FIXTURE_MARKERS)
+            for symlink in (False, True)
+        ]
+        with tempfile.TemporaryDirectory() as name:
+            common = Path(name)
+            ordinary = common / "fixtures"
+            ordinary.mkdir()
+            for folder, marker, symlink in cases:
+                retained = ordinary / (folder + ("-link" if symlink else "-file"))
+                retained.mkdir()
+                child = retained / "child"
+                deep = child / "deeper" / "scratch"
+                deep.mkdir(parents=True)
+                if marker:
+                    if symlink:
+                        (retained / marker).symlink_to("missing-synthetic-target")
+                    else:
+                        (retained / marker).write_text("PRIVATE_MARKER_CONTENT")
+                for parent in (retained, child, deep):
+                    with (
+                        self.subTest(
+                            folder=folder,
+                            marker=marker,
+                            symlink=symlink,
+                            depth=parent.name,
+                        ),
+                        patch.object(
+                            Path, "open", side_effect=AssertionError("marker read")
+                        ),
+                        self.assertRaisesRegex(
+                            external.Refusal, "^fresh-parent-required$"
+                        ),
+                    ):
+                        external.fresh_parent(parent)
+            # Markers/prefixes in children do not poison a common fixture parent.
+            self.assertEqual(external.fresh_parent(ordinary), ordinary)
+            self.assertEqual(external.fresh_parent(common), common)
+
+    def test_work_and_temp_retained_ancestors_refuse_before_import_hash_or_allocation(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source, work = root / "source", root / "fixtures"
+            source.mkdir()
+            work.mkdir()
+            retained = work / "oc-box-v2-only-host-synthetic"
+            retained.mkdir()
+            deep = retained / "child/deeper"
+            deep.mkdir(parents=True)
+            for option in ("work_dir", "temp_dir"):
+                for selected in (retained, retained / "child", deep):
+                    args = argparse.Namespace(
+                        source=source,
+                        expect_commit=external.COMMIT,
+                        opencode_v2=Path("/synthetic/missing-native"),
+                        work_dir=work,
+                        temp_dir=None,
+                    )
+                    setattr(args, option, selected)
+                    with (
+                        self.subTest(option=option, depth=selected.name),
+                        patch.object(external, "host_guard"),
+                        patch.object(external, "snapshot", return_value={"sha256": {}}),
+                        patch.object(external, "load_candidate") as imports,
+                        patch.object(external, "digest") as native_hash,
+                        patch.object(
+                            external.tempfile, "TemporaryDirectory"
+                        ) as allocate,
+                        patch.object(box, "run") as native,
+                        self.assertRaisesRegex(
+                            external.Refusal, "^fresh-parent-required$"
+                        ),
+                    ):
+                        external.preflight(args, root / "runner.py")
+                    imports.assert_not_called()
+                    native_hash.assert_not_called()
+                    allocate.assert_not_called()
+                    native.assert_not_called()
+
+    def test_both_cache_allocations_ignore_poisoned_cached_tempdir_and_tmpdir(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source, scratch, retained = (
+                root / "source",
+                root / "scratch",
+                root / "oc-box-gv-host-retained",
+            )
+            for path in (source, scratch, retained):
+                path.mkdir()
+            (source / "unchanged").write_text("SOURCE")
+            (retained / "fixture.json").write_text("PRIVATE_RETAINED")
+            identity = {"sha256": {}}
+            actual_allocate = tempfile.TemporaryDirectory
+            for ambient in (retained, source):
+                allocations = []
+                cli = types.SimpleNamespace(
+                    APP=source, CHECKS=external.CHECKS, EXCLUDED=external.EXCLUDED
+                )
+
+                def allocate(*a, **k):
+                    directory = actual_allocate(*a, **k)
+                    allocations.append(Path(directory.name))
+                    return directory
+
+                def prepare_cli(selected):
+                    self.assertEqual(selected, source)
+                    cli.cache = tempfile.TemporaryDirectory(
+                        prefix="synthetic-candidate-cache-"
+                    )
+                    return identity
+
+                cli._prepare_cli_imports = prepare_cli
+                before_source = sorted(source.iterdir())
+                before_retained = sorted(retained.iterdir())
+                with (
+                    self.subTest(ambient=ambient.name),
+                    patch.dict(os.environ, {"TMPDIR": str(ambient)}),
+                    patch.object(tempfile, "tempdir", str(ambient)),
+                    patch.object(tempfile, "TemporaryDirectory", side_effect=allocate),
+                    patch.dict(sys.modules),
+                    patch.object(sys, "path", list(sys.path)),
+                    patch.object(sys, "pycache_prefix", sys.pycache_prefix),
+                    patch.object(sys, "dont_write_bytecode", sys.dont_write_bytecode),
+                    patch.object(external, "import_guard"),
+                    patch.object(external, "snapshot", return_value=identity),
+                    patch.object(external.importlib, "import_module", return_value=cli),
+                ):
+                    selected, cache = external.load_candidate(source, identity, scratch)
+                    self.assertIs(selected, cli)
+                    self.assertEqual(len(allocations), 2)
+                    self.assertTrue(all(path.parent == scratch for path in allocations))
+                    self.assertEqual(tempfile.tempdir, str(ambient))
+                    self.assertEqual(os.environ["TMPDIR"], str(ambient))
+                    cache.cleanup()
+                    cli.cache.cleanup()
+                self.assertEqual(sorted(source.iterdir()), before_source)
+                self.assertEqual(sorted(retained.iterdir()), before_retained)
+                self.assertEqual(list(scratch.iterdir()), [])
+
+    def test_retained_or_source_cache_parent_refuses_before_loading_or_allocating(self):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source, retained = root / "source", root / "oc-box-live-backup-retained"
+            source.mkdir()
+            retained.mkdir()
+            for selected in (retained, source):
+                with (
+                    self.subTest(selected=selected.name),
+                    patch.object(external.importlib, "import_module") as imports,
+                    patch.object(tempfile, "TemporaryDirectory") as allocate,
+                    self.assertRaises(external.Refusal),
+                ):
+                    external.load_candidate(source, {"sha256": {}}, selected)
+                imports.assert_not_called()
+                allocate.assert_not_called()
+
+    def test_main_chooses_explicit_safe_scratch_or_work_parent_not_ambient_defaults(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as name:
+            root = Path(name)
+            source, work, temporary = root / "source", root / "work", root / "scratch"
+            poison = root / "oc-box-live-v2-retained"
+            for path in (source, work, temporary, poison):
+                path.mkdir()
+            binary = root / "synthetic-native"
+            identity = {"sha256": {}}
+            cli = types.SimpleNamespace(source_identity=lambda: identity)
+            for selected in (None, temporary):
+                arguments = [
+                    "--source",
+                    str(source),
+                    "--expect-commit",
+                    external.COMMIT,
+                    "--opencode-v2",
+                    str(binary),
+                    "--work-dir",
+                    str(work),
+                ]
+                if selected is not None:
+                    arguments += ["--temp-dir", str(selected)]
+                with (
+                    self.subTest(explicit_temp=selected is not None),
+                    patch.dict(os.environ, {"TMPDIR": str(poison)}),
+                    patch.object(tempfile, "tempdir", str(poison)),
+                    patch.object(external, "host_guard"),
+                    patch.object(
+                        external,
+                        "preflight",
+                        return_value=(source, identity, binary, work, selected),
+                    ),
+                    patch.object(
+                        external, "load_candidate", return_value=(cli, Mock())
+                    ) as load,
+                    patch.object(
+                        external,
+                        "digest",
+                        side_effect=lambda p: (
+                            external.NATIVE_SHA256 if p == binary else "a" * 64
+                        ),
+                    ),
+                    patch.object(external, "snapshot", return_value=identity),
+                    patch.object(external, "import_guard"),
+                    patch.object(external, "execute_fixture", return_value=0),
+                ):
+                    self.assertEqual(external.main(arguments), 0)
+                    load.assert_called_once_with(source, identity, selected or work)
 
 
 class SourceBindingTests(unittest.TestCase):
@@ -828,7 +1210,7 @@ identity=driver.snapshot(source,driver.COMMIT)
 refuse=(os.geteuid()==0 or os.environ.get('OC_BOX_CONTAINER')=='1'
         or pathlib.Path('/.dockerenv').exists() or pathlib.Path('/run/.containerenv').exists())
 try:
-    fixture,cache=driver.load_candidate(source,identity)
+    fixture,cache=driver.load_candidate(source,identity,source.parent)
 except BaseException as error:
     # Running as root/in a container must still hit the unchanged candidate
     # host guard after our verified, isolated source import. No native calls.
@@ -952,10 +1334,11 @@ else:
             ):
                 with self.assertRaisesRegex(external.Refusal, "source-shadowing"):
                     external.import_guard(source, identity, before=True)
-        with patch.object(external.tempfile, "TemporaryDirectory") as allocate:
-            with self.assertRaisesRegex(external.Refusal, "source-shadowing"):
-                external.load_candidate(source, identity)
-            allocate.assert_not_called()
+        with tempfile.TemporaryDirectory() as name:
+            with patch.object(external.tempfile, "TemporaryDirectory") as allocate:
+                with self.assertRaisesRegex(external.Refusal, "source-shadowing"):
+                    external.load_candidate(source, identity, Path(name))
+                allocate.assert_not_called()
         for filename, allowed in (
             (source / "tools/checked.py", True),
             (source / "tools/unchecked.py", False),
