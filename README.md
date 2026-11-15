@@ -253,6 +253,11 @@ optional. Dependencies stay isolated; GitHub updates retain supported opt-ins in
 private releases. These instructions do not
 claim that the currently published stable PyPI package contains the dashboard.
 
+**Switching to `--devel` does not enable the TUI extra for the first time.**
+If `oc-box tui` reports “Optional TUI dependencies are missing” after a GitHub
+upgrade, follow [the first-time GitHub TUI setup](docs/update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
+Do not install a second pipx/uv copy merely to repair the GitHub installation.
+
 An ordinary installed launcher is appropriate for unrelated projects. To manage
 the **oc-box checkout itself**, run a non-editable isolated package from that
 checkout instead of `--with-editable` launcher code in the mounted project:
@@ -402,6 +407,19 @@ oc-box upgrade --stable      # Return to stable; warns if this downgrades code
 oc-box upgrade --auto-update on
 oc-box upgrade --auto-update off
 ```
+
+`oc-box upgrade --devel` selects the development release, not every optional
+feature. If the GitHub installation has never enabled the dashboard, rerun the
+bootstrap on the host as your regular user:
+
+```sh
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-tui --with-vault
+oc-box tui
+```
+
+Keep `--with-vault` if you use the encrypted vault; otherwise omit it. This adds
+dependencies privately to the installed release, without resetting workspaces
+or deleting history. Later upgrades to TUI-supporting releases retain that opt-in.
 
 Automatic updates are **opt-in**. When enabled, normal installed `oc-box` starts
 check the saved GitHub release channel before opening a workspace, install a

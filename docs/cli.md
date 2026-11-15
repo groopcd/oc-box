@@ -430,6 +430,20 @@ in the installed build. It requires the optional `tui` Python extra or GitHub
 installer `--with-tui`, a regular unprivileged Linux host user, and real TTY
 input/output. Normal CLI commands retain their stdlib-only baseline.
 
+For a GitHub installation, `oc-box upgrade --devel` selects the release channel
+but does not enable TUI dependencies for the first time. If `oc-box tui` reports
+“Optional TUI dependencies are missing”, rerun the host bootstrap explicitly:
+
+```sh
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-tui --with-vault
+```
+
+Keep `--with-vault` if you use the encrypted vault; otherwise omit it. This
+installs optional dependencies privately in the immutable release, not system
+Python, without resetting workspaces or deleting history. Later updates to
+TUI-supporting targets retain the opt-in. Stay with the GitHub method rather
+than creating a second pipx/uv installation to supply its missing dependencies.
+
 ```sh
 oc-box tui
 oc-box tui --project ~/devel/demo
@@ -896,6 +910,11 @@ to a verified owning pipx, uv tool or dedicated virtual-environment manager.
 An ambiguous owner or editable checkout receives manual guidance rather than
 a guessed installation target. Supported requested extras are retained; stable
 1.6 does not support the optional `tui` extra.
+
+Channel selection is not first-time optional-feature installation. A GitHub
+upgrade with `--devel` does not add TUI dependencies to an installation that
+never opted in. Use the bootstrap with `--devel --with-tui`, retaining
+`--with-vault` when used, as shown under `tui`. No workspace reset is required.
 
 Normal updates do not silently downgrade. An explicit channel switch may select
 an older release and warns first. **Replacing launcher files does not roll back
@@ -2835,11 +2854,12 @@ sh install-oc-box.sh
 ```
 
 For a reviewed installer containing the experimental dashboard, enable its
-optional dependencies with `sh install.sh --with-tui`, or
-`sh install.sh --with-vault --with-tui` to include vault support. Use the actual
-downloaded filename (`install-oc-box.sh` above). A piped bootstrap accepts
-`sh -s -- --with-tui` or `sh -s -- --with-vault --with-tui`. Dependencies are
-installed privately in the immutable release; no system/user-site pip is used.
+optional dependencies with `sh install.sh --devel --with-tui`, or
+`sh install.sh --devel --with-vault --with-tui` to include vault support. Use
+the actual downloaded filename (`install-oc-box.sh` above). A piped bootstrap
+accepts `sh -s -- --devel --with-tui` or
+`sh -s -- --devel --with-vault --with-tui`. Dependencies are installed privately
+in the immutable release; no system/user-site pip is used.
 GitHub updates retain these opt-ins while existing launchers remain pinned to
 their earlier release. Python-package installations instead use their extras
 and owning package manager.

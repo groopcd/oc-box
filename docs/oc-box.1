@@ -181,6 +181,16 @@ Snapshots retain the existing complete\-inventory, checked\-export, pending\-ses
 .PP
 Open the optional Textual workspace dashboard, separate from the native OpenCode conversation TUI launched by \fBstart\fR\&. This is a development\-branch feature, not an accepted stable dashboard release; check \fBoc\-box tui \-\-help\fR for availability in the installed build. It requires the optional \fBtui\fR Python extra or GitHub installer \fB\-\-with\-tui\fR, a regular unprivileged Linux host user, and real TTY input/output. Normal CLI commands retain their stdlib\-only baseline.
 .PP
+For a GitHub installation, \fBoc\-box upgrade \-\-devel\fR selects the release channel but does not enable TUI dependencies for the first time. If \fBoc\-box tui\fR reports “Optional TUI dependencies are missing”, rerun the host bootstrap explicitly:
+.PP
+.nf
+.fam C
+curl \-fsSL \-\-proto '=https' \-\-tlsv1.2 https://raw.githubusercontent.com/groopcd/oc\-box/master/install.sh | sh \-s \-\- \-\-devel \-\-with\-tui \-\-with\-vault
+.fam T
+.fi
+.PP
+Keep \fB\-\-with\-vault\fR if you use the encrypted vault; otherwise omit it. This installs optional dependencies privately in the immutable release, not system Python, without resetting workspaces or deleting history. Later updates to TUI\-supporting targets retain the opt\-in. Stay with the GitHub method rather than creating a second pipx/uv installation to supply its missing dependencies.
+.PP
 .nf
 .fam C
 oc\-box tui
@@ -366,6 +376,8 @@ oc\-box upgrade \-\-auto\-update off
 .fi
 .PP
 GitHub upgrades verify tag/commit identity and selected branch membership before running the staged immutable installer. Python\-package upgrades delegate only to a verified owning pipx, uv tool or dedicated virtual\-environment manager. An ambiguous owner or editable checkout receives manual guidance rather than a guessed installation target. Supported requested extras are retained; stable 1.6 does not support the optional \fBtui\fR extra.
+.PP
+Channel selection is not first\-time optional\-feature installation. A GitHub upgrade with \fB\-\-devel\fR does not add TUI dependencies to an installation that never opted in. Use the bootstrap with \fB\-\-devel \-\-with\-tui\fR, retaining \fB\-\-with\-vault\fR when used, as shown under \fBtui\fR\&. No workspace reset is required.
 .PP
 Normal updates do not silently downgrade. An explicit channel switch may select an older release and warns first. **Replacing launcher files does not roll back workspace/session state.** Stop active clients, keep encrypted backups and check compatibility before returning from development to stable.
 .PP
@@ -1363,7 +1375,7 @@ sh install\-oc\-box.sh
 .fam T
 .fi
 .PP
-For a reviewed installer containing the experimental dashboard, enable its optional dependencies with \fBsh install.sh \-\-with\-tui\fR, or \fBsh install.sh \-\-with\-vault \-\-with\-tui\fR to include vault support. Use the actual downloaded filename (\fBinstall\-oc\-box.sh\fR above). A piped bootstrap accepts \fBsh \-s \-\- \-\-with\-tui\fR or \fBsh \-s \-\- \-\-with\-vault \-\-with\-tui\fR\&. Dependencies are installed privately in the immutable release; no system/user\-site pip is used. GitHub updates retain these opt\-ins while existing launchers remain pinned to their earlier release. Python\-package installations instead use their extras and owning package manager.
+For a reviewed installer containing the experimental dashboard, enable its optional dependencies with \fBsh install.sh \-\-devel \-\-with\-tui\fR, or \fBsh install.sh \-\-devel \-\-with\-vault \-\-with\-tui\fR to include vault support. Use the actual downloaded filename (\fBinstall\-oc\-box.sh\fR above). A piped bootstrap accepts \fBsh \-s \-\- \-\-devel \-\-with\-tui\fR or \fBsh \-s \-\- \-\-devel \-\-with\-vault \-\-with\-tui\fR\&. Dependencies are installed privately in the immutable release; no system/user\-site pip is used. GitHub updates retain these opt\-ins while existing launchers remain pinned to their earlier release. Python\-package installations instead use their extras and owning package manager.
 .PP
 The bootstrap clones full history anonymously into a private temporary directory and removes that temporary checkout when finished. It does not configure Git authentication, download credentials, or keep a source checkout in your project. When moving from an older flat installation, exit its active oc\-box launchers first; future versioned installations can coexist with already running versions.
 .PP

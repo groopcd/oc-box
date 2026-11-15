@@ -215,6 +215,14 @@ Snapshots retain the existing complete-inventory, checked-export, pending-sessio
 
 Open the optional Textual workspace dashboard, separate from the native OpenCode conversation TUI launched by @code{start}. This is a development-branch feature, not an accepted stable dashboard release; check @code{oc-box tui --help} for availability in the installed build. It requires the optional @code{tui} Python extra or GitHub installer @code{--with-tui}, a regular unprivileged Linux host user, and real TTY input/output. Normal CLI commands retain their stdlib-only baseline.
 
+For a GitHub installation, @code{oc-box upgrade --devel} selects the release channel but does not enable TUI dependencies for the first time. If @code{oc-box tui} reports “Optional TUI dependencies are missing”, rerun the host bootstrap explicitly:
+
+@example
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-tui --with-vault
+@end example
+
+Keep @code{--with-vault} if you use the encrypted vault; otherwise omit it. This installs optional dependencies privately in the immutable release, not system Python, without resetting workspaces or deleting history. Later updates to TUI-supporting targets retain the opt-in. Stay with the GitHub method rather than creating a second pipx/uv installation to supply its missing dependencies.
+
 @example
 oc-box tui
 oc-box tui --project ~/devel/demo
@@ -386,6 +394,8 @@ oc-box upgrade --auto-update off
 @end example
 
 GitHub upgrades verify tag/commit identity and selected branch membership before running the staged immutable installer. Python-package upgrades delegate only to a verified owning pipx, uv tool or dedicated virtual-environment manager. An ambiguous owner or editable checkout receives manual guidance rather than a guessed installation target. Supported requested extras are retained; stable 1.6 does not support the optional @code{tui} extra.
+
+Channel selection is not first-time optional-feature installation. A GitHub upgrade with @code{--devel} does not add TUI dependencies to an installation that never opted in. Use the bootstrap with @code{--devel --with-tui}, retaining @code{--with-vault} when used, as shown under @code{tui}. No workspace reset is required.
 
 Normal updates do not silently downgrade. An explicit channel switch may select an older release and warns first. **Replacing launcher files does not roll back workspace/session state.** Stop active clients, keep encrypted backups and check compatibility before returning from development to stable.
 
@@ -1351,7 +1361,7 @@ curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/
 sh install-oc-box.sh
 @end example
 
-For a reviewed installer containing the experimental dashboard, enable its optional dependencies with @code{sh install.sh --with-tui}, or @code{sh install.sh --with-vault --with-tui} to include vault support. Use the actual downloaded filename (@code{install-oc-box.sh} above). A piped bootstrap accepts @code{sh -s -- --with-tui} or @code{sh -s -- --with-vault --with-tui}. Dependencies are installed privately in the immutable release; no system/user-site pip is used. GitHub updates retain these opt-ins while existing launchers remain pinned to their earlier release. Python-package installations instead use their extras and owning package manager.
+For a reviewed installer containing the experimental dashboard, enable its optional dependencies with @code{sh install.sh --devel --with-tui}, or @code{sh install.sh --devel --with-vault --with-tui} to include vault support. Use the actual downloaded filename (@code{install-oc-box.sh} above). A piped bootstrap accepts @code{sh -s -- --devel --with-tui} or @code{sh -s -- --devel --with-vault --with-tui}. Dependencies are installed privately in the immutable release; no system/user-site pip is used. GitHub updates retain these opt-ins while existing launchers remain pinned to their earlier release. Python-package installations instead use their extras and owning package manager.
 
 The bootstrap clones full history anonymously into a private temporary directory and removes that temporary checkout when finished. It does not configure Git authentication, download credentials, or keep a source checkout in your project. When moving from an older flat installation, exit its active oc-box launchers first; future versioned installations can coexist with already running versions.
 

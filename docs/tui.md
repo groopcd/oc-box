@@ -79,6 +79,25 @@ user-site pip installation is needed. Normal non-TUI CLI operation retains its
 stdlib-only baseline; the UI dependencies are optional, not prerequisites for
 `start`, `status`, or recovery commands.
 
+### Missing TUI dependencies after a GitHub upgrade
+
+Selecting `oc-box upgrade --devel` installs the development launcher but does
+not enable the optional TUI extra for the first time. If `oc-box tui` reports
+“Optional TUI dependencies are missing”, rerun the GitHub bootstrap with the
+explicit feature flag, on the host as your regular user:
+
+```sh
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-tui --with-vault
+oc-box tui
+```
+
+Keep `--with-vault` if you use the encrypted vault; otherwise omit it. Dependencies
+remain private to that immutable GitHub release. No workspace reset, history
+deletion or system-Python installation is needed; do not install a second
+pipx/uv copy to repair this GitHub installation. Subsequent upgrades to a target
+supporting the TUI preserve the opt-in. See the
+[channel-switch troubleshooting](update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
+
 These installation examples explicitly select experimental development;
 stable 1.6.94 does not include the manager. Pre-channel 1.7 launchers cannot use
 the new upgrade flags and require the bootstrap; see

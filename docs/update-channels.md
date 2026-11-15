@@ -53,6 +53,35 @@ backups, and check compatibility before returning from development to stable.
 Only extras supported by the target are retained. Current stable 1.6 has no
 `--with-tui`; selecting stable does not carry the development manager into it.
 
+## Enable the dashboard after a GitHub channel switch
+
+`oc-box upgrade --devel` changes the release channel; it does **not** enable
+the optional TUI dependencies for the first time. A successful channel upgrade
+can therefore be followed by this message from `oc-box tui`:
+
+```text
+Optional TUI dependencies are missing.
+```
+
+For an existing **GitHub/curl installation**, stay with that installation method.
+Rerun the channel-aware bootstrap on the host as your regular user, without sudo:
+
+```sh
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-tui --with-vault
+oc-box --version
+oc-box tui
+```
+
+Keep `--with-vault` if you use the encrypted vault; otherwise omit it. This
+installs optional dependencies in the new immutable release's private directory,
+not system or user-site Python. It does not reset workspaces, delete history
+or change credentials. Subsequent upgrades to releases supporting the TUI retain
+the enabled opt-in. Do not mix in a second pipx/uv installation just to supply
+dependencies to a GitHub-installed launcher.
+
+Python-package owners instead manage optional extras in their owning isolated
+environment; the GitHub bootstrap above is not a package-manager upgrade.
+
 ## Automatic updates
 
 GitHub automatic updates remain off by default:
