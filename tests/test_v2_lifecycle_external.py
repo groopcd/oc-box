@@ -585,6 +585,8 @@ class CompanionReportTests(unittest.TestCase):
         fail_report=None,
         check_change=False,
         integrity_failure=None,
+        stage_fault=None,
+        publication_fault=False,
     ):
         state = {}
         source = {
@@ -613,6 +615,70 @@ class CompanionReportTests(unittest.TestCase):
             )
         real_write = safety.write_json_new
         real_digest = external.digest
+        real_stage_write = external.write_report_stage
+        real_fdopen, real_fsync, real_link = os.fdopen, os.fsync, os.link
+
+        class StageStream:
+            """Controlled late failures, only on the new stage writer's stream."""
+
+            def __init__(self, stream):
+                self.stream = stream
+                self.text = ""
+
+            def __enter__(self):
+                self.stream.__enter__()
+                return self
+
+            def __exit__(self, *info):
+                result = self.stream.__exit__(*info)
+                state["stage_closed"] = self.stream.closed
+                if stage_fault == "close":
+                    raise OSError("PRIVATE_STAGE_CLOSE")
+                return result
+
+            def write(self, text):
+                result = self.stream.write(text)
+                self.text += text
+                if stage_fault == "write":
+                    try:
+                        json.loads(self.text)
+                    except ValueError:
+                        pass
+                    else:
+                        self.stream.flush()
+                        state["late_write_after_complete_json"] = True
+                        raise OSError("PRIVATE_STAGE_WRITE")
+                return result
+
+            def flush(self):
+                self.stream.flush()
+                if stage_fault == "flush":
+                    raise OSError("PRIVATE_STAGE_FLUSH")
+
+            def fileno(self):
+                return self.stream.fileno()
+
+        def fdopen(descriptor, *args, **kwargs):
+            stream = real_fdopen(descriptor, *args, **kwargs)
+            return StageStream(stream) if kwargs.get("encoding") == "utf-8" else stream
+
+        def fsync(descriptor):
+            if stage_fault == "fsync":
+                raise OSError("PRIVATE_STAGE_FSYNC")
+            return real_fsync(descriptor)
+
+        def stage_write(descriptor, value):
+            if fail_report == external.REPORT:
+                with real_fdopen(descriptor, "w", encoding="utf-8"):
+                    raise OSError("PRIVATE_REPORT")
+            return real_stage_write(descriptor, value)
+
+        def link(*args, **kwargs):
+            state["publication_calls"] = state.get("publication_calls", 0) + 1
+            self.assertTrue(state["stage_closed"])
+            if publication_fault:
+                raise OSError("PRIVATE_PUBLISH_PATH")
+            return real_link(*args, **kwargs)
 
         def checksum(path):
             if path.name == "result.json":
@@ -698,6 +764,10 @@ class CompanionReportTests(unittest.TestCase):
             ),
             patch.object(safety, "write_json_new", side_effect=write),
             patch.object(external, "digest", side_effect=checksum),
+            patch.object(external, "write_report_stage", side_effect=stage_write),
+            patch.object(os, "fdopen", side_effect=fdopen),
+            patch.object(os, "fsync", side_effect=fsync),
+            patch.object(os, "link", side_effect=link),
             contextlib.redirect_stdout(io.StringIO()) as output,
             contextlib.redirect_stderr(io.StringIO()) as errors,
         ):
@@ -721,6 +791,7 @@ class CompanionReportTests(unittest.TestCase):
             if (root / external.REPORT).exists()
             else None
         )
+        state["stages"] = list(root.glob(external.REPORT_STAGE_PREFIX + "*.json"))
         state.update(code=code, server=server, worker=worker, stderr=errors.getvalue())
         return state
 
@@ -740,6 +811,31 @@ class CompanionReportTests(unittest.TestCase):
             )
             self.assertNotIn("fixture_ids", report)
             self.assertNotIn("ses_", json.dumps(report))
+            self.assertEqual(len(report["launches"]), 5)
+            self.assertTrue(report["first_import_verified"])
+            self.assertEqual(
+                report["provenance"]["native"]["sha256"], external.NATIVE_SHA256
+            )
+            self.assertEqual(
+                report["companion_publication"],
+                {
+                    "method": "closed-private-stage-link-no-replace",
+                    "staging_retained": True,
+                    "staging_authoritative": False,
+                },
+            )
+            self.assertEqual(len(state["stages"]), 1)
+            stage = state["stages"][0]
+            final = state["root"] / external.REPORT
+            self.assertEqual(stage.stat().st_ino, final.stat().st_ino)
+            self.assertEqual(stage.stat().st_nlink, 2)
+            self.assertEqual(stage.stat().st_mode & 0o777, 0o600)
+            self.assertEqual((state["root"] / "result.json").stat().st_nlink, 1)
+            # The frozen reader still enforces single-link originals. It is
+            # deliberately not the reader for the new retained-alias receipt.
+            safety.private_json(state["root"], "result.json")
+            with self.assertRaisesRegex(safety.FixtureError, "^unsafe-metadata$"):
+                safety.private_json(state["root"], external.REPORT)
 
     def test_cleanup_or_alive_failure_cannot_pass_even_when_original_passed(self):
         for kwargs in (
@@ -841,6 +937,143 @@ class CompanionReportTests(unittest.TestCase):
                     self.assertFalse(
                         state["outer"] and state["outer"]["status"] == "passed"
                     )
+
+    def test_late_stage_failures_never_publish_authoritative_pass(self):
+        for fault in ("write", "flush", "fsync", "close"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as name:
+                state = self.run_outer(Path(name), stage_fault=fault)
+                self.assertEqual(state["code"], 1)
+                self.assertIsNone(state["outer"])
+                self.assertFalse((state["root"] / external.REPORT).exists())
+                self.assertEqual(state.get("publication_calls", 0), 0)
+                self.assertTrue(state["stage_closed"])
+                self.assertEqual(len(state["stages"]), 1)
+                staged = json.loads(state["stages"][0].read_text())
+                self.assertEqual(staged["status"], "passed")
+                self.assertFalse(
+                    staged["companion_publication"]["staging_authoritative"]
+                )
+                if fault == "write":
+                    self.assertTrue(state["late_write_after_complete_json"])
+                failure = json.loads(state["stderr"].splitlines()[-1])
+                self.assertEqual(failure["status"], "failed")
+                self.assertEqual(
+                    failure["reporting_failures"][-1]["substep"], "external-report"
+                )
+                self.assertNotIn("PRIVATE", json.dumps(failure))
+
+    def test_atomic_publication_failure_preserves_fixed_primary_and_cleanup_context(
+        self,
+    ):
+        for failed_run in (False, True):
+            with (
+                self.subTest(failed_run=failed_run),
+                tempfile.TemporaryDirectory() as name,
+            ):
+                state = self.run_outer(
+                    Path(name),
+                    publication_fault=True,
+                    fail_primary=failed_run,
+                    fail_cleanup=failed_run,
+                )
+                self.assertEqual(state["code"], 1)
+                self.assertIsNone(state["outer"])
+                self.assertFalse((state["root"] / external.REPORT).exists())
+                self.assertEqual(state["publication_calls"], 1)
+                self.assertEqual(len(state["stages"]), 1)
+                failure = json.loads(state["stderr"].splitlines()[-1])
+                if failed_run:
+                    self.assertEqual(
+                        failure["primary_failure"]["category"], "selected-session"
+                    )
+                    self.assertEqual(len(failure["cleanup_failures"]), 1)
+                else:
+                    self.assertIsNone(failure["primary_failure"])
+                    self.assertFalse(failure["cleanup_failures"])
+                self.assertEqual(
+                    failure["reporting_failures"][-1]["substep"], "external-report"
+                )
+                self.assertNotIn("PRIVATE", json.dumps(failure))
+
+    def test_late_stage_failure_retains_existing_primary_and_cleanup_diagnostics(self):
+        for fault in ("write", "flush", "fsync", "close"):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as name:
+                state = self.run_outer(
+                    Path(name),
+                    stage_fault=fault,
+                    fail_primary=True,
+                    fail_cleanup=True,
+                )
+                self.assertEqual(state["code"], 1)
+                self.assertIsNone(state["outer"])
+                self.assertEqual(state.get("publication_calls", 0), 0)
+                failure = json.loads(state["stderr"].splitlines()[-1])
+                self.assertEqual(
+                    failure["primary_failure"]["category"], "selected-session"
+                )
+                self.assertEqual(len(failure["cleanup_failures"]), 1)
+                self.assertEqual(
+                    failure["reporting_failures"][-1]["substep"], "external-report"
+                )
+                self.assertNotIn("PRIVATE", json.dumps(failure))
+
+
+class AtomicPublicationTests(unittest.TestCase):
+    def test_existing_file_and_symlink_refuse_without_overwriting_any_evidence(self):
+        for kind in ("file", "symlink"):
+            with (
+                self.subTest(kind=kind),
+                tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as name,
+            ):
+                root = Path(name)
+                safety.write_json_new(root / "result.json", {"synthetic": "original"})
+                original = (root / "result.json").read_bytes()
+                target = root / "PRIVATE_TARGET"
+                target.write_bytes(b"PRIVATE_TARGET_BYTES")
+                final = root / external.REPORT
+                if kind == "symlink":
+                    final.symlink_to(target)
+                    link_value = os.readlink(final)
+                else:
+                    final.write_bytes(b'{"status":"passed","preexisting":true}\n')
+                before = final.read_bytes()
+                with patch.object(os, "link", wraps=os.link) as link:
+                    with self.assertRaises(FileExistsError) as failure:
+                        external.publish_report(root, {"status": "passed"})
+                link.assert_called_once()
+                self.assertFalse(link.call_args.kwargs["follow_symlinks"])
+                self.assertEqual(final.read_bytes(), before)
+                self.assertEqual(target.read_bytes(), b"PRIVATE_TARGET_BYTES")
+                if kind == "symlink":
+                    self.assertEqual(os.readlink(final), link_value)
+                stages = list(root.glob(external.REPORT_STAGE_PREFIX + "*.json"))
+                self.assertEqual(len(stages), 1)
+                self.assertEqual(stages[0].stat().st_nlink, 1)
+                self.assertEqual(stages[0].stat().st_mode & 0o777, 0o600)
+                self.assertEqual(json.loads(stages[0].read_text())["status"], "passed")
+                self.assertEqual((root / "result.json").read_bytes(), original)
+                self.assertEqual((root / "result.json").stat().st_nlink, 1)
+                diagnostic = json.dumps(
+                    external.diagnostic(failure.exception, "external-report", fixture)
+                )
+                self.assertNotIn("PRIVATE", diagnostic)
+                self.assertNotIn(str(root), diagnostic)
+                self.assertNotIn(stages[0].name, diagnostic)
+
+    def test_success_retains_closed_stage_without_postpublication_cleanup(self):
+        with tempfile.TemporaryDirectory(prefix=fixture.PREFIX) as name:
+            root = Path(name)
+            with patch.object(
+                os, "unlink", side_effect=AssertionError("postpublication cleanup")
+            ):
+                external.publish_report(root, {"status": "passed"})
+            stages = list(root.glob(external.REPORT_STAGE_PREFIX + "*.json"))
+            final = root / external.REPORT
+            self.assertEqual(len(stages), 1)
+            self.assertEqual(final.read_bytes(), stages[0].read_bytes())
+            self.assertEqual(final.stat().st_nlink, 2)
+            # TemporaryDirectory cleanup is outside this assertion and is only
+            # disposal of this offline synthetic test, never harness cleanup.
 
 
 class FreshPlacementTests(unittest.TestCase):

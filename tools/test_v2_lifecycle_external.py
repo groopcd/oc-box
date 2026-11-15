@@ -4,6 +4,8 @@
 Invoke this independent file with python3 -I -B, --source and --expect-commit.
 Only the first validated source-workspace start gains --import-session. The
 unchanged candidate runs all ten lifecycle checks and retains its own report.
+The external receipt is atomically linked from closed private staging retained
+as non-authoritative evidence; its two links stay inside the fresh private root.
 There is no retry, retained-store inspection, cleanup, V1 or interactive gate.
 Trusted interpreter/site-packages/Git and no concurrent writers are required.
 Offline callback tests are NOT native or rootless Podman acceptance.
@@ -71,6 +73,7 @@ SEQUENCE = (
     ("reset", "source-a"),
 )
 REPORT = "external-lifecycle-result.json"
+REPORT_STAGE_PREFIX = ".external-lifecycle-stage-"
 FORMAT = "oc-box-external-v2-lifecycle-v1"
 # All historical host families share these prefixes/markers. Check ancestors
 # only: an ordinary common parent containing sibling fixtures remains usable.
@@ -771,6 +774,46 @@ def preflight(args, runner):
     return source, identity, binary, parent, temporary
 
 
+def write_report_stage(descriptor, value):
+    """Own/close this newly allocated private descriptor before publication."""
+    try:
+        output = os.fdopen(descriptor, "w", encoding="utf-8")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with output:
+        json.dump(value, output, indent=2)
+        output.write("\n")
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def publish_report(root, value):
+    """Closed staging -> atomic no-replace link; retain the private alias."""
+    root = safe_path(root)
+    info = root.lstat()
+    require(
+        stat.S_ISDIR(info.st_mode)
+        and root.name.startswith("oc-box-v2-only-host-")
+        and info.st_uid == os.getuid()
+        and not info.st_mode & 0o077,
+        "fresh-root",
+    )
+    descriptor, stage = tempfile.mkstemp(
+        prefix=REPORT_STAGE_PREFIX,
+        suffix=".json",
+        dir=root,
+    )
+    # A late write/flush/fsync/close failure leaves only non-authoritative staging.
+    # No cleanup on either outcome: unlink failure after link must not turn a
+    # published pass into a nonzero invocation. The root is private and fresh.
+    write_report_stage(descriptor, value)
+    os.link(stage, root / REPORT, follow_symlinks=False)
+    # Link is the final fallible publication operation. The final file and the
+    # retained stage intentionally have nlink=2. Frozen private_json (nlink=1)
+    # remains used only for original result.json, never for this new receipt.
+
+
 def execute_fixture(fixture, parent, binary, distro, temporary, provenance, recheck):
     adapter = Adapter(fixture, parent)
     exit_code = None
@@ -856,18 +899,25 @@ def execute_fixture(fixture, parent, binary, distro, temporary, provenance, rech
         "primary_failure": adapter.primary,
         "cleanup_failures": adapter.cleanup_errors,
         "reporting_failures": adapter.reporting_errors,
+        "companion_publication": {
+            "method": "closed-private-stage-link-no-replace",
+            "staging_retained": True,
+            "staging_authoritative": False,
+        },
         "limits": "Fresh scripted synthetic V2-only host lifecycle; no legacy/global/UI/real-provider/OAuth/network/security acceptance.",
     }
     try:
-        fixture.safety.write_json_new(adapter.root / REPORT, result)
+        publish_report(adapter.root, result)
     except BaseException as error:
         adapter.fail(error, "external-report", secondary="report")
         print(
-            "External lifecycle report failed; original evidence retained.",
+            "External lifecycle report publication failed; original evidence retained. "
+            "Any staging is private and non-authoritative.",
             file=sys.stderr,
         )
-        # A failed exclusive write cannot persist a companion report. Preserve
-        # the already fixed primary/secondary diagnostics on stderr instead.
+        # Failed staging/publication is not an authoritative receipt; preserve
+        # fixed primary/secondary diagnostics on stderr. Never replace a final
+        # file that already existed; partial/complete staging stays private.
         print(
             json.dumps(
                 {
