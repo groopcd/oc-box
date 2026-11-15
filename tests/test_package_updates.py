@@ -457,6 +457,63 @@ class ManagerSafetyTests(unittest.TestCase):
         with self.assertRaises(channels.ChannelError):
             updates._manager(self.prefix, self.before, self.work, self.env)
 
+    def test_pipx_prerelease_receipts_accept_only_one_exact_safe_token(self):
+        for options in (
+            ["--pre"],
+            "--pre",
+            "'--pre'",
+            ["--pre", *updates.PIP_FLAGS],
+            [*updates.PIP_FLAGS, "--pre"],
+            ["--force-reinstall", "--pre", *updates.PIP_FLAGS],
+            shlex.join(["--pre", "--force-reinstall", *updates.PIP_FLAGS]),
+        ):
+            receipt = self.receipt()
+            receipt["main_package"]["pip_args"] = options
+            with self.subTest(options=options):
+                self.assertEqual(self.pipx(receipt)[::2], ("pipx", ["tui", "vault"]))
+        for options in (
+            ["--pre=allow"],
+            ["--pre", "--pre"],
+            "--pre --pre",
+            ["--pre --no-input"],
+            [" --pre"],
+            ["--pre "],
+            "--pre\n",
+            "--pre\t",
+            "'--pre",
+            "--pre; echo unsafe",
+            ["--pre", "--extra-index-url", "https://private.invalid"],
+            ["--pre", "--index-url", "https://private.invalid", *updates.PIP_FLAGS[2:]],
+            ["--pre", *updates.PIP_FLAGS, "--target", "/foreign"],
+            ["--pre", *updates.PIP_FLAGS, "--pre"],
+            ["--index-url", "--pre", *updates.PIP_FLAGS[1:]],
+            ["--pre", "--force-reinstall", "--force-reinstall", *updates.PIP_FLAGS],
+            {"--pre": True},
+            [["--pre"]],
+            None,
+            True,
+        ):
+            receipt = self.receipt()
+            receipt["main_package"]["pip_args"] = options
+            with (
+                self.subTest(options=options),
+                self.assertRaisesRegex(channels.ChannelError, "unsupported ownership"),
+            ):
+                self.pipx(receipt)
+
+    def test_prerelease_receipt_policy_does_not_save_or_select_devel(self):
+        receipt = self.receipt()
+        receipt["main_package"]["pip_args"] = "--pre"
+        with patch.dict(
+            os.environ, {"XDG_CONFIG_HOME": str(self.work / "private-config")}
+        ):
+            self.pipx(receipt)
+            self.assertEqual(
+                channels.selected_channel(owner="package:fixture"), "stable"
+            )
+            self.assertEqual(channels.load_settings(), {})
+            self.assertFalse(channels.config_path().exists())
+
     def test_plain_pip_refuses_unrecorded_extras_and_indirect_installs(self):
         for change in ({"extras": ["vault"]}, {"requested": False}):
             before = dict(self.before, **change)
@@ -499,6 +556,11 @@ class ManagerSafetyTests(unittest.TestCase):
                 updates._manager(self.prefix, self.before, self.work, self.env)[2],
                 ["vault"],
             )
+            receipt.write_text(basic + '[tool.options]\nprerelease = "allow"\n')
+            self.assertEqual(
+                updates._manager(self.prefix, self.before, self.work, self.env)[2],
+                ["vault"],
+            )
             # uv records the exact interpreter selector written by our own
             # delegation. It must remain reusable, not admit other interpreters.
             receipt.write_text(
@@ -514,6 +576,8 @@ class ManagerSafetyTests(unittest.TestCase):
                 basic + 'python = ["unverified"]\n',
                 basic + '[tool.options]\nindex-url = "https://private.invalid"\n',
                 basic + '[tool.options]\nresolution = "lowest"\n',
+                basic + '[tool.options]\nprerelease = "if-necessary"\n',
+                basic + '[tool.options]\nprerelease = ["allow"]\n',
                 basic.replace('name="oc-box", extras=', 'name="other", extras='),
                 basic.replace('specifier=">=1.6.1"', 'url="file:///private"'),
                 basic.replace(
@@ -542,7 +606,29 @@ class ManagerSafetyTests(unittest.TestCase):
         )
         self.assertFalse(updates._uv_options({"index-url": "https://private.invalid"}))
         self.assertFalse(updates._uv_options({"no-build": False}))
-        self.assertFalse(updates._uv_options({"prerelease": "allow"}))
+        self.assertTrue(updates._uv_options({"prerelease": "allow"}))
+        self.assertTrue(
+            updates._uv_options(
+                {"prerelease": "allow", "index-url": updates.INDEX, "no-build": True}
+            )
+        )
+        for policy in (
+            "if-necessary",
+            "explicit",
+            "disallow",
+            "allow ",
+            "ALLOW",
+            {},
+            [],
+            1,
+            True,
+            None,
+        ):
+            with self.subTest(policy=policy):
+                self.assertFalse(updates._uv_options({"prerelease": policy}))
+        self.assertFalse(
+            updates._uv_options({"prerelease": "allow", "find-links": ["/foreign"]})
+        )
 
     def test_child_environment_stdin_timeout_and_private_errors(self):
         hostile = {
@@ -648,10 +734,12 @@ class IsolatedManagerTests(unittest.TestCase):
         self.env = updates._environment(self.work)
         self.env["UV_TOOL_DIR"] = str(self.work / "tools")
         self.env["UV_TOOL_BIN_DIR"] = str(self.work / "bin")
+        self.offered_extras = {}
         for version in ("1.6.1", "1.6.2", "1.6.3.dev0"):
             self.wheel(version)
 
-    def wheel(self, version):
+    def wheel(self, version, extras=()):
+        self.offered_extras[version] = sorted(extras)
         dist = f"oc_box-{version}.dist-info"
         files = {
             "oc_box/__init__.py": "",
@@ -659,7 +747,11 @@ class IsolatedManagerTests(unittest.TestCase):
             "oc_box/distribution.json": json.dumps(
                 {"installer": "python-package", "version": version}
             ),
-            f"{dist}/METADATA": f"Metadata-Version: 2.3\nName: oc-box\nVersion: {version}\nRequires-Python: >=3.10\n",
+            f"{dist}/METADATA": (
+                f"Metadata-Version: 2.3\nName: oc-box\nVersion: {version}\n"
+                "Requires-Python: >=3.10\n"
+                + "".join(f"Provides-Extra: {extra}\n" for extra in sorted(extras))
+            ),
             f"{dist}/WHEEL": "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
             f"{dist}/entry_points.txt": "[console_scripts]\noc-box = oc_box.fixture:main\n",
             f"{dist}/RECORD": "",
@@ -695,7 +787,11 @@ class IsolatedManagerTests(unittest.TestCase):
             }
         version = url.split("/")[-2]
         return {
-            "info": {"name": "oc-box", "version": version, "provides_extra": []},
+            "info": {
+                "name": "oc-box",
+                "version": version,
+                "provides_extra": self.offered_extras[version],
+            },
             "urls": [public_file(version)],
         }
 
@@ -756,7 +852,7 @@ class IsolatedManagerTests(unittest.TestCase):
             normalized_options["find-links"] = [self.wheels.as_uri()]
             self.assertEqual(normalized, before)
 
-    def exercise(self, prefix, *, kind):
+    def exercise(self, prefix, *, kind, extras=(), prerelease_origin=False):
         python = prefix / "bin/python"
         package = Path(
             self.command(
@@ -832,8 +928,20 @@ class IsolatedManagerTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             for condition in patches:
                 stack.enter_context(condition)
+            if prerelease_origin:
+                # The documented unpinned install resolves to a prerelease, but
+                # its resolver policy must not silently select the devel channel.
+                receipt = prefix / "uv-receipt.toml"
+                previous_receipt = receipt.read_bytes()
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertIsNone(updates.upgrade(package))
+                self.assertIn("PyPI stable: 1.6.2", output.getvalue())
+                self.assertIn("ahead", output.getvalue())
+                self.assertFalse(mutations)
+                self.assertFalse(channels.config_path().exists())
+                self.assertEqual(receipt.read_bytes(), previous_receipt)
             for channel, version, count in (
-                (None, "1.6.2", 1),
+                ("stable" if prerelease_origin else None, "1.6.2", 1),
                 ("devel", "1.6.3.dev0", 2),
                 (None, "1.6.3.dev0", 2),
                 ("stable", "1.6.2", 3),
@@ -847,6 +955,7 @@ class IsolatedManagerTests(unittest.TestCase):
                 self.assertEqual(fresh["version"], version)
                 self.assertEqual(fresh["prefix"], str(prefix))
                 self.assertFalse(fresh["direct"])
+                self.assertEqual(fresh["extras"], self.offered_extras[version])
                 selected = "devel" if version.endswith(".dev0") else "stable"
                 self.assertIn(f"PyPI {selected}: {version}", output.getvalue())
                 if channel == "stable":
@@ -859,12 +968,22 @@ class IsolatedManagerTests(unittest.TestCase):
                 self.assertEqual(
                     list(settings["package_update_channels"].values()), [selected]
                 )
+                self.assertEqual(
+                    list(settings["package_update_extras"].values()), [sorted(extras)]
+                )
+                self.assertNotIn("update_channel", settings)
                 if channel is None and selected == "devel":
                     self.assertIn("up to date", output.getvalue())
                     if kind in ("pipx", "uv"):
                         self.assertEqual(receipt.read_bytes(), previous_receipt)
                 else:
-                    self.assertIn("oc-box==" + version, mutations[-1])
+                    target_extras = sorted(
+                        set(extras) & set(self.offered_extras[version])
+                    )
+                    suffix = (
+                        "[" + ",".join(target_extras) + "]" if target_extras else ""
+                    )
+                    self.assertIn("oc-box" + suffix + "==" + version, mutations[-1])
                     self.normalize_receipt_transport(prefix, kind)
                     if kind == "pipx":
                         flags = json.loads((prefix / "pipx_metadata.json").read_text())[
@@ -888,7 +1007,8 @@ class IsolatedManagerTests(unittest.TestCase):
                     previous_receipt = receipt.read_bytes()
         self.assertEqual(
             observed_versions,
-            ["1.6.1", "1.6.2", "1.6.3.dev0", "1.6.3.dev0"],
+            (["1.6.3.dev0", "1.6.3.dev0"] if prerelease_origin else ["1.6.1"])
+            + ["1.6.2", "1.6.3.dev0", "1.6.3.dev0"],
         )
         return package, fresh
 
@@ -984,6 +1104,48 @@ class IsolatedManagerTests(unittest.TestCase):
         self.assertEqual(fresh["version"], "1.6.2")
         self.assertIn('specifier = "==1.6.2"', receipt.read_text())
         self.assertTrue((self.work / "bin/oc-box").is_symlink())
+
+    @unittest.skipIf(
+        sys.version_info < (3, 11), "uv receipt parsing needs stdlib tomllib"
+    )
+    def test_real_uv_prerelease_receipt_roundtrip_preserves_supported_extras(self):
+        import tomllib
+
+        for version in ("1.6.1", "1.6.3.dev0"):
+            self.wheel(version, extras=("tui", "vault"))
+        self.wheel("1.6.2", extras=("vault",))
+        self.command(
+            [
+                self.uv,
+                "tool",
+                "install",
+                "--no-config",
+                "--no-index",
+                "--find-links",
+                self.wheels,
+                "--prerelease",
+                "allow",
+                "oc-box[tui,vault]",
+            ]
+        )
+        prefix = self.work / "tools/oc-box"
+        receipt = prefix / "uv-receipt.toml"
+        before = tomllib.loads(receipt.read_text())
+        self.assertEqual(before["tool"]["options"]["prerelease"], "allow")
+        self.assertEqual(before["tool"]["requirements"][0]["extras"], ["tui", "vault"])
+        self.normalize_receipt_transport(prefix, "uv")
+        self.assertEqual(
+            tomllib.loads(receipt.read_text())["tool"]["options"]["prerelease"], "allow"
+        )
+        with patch.object(updates.shutil, "which", return_value=str(self.uv)):
+            _, fresh = self.exercise(
+                prefix, kind="uv", extras=("tui", "vault"), prerelease_origin=True
+            )
+        self.assertEqual(fresh["version"], "1.6.2")
+        self.assertEqual(
+            tomllib.loads(receipt.read_text())["tool"]["requirements"][0]["extras"],
+            ["vault"],
+        )
 
 
 if __name__ == "__main__":

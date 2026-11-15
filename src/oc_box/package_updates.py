@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -259,8 +260,7 @@ def _manager(prefix, before, work, env):
                 or main.get("pinned", False)
                 or receipt.get("venv_args")
                 or receipt.get("injected_packages")
-                or main.get("pip_args", [])
-                not in ([], PIP_FLAGS, ["--force-reinstall", *PIP_FLAGS])
+                or not _pipx_options(main.get("pip_args", []))
                 or main.get("include_dependencies") is not False
                 or main.get("include_apps") is not True
             ):
@@ -507,13 +507,39 @@ def _saved_extras(owner):
     return _extras(saved.get(owner, []))
 
 
+def _pipx_options(options):
+    """Recognize safe receipt options; never forward receipt text to a child."""
+    if isinstance(options, str):
+        if any(ord(character) < 32 or ord(character) == 127 for character in options):
+            return False
+        try:
+            options = shlex.split(options)
+        except ValueError:
+            return False
+    if not isinstance(options, list) or any(
+        not isinstance(option, str) for option in options
+    ):
+        return False
+    # A single --pre describes the original resolver, not the update channel.
+    # The delegated update still uses our canonical flags and exact target pin.
+    if options.count("--pre") > 1:
+        return False
+    if "--pre" in options:
+        position = options.index("--pre")
+        if position and options[position - 1] == "--index-url":
+            return False
+        options = options[:position] + options[position + 1 :]
+    return options in ([], PIP_FLAGS, ["--force-reinstall", *PIP_FLAGS])
+
+
 def _uv_options(options):
-    """Only defaults and the safe options written by our own delegation."""
+    """Only safe defaults, explicit prerelease opt-in and our delegated options."""
     if not isinstance(options, dict) or set(options) - {
         "index",
         "index-url",
         "keyring-provider",
         "no-build",
+        "prerelease",
     }:
         return False
     expected_index = [
@@ -530,6 +556,7 @@ def _uv_options(options):
         and options.get("index-url", INDEX) == INDEX
         and options.get("keyring-provider", "disabled") == "disabled"
         and options.get("no-build", True) is True
+        and options.get("prerelease", "allow") == "allow"
     )
 
 
@@ -710,8 +737,6 @@ def upgrade(root, *, check=False, channel=None):
         constraint.write_text("oc-box==" + version + "\n")
         env["PIP_CONSTRAINT"] = str(constraint)
         if kind == "pipx":
-            import shlex
-
             command = [
                 executable,
                 "install",
