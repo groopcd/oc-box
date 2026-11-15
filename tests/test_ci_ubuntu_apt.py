@@ -47,6 +47,45 @@ class UbuntuAptConfigTests(unittest.TestCase):
             **kwargs,
         )
 
+    def test_allowlisted_https_mirror_ipv4_matrix_keeps_authentication(self):
+        for mirror in ("edge", "azure", "ubuntu"):
+            for ipv4 in (False, True):
+                with self.subTest(mirror=mirror, ipv4=ipv4):
+                    output = self.root / (mirror + str(ipv4))
+                    settings = config_values(
+                        self.generate(output, mirror=mirror, force_ipv4=ipv4)
+                    )
+                    self.assertIn(
+                        "URIs: " + apt.MIRRORS[mirror],
+                        (output / "ubuntu.sources").read_text(),
+                    )
+                    self.assertIn(
+                        "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg",
+                        (output / "ubuntu.sources").read_text(),
+                    )
+                    self.assertEqual(
+                        settings.get("Acquire::ForceIPv4"), "true" if ipv4 else None
+                    )
+                    for key in (
+                        "Acquire::https::Verify-Peer",
+                        "Acquire::https::Verify-Host",
+                    ):
+                        self.assertEqual(settings[key], "true")
+                    self.assertEqual(
+                        settings["APT::Get::AllowUnauthenticated"], "false"
+                    )
+
+    def test_mirror_injection_and_invalid_ip_options_refuse_before_write(self):
+        for options in (
+            {"mirror": "https://untrusted.invalid"},
+            {"mirror": "azure\nInjected"},
+            {"force_ipv4": "true"},
+            {"force_ipv4": 1},
+        ):
+            with self.subTest(options=options), self.assertRaises(apt.ConfigError):
+                self.generate(**options)
+            self.assertFalse(self.output.exists())
+
     def test_supported_suite_matrix_and_isolated_source_selection(self):
         for codename in ("noble", "resolute"):
             with self.subTest(codename=codename):
@@ -326,8 +365,14 @@ class UbuntuAptConfigTests(unittest.TestCase):
     def test_cli_prints_only_absolute_config_path_or_fixed_error(self):
         real_generate = apt.generate
 
-        def generate_for_fixture(output, *, codename):
-            return real_generate(output, codename=codename, ca_bundle=self.ca)
+        def generate_for_fixture(output, *, codename, mirror, force_ipv4):
+            return real_generate(
+                output,
+                codename=codename,
+                mirror=mirror,
+                force_ipv4=force_ipv4,
+                ca_bundle=self.ca,
+            )
 
         stdout, stderr = io.StringIO(), io.StringIO()
         with patch.object(apt, "generate", side_effect=generate_for_fixture):

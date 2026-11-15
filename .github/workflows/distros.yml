@@ -2,7 +2,7 @@ name: Distro dependency checks
 
 on:
   push:
-    branches: [master, 'feature/**']
+    branches: [master, devel, 'feature/**']
   pull_request:
   workflow_dispatch:
 
@@ -44,7 +44,7 @@ jobs:
           if [[ "$DISTRO" == ubuntu ]]; then
             apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
             chmod 755 "$apt_root"
-            apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config" --codename noble)
+            apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config" --codename noble --mirror azure --force-ipv4)
             extra=(--volume "$apt_root:$apt_root:ro" --env "APT_CONFIG=$apt_config")
           fi
           docker run --rm --volume "$GITHUB_WORKSPACE:/src:ro" --workdir /src \

@@ -23,7 +23,8 @@ oc-box web [--project PATH | --workspace ID] [--port N] [--no-open] [--no-vault]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
-oc-box upgrade [--check | --auto-update on|off]
+oc-box upgrade [--check] [--stable | --devel]
+oc-box upgrade --auto-update on|off
 oc-box secrets init|list|passwd
 oc-box secrets set|remove NAME
 oc-box credentials [--project PATH | --workspace ID] [CREDENTIAL-OPTIONS]
@@ -863,38 +864,49 @@ oc-box --status --json
 
 ### upgrade
 
-Check and update the installed oc-box launcher/modules and prebuilt manuals
-from the fixed public GitHub repository, branch `master`. Run on the host as
-your regular user; no sudo or GitHub token is needed. This command works without
-Podman or a registered workspace. It does not update host OpenCode, modify a
-source checkout, reset a container, or touch project/session data.
+Update the installed launcher/modules and prebuilt manuals from a verified
+published release. Run on the host as your regular user; no sudo or GitHub
+token is needed. No Podman or registered workspace is required. This does not
+update host OpenCode, modify a source checkout, reset a container or migrate
+project/session data.
 
-This command's GitHub update path applies only to curl/source-installed copies.
-Python-package installations detect their packaged distribution marker and
-print `pipx upgrade oc-box`, `uv tool upgrade oc-box`, or the current interpreter's
-pip upgrade command instead, without downloading or installing anything. They
-reject `--auto-update on` because a package manager owns those files; normal
-launches skip GitHub automatic updates even if a shared host config enables them.
-`--auto-update off` on a package-managed copy prints that package guidance and
-does not modify the GitHub installation's shared setting. Both channels use the
-same runtime/workspace format and remain supported in parallel.
+Release channels are independent of installation method: **stable** comes from
+`master` as a final release; **devel** comes from `devel` as a GitHub prerelease
+and Python `.dev0` package. Both GitHub/curl and PyPI are supported. Upgrades
+select immutable published releases, never moving branch HEAD.
+
+Without a saved choice, the channel is stable. A successful explicit `--devel`
+or `--stable` selection is remembered by the verified installation owner.
+GitHub installations and individual package-manager installations have separate
+preferences. A preview or failed upgrade does not save a new preference.
 
 ```sh
 oc-box upgrade --check
-oc-box upgrade
+oc-box upgrade --devel --check
+oc-box upgrade --devel
+oc-box upgrade                  # Follow the saved channel
+oc-box upgrade --stable
 oc-box upgrade --auto-update on
 oc-box upgrade --auto-update off
 ```
 
-`--check` compares the installed commit with GitHub and reports whether it
-differs, without installing. A normal upgrade clones the full public branch
-history into a temporary directory, pins the checked commit, verifies source
-identity, and runs its staged user-local installer. An identical clean build
-does not download the full history again. A locally installed build whose commit
-count is ahead of the published branch is retained rather than downgraded.
-Source-checkout updates remain a separate `git pull`/review task: upgrade always
-targets the installed user-local copy. A changed published commit at the same
-count can replace a different installed build.
+GitHub upgrades verify tag/commit identity and selected branch membership before
+running the staged immutable installer. Python-package upgrades delegate only
+to a verified owning pipx, uv tool or dedicated virtual-environment manager.
+An ambiguous owner or editable checkout receives manual guidance rather than
+a guessed installation target. Supported requested extras are retained; stable
+1.6 does not support the optional `tui` extra.
+
+Normal updates do not silently downgrade. An explicit channel switch may select
+an older release and warns first. **Replacing launcher files does not roll back
+workspace/session state.** Stop active clients, keep encrypted backups and check
+compatibility before returning from development to stable.
+
+Exact v1.6.60 needs one plain `oc-box upgrade` before these flags. Pre-feature
+1.7 GitHub installations need the channel-aware bootstrap with an explicit
+channel; their old ahead-of-master check can retain the development build.
+Older package installations can first update with their owning manager. See
+[update channels](update-channels.md) for the bootstrap and package examples.
 
 The installer stages a complete release under `~/.local/share/oc-box/releases/`,
 including license and manuals, before switching the launcher. New processes use
@@ -904,16 +916,19 @@ garbage collection. `current` and compatible top-level installed paths point to
 the activated release. An older flat installation is migrated; its old manuals
 are preserved as `legacy-docs`. No workspaces or credentials are migrated/deleted.
 
-Automatic updates are off by default. `--auto-update on` saves `auto_update: true`
-in the existing host oc-box configuration, retaining settings such as `pass_env`.
+GitHub automatic updates are off by default and follow the saved release channel.
+`--auto-update on` saves `auto_update: true` in the existing host oc-box
+configuration, retaining settings such as `pass_env`.
 Normal installed `start` launches check before Podman/workspace setup and, when
 updated, continue with the same arguments. No background daemon, active-session
 update, or automatic check for list/status/terminal/reset/purge is introduced.
 Direct source-checkout launches skip automatic updates. A concurrent check does
 not block another normal launcher. Network/download failures are reported and
 the normal launch continues with the installed version; explicit upgrade failures
-return nonzero. After enabling automatic updates you are trusting future code
-published to this development branch, not signed release artifacts.
+return nonzero. Package automatic updates remain disabled:
+`--auto-update on` refuses package ownership, while `off` prints package-manager
+guidance without changing the GitHub installation's setting. Automatic-update
+settings cannot be combined with channel selectors or `--check`.
 
 Fetch/checkout/install subprocesses have a clean, positive-allowlisted
 environment. Global/system Git config, helpers, hooks, external protocols,
@@ -1497,18 +1512,36 @@ oc-box reset --project ~/devel/demo --distro debian
 
 ### --check
 
-With `upgrade`, report whether the public GitHub commit differs from the
-installed version without installing it. Returns success when a version is
-available or the installation is current; it is not an update-available exit
+With `upgrade`, preview the saved or explicitly selected published channel
+without installing or persisting a preference. Returns success when a version
+is available or the installation is current; it is not an update-available exit
 code. Network errors return nonzero. Cannot be combined with `--auto-update`,
-workspace selectors, or other commands. Example: `oc-box upgrade --check`.
+workspace selectors or other commands. Example: `oc-box upgrade --devel --check`.
+
+### --stable
+
+With `upgrade`, select and remember the stable channel after a successful
+verified upgrade. With `--check`, preview only. Mutually exclusive with `--devel`;
+cannot be combined with `--auto-update` or workspace actions. An explicit
+downgrade replaces launcher files, not workspace/session state.
+Example: `oc-box upgrade --stable`.
+
+### --devel
+
+With `upgrade`, select and remember published development prereleases after a
+successful verified upgrade. With `--check`, preview only. Mutually exclusive
+with `--stable`; cannot be combined with `--auto-update` or workspace actions.
+Development features remain experimental; selection is not stable acceptance.
+Example: `oc-box upgrade --devel`.
 
 ### --auto-update on|off
 
 With `upgrade`, persistently enable or disable automatic updates before normal
 installed launches. The default is off. This setting itself performs no download
 or installation and preserves other keys in `~/.config/oc-box/config.json` (or
-its XDG equivalent). Cannot be combined with `--check` or workspace actions.
+its XDG equivalent). GitHub updates follow the saved channel; package automatic
+updates remain disabled. Cannot be combined with `--check`, `--stable`,
+`--devel` or workspace actions.
 Example: `oc-box upgrade --auto-update on`.
 
 ### --new

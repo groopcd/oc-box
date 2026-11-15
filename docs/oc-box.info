@@ -65,7 +65,8 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box --status [--project PATH | --workspace ID] [--json]
      oc-box status [--project PATH | --workspace ID] [--json]
      oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
-     oc-box upgrade [--check | --auto-update on|off]
+     oc-box upgrade [--check] [--stable | --devel]
+     oc-box upgrade --auto-update on|off
      oc-box secrets init|list|passwd
      oc-box secrets set|remove NAME
      oc-box credentials [--project PATH | --workspace ID] [CREDENTIAL-OPTIONS]
@@ -997,39 +998,52 @@ Resource reports for metric interpretation.
 4.16 upgrade
 ============
 
-Check and update the installed oc-box launcher/modules and prebuilt
-manuals from the fixed public GitHub repository, branch ‘master’.  Run
-on the host as your regular user; no sudo or GitHub token is needed.
-This command works without Podman or a registered workspace.  It does
-not update host OpenCode, modify a source checkout, reset a container,
-or touch project/session data.
+Update the installed launcher/modules and prebuilt manuals from a
+verified published release.  Run on the host as your regular user; no
+sudo or GitHub token is needed.  No Podman or registered workspace is
+required.  This does not update host OpenCode, modify a source checkout,
+reset a container or migrate project/session data.
 
-This command's GitHub update path applies only to curl/source-installed
-copies.  Python-package installations detect their packaged distribution
-marker and print ‘pipx upgrade oc-box’, ‘uv tool upgrade oc-box’, or the
-current interpreter's pip upgrade command instead, without downloading
-or installing anything.  They reject ‘--auto-update on’ because a
-package manager owns those files; normal launches skip GitHub automatic
-updates even if a shared host config enables them.  ‘--auto-update off’
-on a package-managed copy prints that package guidance and does not
-modify the GitHub installation's shared setting.  Both channels use the
-same runtime/workspace format and remain supported in parallel.
+Release channels are independent of installation method: **stable**
+comes from ‘master’ as a final release; **devel** comes from ‘devel’ as
+a GitHub prerelease and Python ‘.dev0’ package.  Both GitHub/curl and
+PyPI are supported.  Upgrades select immutable published releases, never
+moving branch HEAD.
+
+Without a saved choice, the channel is stable.  A successful explicit
+‘--devel’ or ‘--stable’ selection is remembered by the verified
+installation owner.  GitHub installations and individual package-manager
+installations have separate preferences.  A preview or failed upgrade
+does not save a new preference.
 
      oc-box upgrade --check
-     oc-box upgrade
+     oc-box upgrade --devel --check
+     oc-box upgrade --devel
+     oc-box upgrade                  # Follow the saved channel
+     oc-box upgrade --stable
      oc-box upgrade --auto-update on
      oc-box upgrade --auto-update off
 
-‘--check’ compares the installed commit with GitHub and reports whether
-it differs, without installing.  A normal upgrade clones the full public
-branch history into a temporary directory, pins the checked commit,
-verifies source identity, and runs its staged user-local installer.  An
-identical clean build does not download the full history again.  A
-locally installed build whose commit count is ahead of the published
-branch is retained rather than downgraded.  Source-checkout updates
-remain a separate ‘git pull’/review task: upgrade always targets the
-installed user-local copy.  A changed published commit at the same count
-can replace a different installed build.
+GitHub upgrades verify tag/commit identity and selected branch
+membership before running the staged immutable installer.
+Python-package upgrades delegate only to a verified owning pipx, uv tool
+or dedicated virtual-environment manager.  An ambiguous owner or
+editable checkout receives manual guidance rather than a guessed
+installation target.  Supported requested extras are retained; stable
+1.6 does not support the optional ‘tui’ extra.
+
+Normal updates do not silently downgrade.  An explicit channel switch
+may select an older release and warns first.  **Replacing launcher files
+does not roll back workspace/session state.** Stop active clients, keep
+encrypted backups and check compatibility before returning from
+development to stable.
+
+Exact v1.6.60 needs one plain ‘oc-box upgrade’ before these flags.
+Pre-feature 1.7 GitHub installations need the channel-aware bootstrap
+with an explicit channel; their old ahead-of-master check can retain the
+development build.  Older package installations can first update with
+their owning manager.  See [update channels](update-channels.md) for the
+bootstrap and package examples.
 
 The installer stages a complete release under
 ‘~/.local/share/oc-box/releases/’, including license and manuals, before
@@ -1041,18 +1055,21 @@ point to the activated release.  An older flat installation is migrated;
 its old manuals are preserved as ‘legacy-docs’.  No workspaces or
 credentials are migrated/deleted.
 
-Automatic updates are off by default.  ‘--auto-update on’ saves
-‘auto_update: true’ in the existing host oc-box configuration, retaining
-settings such as ‘pass_env’.  Normal installed ‘start’ launches check
-before Podman/workspace setup and, when updated, continue with the same
-arguments.  No background daemon, active-session update, or automatic
-check for list/status/terminal/reset/purge is introduced.  Direct
-source-checkout launches skip automatic updates.  A concurrent check
-does not block another normal launcher.  Network/download failures are
-reported and the normal launch continues with the installed version;
-explicit upgrade failures return nonzero.  After enabling automatic
-updates you are trusting future code published to this development
-branch, not signed release artifacts.
+GitHub automatic updates are off by default and follow the saved release
+channel.  ‘--auto-update on’ saves ‘auto_update: true’ in the existing
+host oc-box configuration, retaining settings such as ‘pass_env’.
+Normal installed ‘start’ launches check before Podman/workspace setup
+and, when updated, continue with the same arguments.  No background
+daemon, active-session update, or automatic check for
+list/status/terminal/reset/purge is introduced.  Direct source-checkout
+launches skip automatic updates.  A concurrent check does not block
+another normal launcher.  Network/download failures are reported and the
+normal launch continues with the installed version; explicit upgrade
+failures return nonzero.  Package automatic updates remain disabled:
+‘--auto-update on’ refuses package ownership, while ‘off’ prints
+package-manager guidance without changing the GitHub installation's
+setting.  Automatic-update settings cannot be combined with channel
+selectors or ‘--check’.
 
 Fetch/checkout/install subprocesses have a clean, positive-allowlisted
 environment.  Global/system Git config, helpers, hooks, external
@@ -1696,24 +1713,44 @@ host packages or snapshot date.  Changing an existing workspace requires
 5.16 -check
 ===========
 
-With ‘upgrade’, report whether the public GitHub commit differs from the
-installed version without installing it.  Returns success when a version
-is available or the installation is current; it is not an
+With ‘upgrade’, preview the saved or explicitly selected published
+channel without installing or persisting a preference.  Returns success
+when a version is available or the installation is current; it is not an
 update-available exit code.  Network errors return nonzero.  Cannot be
-combined with ‘--auto-update’, workspace selectors, or other commands.
-Example: ‘oc-box upgrade --check’.
+combined with ‘--auto-update’, workspace selectors or other commands.
+Example: ‘oc-box upgrade --devel --check’.
 
-5.17 -auto-update on|off
+5.17 -stable
+============
+
+With ‘upgrade’, select and remember the stable channel after a
+successful verified upgrade.  With ‘--check’, preview only.  Mutually
+exclusive with ‘--devel’; cannot be combined with ‘--auto-update’ or
+workspace actions.  An explicit downgrade replaces launcher files, not
+workspace/session state.  Example: ‘oc-box upgrade --stable’.
+
+5.18 -devel
+===========
+
+With ‘upgrade’, select and remember published development prereleases
+after a successful verified upgrade.  With ‘--check’, preview only.
+Mutually exclusive with ‘--stable’; cannot be combined with
+‘--auto-update’ or workspace actions.  Development features remain
+experimental; selection is not stable acceptance.  Example: ‘oc-box
+upgrade --devel’.
+
+5.19 -auto-update on|off
 ========================
 
 With ‘upgrade’, persistently enable or disable automatic updates before
 normal installed launches.  The default is off.  This setting itself
 performs no download or installation and preserves other keys in
-‘~/.config/oc-box/config.json’ (or its XDG equivalent).  Cannot be
-combined with ‘--check’ or workspace actions.  Example: ‘oc-box upgrade
---auto-update on’.
+‘~/.config/oc-box/config.json’ (or its XDG equivalent).  GitHub updates
+follow the saved channel; package automatic updates remain disabled.
+Cannot be combined with ‘--check’, ‘--stable’, ‘--devel’ or workspace
+actions.  Example: ‘oc-box upgrade --auto-update on’.
 
-5.18 -new
+5.20 -new
 =========
 
 Start a new root conversation while retaining the same container and
@@ -1721,7 +1758,7 @@ files.  Use with start (the default) or reset.  Mutually exclusive with
 ‘--resume’ and ‘--import-session’.  Example: ‘oc-box --project
 ~/devel/demo --new’.
 
-5.19 -resume
+5.21 -resume
 ============
 
 Explicitly request the normal resume behavior.  Requires a registered
@@ -1730,7 +1767,7 @@ can start a new conversation.  Use with start/reset.  Mutually exclusive
 with ‘--new’ and ‘--import-session’.  Example: ‘oc-box --project
 ~/devel/demo --resume’.
 
-5.20 -import-session SESSION_ID
+5.22 -import-session SESSION_ID
 ===============================
 
 Copy a host conversation from the selected project into the private
@@ -1744,7 +1781,7 @@ project; the original registry and saved archive verify its project.
 
      oc-box --project ~/devel/demo --import-session ses_HOST_SESSION_ID
 
-5.21 -model PROVIDER/MODEL
+5.23 -model PROVIDER/MODEL
 ==========================
 
 Pass the provider/model choice to the OpenCode TUI on this launch.  It
@@ -1753,7 +1790,7 @@ otherwise normal OpenCode provider/model preferences apply.
 
      oc-box --project ~/devel/demo --model github-copilot/gpt-6.1-sol
 
-5.22 -credential-mode env|selected|vault
+5.24 -credential-mode env|selected|vault
 ========================================
 
 With ‘credentials’, save an explicit forwarding mode for that workspace.
@@ -1769,7 +1806,7 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.23 -no-vault
+5.25 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -1788,7 +1825,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.24 -env-secret NAME
+5.26 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -1801,7 +1838,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.25 -vault-secret NAME
+5.27 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -1813,7 +1850,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.26 -clear-credentials
+5.28 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -1825,7 +1862,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.27 -output FILE
+5.29 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -1835,7 +1872,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.28 -portable
+5.30 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -1845,7 +1882,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.29 -recipient AGE_KEY
+5.31 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -1856,7 +1893,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.30 -identity FILE
+5.32 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -1867,7 +1904,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.31 -cpus NUMBER
+5.33 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -1878,7 +1915,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.32 -memory SIZE
+5.34 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -1890,7 +1927,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.33 -pids-limit NUMBER
+5.35 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -1898,7 +1935,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.34 -device MAPPING
+5.36 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -1912,7 +1949,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.35 -podman-arg=-OPTION[=VALUE]
+5.37 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -1939,7 +1976,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.36 -clear-devices
+5.38 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -1950,7 +1987,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.37 -clear-podman-args
+5.39 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -1960,7 +1997,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.38 -delete-sessions
+5.40 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -1969,7 +2006,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.39 -all
+5.41 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -1977,7 +2014,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.40 -y, -yes
+5.42 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -3199,22 +3236,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description2691
-Node: Commands6203
-Node: Options82574
-Node: Lifecycle and persistence102731
-Node: Distribution images104851
-Node: Sessions and recovery109726
-Node: Devices and host permissions116311
-Node: Resource reports118657
-Node: Configuration and environment120768
-Node: Files132031
-Node: Exit status137975
-Node: Examples138828
-Node: Troubleshooting140914
-Node: Installation and manuals152266
-Node: Authors and license161486
-Node: See also162093
+Node: Description2730
+Node: Commands6242
+Node: Options83261
+Node: Lifecycle and persistence104328
+Node: Distribution images106448
+Node: Sessions and recovery111323
+Node: Devices and host permissions117908
+Node: Resource reports120254
+Node: Configuration and environment122365
+Node: Files133628
+Node: Exit status139572
+Node: Examples140425
+Node: Troubleshooting142511
+Node: Installation and manuals153863
+Node: Authors and license163083
+Node: See also163690
 
 End Tag Table
 

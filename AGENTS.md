@@ -220,18 +220,64 @@ without modifying the parent environment. Verify `gh api user` reports
 `groopcd` before publishing. Pass Git credential helpers per command rather
 than storing tokens or changing global authentication settings.
 
-Version `1.7.N+gHASH` is derived from the full Git history, with N the commit
+Development version `1.7.N.dev0+gHASH` is derived from the full Git history, with N the commit
 count minus the 1.0.0 baseline (29); every later commit advances N automatically.
 The 1.5, 1.6 and 1.7 series deliberately retain this baseline; do not reset the patch
 count or rewrite embedded 0.1/1.0/1.5/1.6 identities when preparing a release.
 Keep the absolute `commit_count` for old updater compatibility, require full
-history, and fast-forward tested release commits into master. The installer
+history, and fast-forward tested development releases into `devel`, never
+`master`. Stable final releases remain on `master`. The installer
 embeds the source identity in its private `build-info.json`. Original project
 code/documentation is GPL-3.0-or-later;
 retain LICENSE and NOTICE when distributing/installing it.
-PyPI uses the public `1.7.N` version; retain the full `+gHASH` identity in package
+PyPI uses the public `1.7.N.dev0` development version; retain the full `+gHASH` identity in package
 resources. Python-package installations upgrade through pipx/uv/pip, never the
 GitHub self-updater. Preserve the normal curl/GitHub update path in parallel.
+
+## Approved experimental development publication
+
+The owner approved a channel-ready successor to the separately tested
+`557396562b1b835d15ffcf152428762dc27d7ecd` candidate, with a new derived
+identity, development-branch publication, documentation and PyPI prerelease.
+Stable v1.6.94 and `master` remain unchanged. Preserve existing source worktrees,
+private evidence and the earlier unfinished/conflicted channel integration.
+
+Development is a release channel, not an installation method: GitHub prereleases
+and `.dev0` packages come from `devel`; stable finals come from `master`.
+Select immutable published releases and verify source/tag/version/branch
+membership. Successful explicit selections persist per verified installation
+owner; previews do not mutate preferences. Keep updater downloads anonymous,
+sanitized and stdlib-only, package upgrades delegated only to verified owners,
+GitHub auto-update opt-in and package auto-update disabled. Preserve optional
+TUI/vault extras only when supported by the selected target. A launcher downgrade
+does not roll back workspace/session state.
+
+This port changes update/install/version/publication paths, not workspace,
+credential, history, sharing or dashboard behavior. Do not import unrelated
+stable runtime changes merely to obtain channel support. Audit unchanged core
+function/module identities against the original candidate and state the
+provenance boundary honestly; a new source hash is not an old exact-source pass.
+Require relevant source/package/native/build-only validation and independent
+review before publishing the frozen successor. No container-only fixture is a
+new external-host acceptance.
+
+The owner explicitly intends unfinished UI validation to remain an experimental
+development limitation. Keep the recorded full UI restore-verifier refusal and
+unperformed portable UI/Storage/removal/final-attestation/Quit checks visible;
+never relabel them passed. Existing accepted 42-check history, 12/six recovery,
+13-stage vault, 37-check sharing and separate six-stage V1/V2 lifecycle reports
+retain their original candidate/native identities. Do not replay completed gates
+or stopped fixtures merely to finish documentation. Stable UI promotion remains
+separately gated; prerelease publication is not that acceptance or a security
+certification.
+
+Publish the exact clean tested successor as one matching `v1.7.N.dev0` GitHub
+prerelease and PyPI version. Preserve full-history baseline 29, all existing
+tags and the stable release. The Trusted Publishing workflow must bind/recheck
+source and exact artifacts, verify existing release assets, and transfer only
+validated wheel/sdist bytes. Do not start a second upload. Attach that workflow's
+exact distributions, identity and checksums, then anonymously compare public
+GitHub/PyPI downloads. No raw private evidence or credential material is public.
 
 Update `docs/cli.md` when command-line behavior changes, then regenerate with
 `python3 tools/build_docs.py` (requires GNU makeinfo). Prebuilt manuals ship in

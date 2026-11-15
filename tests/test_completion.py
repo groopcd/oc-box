@@ -142,6 +142,36 @@ fi
         self.assertEqual(self.complete("completion", "ba"), ["bash"])
         self.assertEqual(self.complete("completion", "bash", "ba"), [])
 
+    def test_channel_options_are_local_to_upgrade_not_tui_or_workspace_actions(self):
+        self.assertEqual(self.complete("upgrade", "--st"), ["--stable"])
+        self.assertEqual(self.complete("upgrade", "--de"), ["--devel"])
+        for command in (
+            "start",
+            "stop",
+            "sync",
+            "reset",
+            "repair",
+            "terminal",
+            "web",
+            "tui",
+            "share",
+            "credentials",
+            "status",
+            "doctor",
+            "backup",
+            "backup-info",
+            "restore",
+            "purge",
+            "list",
+            "distros",
+            "secrets",
+            "completion",
+        ):
+            with self.subTest(command=command):
+                options = self.complete(command, "--")
+                self.assertNotIn("--stable", options)
+                self.assertNotIn("--devel", options)
+
     def test_no_vault_is_offered_only_for_owning_launch_commands(self):
         self.assertEqual(self.complete("--no-v"), ["--no-vault"])
         for command in ("start", "reset", "web"):

@@ -2924,7 +2924,22 @@ def parser():
     result.add_argument(
         "--check",
         action="store_true",
-        help="with upgrade, check GitHub for a changed version without installing",
+        help="with upgrade, preview the selected published channel without installing",
+    )
+    channel = result.add_mutually_exclusive_group()
+    channel.add_argument(
+        "--stable",
+        dest="update_channel",
+        action="store_const",
+        const="stable",
+        help="with upgrade, select and remember the stable release channel",
+    )
+    channel.add_argument(
+        "--devel",
+        dest="update_channel",
+        action="store_const",
+        const="devel",
+        help="with upgrade, select and remember the development release channel",
     )
     result.add_argument(
         "--maintenance",
@@ -3269,6 +3284,7 @@ def main(argv=None):
                 args.version,
                 args.check,
                 args.auto_update is not None,
+                args.update_channel is not None,
                 args.distro,
                 args.new,
                 args.resume,
@@ -3290,8 +3306,12 @@ def main(argv=None):
                 "Credentials accepts only workspace selectors and credential-selection options."
             )
         return credentials_command(args)
-    if (args.check or args.auto_update is not None) and args.command != "upgrade":
-        raise BoxError("--check and --auto-update apply only to upgrade.")
+    if (
+        args.check or args.auto_update is not None or args.update_channel is not None
+    ) and args.command != "upgrade":
+        raise BoxError(
+            "--check, --auto-update, --stable and --devel apply only to upgrade."
+        )
     if args.command == "upgrade":
         if any(
             (
@@ -3318,9 +3338,23 @@ def main(argv=None):
                 args.version,
             )
         ):
-            raise BoxError("Upgrade accepts only --check or --auto-update on/off.")
-        if args.check and args.auto_update is not None:
-            raise BoxError("--check and --auto-update are mutually exclusive.")
+            raise BoxError(
+                "Upgrade accepts only --check, --stable/--devel or --auto-update on/off."
+            )
+        if args.auto_update is not None and (
+            args.check or args.update_channel is not None
+        ):
+            raise BoxError(
+                "--auto-update cannot be combined with --check, --stable or --devel."
+            )
+        if os.environ.get("OC_BOX_CONTAINER") == "1":
+            raise BoxError(
+                "Run 'oc-box upgrade' on the host; the container cannot update its host launcher."
+            )
+        if os.geteuid() == 0:
+            raise BoxError(
+                "Run oc-box upgrade as your regular host user, without sudo."
+            )
         if __package__:
             from .updater import (
                 UpdateError,
@@ -3338,7 +3372,7 @@ def main(argv=None):
                 upgrade,
             )
 
-        if package_managed(APP):
+        if args.auto_update is not None and package_managed(APP):
             if args.auto_update == "on":
                 raise BoxError(
                     package_upgrade_message(APP)
@@ -3346,19 +3380,11 @@ def main(argv=None):
                 )
             print(package_upgrade_message(APP))
             return 0
-        if os.environ.get("OC_BOX_CONTAINER") == "1":
-            raise BoxError(
-                "Run 'oc-box upgrade' on the host; the container cannot update its host launcher."
-            )
         try:
             if args.auto_update is not None:
-                if os.geteuid() == 0:
-                    raise BoxError(
-                        "Run oc-box upgrade as your regular host user, without sudo."
-                    )
                 update_settings(args.auto_update == "on")
                 return 0
-            upgrade(APP, check=args.check)
+            upgrade(APP, check=args.check, channel=args.update_channel)
         except UpdateError as exc:
             raise BoxError(str(exc)) from exc
         return 0
