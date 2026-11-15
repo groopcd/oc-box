@@ -28,6 +28,110 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
+### Reviewed 5573965 candidate evidence
+
+The following is a review of retained evidence for clean
+`557396562b1b835d15ffcf152428762dc27d7ecd`, `1.7.110+g5573965`, count 139.
+It is **not a new execution or exact-source acceptance of its channel-integrated
+successor**. The owner now approves experimental `devel`/`.dev0` publication with
+the incomplete UI scope disclosed, leaving stable v1.6.94/master unchanged.
+That decision does not relabel any unfinished observation passed.
+
+| Earlier-source automation | Reviewed result |
+| --- | --- |
+| [Source/native CI](https://github.com/groopcd/oc-box/actions/runs/43282466795) | 1,642 tests per Python 3.10/3.13 engine, zero CI skips; all 12 native scripts. |
+| [Distro CI](https://github.com/groopcd/oc-box/actions/runs/43282466720) | Seven distro jobs passed. |
+| [Build-only CI](https://github.com/groopcd/oc-box/actions/runs/43282469573) | Passed; publishing skipped. |
+| Local suites | 1,642 tests each with two documented environment skips each, unlike CI. |
+| Distribution audit | 60 wheel Git payloads, 197 tracked sdist files and 71 RECORD hashes; source identities and licenses reviewed. |
+
+Earlier build-only wheel SHA-256:
+`95d66f0006f547bb6a4adf7d55bc757a0e2a5a86c39e5a0e6b812481947c68cd`;
+sdist SHA-256:
+`d795bc34e6bfe4390d8a1ca9220ed2940b77a785e0d34843036167f5b5d9e588`.
+These identify the old `1.7.110` build-only files, not a future published build.
+The historical local-native failure remains unresolved/preserved; later clean
+native/CI passes do not retroactively diagnose it.
+
+| Earlier-source external-host scope | Retained report SHA-256 |
+| --- | --- |
+| History/readiness: 42 checks | `e287598d7b5afdff5c95586587e2a83d0481da24e2e6892fe1eba22501d926b0` |
+| Recovery snapshot: 12 checks | `4583a5888ce2dca7f7240cb66f7494db0da507744f1a93c27a08481998c6cf56` |
+| Stop cancellation: six checks | `c6cd959ff23c72a6f9889b7f2e48ca89721cf01eedd674b5e9c52a4055050fe6` |
+| Global vault: 13 stages | `fa12479de9b6adcc6f2a12639a94c045dfed9b6535823fdc9b12c5bb44dcb62d` |
+| Sharing: 37 checks | `bc65ed9d76f296b284509ac1a8db266c954ea9d486cd5d24eeb038a8da190c6b` |
+| V1/V2 CLI lifecycle: six stages, including nine superseded-history checks | `bf600842be50b517962d6879ff5f890b3513cee92a6ae20d3375d07859d2784f` |
+| Lifecycle source/native/launch pins | `e59cc23946e82176ccc73ef94e72ddc5b91c14f8beaf4b796f7aaac05010f40f` |
+
+History exits were `[0,0,0,1,0,0,0,0]`; recovery owners `[0,1]`, cancellation
+stop `0`. Sharing included actual nested-mount checks and enforcing SELinux,
+with source labels unchanged. Lifecycle completed once, with fixture/launcher/
+process exits 0, three distinct workspace IDs and 18 synthetic provider requests.
+It used private native **V1 1.19.5 / V2 2.2.6**, without replacing system OpenCode.
+The separate CLI lifecycle gate is **complete and must not be replayed for
+publication paperwork**. Its raw output was not retained (13,841 stderr bytes);
+no zero-stderr or comprehensive cleanup-log review is claimed.
+
+These are scripted synthetic external-host/rootless results, not interactive UI,
+real-provider/real-project restore, native-job cleanup, exhaustive races,
+network containment, security certification or native 2.3 acceptance. Stable
+1.6.94 evidence does not accept the new manager/sharing line.
+
+#### Retained UI observations and stopped scope
+
+Genuine navigation, settings, clipboard, loading/focus/resize/native PTY,
+session backup/fresh-ID restore and masked-password observations retain their
+original scope and `NOT_AUTOMATICALLY_PASSED` qualification. Failed broader
+fixtures are not recast as complete passes.
+
+Full workspace backup Create/Inspect returned 0; authenticated backup review
+verified source/archive equality and unrelated ciphertext preservation. The
+expected Host whole-workspace-backup preflight refusal was genuinely observed.
+**UI full restore returned 0 and reported a fresh stopped workspace, but its
+later integrity verifier refused `manifest`.** That failed report's SHA-256 is
+`22dfa5cea90821897e1a80a513bfaee0d3cc0de9fa66a974e6938105ae660af6`;
+saved failed-state SHA-256 is
+`de7e370f7370630967be1eb46005793e1a08d0b554122c6d35b15ba51c87be49`.
+Its empty `checks` object records no first failing subcomparison.
+
+Production deliberately makes extraction roots 0700 and clears special bits
+from non-symlink children. A subsequent metadata-only observation found source
+home 0755 versus restored home 0700 with unchanged host UID/GID; both project
+roots were 0700. This confirms an intentional transformation, **not all-entry
+equality or the sole/first cause of failure**. Full restored integrity,
+preservation and fresh-identity oracle completion remain unaccepted.
+
+The portable UI Create/Inspect/restore sequence was **not armed**. Remaining
+three-scope Storage observations, designated ciphertext deletion, original
+synthetic source removal with project/history/retired-provenance/other-ciphertext/
+both-restores preservation checks, the final journal/preservation attestation and
+latest manager Quit confirmation remain unperformed or unaccepted. No current
+resource, shutdown or lease-cleanup state is certified.
+
+The owner stopped that sequence and explicitly selected experimental development
+publication with these limitations. Do not resume its stores, replay completed
+gates, decrypt evidence or treat publication as a waiver/pass. Preserve every
+failed attempt and encrypted archive. Stable promotion remains gated separately.
+
+#### Channel-successor validation boundary
+
+The approved port changes install/update/version/publication handling and the
+upgrade CLI path, not core workspace, credential, history, sharing or dashboard
+behavior. Review unchanged core functions/modules and schema/provenance
+separately from changed entrypoint paths; do not claim all runtime files or a
+full old donor map are identical. Relevant new-source source/package/native CI,
+guarded build-only distribution checks and independent review remain required,
+especially for channel resolution, ownership delegation, previews, extras,
+downgrade warnings and the `.dev0`/tag/branch/artifact identity chain.
+
+No supported-version, protected-data, secret-lifetime or ownership regression is
+retired to reduce testing. A new source hash and an experimental label do not
+become an exact-source host pass; earlier results retain the hashes above.
+Do not schedule needless broad host retesting for channel-only paperwork.
+Future runtime changes/stable promotion still need applicable clean-source
+evidence. See [the channel guide](update-channels.md) and
+[publication checklist](../CONTRIBUTING.md#release-gate-and-publication-checklist).
+
 ### Experimental temporary host-file tools
 
 `oc-box share PATH` uses native V2 experimental client-MCP, not a filesystem
@@ -55,7 +159,8 @@ unrelated MCP/config preservation, and tool removal/disconnect on close/reload.
 Record the native version; an unsupported experimental API must refuse without
 writing configuration. These checks do not prove host file/container isolation.
 
-Before publication, run on the **host**, outside this container, using a clean
+For relevant runtime changes or stable promotion, run on the **host**, outside
+this container, using a clean
 source-pinned candidate and synthetic files only. Check a running workspace can
 share outside-root text and screenshots with no reset, host listener, mount,
 credential refresh or saved MCP entry; ordinary container file/shell access must
@@ -71,10 +176,12 @@ reports and do not infer acceptance from unit/native or earlier TUI/vault passes
 ### Experimental workspace manager
 
 The [Textual manager](tui.md) adds a separate validation surface from the native
-OpenCode conversation TUI. Its first-release candidate is **not a published
-stable build or host-acceptance claim**. The decision is stable after fresh
-source-pinned host checks, not a preview release. The checks below are
-requirements, not a record that they were executed or passed. Demo, headless
+OpenCode conversation TUI. Its development publication is explicitly
+**experimental, not stable manager acceptance**; see the
+[retained evidence and incomplete UI scope](#reviewed-5573965-candidate-evidence).
+The checks below remain validation/stable-promotion requirements, not a record
+that every observation was executed or passed, nor a request to resume stopped
+fixtures. Demo, headless
 behavior, real native APIs and operator-observed Podman/terminal behavior
 provide different evidence; none may be substituted for the next layer.
 
@@ -216,10 +323,12 @@ never install packages into system/user-site Python. Default wheel/CLI tests
 must still run without the optional UI dependencies. Test help/argument handling
 and normal CLI compatibility in those environments, not just imported metadata.
 
-The build-only publication gate must check `--with-vault --with-tui`. Preserve
-the workflow guard preventing a GitHub prerelease from automatically uploading
-the ordinary stable `1.7.N` version to PyPI; manual `publish=true` is an explicit
-publication path, not a bypass of acceptance/review.
+The build-only publication gate must check `--with-vault --with-tui`. Development
+requires matching `.dev0` public/resource versions, `devel` source membership
+and a GitHub prerelease, bound to the exact wheel/sdist and validated clean
+identity. Preserve the guard preventing a GitHub prerelease from uploading the
+ordinary final `1.7.N` version; manual `publish=true` cannot bypass it.
+Verify existing release assets and transfer only the workflow's validated bytes.
 
 **New clean-host gate before stable publication.** Freeze the fully integrated
 candidate and record its full commit, clean state, native executable identities,
@@ -308,10 +417,12 @@ observations include:
   trusted-path validation. Ordinary installed launchers for unrelated projects
   must continue to work.
 
-For this first integrated manager release, repeat all three current host
-fixtures—`tools/test_session_sync_podman.py`,
-`tools/test_global_vault_podman.py` and `tools/test_v2_podman.py`—on that same
-clean candidate, in addition to the Textual/journal/archive-resume observations.
+For a future stable integrated manager candidate, require clean-source reports
+from all three current host fixtures—`tools/test_session_sync_podman.py`,
+`tools/test_global_vault_podman.py` and `tools/test_v2_podman.py`—on the same
+candidate, in addition to the Textual/journal/archive-resume observations.
+This is not a request to rerun the completed `5573965` CLI lifecycle gate or the
+stopped dashboard fixtures for the approved channel-only development successor.
 The focused runner now requires **42 named checks**: all 33 earlier checks plus
 nine archive/resume regressions. Its ordered launcher exits must be
 `[0, 0, 0, 1, 0, 0, 0, 0]`; the single `1` remains the deliberate pending-shell
@@ -670,7 +781,8 @@ rehearsal is not host acceptance.
 
 ### Next migrated-history release candidate
 
-**Historical handoff, reusable for a new candidate.** Published `v1.6.51` remains
+**Historical handoff, reusable for a separately approved new runtime/stable
+candidate—not instructions to resume retained fixtures.** Published `v1.6.51` remains
 unchanged and its accepted reports predate the superseded-assistant correction.
 The later [v1.6.58 release record](#published-v1658-evidence-reconciliation)
 reports all three host fixtures, including that correction, on its exact source.
@@ -754,10 +866,10 @@ source/native/harness identities, every required check, deliberate refusal
 exits, recovery and secondary failures. Share only the fixed-schema reports and
 clean checkout identity, not raw native logs, environment or transcripts.
 
-After acceptance, follow the
+For a future separately approved publication, follow the
 [publication checklist](../CONTRIBUTING.md#release-gate-and-publication-checklist):
-fast-forward the accepted commit without changing its identity, publish the
-matching GitHub Release/PyPI version, and compare the public artifacts' hashes.
+select the appropriate stable/devel branch and version, preserve the validated
+commit identity, and compare the exact public artifact hashes.
 No new host pass or release is recorded by preparing this handoff.
 
 ### Published v1.6.58 evidence reconciliation

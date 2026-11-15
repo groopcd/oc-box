@@ -5,15 +5,17 @@ managing native OpenCode 2.x sessions, and attaching to their persistent session
 terminals. It is separate from the native OpenCode conversation TUI opened by
 `oc-box start`; it does not replace that client or add a new chat interface.
 
-**Status: first-release candidate; host acceptance pending, not published as
-stable.** The embedded terminal remains experimental. The contract below
-describes the integrated manager, not a test-execution report.
+**Status: experimental development channel; incomplete UI acceptance is
+explicitly disclosed, not passed.** The owner approved development publication,
+not stable manager promotion. Stable 1.6.94 remains the default without this
+manager. The embedded terminal remains experimental. The contract below
+describes the integrated manager, not a completed test-execution report.
 Check `oc-box tui --help` in the installed build for availability; previously
 published packages need not include it. Demo/headless checks and native offline
 fixtures do not establish interactive host or rootless-Podman acceptance.
-The publication decision is **stable after fresh source-pinned host checks**,
-not an early preview. See the [candidate notes](releases/tui-v1.md) for the
-release-summary template and evidence still required.
+See the [known acceptance limitations](releases/1.7.md#known-acceptance-limitations)
+and [manager release notes](releases/tui-v1.md) for retained observations,
+unfinished restore/storage checks and the separate stable-promotion gate.
 
 ## Design and scope
 
@@ -45,37 +47,42 @@ extension to the workspace owner's service.
 
 ## Installation
 
-For a Python release containing the manager, opt in to its dependencies through
-an isolated tool installation:
+After a development package has been published, explicitly allow prereleases and
+opt in to its dependencies through an isolated tool installation:
 
 ```sh
-uv tool install 'oc-box[tui]'
+uv tool install --prerelease allow 'oc-box[tui]'
 # Or:
-pipx install 'oc-box[tui]'
+pipx install --pip-args='--pre' 'oc-box[tui]'
 ```
 
-To include the independent vault extra too, use `'oc-box[tui,vault]'`. Upgrade
-through the same tool manager, not `oc-box upgrade`.
+To include the independent vault extra too, use `'oc-box[tui,vault]'`. A current
+channel-aware installation can select `oc-box upgrade --devel`; package updates
+delegate only to the verified owning tool/environment, never the GitHub installer.
+Unrecognized/custom ownership receives manual guidance. Package automatic
+updating remains off.
 
-For a reviewed GitHub installer containing this feature:
+For the channel-aware GitHub bootstrap:
 
 ```sh
-sh install.sh --with-tui
+sh install.sh --devel --with-tui
 # Or enable both optional features:
-sh install.sh --with-vault --with-tui
+sh install.sh --devel --with-vault --with-tui
 ```
 
 Review the downloaded `install.sh` before running it. The equivalent piped
-bootstrap suffix is `sh -s -- --with-tui`, or
-`sh -s -- --with-vault --with-tui`. GitHub installations keep these optional
+bootstrap suffix is `sh -s -- --devel --with-tui`, or
+`sh -s -- --devel --with-vault --with-tui`. GitHub installations keep these optional
 dependencies in the private immutable release, retain the opt-in across GitHub
 updates, and leave running releases pinned to their original copy. No system or
 user-site pip installation is needed. Normal non-TUI CLI operation retains its
 stdlib-only baseline; the UI dependencies are optional, not prerequisites for
 `start`, `status`, or recovery commands.
 
-These installation examples apply to a release/source revision containing the
-manager; they do not assert availability in the current stable PyPI package.
+These installation examples explicitly select experimental development;
+stable 1.6.94 does not include the manager. Pre-channel 1.7 launchers cannot use
+the new upgrade flags and require the bootstrap; see
+[update channels](update-channels.md#bootstrap-and-older-installations).
 For ordinary unrelated projects, use the installed `oc-box tui` normally. The
 self-checkout launch below is specifically for managing oc-box's own source.
 
@@ -395,9 +402,12 @@ complex grapheme rendering and extended keyboard protocols are not supported;
 use the native standalone terminal client for applications needing those
 capabilities.
 
-Actual embedded rendering, keyboard input, resize, takeover and detach/reattach
-need a new operator-observed host acceptance run. Headless emulator output and
-the earlier native terminal tests are not an embedded-dashboard host pass.
+Retained operator observations cover bounded embedded rendering/input,
+focus/resize and native PTY behavior with their original
+`NOT_AUTOMATICALLY_PASSED` qualification. They are not a completed dashboard
+acceptance block. Headless emulator output and earlier native terminal tests
+cannot supply missing observations or establish lease cleanup after an
+unconfirmed manager Quit.
 
 ### 5. Logs
 
@@ -506,8 +516,21 @@ Backup file paths and decrypted transcript text never enter the activity journal
 
 ## Stable-release validation gate
 
-This document describes the candidate contract, not a completed host acceptance
-or publication. Its bounded implementation/validation layers are:
+The development release is explicitly experimental. A full UI restore returned
+0, but its later integrity verifier refused `manifest`; full restored integrity
+remains unaccepted. The intentional extraction-root mode change 0755 to 0700
+does not prove all-entry equality or the sole failure cause. Portable UI was not
+armed; remaining three-scope Storage, designated ciphertext deletion,
+source-removal preservation, final journal/attestation and manager Quit checks
+were not completed. See the [complete limitations](releases/1.7.md#known-acceptance-limitations).
+
+The separate six-stage CLI V1/V2 lifecycle gate **is complete** on `5573965`
+with native 1.19.5/2.2.6. It is not a completed UI gate and is not to be replayed
+for documentation. Prior source-qualified results are not exact-source passes
+for the channel-integrated successor.
+
+This document describes the manager contract, not completed stable acceptance.
+Its bounded implementation/validation layers are:
 
 1. Transport-free session domain, private favorites and fixed-category logging.
 2. Optional installation, seven-tab UI, cheap metrics and synthetic-only demo.
@@ -526,7 +549,10 @@ their own earlier source and scope, not this new dashboard. No resource-editing
 phase is included: CPU/RAM limit edits, quotas, resizes and store moves remain
 separate work.
 
-Do not advance `master` (the curl/self-update source), create the stable tag or
-publish to PyPI before the new candidate passes the required external-host
-checks and report review. A build artifact, demo, prior native conversation-TUI
-pass or GitHub prerelease is not an alternative to that gate.
+The approved development publication belongs on `devel` as a GitHub prerelease
+and `.dev0` PyPI version after relevant new-source CI/package/build-only checks.
+Do not advance `master`, create a stable tag or publish a final PyPI version by
+treating that approval as stable acceptance. Stable promotion requires complete
+manager acceptance, applicable final-source gates and separate approval; this is
+not an instruction to reopen stopped fixtures. A build artifact, demo or prior
+native conversation-TUI pass is not the missing host evidence.

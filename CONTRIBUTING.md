@@ -1,6 +1,6 @@
 # Contributing
 
-Use the full Git history: the release identity is `1.7.N+gHASH`, with N the
+Use the full Git history: the development identity is `1.7.N.dev0+gHASH`, with N the
 commit count minus the 1.0.0 baseline (29). Keep the absolute `commit_count` in
 metadata for upgrade compatibility with 0.1/1.0/1.5/1.6 releases. The 1.7 manager
 and sharing series preserves that patch-count baseline, just as 1.5 and 1.6 did. Changes should keep
@@ -363,16 +363,18 @@ remain covered without optional dependencies. Standard build produces the wheel
 from the sdist to verify that it works without Git. Do not publish a dirty
 working tree.
 
-PyPI rejects local `+gHASH` version suffixes: the distribution version is
-`1.7.N` from full-history commit count minus `VERSION_BASE_COMMIT_COUNT`, and
-packaged `build-info.json` keeps `1.7.N+gHASH` plus the full commit and absolute
-commit count. The original stable release has count 29 and version 1.0.0; every
+PyPI rejects local `+gHASH` version suffixes: the development distribution version
+is `1.7.N.dev0` from full-history commit count minus `VERSION_BASE_COMMIT_COUNT`,
+and packaged `build-info.json` keeps `1.7.N.dev0+gHASH` plus the full commit and
+absolute commit count. The original stable release has count 29 and version 1.0.0; every
 subsequent commit advances the patch automatically. Version calculation rejects
 shallow history. The 1.5, 1.6 and 1.7 series keep that baseline; a first published patch
 need not be zero. Embedded older series retain their identity until upgrade.
-Fast-forward the tested release commit into master so merging
-does not add an extra version increment. Each selected release needs a unique
-version; ordinary commits remain on GitHub without requiring a PyPI upload.
+Fast-forward the validated development release into `devel`, not `master`, so
+merging does not add an extra version increment. Stable final releases remain on
+`master`; no stable 1.7 integration is authorized by development publication.
+Each selected release needs a unique version; ordinary commits remain on GitHub
+without requiring a PyPI upload.
 
 Trusted Publisher configuration in PyPI must match:
 
@@ -387,16 +389,17 @@ rather than executing package build code with publishing credentials. GitHub
 Actions are pinned by commit. The user must create/own the PyPI account and
 configure the matching publisher; pending publishers do not reserve names.
 
-First run the workflow with its `publish` input false to verify a build-only
-run, including isolated package checks with `--with-vault --with-tui`. A
-published **stable, non-prerelease** GitHub release named `v1.7.N` (matching
-`public_version(build)`) builds, validates, and publishes to PyPI. The workflow's
-prerelease guard must prevent a GitHub prerelease from automatically uploading
-a regular `1.7.N` package: that version has no Python prerelease suffix and would
-otherwise be a stable PyPI release. A GitHub preview is not permission to bypass
-the stable acceptance gate. Alternatively manually dispatch `publish.yml` on a
-reviewed, accepted commit with `publish` true. Environment protection rules may
-require owner approval. Do not publish from untrusted pull requests.
+First run the guarded workflow with its `publish` input false to verify a
+build-only run, including isolated checks with `--with-vault --with-tui`.
+Development publication requires a matching `v1.7.N.dev0` GitHub **prerelease**,
+public `.dev0` package and validated source on `devel`. Stable final releases
+require final versions and the stable branch. The workflow must bind/recheck the
+clean source, version, tag, branch and exact wheel/sdist identities, including
+existing release-asset checksums. A GitHub prerelease must not upload a regular
+`1.7.N` package; manual `publish=true` is not a bypass of those guards or approval.
+Only one upload is authorized for the chosen release, not competing manual and
+release-triggered uploads. Environment protection rules may require owner
+approval. Do not publish from untrusted pull requests.
 The repository's CI builds/verifies packages on Python 3.10 and 3.13; the full
 mainline smoke fixture remains part of local verification with OpenCode.
 
@@ -408,74 +411,99 @@ update errors for both hosted runners and the Ubuntu distro container; see
 
 ### Release gate and publication checklist
 
-GitHub/curl and PyPI are separate distribution channels. `install.sh` and the
-GitHub self-updater fetch `master`, not the latest release tag. Do not advance
-that branch to an unaccepted runtime candidate merely to start release CI.
-For the first Textual manager, the chosen path is **stable after host checks**,
-not a preview. The [1.7 candidate notes](docs/releases/1.7.md) and detailed
-[manager notes](docs/releases/tui-v1.md) are templates,
-not a published release or passing report.
+Stable/devel are release channels; GitHub/curl and PyPI are installation methods.
+The channel-aware bootstrap/updater selects immutable published releases and
+verifies their tag/source/version/branch, not arbitrary moving HEAD. See
+[update channels](docs/update-channels.md) for user-facing behavior.
 
-1. Integrate changes on a `feature/**` candidate branch, preserving full history.
-   Finish documentation and regenerate the manuals before freezing the commit.
-   Check for untracked files as well as `build-info.json`'s dirty flag. Keep the
-   candidate unchanged throughout validation; record its full commit identity.
-2. Require the source/package/native integration workflow to pass, and the
-   seven-image distro workflow for package-map changes. Run `publish.yml` with
-   `publish=false` on the candidate as a build-only gate, including vault/TUI
-   package verification and the prerelease-publication guard. Neither this workflow
-   nor the release-triggered publisher automatically checks other workflows or
-   host reports; the release owner must review those gates explicitly.
-3. For history/lifecycle changes and this first integrated TUI release, obtain
-   new external-host reports for the focused history/readiness runner,
-   global-vault fixture and V1/V2 lifecycle fixture on the same clean candidate.
-   Retain all 42 default history/readiness checks and the ordered exits
-   `[0,0,0,1,0,0,0,0]`. Also run both fresh post-stop recovery cases:
-   `--history-recovery-case snapshot` (12 checks) and `stop-cancel` (six checks),
-   with owner exits `[0,1]` each and explicit-stop exit `0` in the cancellation
-   case. See the
-   [recovery evidence and scope](docs/testing.md#reviewed-focused-recovery-host-acceptance).
-   Earlier component passes do not accept a later integrated source.
-   Include regression-specific host cases,
-   not just the previously accepted baseline. Use only private synthetic state;
-   never bypass host-only guards from an oc-box container. Follow the
-   [history/readiness handoff](docs/testing.md#focused-historyreadiness-host-runner)
-   and preserve failed attempts separately. The TUI additionally requires the
-   [manager host observations](docs/testing.md#experimental-workspace-manager):
-   actual Textual navigation/settings and embedded PTY behavior, lease cleanup,
-   journal privacy/rotation and opt-in external logs, stable session-table
-   scrolling, native parent deletion and archived-root resume behavior. Earlier
-   native OpenCode conversation-TUI acceptance does not cover this dashboard.
-   Temporary live host-file sharing additionally requires its
-   [focused host checks](docs/testing.md#experimental-temporary-host-file-tools)
-   on the same candidate: host disclosure consent, confinement, real read/image
-   delivery, isolation from ordinary container filesystem access, owner leases,
-   disconnect/stop/reload, no automatic regrant and backup/source preservation.
-4. Review the real reports, every required check, native and source identities,
-   expected refusals, recovery and secondary failures. Offline rehearsals, old
-   reports and a successful build cannot substitute for host acceptance. If any
-   source changes after testing, freeze and validate the new candidate instead.
-5. After acceptance and publication approval, fast-forward the exact tested
-   commit into `master`, push it and tag that same commit as `v1.7.N`. Do not
-   squash, rebase or add a merge/evidence commit between acceptance and tagging:
-   every commit changes both source identity and the derived version. Put the
-   accepted report summary in the GitHub release notes; later source-documentation
-   updates have their own version and do not retroactively change the release.
-6. Publish the stable GitHub Release. Its release event invokes Trusted
-   Publishing to PyPI; do not start a second upload. Wait for successful build
-   and publish jobs, including any environment approval. Download that run's
-   `python-distributions` artifact and attach its exact wheel and sdist, plus a
-   `SHA256SUMS` file, to the GitHub Release.
-7. Download the public PyPI files and compare their hashes with the GitHub assets
-   and checksum file. Re-run
-   `tools/check_package.py DISTDIR --with-vault --with-tui`, verify
-   an isolated installed CLI reports the accepted full `+gHASH` identity, and
-   check tag, release and `master` identities. Keep the full commit/count in
-   wheel and sdist resources even though the public version has no local suffix.
+#### Approved experimental development publication
 
-A later evidence-only commit on `master` also advances the curl/self-update
-version, while PyPI stays at its selected release. Do not describe those channels
-as byte-identical after such an update; retain the released tag and artifacts.
+The owner approved a channel-integrated successor of the separately tested
+`5573965` candidate, **not stable manager acceptance**. Stable v1.6.94,
+`master`, its tag and its PyPI files remain unchanged. Preserve unrelated source
+worktrees, private evidence and prior unfinished integrations.
+
+1. Keep the successor limited to channel/install/update/version/publication
+   paths and documentation, without importing unrelated stable workspace,
+   credential, history, sharing or dashboard changes. Review unchanged core
+   functions/modules against the original candidate separately from changed
+   CLI entrypoint handling; a new source hash is not an old full-map pass.
+2. Finish documentation/manual generation and independent review, then freeze
+   a clean full-history successor. Record its full commit, absolute count and
+   derived `1.7.N.dev0+gHASH` identity; never hardcode the old patch count or reset
+   baseline 29. Check untracked files and dirty metadata without deleting private
+   evidence to make an old checkout clean.
+3. Require relevant source/package/native CI and channel/install/version/upgrade
+   tests on that source. Review distro CI; package-map changes require all seven
+   images. Run guarded `publish.yml` with `publish=false`, including wheel/sdist,
+   Twine and `--with-vault --with-tui` package checks. Keep default no-extra
+   behavior and all V1/data-loss/secret/ownership/permission regressions.
+   The workflow does not itself review all other CI or private host reports;
+   the release owner must do so explicitly.
+4. Preserve [the exact earlier-source evidence](docs/testing.md#reviewed-5573965-candidate-evidence):
+   42 history/readiness checks, 12/six recovery checks, 13 vault stages, 37 sharing
+   checks and the **completed separate six-stage CLI V1/V2 lifecycle gate**, with
+   native 1.19.5/2.2.6. These are not new-source exact passes. Do not replay
+   completed gates, resume stopped UI fixtures, decrypt retained evidence or
+   probe old stores merely for this channel-only publication.
+5. Disclose [all UI limitations](docs/releases/1.7.md#known-acceptance-limitations)
+   in the release notes: UI full restore returned 0 but the later verifier
+   refused `manifest`; intentional root-mode tightening is not all-entry equality
+   or the sole proven cause. Portable UI was unarmed; remaining three-scope
+   Storage, reviewed ciphertext deletion, source-removal preservation,
+   final journal/attestation and manager Quit checks are unaccepted/unperformed.
+   Retain `NOT_AUTOMATICALLY_PASSED` for human observations. Development approval
+   is not a waiver/pass, native 2.3 acceptance or a security certification.
+6. After review and approval, fast-forward the exact validated successor into
+   `devel`, never `master`, and tag that source `v1.7.N.dev0`. Do not add a
+   merge/evidence commit between validation and tagging. Publish one matching
+   GitHub **prerelease** and same-project PyPI `.dev0` release. The workflow
+   must verify/recheck source/tag/channel/version and exact wheel/sdist identity;
+   neither prerelease labeling nor manual dispatch may upload a regular final
+   `1.7.N` package. Do not start a second upload.
+7. Retain the successful workflow's exact distribution artifact. Attach its wheel,
+   sdist, `validated-identity.json` and `SHA256SUMS` to the GitHub prerelease;
+   verify existing assets by checksum before reuse. Earlier local/build-only
+   artifacts are not substitutes.
+8. Anonymously download public GitHub/PyPI files and compare their hashes against
+   those exact assets/checksums. Re-run
+   `tools/check_package.py DISTDIR --with-vault --with-tui`, verify the isolated
+   installed CLI's full `.dev0+gHASH` identity and wheel/sdist commit/count, and
+   check tag, prerelease and `devel` membership. Verify stable refs/files were
+   not changed.
+
+A later branch/evidence commit advances its own derived identity but is not
+silently a channel update. Retain immutable release tags/artifacts and do not
+describe independently built GitHub/PyPI files as byte-identical without hash
+verification.
+
+#### Separate stable-promotion gate
+
+Stable UI promotion still requires complete manager acceptance and applicable
+final-source host validation. This is a future gate, not a request to resume
+retained fixtures or repeat the completed CLI gate for paperwork. For relevant
+runtime changes, use fresh private synthetic external-host state and never run
+host-only probes from inside oc-box.
+
+Retain all 42 history/readiness checks and ordered exits
+`[0,0,0,1,0,0,0,0]`, plus both recovery cases: `snapshot` (12 checks) and
+`stop-cancel` (six), owner exits `[0,1]` each and explicit-stop exit `0`.
+Require applicable global-vault and full V1/V2 lifecycle evidence, manager
+navigation/settings/clipboard/scrolling/native PTY and lease cleanup, private
+journal/rotation and opt-in logs, complete Storage/backup/restore/removal
+preservation, and source-qualified sharing confinement/consent/lease/reload/
+backup checks. Keep original failures; old component passes do not accept a
+later integrated source.
+
+See the [stable gate table](docs/releases/1.7.md#stable-promotion-remains-separate),
+[manager host plan](docs/testing.md#experimental-workspace-manager) and
+[sharing host plan](docs/testing.md#experimental-temporary-host-file-tools).
+Review the actual reports, refusals, recovery, native/source identities and
+secondary failures. A successful build is not host acceptance. Future stable
+publication requires separate owner approval and reviewed integration with
+then-current `master`; the historical fast-forward plan does not resolve its
+divergence. No master advancement or final-version publication follows from
+the approved development release.
 
 Use only the repository owner's explicit publication credential, isolated
 subprocess-local GitHub authentication and a verified owner identity for GitHub

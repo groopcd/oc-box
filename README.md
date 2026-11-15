@@ -11,12 +11,13 @@ Copyright (C) 2026 Paulo Dias <paulo.miguel.dias@gmail.com>.
 Licensed [GPL-3.0-or-later](LICENSE); see [NOTICE](NOTICE) for attribution and
 the acknowledgment of OpenAI coding-assistant contributions through OpenCode.
 
-**1.7 rollout:** the series adds the optional Textual manager, temporary live
-host-file tools and guarded exit-history recovery, and retains the private-memory
-and Ubuntu CI fixes from 1.6.60. See the
-[1.7 release notes and acceptance checklist](docs/releases/1.7.md) for the feature
-set and publication requirements. Development-branch contents and component
-passes alone are not a published stable release.
+**1.7 development channel (explicit opt-in):** the series adds the optional
+Textual manager, temporary live host-file tools and guarded exit-history recovery,
+and retains the private-memory and Ubuntu CI fixes from 1.6.60. Stable 1.6.94
+remains the default and does not include the manager. Development releases use
+`1.7.N.dev0`; their publication does **not** declare unfinished dashboard
+restore/storage acceptance passed. See the [channel guide](docs/update-channels.md)
+and [1.7 release notes and known limitations](docs/releases/1.7.md).
 
 ## Why oc-box?
 
@@ -86,14 +87,19 @@ V2 launches need Linux anonymous-memory file support even with `--no-vault`.
 Older uv-managed Python builds without `os.memfd_create` use a compatible libc
 fallback; see [private capture troubleshooting](docs/cli.md#private-output-capture-and-uv-python).
 
-Install on the **host as your regular user**, without sudo. Choose one channel:
+Install on the **host as your regular user**, without sudo. Choose an installation
+method; a new installation defaults to the stable release channel:
 
 | Method | Install | Update |
 | --- | --- | --- |
 | **pipx — isolated CLI from [PyPI](https://pypi.org/project/oc-box/)** | `pipx install oc-box` | `pipx upgrade oc-box` |
 | **uv — isolated CLI from PyPI** | `uv tool install oc-box` | `uv tool upgrade oc-box` |
 | **pip — inside an activated virtual environment** | `python -m pip install oc-box` | `python -m pip install --upgrade oc-box` |
-| **GitHub — latest development branch** | One-line installer below | `oc-box upgrade` |
+| **GitHub — published stable/devel releases** | One-line installer below | `oc-box upgrade` |
+
+Development is an explicit opt-in, not moving branch HEAD. Existing saved channel
+choices are retained. See [update channels](docs/update-channels.md) for
+`upgrade --devel`, `--stable`, nonmutating previews and older-launcher bootstrap.
 
 ### Install from PyPI
 
@@ -138,7 +144,8 @@ no need for `sudo pip` or a system/user-site pip installation.
 
 ### Install from GitHub or source
 
-The existing one-line installer remains available for the latest GitHub code:
+The one-line installer selects a published stable release by default, or reuses
+the saved GitHub channel:
 
 ```sh
 curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh
@@ -146,11 +153,13 @@ curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/
 
 This downloads and runs the public installer; it trusts the published GitHub
 source. To inspect it first, download `install.sh`, review it, and run `sh
-install.sh`. Git clones the full public branch history anonymously into a
-temporary directory so installed versions retain their accurate commit count.
+install.sh`. The channel-aware bootstrap resolves the published release and
+verifies its tag/commit against the selected channel branch. Git fetches full
+history anonymously into a temporary directory for the accurate commit count.
 It does not use or save your GitHub/provider tokens.
 
-Alternatively, install from a source checkout:
+Alternatively, install an explicitly reviewed source checkout (this installs that
+source, not necessarily a published release):
 
 ```sh
 git clone https://github.com/groopcd/oc-box.git
@@ -161,8 +170,8 @@ oc-box --version
 
 ### Upgrade PyPI installations
 
-The PyPI and GitHub channels use the same code and workspace format. Choose
-the package manager that owns your CLI installation when upgrading it:
+PyPI and GitHub are installation methods, each supporting stable/devel release
+choices. Direct package-manager updates remain available:
 
 ```sh
 pipx upgrade oc-box
@@ -171,20 +180,23 @@ uv tool upgrade oc-box
 python -m pip install --upgrade oc-box
 ```
 
-`oc-box upgrade` detects Python-package installations and prints the appropriate
-command; it does not overwrite package-managed files or create a competing
-GitHub-installed launcher. GitHub/curl installations retain `oc-box upgrade` and
-opt-in automatic GitHub updates. If both channels are installed, check
-`command -v oc-box` to select the intended launcher. PyPI package versions use
-`1.7.N`, while `oc-box --version` also records `+gHASH` for source provenance.
+Channel-aware `oc-box upgrade` delegates to the verified pipx, uv tool or dedicated
+virtual environment owning the running CLI; unrecognized/custom installations
+receive manual guidance. It never uses the GitHub installer for a package-owned
+CLI or creates a competing launcher. Editable source installations must update
+their checkout separately. Package auto-update stays disabled; GitHub auto-update
+is opt-in. If both methods are installed, check `command -v oc-box`.
+Public development versions use `1.7.N.dev0`; `oc-box --version` also records
+`+gHASH` for source provenance. Ordinary package installs still select stable
+unless prereleases are explicitly requested.
 Published PyPI releases are selected separately from ordinary GitHub commits.
 Packaged manuals are in the package's `docs/` and the tool environment's
 `share/man`/`share/info`; those directories may need explicit reader paths.
 
 ### Experimental workspace dashboard
 
-The development branch adds an optional Textual manager, separate from OpenCode's
-native conversation TUI:
+The experimental development channel adds an optional Textual manager, separate
+from OpenCode's native conversation TUI:
 
 ```sh
 oc-box tui
@@ -225,19 +237,20 @@ foreground masked prompts and fresh-ID restoration. Backups and restores do not
 silently overwrite existing files or start restored workspaces. CPU/RAM limit edits, quotas, resizes and
 storage moves remain deferred; resource settings are informational.
 
-For a Python release **containing this feature**, opt in to the dashboard and,
-optionally, the independent vault extra:
+After a development package has been published, explicitly allow prereleases and
+opt in to the dashboard and, optionally, the independent vault extra:
 
 ```sh
-uv tool install 'oc-box[tui,vault]'
-# Or: pipx install 'oc-box[tui,vault]'
+uv tool install --prerelease allow 'oc-box[tui,vault]'
+# Or: pipx install --pip-args='--pre' 'oc-box[tui,vault]'
 oc-box tui --read-only
 ```
 
-A reviewed GitHub installer containing it accepts `sh install.sh --with-tui` or
-`sh install.sh --with-vault --with-tui` (piped suffix:
-`sh -s -- --with-vault --with-tui`). Dependencies stay optional and isolated;
-GitHub updates retain the opt-in in private releases. These instructions do not
+A channel-aware GitHub bootstrap accepts
+`sh install.sh --devel --with-vault --with-tui` (piped suffix:
+`sh -s -- --devel --with-vault --with-tui`). Vault support is independent and
+optional. Dependencies stay isolated; GitHub updates retain supported opt-ins in
+private releases. These instructions do not
 claim that the currently published stable PyPI package contains the dashboard.
 
 An ordinary installed launcher is appropriate for unrelated projects. To manage
@@ -253,10 +266,12 @@ explanation](docs/tui.md#launch-and-navigation). Normal mode requires a
 regular-user host TTY. Synthetic-only `--demo` uses fixed sample data and permits
 container preview without host service/registry/log access or actions. Demo and
 offline checks are **not a new interactive/Podman host acceptance pass**.
-The first TUI release is planned as **stable only after fresh, source-pinned
-host checks**, not as a preview workaround. See the [manager guide](docs/tui.md)
-and [candidate release notes](docs/releases/tui-v1.md) for keys, source-specific
-session actions, log privacy and the publication gate.
+The owner approved an **experimental development release with the incomplete UI
+acceptance disclosed**, not a stable manager release. A full restore returned 0,
+but a later integrity verifier refused `manifest`; portable/storage completion
+and final preservation/journal checks remain unaccepted. See the
+[manager guide](docs/tui.md) and [manager release notes](docs/releases/tui-v1.md)
+for the complete limitations, keys, source-specific actions and stable gate.
 
 ### OpenCode 2.x shared clients
 
@@ -304,8 +319,9 @@ experimental client-MCP API. It does not expose a path to shell commands.
 Read-only and later disconnect do not undo disclosure. Hidden files and future
 additions to a shared folder are included; prefer a single file when possible.
 See [share](docs/cli.md#share) for confirmation, protected-path refusals, size
-limits and lifecycle details. This feature is pending live host acceptance and
-publication after the TUI/regression work.
+limits and lifecycle details. Its 37-check scripted host acceptance belongs to
+the earlier exact `5573965` source and native 2.2.6, not automatically to every
+later development build; see [the evidence scope](docs/releases/1.7.md#reviewed-earlier-source-evidence).
 
 ### V2 conversation archives
 
@@ -379,14 +395,17 @@ launchers before reinstalling. The pinned-release guarantee applies afterward.
 ### Upgrade from GitHub
 
 ```sh
-oc-box upgrade --check       # Check for a changed published version
-oc-box upgrade               # Install the current public GitHub master commit
+oc-box upgrade --check       # Preview the saved channel; do not change it
+oc-box upgrade               # Install a published release from that channel
+oc-box upgrade --devel       # Explicitly opt in and remember development
+oc-box upgrade --stable      # Return to stable; warns if this downgrades code
 oc-box upgrade --auto-update on
 oc-box upgrade --auto-update off
 ```
 
 Automatic updates are **opt-in**. When enabled, normal installed `oc-box` starts
-check GitHub before opening a workspace, install a changed version, and continue
+check the saved GitHub release channel before opening a workspace, install a
+changed version, and continue
 with the same arguments. Network/update failures print a message and continue
 with the installed version. There is no background daemon or update during an
 active session. Informational commands, maintenance terminals, reset/purge, and
@@ -395,10 +414,15 @@ direct source-checkout launches do not perform automatic checks.
 Upgrades replace only the installed launcher/modules/manuals. They do not pull
 into or change a source checkout, reset containers, delete workspaces, touch
 provider credentials, or change the host OpenCode version. A locally installed
-commit ahead of the published branch is retained. No GitHub token is required;
+version newer than the channel release is retained unless an explicit channel
+switch selects an older release. That switch changes program files, not
+workspace/session state; it is not a rollback. `--check` saves nothing. No GitHub token is required;
 updates use the fixed public HTTPS upstream without global Git config, helpers,
-hooks, or forwarded environment secrets. This follows the development branch,
-not signed release artifacts; see [SECURITY.md](SECURITY.md).
+hooks, or forwarded environment secrets. Release identity checks are not a signed
+release or reproducible-build scheme; see [SECURITY.md](SECURITY.md).
+Old pre-channel 1.7 launchers require the channel-aware bootstrap, not unsupported
+new flags; exact v1.6.60 needs one plain upgrade first. See
+[bootstrap compatibility](docs/update-channels.md#bootstrap-and-older-installations).
 
 ## Quick start
 
@@ -874,7 +898,8 @@ See [backup commands and limitations](docs/cli.md#backup) and
 
 The [complete CLI reference](docs/cli.md) covers **every command and option**,
 including defaults, examples, persistence, crash recovery, expected failures,
-configuration, resource metrics, and troubleshooting.
+configuration, resource metrics, and troubleshooting. The
+[channel guide](docs/update-channels.md) explains stable/devel selection.
 
 The installer includes prebuilt man and GNU Info pages:
 
@@ -892,7 +917,8 @@ info --file "$HOME/.local/share/info/oc-box.info"
 
 Readers are host packages (`man` and `info` on openSUSE). See
 [CONTRIBUTING.md](CONTRIBUTING.md) to regenerate the manuals from `docs/cli.md`.
-`oc-box --version` uses `1.7.N+gHASH`. The 1.5, 1.6 and 1.7 series retain N's original 1.0.0
+Development `oc-box --version` uses `1.7.N.dev0+gHASH`; a final stable
+release uses no `.dev0`. The 1.5, 1.6 and 1.7 series retain N's original 1.0.0
 baseline (full-history commit count minus 29), so commits continue advancing N
 automatically rather than restarting at zero. Installed copies retain their
 source version until upgraded or reinstalled. Existing 0.1/1.0/1.5/1.6 installations

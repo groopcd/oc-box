@@ -101,8 +101,14 @@ untrusted guarantee that a model will ignore it. Existing native permission rule
 and Build behavior remain unchanged; host confirmation is the disclosure fence.
 
 Unit/process/native tests are not rootless-Podman or interactive host acceptance.
-Keep this feature unpublished until the TUI and regression work and the focused
-host checks in `docs/testing.md` are complete.
+The earlier exact `5573965` candidate has 37 reviewed scripted external-host
+sharing checks with native 2.2.6, including nested mounts and enforcing SELinux
+with source labels unchanged. That scope is not a security certification or
+acceptance of every later source/native version. The owner approved experimental
+development publication with the separate dashboard acceptance limitations
+disclosed, not a stable manager pass. See
+[the source-qualified evidence](docs/testing.md#reviewed-5573965-candidate-evidence)
+and [known limitations](docs/releases/1.7.md#known-acceptance-limitations).
 
 ## Global V2 host credential vault and policy overrides
 
@@ -232,9 +238,13 @@ project or assume Windows-shared mounts have the same permission behavior.
 GitHub installs can opt into private crypto wheels using `--with-vault`, staged
 before launcher activation without modifying system/user site-packages. Python
 tool installs use the `vault` extra; default installs remain dependency-free.
-The earlier selected-vault host probes are accepted; global defaults and
-`--no-vault` have no accepted new live Podman lifecycle pass. Unit/native offline
-checks do not establish that host acceptance.
+Selected-vault, global-default and `--no-vault` host evidence retain the exact
+source/native identities and limits recorded in the
+[test strategy](docs/testing.md). The reviewed `5573965` evidence includes a
+13-stage global-vault fixture and a separate completed six-stage V1/V2 CLI
+lifecycle fixture. These do not accept the unfinished dashboard restore/storage
+block or become a new-source host pass merely because a channel port preserves
+core workspace behavior.
 
 ## Host-side operations
 
@@ -345,12 +355,17 @@ not an incremental store or running-process checkpoint.
 
 ## Installation and updates
 
-The curl bootstrap and `oc-box upgrade` trust the code published at the public
-`https://github.com/groopcd/oc-box` master branch over HTTPS. This is not a signed
-release or reproducible-build verification scheme. Review the installer or use
-a reviewed source checkout if you need to inspect code before execution.
+Stable/devel are release choices in both GitHub/curl and PyPI, not alternative
+containment boundaries. New installations default to stable; development is
+explicitly selected and a successful choice is saved per verified installation
+owner. GitHub selects published final releases from `master` or prereleases from
+`devel`, verifying tag/commit/version/branch membership instead of treating moving
+HEAD as a release. The bootstrap entrypoint itself is public code fetched from
+`https://github.com/groopcd/oc-box` over HTTPS. These checks are not a signed
+release or reproducible-build scheme. Review the installer or use a reviewed
+source checkout if you need to inspect code before execution.
 
-Upgrades use an anonymous HTTPS Git fetch in a temporary HOME with global/system
+GitHub upgrades use an anonymous HTTPS Git fetch in a temporary HOME with global/system
 Git config, credential helpers, hooks, and non-HTTPS Git transports disabled.
 Provider/publishing tokens, shell/loader hooks, and arbitrary host environment
 variables are not inherited. The fetched commit is pinned and checked, with full
@@ -359,8 +374,9 @@ clean environment to stage the new program and prebuilt manuals in `~/.local`.
 No sudo, GitHub token, project script, or submodule is needed. A compromise of
 the upstream account/source is still a software-supply-chain risk.
 
-Automatic updates are explicit opt-in and run only before normal installed
-launches, never while an agent is working. Failed network checks fall back to
+GitHub automatic updates are explicit opt-in, follow the saved channel and run
+only before normal installed launches, never while an agent is working.
+Package automatic updating remains disabled. Failed network checks fall back to
 the installed version. Installation validates its source files and stages a
 complete versioned copy before switching the launcher. Old running launchers
 use their existing release path, which is not overwritten or removed. Updates
@@ -371,15 +387,34 @@ do not modify project source checkouts, workspace registries, private container
 volumes, or OpenCode credentials. A host-container boundary is not bypassed to
 update the host: use the host terminal.
 
+`upgrade --check`, including an explicit channel preview, makes no installation
+or preference changes. Normal upgrades do not silently downgrade. An explicit
+channel switch can install an older launcher and warns: this changes program
+files, **not workspace/session state**, and is not a data rollback. Keep backups,
+stop active clients and assess compatibility before switching back. Only extras
+supported by the target are retained; stable 1.6.94 has no dashboard. See
+[update channels](docs/update-channels.md), including the older-launcher bootstrap.
+
 Python-package installs use a separate `oc_box` namespace and packaged resource
 marker. They do not execute the GitHub self-updater or write the source
-installer's global wrapper/release tree. Upgrade them through pipx, uv, or pip
-in their environment. The build workflow and PyPI publishing job are separate;
+installer's global wrapper/release tree. Channel-aware `oc-box upgrade` delegates
+only to the verified pipx, uv tool or dedicated virtual environment owning the
+running CLI, retaining supported extras. Unknown/custom ownership refuses with
+manual guidance; editable source copies must update their checkout separately.
+Direct manager commands remain available. No system/user-site pip install is
+recommended. The build workflow and PyPI publishing job are separate;
 only the latter receives GitHub OIDC permissions and exchanges them for PyPI's
 short-lived upload credential. No permanent PyPI token is required. Publishing
 is limited to selected reviewed releases/manual dispatches, not pull requests.
 This provides authenticated publishing, not a guarantee of harmless package
 contents; maintain package/account ownership and review upstream changes.
+The guarded workflow binds the clean source/tag/channel/version to its exact
+wheel and sdist and rechecks the artifact identities. Development publication
+requires a `devel` GitHub prerelease and public `.dev0` version; neither a preview
+label nor manual dispatch may publish an unaccepted final `1.7.N` version.
+Compare public GitHub/PyPI assets with that workflow's checksums and validated
+identity, not older local artifacts. Stable 1.6.94's source/tag/files remain
+unchanged by the approved experimental 1.7 publication.
 
 ## Reporting issues
 

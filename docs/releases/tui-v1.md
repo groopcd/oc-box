@@ -1,19 +1,20 @@
-# 1.7 Textual manager — candidate release notes
+# 1.7 Textual manager — experimental development release notes
 
-**Unpublished candidate / release-notes template. Host acceptance is pending.**
-The selected publication path is **stable after fresh source-pinned host checks**,
-not an early preview. This document neither publishes a version nor records a
-passing host run. The final version/hash are deliberately not fixed here:
-documentation and integration commits advance the commit-derived version.
-These are the detailed manager notes for the combined
-[1.7 manager and live-sharing candidate](1.7.md); sharing has its own host gate.
+**Approved for experimental development publication with incomplete UI
+acceptance disclosed; not stable manager acceptance.** The owner selected the
+`devel` channel and `1.7.N.dev0` package line for the channel-ready successor of
+`5573965`. Stable 1.6.94/master remain unchanged and do not include this manager.
+This document records no new test run and does not declare the unfinished
+dashboard sequence passed.
 
-Before using this text for a GitHub Release, freeze the final clean candidate,
-complete and review the gates below, then insert its actual public version, full
-commit, `+gHASH` identity and absolute commit count in the release notes. Do not
-add an evidence commit between acceptance and tagging the tested source.
+The final version/hash are deliberately not fixed here: documentation and
+integration commits advance N, derived from full-history count minus 29.
+Resources keep `.dev0+gHASH`, full commit and count. The release must identify its
+actual frozen successor, not reuse the earlier `1.7.110+g5573965` identity. These
+are the detailed manager notes for the combined
+[1.7 development release](1.7.md), including source-qualified sharing evidence.
 
-## Candidate highlights
+## Manager highlights
 
 The optional `oc-box tui` manager adds **Status, Settings, Sessions, Terminals,
 Logs, Storage and Backup/restore**. It is separate from OpenCode's native conversation TUI and does not
@@ -93,20 +94,23 @@ are V2-only. The ordinary CLI still has no third-party Python baseline dependenc
 
 ## Installation and quick start
 
-These commands apply **only to a published release containing the manager**;
-they do not assert that the current stable PyPI package already has it:
+These commands explicitly request a published development prerelease; ordinary
+stable installations do not include the manager:
 
 ```sh
-uv tool install 'oc-box[tui,vault]'
-# Or: pipx install 'oc-box[tui,vault]'
+uv tool install --prerelease allow 'oc-box[tui,vault]'
+# Or: pipx install --pip-args='--pre' 'oc-box[tui,vault]'
 oc-box tui --read-only
 ```
 
-Use `[tui]` alone if vault support is not wanted. A reviewed GitHub installer
-containing the feature accepts `sh install.sh --with-tui` or
-`sh install.sh --with-vault --with-tui`; the equivalent piped suffix is
-`sh -s -- --with-vault --with-tui`. Extras remain isolated and GitHub updates
-retain the opt-ins. Normal operation needs a regular-user Linux host TTY.
+Use `[tui]` alone if vault support is not wanted. The channel-aware GitHub
+bootstrap accepts `sh install.sh --devel --with-vault --with-tui`; its equivalent
+piped suffix is `sh -s -- --devel --with-vault --with-tui`. Extras remain isolated;
+GitHub updates retain supported opt-ins. A current channel-aware CLI can select
+`oc-box upgrade --devel`, delegating package upgrades only to the verified owner.
+Older pre-channel 1.7 launchers require the bootstrap instead. See
+[update channels](../update-channels.md). Normal operation needs a regular-user
+Linux host TTY.
 
 For unrelated projects, use the installed launcher. To manage oc-box's **own
 checkout**, run an isolated non-editable package from that checkout instead:
@@ -119,6 +123,41 @@ Keep trusted-path validation enabled; an exposed editable launcher must refuse.
 `oc-box tui --demo` is a synthetic-only preview, with no host services, registry,
 logs or native actions. It is not an acceptance test.
 
+## Retained observations and known limitations
+
+Exact-source `5573965` has reviewed automation and scripted host history,
+recovery, vault, sharing and separate V1/V2 lifecycle acceptance; see the
+[evidence index](../testing.md#reviewed-5573965-candidate-evidence). The six-stage
+CLI lifecycle gate is **complete**, not invalidated by the separate incomplete
+UI sequence, and must not be replayed for publication paperwork.
+
+Real navigation, settings, clipboard, loading/focus/resize/native PTY, session
+backup/fresh-ID restore and masked-password observations retain their original
+scope and `NOT_AUTOMATICALLY_PASSED` qualification. Full workspace backup Create
+and Inspect returned 0; authenticated backup verification passed, and the expected
+Host whole-workspace-backup preflight refusal was genuinely observed.
+
+**UI full restore returned 0, but its later integrity verifier refused
+`manifest`.** A metadata-only observation found the intentional home extraction
+root change from 0755 to 0700 with unchanged host UID/GID. This is not all-entry
+equality or proof that this mode change was the sole/first refusal cause.
+Full restored integrity/preservation/fresh-identity oracle completion remains
+unaccepted.
+
+Portable UI Create/Inspect/restore was not armed. Three-scope Storage completion,
+designated ciphertext deletion, original-source removal with retained
+project/history/retired-provenance/other-ciphertext/both-restores assertions, final
+journal/preservation attestation and latest manager Quit confirmation remain
+unperformed or unaccepted. Do not infer shutdown/lease cleanup. The owner
+approved experimental publication with these limitations, not a pass or further
+fixture continuation. Preserve original failures, stores and encrypted evidence.
+
+The channel successor changes install/update/version/publication handling, not
+dashboard/core workspace behavior. Its new source still needs relevant
+source/package/native and guarded build-only validation; prior evidence is not a
+new-source full-map pass. Stable 1.6.94 and newer native-version evidence do not
+accept the manager or experimental sharing.
+
 ## Evidence required before stable publication
 
 No row below is marked passed by preparing these notes. Record the final source
@@ -129,7 +168,7 @@ versions, original report locations and actual operator observations privately.
 | --- | --- |
 | Source/package/native CI | Passing exact-source checks, including native V1/V2 and the TUI contracts/native fixture; resolve any current failures and rerun. |
 | Distro checks | Review the seven-image matrix; require fresh passing runs for package-map changes. |
-| Build-only distribution | `publish.yml` with `publish=false`, wheel/sdist checks with `--with-vault --with-tui`, and a guard against automatic stable PyPI upload from GitHub prereleases. |
+| Build-only distribution | `publish.yml` with `publish=false`, wheel/sdist checks with `--with-vault --with-tui`, and source/tag/version/channel guards that cannot publish a final PyPI version from a GitHub prerelease or manual bypass. |
 | Focused host history/readiness | Fresh reviewed `tools/test_session_sync_podman.py` report on the final clean candidate: all 42 checks true, including nine archive/resume cases; ordered exits `[0,0,0,1,0,0,0,0]`. |
 | Global-vault host lifecycle | Fresh reviewed `tools/test_global_vault_podman.py` report on that same source. |
 | V1/V2 host lifecycle | Fresh reviewed `tools/test_v2_podman.py` report, including migrated-history checks, on that same source. |
@@ -151,12 +190,17 @@ conversation-TUI observations do not accept this Textual candidate. No
 real-provider, real-project restore, network-containment or security-certification
 claim is added.
 
-After all required reports/checks are reviewed and publication is approved,
-fast-forward **the exact accepted commit** into `master`, tag that same source,
-publish the stable GitHub Release/PyPI package and compare public artifact hashes.
-Until then, do not advance `master`, tag or publish to PyPI. A successful build or
-GitHub prerelease is not a substitute for acceptance; manual `publish=true` still
-requires the same gate.
+The approved development path uses the exact validated successor on `devel`,
+one matching `v1.7.N.dev0` GitHub prerelease and PyPI upload, with the workflow's
+exact distributions, validated identity and checksums. Compare public artifact
+hashes; do not substitute the old build-only artifacts or start a second upload.
+It does not advance `master` or create a final stable package.
+
+Stable promotion remains separately gated on complete manager acceptance,
+applicable final-source host checks, owner approval and reviewed integration with
+the then-current stable branch. These requirements do not schedule another host
+run or authorize replay of retained fixtures. A prerelease/manual dispatch is
+not a way to upload an unaccepted regular final `1.7.N` version.
 
 See the [manager guide](../tui.md), [test strategy](../testing.md#experimental-workspace-manager)
 and [publication checklist](../../CONTRIBUTING.md#release-gate-and-publication-checklist).
