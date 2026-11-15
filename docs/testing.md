@@ -515,6 +515,36 @@ ownership, full/portable restore, reset and refusal checks. Require separately
 identified fixed primary/secondary diagnostics and fresh source-bound host
 validation after correction. Do not replay the retained failed store.
 
+The independent `tools/test_v2_lifecycle_external.py` adapter is preparation
+for that fresh gate, not an application update or acceptance of the failed run.
+It verifies the immutable candidate before imports and delegates to the frozen
+lifecycle helper, adding only the validated first-start import argument.
+The external checkout must retain `tests/test_v2_lifecycle_external.py` for
+its separately recorded offline-test provenance. Pin and review the external
+checkout independently from the application before using this example:
+
+```bash
+# Normal unprivileged host terminal only; both parents must be outside every
+# retained fixture/store, and the runner must be outside the frozen source.
+uv run --isolated --no-project --with cryptography python -I -B \
+  /path/to/clean/external-harness/tools/test_v2_lifecycle_external.py \
+  --source /path/to/clean/frozen/source \
+  --expect-commit 9a6e99ad01b3bf02e19edb3ec9d7ab3289d40f22 \
+  --opencode-v2 /path/to/opencode2 --native-version 2.3.0 \
+  --work-dir /path/to/fresh-fixtures --temp-dir /path/to/private-temp
+```
+
+The adapter accepts only its audited 2.3.0 executable and frozen source.
+It has no retained-store inspection, cleanup, retry or legacy mode. Preserve
+both the original fresh `result.json` and companion
+`external-lifecycle-result.json`. Acceptance requires all ten original checks,
+unchanged exclusions, exactly one verified initial import, all five owning
+launches completed with no later import, original exit zero and matching report
+hash, and shutdown/close/join once each with no alive provider worker. Fixed
+primary, cleanup and reporting failures remain separate and must all be absent.
+Source/native/runner/offline-test/helper identities are recorded separately.
+No public application tag or release assets may be produced from the harness.
+
 Accepted scope is **63 scripted synthetic history/readiness/recovery checks**
 plus the separate **13-stage global-vault gate**, not complete release
 acceptance, interactive UI, real inference, OAuth, network-containment,
