@@ -624,6 +624,30 @@ New observations must be confined to fresh, verified-owned stopped resources,
 with fixed nonsecret results and no reuse or repair of retained stores. This
 does not authorize repeating accepted history/recovery/global-vault gates.
 
+The corrected external adapter collects aggregate fingerprints only at the
+frozen donor's **six existing stopped-home snapshot sites**, with verified
+owned/stopped resources before any home read. Its independently collected
+exact-tree digest must equal the unchanged donor digest. Only the initial
+source snapshot supplies the policy expectation: root mode `0700` and removal
+of nonsymlink special bits, with ordinary modes, child UID/GID, inventory,
+types, link targets and regular contents otherwise unchanged. The controlled
+fixture requires root ownership `0:0`; unknown mappings are refused.
+
+Restored snapshots are **not normalized**. Their exact trees must equal that
+source-derived expectation, the two critical home files must match exactly,
+and root privacy/ownership and absence of restored child special bits are
+independently required. All three later source-home preservation comparisons
+remain exact, including original root mode and special bits. Full and portable
+restore comparison outcomes are recorded as fixed booleans in
+`home_comparisons`; all three `source_home_preservations_exact` results must be
+true for an external pass. A policy mismatch, unstable dual read, unexpected
+snapshot sequence or ordinary metadata/content difference still fails.
+
+Focused synthetic tests exercise actual stdlib archive creation/extraction and
+adversarial restored/source mutations. They do not prove the cause of earlier
+host failures or replace a fresh affected lifecycle pass. Existing reports and
+their original runner hashes are not rewritten to the corrected interpretation.
+
 ### Focused history/readiness host runner
 
 `tools/test_session_sync_podman.py` is a separate host harness, not an installed
