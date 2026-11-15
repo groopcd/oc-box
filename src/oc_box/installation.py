@@ -63,6 +63,8 @@ RUNTIME_FILES = (
     "workspace_identity.py",
     "installation.py",
     "updater.py",
+    "update_channels.py",
+    "package_updates.py",
     "install.py",
 )
 RESOURCE_FILES = (
@@ -82,6 +84,7 @@ MANUAL_FILES = (
     "opencode-2.md",
     "host-plugins.md",
     "tui.md",
+    "update-channels.md",
 )
 COMPLETION_FILE = "completions/oc-box"
 
