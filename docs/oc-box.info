@@ -589,7 +589,11 @@ shortcuts.
 Nonempty editable search and form inputs have a right-edge ‘×’ inside
 the field.  Click it to clear that field and retain editing focus,
 without submitting, connecting or accessing the clipboard.  Password and
-disabled fields are excluded.
+disabled fields are excluded.  Session/log filtering waits for a 120 ms
+typing pause rather than rebuilding tables on every key.  Input editing
+remains immediate.  Unchanged views skip rebuilds, and favorites I/O is
+asynchronous; native discovery remains explicit and monitoring keeps the
+selected refresh interval.
 
 Drag-select visible text throughout the dashboard, including logs,
 graphs, terminal output and control labels.  Releasing the mouse copies
@@ -3276,20 +3280,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2730
 Node: Commands6242
-Node: Options85279
-Node: Lifecycle and persistence106346
-Node: Distribution images108466
-Node: Sessions and recovery113341
-Node: Devices and host permissions119926
-Node: Resource reports122272
-Node: Configuration and environment124383
-Node: Files135646
-Node: Exit status141590
-Node: Examples142443
-Node: Troubleshooting144529
-Node: Installation and manuals155881
-Node: Authors and license165133
-Node: See also165740
+Node: Options85565
+Node: Lifecycle and persistence106632
+Node: Distribution images108752
+Node: Sessions and recovery113627
+Node: Devices and host permissions120212
+Node: Resource reports122558
+Node: Configuration and environment124669
+Node: Files135932
+Node: Exit status141876
+Node: Examples142729
+Node: Troubleshooting144815
+Node: Installation and manuals156167
+Node: Authors and license165419
+Node: See also166026
 
 End Tag Table
 

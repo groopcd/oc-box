@@ -491,6 +491,10 @@ the native shell before using dashboard shortcuts.
 Nonempty editable search and form inputs have a right-edge `×` inside the field.
 Click it to clear that field and retain editing focus, without submitting,
 connecting or accessing the clipboard. Password and disabled fields are excluded.
+Session/log filtering waits for a 120 ms typing pause rather than rebuilding
+tables on every key. Input editing remains immediate. Unchanged views skip
+rebuilds, and favorites I/O is asynchronous; native discovery remains explicit
+and monitoring keeps the selected refresh interval.
 
 Drag-select visible text throughout the dashboard, including logs, graphs,
 terminal output and control labels. Releasing the mouse copies immediately;

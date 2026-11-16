@@ -185,6 +185,11 @@ Nonempty editable search and form fields show an **× inside their right edge**.
 Click it to clear only that field and keep typing; it does not submit the form,
 connect to a source or access the clipboard. Password and disabled fields do
 not offer this control.
+Session and log filters update after a short **120 ms typing pause**; text and
+caret editing remain immediate. Unchanged views are not rebuilt, changed table
+cells update in place where possible, and favorites are loaded outside the UI
+thread. These reduce display work without lowering the monitoring cadence or
+turning native session discovery into an automatic action.
 Closing the dashboard disconnects only its clients and releases their leases;
 it does not directly stop the workspace owner or end its native persistent shell.
 If the owner was already waiting to exit, releasing its final client lease lets

@@ -250,6 +250,19 @@ input or native-shell keys, including `s` and `F2`; detach with `Ctrl-]` before
 dashboard shortcuts. Keep log search available from every tab without stealing
 native terminal focus on refresh.
 
+For display regressions, run the synthetic workload in
+`tools/benchmark_tui_display.py` with the optional TUI dependencies. It uses
+32 synthetic workspaces, 1,000 session-metadata records and 2,000 log entries,
+not actual stores or Podman. Check deterministic work counts rather than tight
+wall-clock thresholds: a typing burst should coalesce to one final filter;
+unchanged session/log snapshots should not clear or repopulate the view.
+Verify immediate text/caret editing, final-filter delivery after the short
+debounce, stale callback rejection, same-store cursor/scroll preservation,
+different-store selection separation, and favorites I/O outside rendering.
+All metric samples and fixed-scale histories must remain represented, and a
+redraw must never become a clipboard gesture. Local benchmark timings do not
+establish real-terminal or host acceptance.
+
 Background Status/log/storage updates must leave Sessions rows, selection,
 cursor and scroll position unchanged. Check this with enough rows to scroll,
 not only a single-page table. Inventories update only on explicit Connect/manual
