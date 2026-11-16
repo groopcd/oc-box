@@ -153,6 +153,50 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(len(app.logs.search(app.log_query)), 1)
 
+    async def test_session_disconnect_is_beside_connect_and_search_clear_is_local(self):
+        for size in ((140, 45), (80, 24)):
+            with self.subTest(size=size):
+                backend = SessionDemo()
+                app = DashboardApp(backend, read_only=True)
+                async with app.run_test(size=size) as pilot:
+                    await self.settle(app, pilot)
+                    app.action_tab("sessions")
+                    await pilot.pause()
+                    connect = app.query_one("#connect-sessions", Button)
+                    disconnect = app.query_one("#disconnect-sessions", Button)
+                    self.assertIs(connect.parent, disconnect.parent)
+                    self.assertEqual(connect.region.y, disconnect.region.y)
+                    self.assertLess(connect.region.right, disconnect.region.x)
+                    self.assertLessEqual(
+                        disconnect.region.right, disconnect.parent.content_region.right
+                    )
+                    self.assertEqual(backend.calls, [])
+                    await pilot.click("#connect-sessions")
+                    await self.settle(app, pilot)
+                    self.assertIsNotNone(app.catalog)
+                    search = app.query_one("#session-search", Input)
+                    search.value = "Root"
+                    await pilot.pause()
+                    self.assertEqual(len(app.visible_sessions), 1)
+                    calls = list(backend.calls)
+                    generation = app._catalog_generation
+                    await pilot.click(search, offset=(search.region.width - 2, 1))
+                    await pilot.pause()
+                    self.assertEqual(search.value, "")
+                    self.assertIs(app.focused, search)
+                    self.assertEqual(len(app.visible_sessions), 2)
+                    self.assertEqual(backend.calls, calls)
+                    self.assertEqual(backend.closed, 0)
+                    self.assertEqual(app._catalog_generation, generation)
+                    self.assertTrue(app.query_one("#delete", Button).disabled)
+                    self.assertTrue(app.query_one("#terminal-owner", Button).disabled)
+                    await pilot.click("#disconnect-sessions")
+                    await self.settle(app, pilot)
+                    self.assertIsNone(app.catalog)
+                    self.assertEqual(backend.closed, 1)
+                    self.assertEqual(backend.calls, calls)
+                self.assertEqual(backend.closed, 1)
+
     async def test_global_inventory_includes_children_and_archive_uses_native_patch(
         self,
     ):
