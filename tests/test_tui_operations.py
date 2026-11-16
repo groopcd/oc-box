@@ -102,7 +102,7 @@ class OperationTests(unittest.TestCase):
                     patch.object(box, "state_root") as state,
                     patch.object(tui_storage, "read_workspace_action") as registry,
                 ):
-                    self.refusal(reason, controller.confirm, plan, "CONFIRM")
+                    self.refusal(reason, controller.confirm, plan, "")
                 state.assert_not_called()
                 registry.assert_not_called()
 
@@ -125,7 +125,7 @@ class OperationTests(unittest.TestCase):
             self.assertEqual(plan.request["project"], str(self.project))
             self.assertNotIn(str(other_project), plan.review)
             self.assertNotIn("PRIVATE_REGISTRATION_VALUE", repr(plan))
-            request = self.controller.confirm(plan, "CONFIRM")
+            request = self.controller.confirm(plan, "")
             self.assertNotIn("PRIVATE_REGISTRATION_VALUE", json.dumps(request))
 
             def production_selector(argv):
@@ -170,9 +170,7 @@ class OperationTests(unittest.TestCase):
                 box, "read_json", side_effect=AssertionError("raw read")
             ) as raw,
         ):
-            request = self.controller.confirm(
-                self.plan(workspace=self.ident), "CONFIRM"
-            )
+            request = self.controller.confirm(self.plan(workspace=self.ident), "")
             backend = operations._OperationBackend(box, request=request)
             path, data = backend.selected(self.ident)
         scan.assert_not_called()
@@ -341,13 +339,13 @@ class OperationTests(unittest.TestCase):
             [(self.record, {"id": self.ident, "project": str(self.project)})],
         )
         self.assertEqual(backend.inventory_skipped, 0)
-        self.controller.confirm(self.plan(workspace=self.ident), "CONFIRM")
+        self.controller.confirm(self.plan(workspace=self.ident), "")
 
     def test_parent_confirmation_and_child_execution_bind_registry_directory_identity(
         self,
     ):
         plan = self.plan(workspace=self.ident)
-        request = self.controller.confirm(plan, "CONFIRM")
+        request = self.controller.confirm(plan, "")
         pending = self.plan(workspace=self.ident)
         before = tui_storage.read_workspace_action(box, self.ident)
         old = self.root / "old-state"
@@ -358,7 +356,7 @@ class OperationTests(unittest.TestCase):
         self.assertEqual(before.identity, after.identity)
         self.assertEqual(before.fingerprint, after.fingerprint)
         self.assertNotEqual(before.registry_identity, after.registry_identity)
-        self.refusal("selection-changed", self.controller.confirm, pending, "CONFIRM")
+        self.refusal("selection-changed", self.controller.confirm, pending, "")
         self.refusal("selection-changed", operations.execute, box, request)
         backend = operations._OperationBackend(box, request=request)
         self.refusal("selection-changed", backend.selected, self.ident)
@@ -370,7 +368,7 @@ class OperationTests(unittest.TestCase):
         box.atomic_json(self.record, self.data)
         wrong = self.state / "workspaces" / ("0" * 32) / "workspace.json"
         box.atomic_json(wrong, {**self.data, "project": str(self.root / "wrong")})
-        request = self.controller.confirm(self.plan(workspace=self.ident), "CONFIRM")
+        request = self.controller.confirm(self.plan(workspace=self.ident), "")
         backend = operations._OperationBackend(box, request=request)
         lease = Mock()
         lease.__enter__ = Mock(return_value={})
@@ -405,11 +403,9 @@ class OperationTests(unittest.TestCase):
             self.refusal("trusted-path-exposure", self.plan, workspace=self.ident)
         plan = self.plan(workspace=self.ident)
         with patch.object(box, "APP", self.project):
-            self.refusal(
-                "trusted-path-exposure", self.controller.confirm, plan, "CONFIRM"
-            )
+            self.refusal("trusted-path-exposure", self.controller.confirm, plan, "")
         plan = self.plan(workspace=self.ident)
-        request = self.controller.confirm(plan, "CONFIRM")
+        request = self.controller.confirm(plan, "")
         for operation, args in (
             (operations.execute, (box, request)),
             (
@@ -429,29 +425,76 @@ class OperationTests(unittest.TestCase):
         plan = self.plan(workspace=self.ident)
         self.assertIn(self.ident, plan.review)
         self.assertIn("global vault", plan.review)
-        request = self.controller.confirm(plan, "CONFIRM")
+        self.assertEqual(plan.confirmation, "")
+        request = self.controller.confirm(plan, "")
         self.assertEqual(request["workspace"], self.ident)
         self.assertEqual(request["action"], "workspace-backup")
-        self.refusal("invalid-confirmation", self.controller.confirm, plan, "CONFIRM")
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
         for call in self.forbidden.values():
             call.assert_not_called()
+
+    def test_typed_phrase_is_reserved_for_destructive_actions_matrix(self):
+        for action in sorted(operations.ACTIONS):
+            with self.subTest(action=action):
+                archive = self.root / (action + ".ocbox")
+                options = {}
+                if action not in {"workspace-backup", "session-backup"}:
+                    self.archive(archive)
+                if action == "workspace-backup":
+                    options["workspace"] = self.ident
+                if action in {"workspace-restore", "session-restore"}:
+                    options["destination"] = (
+                        self.root / "new-target"
+                        if action == "workspace-restore"
+                        else self.project
+                    )
+                if action in {"session-backup", "session-restore"}:
+                    options.update(origin="host", store="/synthetic/native.db")
+                if action == "session-backup":
+                    options["session"] = {
+                        "id": "ses_synthetic",
+                        "projectID": "global",
+                        "location": {"directory": str(self.project)},
+                        "title": "Synthetic session",
+                        "time": {"created": 1, "updated": 2},
+                    }
+                plan = self.controller.prepare(action, backup=archive, **options)
+                phrase = "DELETE" if action == "backup-delete" else ""
+                self.assertEqual(plan.confirmation, phrase)
+                self.assertIn("leaves it stopped", plan.review)
+                self.assertEqual(self.controller.confirm(plan, phrase), plan.request)
+                self.refusal(
+                    "invalid-confirmation", self.controller.confirm, plan, phrase
+                )
+        for call in self.forbidden.values():
+            call.assert_not_called()
+
+    def test_empty_phrase_does_not_authorize_unreviewed_or_destructive_actions(self):
+        plan = self.plan(workspace=self.ident)
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, None)
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
+        self.archive()
+        plan = self.plan("backup-delete")
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
+        self.assertTrue(self.output.exists())
+        self.forbidden["main"].assert_not_called()
 
     def test_wrong_phrase_and_forged_review_consume_tokens(self):
         plan = self.plan(workspace=self.ident)
         self.refusal("invalid-confirmation", self.controller.confirm, plan, "wrong")
-        self.refusal("invalid-confirmation", self.controller.confirm, plan, "CONFIRM")
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
         plan = self.plan(workspace=self.ident)
         self.refusal(
             "invalid-confirmation",
             self.controller.confirm,
             replace(plan, review="different"),
-            "CONFIRM",
+            "",
         )
 
     def test_mutated_request_cannot_change_reviewed_target(self):
         plan = self.plan(workspace=self.ident)
         plan.request["backup"] = str(self.root / "other.ocbox")
-        self.refusal("invalid-confirmation", self.controller.confirm, plan, "CONFIRM")
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
 
     def test_output_must_remain_absent_and_outside_project_and_state(self):
         for parent in (self.project, self.state):
@@ -465,18 +508,16 @@ class OperationTests(unittest.TestCase):
                 )
         plan = self.plan(workspace=self.ident)
         self.output.write_bytes(b"new file")
-        self.refusal("output-exists", self.controller.confirm, plan, "CONFIRM")
+        self.refusal("output-exists", self.controller.confirm, plan, "")
 
     def test_registry_replacement_and_root_switch_refuse_confirmation(self):
         plan = self.plan(workspace=self.ident)
         box.atomic_json(self.record, {**self.data, "distro": "ubuntu"})
-        self.refusal("selection-changed", self.controller.confirm, plan, "CONFIRM")
+        self.refusal("selection-changed", self.controller.confirm, plan, "")
         plan = self.plan(workspace=self.ident)
         other = self.root / "other-state"
         with patch.dict(os.environ, {"OC_BOX_STATE_HOME": str(other)}):
-            self.refusal(
-                "workspace-validation", self.controller.confirm, plan, "CONFIRM"
-            )
+            self.refusal("workspace-validation", self.controller.confirm, plan, "")
 
     def test_restore_requires_new_directory_and_never_uses_force(self):
         self.archive()
@@ -488,7 +529,8 @@ class OperationTests(unittest.TestCase):
             destination=self.project,
         )
         plan = self.plan("workspace-restore", destination=self.root / "restored")
-        request = self.controller.confirm(plan, "RESTORE")
+        self.assertEqual(plan.confirmation, "")
+        request = self.controller.confirm(plan, "")
         self.forbidden["main"].side_effect = None
         self.forbidden["main"].return_value = 0
         self.assertEqual(operations.execute(box, request), 0)
@@ -501,23 +543,21 @@ class OperationTests(unittest.TestCase):
         plan = self.plan("workspace-inspect")
         self.output.unlink()
         self.archive()
-        self.refusal("selection-changed", self.controller.confirm, plan, "CONFIRM")
+        self.refusal("selection-changed", self.controller.confirm, plan, "")
         self.forbidden["main"].assert_not_called()
 
     def test_readonly_can_inspect_but_cannot_be_weakened_after_prepare(self):
         self.archive()
         controller = operations.OperationController(box, read_only=True)
         plan = controller.prepare("workspace-inspect", backup=self.output)
-        self.assertEqual(
-            controller.confirm(plan, "CONFIRM")["action"], "workspace-inspect"
-        )
+        self.assertEqual(controller.confirm(plan, "")["action"], "workspace-inspect")
         controller.read_only = False
         self.output.unlink()
         plan = controller.prepare(
             "workspace-backup", workspace=self.ident, backup=self.output
         )
         controller.read_only = True
-        self.refusal("read-only", controller.confirm, plan, "CONFIRM")
+        self.refusal("read-only", controller.confirm, plan, "")
 
     def test_session_source_and_native_selection_are_explicit(self):
         self.refusal("source-selection-required", self.plan, "session-backup")
@@ -551,6 +591,26 @@ class OperationTests(unittest.TestCase):
         )
         self.assertEqual(plan.request["session"], session)
         self.assertIn("including native children", plan.review)
+
+    def test_archive_routing_uses_envelope_not_suffix_and_rechecks_open_file_identity(
+        self,
+    ):
+        for names, kind in (
+            (("key.age", "manifest.age", "sessions.age"), "session"),
+            (
+                ("key.age", "manifest.age", "project.age", "home.age", "registry.age"),
+                "workspace",
+            ),
+        ):
+            with self.subTest(kind=kind):
+                self.archive(names=names)
+                identity = operations.file_identity(self.output)
+                self.assertEqual(
+                    operations.archive_kind(self.output, expected=identity), kind
+                )
+                self.output.write_bytes(b"replaced")
+                with self.assertRaises(operations.OperationError):
+                    operations.archive_kind(self.output, expected=identity)
 
     def test_backup_delete_accepts_only_private_regular_recognized_archives(self):
         self.archive()
@@ -599,7 +659,7 @@ class OperationTests(unittest.TestCase):
         self,
     ):
         self.archive()
-        request = self.controller.confirm(self.plan("workspace-inspect"), "CONFIRM")
+        request = self.controller.confirm(self.plan("workspace-inspect"), "")
         seen = []
 
         def child(command, **kwargs):
@@ -781,7 +841,7 @@ class OperationTests(unittest.TestCase):
     def test_cancelled_operation_review_is_not_reusable(self):
         plan = self.plan(workspace=self.ident)
         self.controller.cancel(plan)
-        self.refusal("invalid-confirmation", self.controller.confirm, plan, "CONFIRM")
+        self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
         self.forbidden["main"].assert_not_called()
 
     def test_large_workspace_import_uses_existing_interactive_exec_and_private_owner(
@@ -849,7 +909,7 @@ class OperationTests(unittest.TestCase):
                     store="/synthetic/native.db",
                     destination=self.project,
                 )
-                request = self.controller.confirm(plan, "RESTORE")
+                request = self.controller.confirm(plan, "")
                 connection = SimpleNamespace(
                     origin="host",
                     store="/synthetic/native.db",
@@ -895,7 +955,7 @@ class OperationTests(unittest.TestCase):
             store="/synthetic/native.db",
             destination=self.project,
         )
-        request = self.controller.confirm(plan, "RESTORE")
+        request = self.controller.confirm(plan, "")
         connection = SimpleNamespace(
             origin="host",
             store="/synthetic/native.db",

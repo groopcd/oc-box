@@ -90,6 +90,10 @@ def memory_file(content=b""):
 
 
 def small(command, *, data=None, timeout=30, tty_errors=False, pass_fds=()):
+    if tty_errors and secret_prompt.operation_active():
+        raise BackupError(
+            "Private dashboard operation refused an unmanaged terminal prompt."
+        )
     terminal = None
     attributes = None
     if tty_errors:
@@ -128,6 +132,11 @@ def small_capture(command, *, data=None, timeout=30, tty_errors=False, pass_fds=
                 env=environment(),
                 timeout=timeout,
                 pass_fds=pass_fds,
+                **(
+                    {"start_new_session": True}
+                    if secret_prompt.operation_active()
+                    else {}
+                ),
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise BackupError(
@@ -183,6 +192,21 @@ def encrypt_passphrase(private, output, minimum):
         ) from exc
     except ValueError as exc:
         raise BackupError(str(exc)) from exc
+    with memory_file(private) as source:
+        _passphrase_tool(
+            ["age", "--encrypt", "--passphrase", "--output", str(output)],
+            phrase,
+            source=source,
+            prompts=(b"Enter passphrase", b"Confirm passphrase"),
+        )
+
+
+def _passphrase_tool(command, phrase, *, source=None, prompts=(b"Enter passphrase",)):
+    """Bounded native age prompt adapter, never a dashboard output parser.
+
+    Only age's fixed passphrase protocol is recognized. Its private terminal
+    output is bounded and discarded, never relayed to UI, logs or diagnostics.
+    """
     # age has no passphrase-fd option. Give it a private controlling PTY, with
     # echo disabled before exec, and answer its standard prompts there. Only
     # validated user input crosses this PTY; no secret enters argv/env or disk.
@@ -196,32 +220,29 @@ def encrypt_passphrase(private, output, minimum):
             "import fcntl,os,sys,termios; "
             "fcntl.ioctl(2,termios.TIOCSCTTY,0); os.execvp(sys.argv[1],sys.argv[1:])"
         )
-        with memory_file(private) as source:
+        with memory_file() as output:
             process = subprocess.Popen(
                 [
                     sys.executable,
                     "-B",
                     "-c",
                     child,
-                    "age",
-                    "--encrypt",
-                    "--passphrase",
-                    "--output",
-                    str(output),
+                    *command,
                 ],
-                stdin=source,
-                stdout=subprocess.DEVNULL,
+                stdin=source if source is not None else subprocess.DEVNULL,
+                stdout=output,
                 stderr=slave,
                 env=environment(),
                 start_new_session=True,
             )
             os.close(slave)
             slave = None
-            prompts = (b"Enter passphrase", b"Confirm passphrase")
             pending = bytearray()
             step = 0
             deadline = time.monotonic() + 30
             while process.poll() is None:
+                if os.fstat(output.fileno()).st_size > MAX_SMALL:
+                    raise BackupError("Unexpected oversized backup key response.")
                 if time.monotonic() >= deadline:
                     raise BackupError("Backup passphrase encryption timed out.")
                 if not select.select([master], [], [], 0.1)[0]:
@@ -248,6 +269,11 @@ def encrypt_passphrase(private, output, minimum):
                 raise BackupError(
                     "Backup passphrase encryption failed; private tool output was not logged."
                 )
+            output.seek(0)
+            result = output.read(MAX_SMALL + 1)
+            if len(result) > MAX_SMALL:
+                raise BackupError("Unexpected oversized backup key response.")
+            return result
     except (OSError, subprocess.SubprocessError) as exc:
         raise BackupError(
             "Backup passphrase tool failed; private tool output was not logged."
@@ -346,9 +372,20 @@ def load_key(path, identities):
             descriptors.append(memory.fileno())
             command.extend(["--identity", f"/proc/self/fd/{memory.fileno()}"])
         command.append(str(path))
-        private = small(
-            command, timeout=300, tty_errors=True, pass_fds=tuple(descriptors)
-        )
+        if not identities and secret_prompt.operation_active():
+            # Embedded mode still reads through the original controlling-TTY
+            # editor. No new-password minimum applies to an existing archive.
+            phrase = secret_prompt.read_secret(
+                "Backup passphrase: ", purpose="backup-unlock"
+            )
+            private = _passphrase_tool(command, phrase)
+        else:
+            private = small(
+                command,
+                timeout=300,
+                tty_errors=not secret_prompt.operation_active(),
+                pass_fds=tuple(descriptors),
+            )
     # The decrypted key envelope is untrusted archive input too. Do not feed
     # arbitrary identity/plugin lines from it to a subsequent age invocation.
     lines = [

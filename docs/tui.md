@@ -169,7 +169,9 @@ not gain a container-mode bypass from the existence of demo mode.
 | `q` | Quit outside a focused embedded terminal |
 | `Ctrl-]` | Detach the focused session-terminal client |
 | `Ctrl+Shift+C` | Copy selected text, when the terminal forwards this shortcut |
+| `Ctrl+Shift+Y` | Copy the whole visible screen as plain text |
 | `Ctrl+Shift+Insert` | Paste text copied inside the dashboard into the focused input or connected shell |
+| `F1` | Explain clipboard shortcuts and host-terminal paste behavior |
 | `Ctrl+A` / `Ctrl+Shift+A` in a text field | Select all field text and copy the completed selection |
 
 When terminal input is focused, ordinary keystrokes belong to the shell rather
@@ -181,6 +183,15 @@ inputs alone, and background refresh does not take focus from the native termina
 The compact global header stays on one line and ellipsizes long
 labels rather than crowding out controls on small terminals; log search remains
 available from every tab.
+Nonempty editable search and form fields show an **× inside their right edge**.
+Click it to clear only that field and keep typing; it does not submit the form,
+connect to a source or access the clipboard. Password and disabled fields do
+not offer this control.
+Session and log filters update after a short **120 ms typing pause**; text and
+caret editing remain immediate. Unchanged views are not rebuilt, changed table
+cells update in place where possible, and favorites are loaded outside the UI
+thread. These reduce display work without lowering the monitoring cadence or
+turning native session discovery into an automatic action.
 Closing the dashboard disconnects only its clients and releases their leases;
 it does not directly stop the workspace owner or end its native persistent shell.
 If the owner was already waiting to exit, releasing its final client lease lets
@@ -192,7 +203,7 @@ Drag to select visible text throughout the dashboard: diagnostics, tables,
 logs, graphs, the embedded terminal and control labels. The highlight remains
 visible over colored logs, row cursors and meters. **Releasing the mouse copies
 the completed selection immediately**; no extra Copy click is required. A successful
-copy shows the same Clipboard notification as the Copy button. A label
+copy shows a Clipboard notification. There are no Copy or Paste buttons. A label
 drag never presses its button, changes its tab/dropdown, or activates a footer
 shortcut. Normal clicks still operate those controls. Scrollbar drags still
 scroll. Panel captions and settings group titles are selectable text as well.
@@ -202,7 +213,7 @@ plain-text copies are meaningful; clipboard text does not retain graph colors.
 Completed double/triple-click text selections and explicit keyboard selection
 in text fields (for example `Ctrl+A`, `Ctrl+Shift+A` or Shift+Arrow) also copy. There is no copy
 while dragging, or from programmatic selection, focus, refresh or container
-output. **Copy** and `Ctrl+Shift+C` (when forwarded by the host terminal) remain
+output. `Ctrl+Shift+C` (when forwarded by the host terminal) remains
 available for an explicit repeat copy. Text fields retain their normal Textual
 editing keys. In the native shell, ordinary `Ctrl+C` still interrupts and
 `Ctrl+V` keeps its shell meaning; neither is replaced by a clipboard shortcut.
@@ -210,9 +221,10 @@ editing keys. In the native shell, ordinary `Ctrl+C` still interrupts and
 start-of-line meaning in the focused native shell. A screen change or Escape
 cancels an unfinished selection without copying or activating the old control.
 
-**Copy view** is an additional shortcut for the whole current visible screen as
-plain text; it is not required for selecting control labels. Settings and review
-dialogs have their own clipboard controls. Copying is available in read-only
+**Copy view** (`Ctrl+Shift+Y`) copies the whole current visible screen as
+plain text; it is not required for selecting control labels. The same shortcuts
+work in ordinary settings and review dialogs without adding clipboard buttons.
+`F1` explains them. Copying is available in read-only
 mode and never confirms a dialog, changes a session, or starts a connection.
 Table/log/terminal selections cover the displayed viewport, not offscreen
 history. Scroll to the desired text before selecting. Followed-log display stays
@@ -224,7 +236,7 @@ and use your **host terminal's paste command**—commonly `Ctrl+Shift+V`,
 The dashboard does not read the desktop clipboard in the background or install
 clipboard helper programs.
 
-**Paste copied** (also `Ctrl+Shift+Insert`) instead pastes the last text copied
+**Paste copied** (`Ctrl+Shift+Insert`, shortcut only) instead pastes the last text copied
 **inside this dashboard**, not arbitrary current desktop clipboard contents.
 It targets only the focused, enabled text field or connected native terminal;
 it never connects or starts a shell. Single-line fields use normal terminal-paste
@@ -266,7 +278,7 @@ are what the OS reports, not a promise of exclusive resources or physical host
 capacity. Presentation does not change underlying totals or the raw report data.
 
 Cheap metrics are batched. Status and followed logs share an adjustable refresh
-interval of **1, 2, 5, 10, 30 or 60 seconds**, default **1 second**, with an
+interval of **any whole number from 1 to 60 seconds**, default **1 second**, with an
 auto-refresh control. Cadence is best-effort: a slow query does not overlap or
 queue another refresh, so the selected interval is not an exact timing guarantee.
 Native session inventories still require explicit Connect and manual refresh.
@@ -293,7 +305,7 @@ window is also usable without a current workspace:
 
 | Topic | Controls and boundaries |
 | --- | --- |
-| Monitoring | Auto-refresh and the shared Status/followed-log interval: 1, 2, 5, 10, 30 or 60 seconds; default 1. |
+| Monitoring | Auto-refresh and a custom shared Status/followed-log interval: any whole number from 1 to 60 seconds; default 1. |
 | Display | Built-in Textual theme and expanded/collapsed diagnostics details. |
 | Sessions | Scope and text filter only; changing them never connects or refreshes a native inventory automatically. |
 | Logs | Follow, source and literal search; searches stay in memory and are never persisted or journaled. External sources retain their explicit opt-in and ownership guards. |
@@ -315,6 +327,11 @@ settings, workspace resources or credential snapshots. There are no CPU/RAM/
 storage edit controls, resource-control RPCs, implicit resets or storage
 migrations. A settings Apply is not a resource Apply or native service reload.
 
+Enter refresh seconds directly in the Monitoring field. Blank, fractional or
+out-of-range values keep the dialog open with feedback and do not apply any of
+the other draft preferences. The quick Settings-tab selector supports the same
+1–60 range.
+
 If you deliberately need different create-time limits, exit the relevant
 clients/owner and use the existing CLI workflow outside the manager:
 
@@ -331,6 +348,8 @@ into a running workspace.
 
 Session discovery is an explicit **Connect**, followed by manual refresh. Merely
 visiting the tab never discovers/starts a service or synchronizes archives.
+**Disconnect** sits beside **Connect / refresh** in the source toolbar, including
+on compact terminals. It retains the existing cancellation/lease-release behavior.
 Choose the connection before interpreting a selected session:
 
 The table is a static snapshot between explicit operations. Background status,
@@ -507,25 +526,70 @@ process checkpoint. The encrypted version-1 envelope has exactly `key.age`,
 quiet source ownership and checked native exports are required; process-local
 checks do not eliminate races with other host processes.
 
-Session restore decrypts and validates before a metadata-only review in the
-foreground terminal. Type `RESTORE` there to authorize the fresh IDs shown in
-that review. Permissions and privileged configuration are cleared; parent links
+Session restore decrypts and validates before an additional metadata-only review
+inside the dashboard, retaining its plan and native connection in the same child.
+Click **Restore reviewed data**, or focus it and press Space, to approve the
+fresh IDs shown. Enter is intentionally ignored so queued password submission
+cannot approve the next review. Permissions and privileged configuration are cleared; parent links
 refer only to newly restored sessions. Existing history is not overwritten and
 restored work is not run. Native import success alone is not accepted: history
 and inventory are verified afterward. A partial failure reports observed new and
 attempted IDs for explicit recovery, not an atomic rollback or automatic delete.
 
-Age recipients and private identity-file paths are optional. Without a recipient,
-the dashboard suspends and the existing native host terminal prompts for a masked
-password. No password widget is added to the selectable/copyable dashboard, and
-no password enters argv, environment, plaintext staging, the clipboard cache or
-the journal. Host terminal recording can still capture deliberately displayed
-metadata. The dashboard resumes after the foreground command; raw command output
-is not recorded in its Logs tab.
+### Paths and passwords
 
-Ctrl-C is delivered to the foreground operation child, while the manager waits
-for that child's normal cleanup before resuming. Interrupting a multi-step
-operation is not an atomic rollback: inspect its explicit target before any retry.
+The archive path is the primary field. A blank workspace restore destination
+gets a visible, editable, absent sibling suggestion; displaying a suggestion
+creates nothing. Inspect/restore route from bounded envelope structure, not the
+filename suffix. Authentication failure never tries another engine or native
+store. Choose full/portable for creation; host scope creates one selected native
+session tree, not a whole-host backup.
+
+Age recipients and existing private identity-file paths are optional **Advanced**
+controls, initially collapsed. Ordinary password backups require no manual key
+copying: a fresh per-archive identity is generated in anonymous memory and stored
+encrypted in the archive. Choose a password and keep it safely; oc-box does not
+save it and cannot recover it. The provider vault is neither reused as a backup
+password nor included in a workspace archive.
+
+Create, inspect and restore stay in an operation modal. Password input is a
+custom masked, nonselectable editor, not Textual Input or ClipboardInput; it
+submits completed input only to the existing child's private controlling TTY.
+No reveal, automatic clipboard read, copied-text cache, search or clear-X action
+is available there. Explicit terminal paste remains bounded and single-line.
+Password confirmation starts empty and unfocused: click its box or Shift+Tab
+before typing. A lost password is not an automatic key-management problem that
+the dashboard silently resolves.
+
+The manager's transient private editor is part of the secret-memory trust
+boundary. Core dumps are disabled before private input, but Python memory
+erasure, same-user debugger, swap or terminal-recording protection is not
+guaranteed. Passwords are never stored as widget values/reactives/messages,
+protocol metadata, argv/env, plaintext files, clipboard content or journal
+entries. Private operations refuse Textual debugging, developer tools and
+event-file logging because those facilities can record input before widget
+handlers. Global copy/paste, help, palette and navigation are fenced through
+child exit, including gaps between dialogs; local focus traversal remains usable.
+
+### Progress and cancellation
+
+The modal shows **named stage + elapsed seconds + an indeterminate progress bar**.
+It does not estimate a byte/time percentage, scan extra data to manufacture a
+total, display raw child output or write a terminal transcript to Logs. Inspection
+shows a bounded metadata projection rather than arbitrary private manifest data.
+
+Cancel or Ctrl+C requests the operation child's normal cleanup. The dashboard
+waits for actual exit and verified completion before releasing its busy state.
+There is no forced operation kill, automatic retry or rollback. Backup's existing
+stop-before-password ordering is unchanged: cancellation can leave an unowned
+source container stopped. Partial session imports retain attempted versus
+observed fresh IDs, including cancellation after submission. Inspect the explicit
+target before retrying an unverified outcome. A cancellation after completion
+was already verified is identified as such, not reported as an accepted cancel.
+
+Ordinary CLI password prompts remain unchanged. Storage removal and encrypted
+file deletion retain their separate foreground handoff and destructive typed
+review.
 
 **Inspect backup** is explicit and available in CLI read-only mode. **Delete backup
 file** is a distinct typed operation on one owned, private, regular supported
@@ -556,7 +620,8 @@ Its bounded implementation/validation layers are:
 3. Explicit native host/workspace connections and guarded V2 session actions.
 4. Existing-client PTY embedding, interactive behavior and lease cleanup.
 5. Reviewed storage deletion and encrypted workspace/session backup/restore,
-   including foreground TTY prompts and privacy-safe failure notifications.
+   including private in-dashboard TTY-backed prompts, progress and privacy-safe
+   failure notifications.
 6. Clean-candidate host acceptance and review before any stable publication.
 
 Each integrated layer needs behavior-focused tests; declaring a phase does not

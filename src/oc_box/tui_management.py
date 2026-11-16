@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 from rich.text import Text
 
@@ -10,18 +11,18 @@ from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, DataTable, Input, Select, Static
+from textual.widgets import Button, Collapsible, DataTable, Input, Select, Static
 
 if __package__:
     from . import status_report, tui_operations, tui_storage
     from .tui_backend import plain
-    from .tui_clipboard import ClipboardBar, ClipboardInput, SelectableDataTable
+    from .tui_clipboard import ClipboardInput, SelectableDataTable
 else:
     import status_report
     import tui_operations
     import tui_storage
     from tui_backend import plain
-    from tui_clipboard import ClipboardBar, ClipboardInput, SelectableDataTable
+    from tui_clipboard import ClipboardInput, SelectableDataTable
 
 
 SCOPES = [
@@ -40,7 +41,7 @@ class ActionReview(ModalScreen):
     ActionReview Horizontal { height: 3; }
     """
 
-    def __init__(self, review, phrase):
+    def __init__(self, review, phrase=""):
         super().__init__()
         self.review, self.phrase = review, phrase
 
@@ -48,28 +49,36 @@ class ActionReview(ModalScreen):
         with Vertical():
             with VerticalScroll(id="operation-review-text"):
                 yield Static(plain(self.review, 32768), markup=False)
-            yield Static(f"Type exactly: {self.phrase}", markup=False)
-            yield ClipboardInput(
-                placeholder="Typed confirmation", id="operation-confirmation"
-            )
+            if self.phrase:
+                yield Static(f"Type exactly: {self.phrase}", markup=False)
+                yield ClipboardInput(
+                    placeholder="Typed confirmation", id="operation-confirmation"
+                )
             yield Static(
                 "Cancel makes no changes.",
                 id="operation-confirmation-status",
                 markup=False,
             )
-            yield ClipboardBar()
             with Horizontal():
                 yield Button("Cancel", id="operation-cancel")
-                yield Button("Confirm", id="operation-confirm", variant="error")
+                yield Button(
+                    "Confirm",
+                    id="operation-confirm",
+                    variant="error" if self.phrase else "primary",
+                )
 
     def on_button_pressed(self, event):
         if event.button.id not in {"operation-cancel", "operation-confirm"}:
-            return  # Clipboard controls must bubble to the normal app handlers.
+            return
         event.stop()
         if event.button.id == "operation-cancel":
             self.dismiss(None)
         elif event.button.id == "operation-confirm":
-            phrase = self.query_one("#operation-confirmation", Input).value
+            phrase = (
+                self.query_one("#operation-confirmation", Input).value
+                if self.phrase
+                else ""
+            )
             if phrase != self.phrase:
                 self.query_one("#operation-confirmation-status", Static).update(
                     "Confirmation does not match; nothing was changed."
@@ -137,7 +146,8 @@ class BackupPanel(Vertical):
 
     def compose(self) -> ComposeResult:
         yield Static(
-            "Encrypted backups only. Workspace archives and individual native session history are different formats.",
+            "Choose an archive path. Password protection is the default: no key file needs copying. "
+            "Inspect and restore detect the archive format automatically.",
             markup=False,
         )
         with Horizontal(classes="toolbar"):
@@ -149,6 +159,7 @@ class BackupPanel(Vertical):
             id="backup-table", cursor_type="row", zebra_stripes=True
         )
         with Horizontal(classes="toolbar"):
+            yield Static("Creation type · inspect/restore auto-detect", markup=False)
             yield Select(
                 [
                     ("Workspace · full (.ocbox)", "full"),
@@ -167,14 +178,17 @@ class BackupPanel(Vertical):
             placeholder="Restore destination: NEW project directory, or native session directory",
             id="backup-destination",
         )
-        yield ClipboardInput(
-            placeholder="Optional age recipients (space separated); blank uses a masked password prompt",
-            id="backup-recipients",
-        )
-        yield ClipboardInput(
-            placeholder="Optional private age identity file paths (one path, or JSON array of paths)",
-            id="backup-identities",
-        )
+        with Collapsible(
+            title="Advanced · existing age recipients / identity files", collapsed=True
+        ):
+            yield ClipboardInput(
+                placeholder="Public recipients for creation; blank uses a private masked password prompt",
+                id="backup-recipients",
+            )
+            yield ClipboardInput(
+                placeholder="Existing private age identity file path, or JSON array of paths",
+                id="backup-identities",
+            )
         yield Static(
             "No global host database replacement. Restores use fresh workspace/session IDs and never auto-start a workspace.",
             id="backup-details",
@@ -206,6 +220,9 @@ class ManagementActions:
         self._management_loading = False
         self._maintenance_busy = False
         self._management_last_completed = None
+        self._backup_preparing = False
+        self._private_interaction = False
+        self._embedded_operation = None
         self._management_controller = tui_operations.OperationController(
             self.backend.box, read_only=self.read_only, demo=self.demo
         )
@@ -343,6 +360,8 @@ class ManagementActions:
 
     def _management_select(self, event):
         if event.select.id in {"storage-scope", "backup-scope", "backup-kind"}:
+            if event.select.id == "backup-scope" and event.value == "host":
+                self.query_one("#backup-kind", Select).value = "session"
             self._render_management()
             return True
         return False
@@ -424,10 +443,32 @@ class ManagementActions:
         review = f"Workspace: {plan.workspace_id}\nProject: {plan.project}\n{plan.review_text}"
         self.push_screen(ActionReview(review, plan.phrase), finish)
 
-    def _review_backup(self, button):
+    def _review_backup(
+        self, button, *, detected=None, expected_path=None, expected_file=None
+    ):
         import json
 
+        # Admission precedes even format probing; browsing/demo never opens an archive.
+        if self.demo:
+            raise tui_operations.OperationError("demo")
+        if self.read_only and button != "backup-inspect":
+            raise tui_operations.OperationError("read-only")
+        if self._maintenance_busy or self._backup_preparing:
+            raise tui_operations.OperationError("busy")
+        archive_path = self.query_one("#backup-file", Input).value.strip()
+        if button in {"backup-inspect", "backup-restore"} and detected is None:
+            self._backup_preparing = True
+            self._detect_backup(button, archive_path)
+            return
+        if expected_path is not None and (
+            archive_path != expected_path
+            or tui_operations.file_identity(tui_operations.real_path(archive_path))
+            != expected_file
+        ):
+            raise tui_operations.OperationError("selection-changed")
         kind = self.query_one("#backup-kind", Select).value
+        if detected is not None:
+            kind = "session" if detected == "session" else "full"
         scope = self.query_one("#backup-scope", Select).value
         verb = {
             "backup-create": "backup",
@@ -472,6 +513,31 @@ class ManagementActions:
                 self.backend.box, workspace, read_only=self.read_only, demo=self.demo
             ).data
             destination = self.backend.box.container_project(data)
+        if action == "session-restore" and origin == "host" and destination is None:
+            destination = self._session()["location"]["directory"]
+        if action == "workspace-restore" and destination is None:
+            selected = next(
+                (
+                    row
+                    for row in self._management_records
+                    if row.workspace_id == self.selected
+                ),
+                None,
+            )
+            base = (
+                Path(selected.project)
+                if selected
+                else tui_operations.real_path(archive_path).with_suffix("")
+            )
+            for count in range(100):
+                candidate = base.with_name(
+                    base.name + "-restored" + (f"-{count}" if count else "")
+                )
+                if not candidate.exists() and not candidate.is_symlink():
+                    destination = str(candidate)
+                    break
+        if verb == "restore" and destination is not None:
+            self.query_one("#backup-destination", Input).value = destination
         self._management_controller.read_only = self.read_only
         plan = self._management_controller.prepare(
             action,
@@ -504,6 +570,37 @@ class ManagementActions:
 
         self.push_screen(ActionReview(plan.review, plan.confirmation), finish)
 
+    @work(thread=True, group="backup-format", exit_on_error=False)
+    def _detect_backup(self, button, path):
+        try:
+            location = tui_operations.real_path(path)
+            identity = tui_operations.file_identity(location)
+            detected = tui_operations.archive_kind(location, expected=identity)
+            if self.is_running:
+                self.call_from_thread(
+                    self._backup_detected, button, path, identity, detected
+                )
+        except Exception:
+            if self.is_running:
+                self.call_from_thread(self._backup_detected, button, path, None, None)
+
+    def _backup_detected(self, button, path, identity, detected):
+        self._backup_preparing = False
+        if detected is None:
+            self._operation_failure(
+                operation="inspection", reason="invalid-backup-file"
+            )
+            return
+        try:
+            self._review_backup(
+                button, detected=detected, expected_path=path, expected_file=identity
+            )
+        except Exception as error:
+            self._operation_failure(
+                error,
+                operation="inspection" if button == "backup-inspect" else "restore",
+            )
+
     def _perform_management(self, request):
         operation = tui_operations.operation_tag(request["action"])
         if self.demo or (
@@ -520,6 +617,27 @@ class ManagementActions:
             or self._management_loading
         ):
             self._operation_failure(operation=operation, reason="busy")
+            return
+        if request["action"] in tui_operations.ACTIONS - {"backup-delete"}:
+            if __package__:
+                from .tui_backup_workflow import BackupWorkflow, private_ui_allowed
+            else:
+                from tui_backup_workflow import BackupWorkflow, private_ui_allowed
+
+            self._maintenance_busy = True
+            self._private_interaction = True
+            self._management_last_completed = None
+            try:
+                private_ui_allowed(self)
+                self._embedded_operation = BackupWorkflow(self.backend.box, request)
+                self.push_screen(self._embedded_operation, self._embedded_finished)
+            except Exception:
+                self._maintenance_busy = self._private_interaction = False
+                self._embedded_operation = None
+                self._message(
+                    "Private backup input is unavailable. Disable dashboard debug, developer tools, "
+                    "and event logging; check private terminal support before retrying."
+                )
             return
         if not all(stream.isatty() for stream in (sys.stdin, sys.stdout, sys.stderr)):
             self._operation_failure(
@@ -566,5 +684,32 @@ class ManagementActions:
             )
         finally:
             self._maintenance_busy = False
+        self._management_refresh()
+        self.action_refresh()
+
+    def _embedded_finished(self, result):
+        if self._embedded_operation is None:
+            return  # a queued callback during final app teardown is not a new operation
+        operation = tui_operations.operation_tag(
+            self._embedded_operation.transport.request["action"]
+        )
+        self._embedded_operation = None
+        self._private_interaction = self._maintenance_busy = False
+        if result is not None and result["code"] == 0:
+            self._management_last_completed = operation
+            self._message(
+                "Backup operation completed. Restored workspaces remain stopped; native session refresh remains explicit."
+            )
+        elif result is not None and result.get("notice"):
+            if __package__:
+                from .tui_notifications import FailureNotice
+            else:
+                from tui_notifications import FailureNotice
+
+            self._show_failure_notice(FailureNotice(**result["notice"]))
+        else:
+            self._operation_failure(
+                operation=operation, dispatched=True, uncertain=True
+            )
         self._management_refresh()
         self.action_refresh()

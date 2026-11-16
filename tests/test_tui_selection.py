@@ -7,6 +7,7 @@ events enter App.on_event so Textual's native Click synthesis is exercised too.
 from contextlib import asynccontextmanager
 import importlib.util
 import re
+import time
 import unittest
 from unittest.mock import patch
 
@@ -81,6 +82,22 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                 value = match.group()
                 return (x, y), (x + cell_len(value) - 1, y), value
         self.fail(f"No visible {text or pattern!r} in {type(widget).__name__}")
+
+    async def wait_for_log_hits(self, app, pilot, expected):
+        """Wait for normal debounced filtering to reach the visible count."""
+        label = app.query_one("#log-hits")
+        deadline = time.monotonic() + 2
+        while True:
+            region = label.region.intersection(app.screen.region)
+            strips = app.screen._compositor.render_strips()
+            visible = {
+                strips[y].crop(region.x, region.right).text.strip()
+                for y in range(region.y, region.bottom)
+            }
+            if expected in visible or time.monotonic() >= deadline:
+                self.assertIn(expected, visible, "Log filter did not settle visibly")
+                return
+            await pilot.pause(0.01)
 
     async def mouse(self, app, pilot, kind, point, *, button=1, when=None):
         x, y = point
@@ -297,7 +314,7 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
             field.value = "previous input selection"
             field.focus()
             field.selection = (0, 8)
-            await pilot.pause()
+            await self.wait_for_log_hits(app, pilot, "0 matches")
             self.assertEqual(copies, [], "programmatic Input selection must not copy")
 
             with self.subTest(gesture="fresh static selection"):
@@ -420,14 +437,16 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     modal = app.screen
                     self.assertIsInstance(modal, SettingsScreen)
-                    modal.query_one("#pref-interval", Select).value = 5
+                    modal.query_one("#pref-interval", Input).value = "7"
                     await pilot.pause()
                     self.assertEqual(copies, [])
                     widget = modal.query_one("#" + action)
                     span = self.visible_span(app, widget, text)
                     before = await self.drag(app, pilot, copies, span)
                     self.assertIs(app.screen, modal, "drag must not Apply/dismiss")
-                    self.assertEqual(modal.query_one("#pref-interval", Select).value, 5)
+                    self.assertEqual(
+                        modal.query_one("#pref-interval", Input).value, "7"
+                    )
                     self.assertEqual(
                         app.query_one("#refresh-interval", Select).value, 1
                     )
@@ -675,7 +694,7 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
             field.value = "already selected input"
             field.focus()
             field.action_select_all()
-            await pilot.pause()
+            await self.wait_for_log_hits(app, pilot, "0 matches")
             self.assertEqual(copies, [])
             span = self.visible_span(app, app.query_one("#log-hits"), "0 matches")
             await self.drag(app, pilot, copies, span)
@@ -686,7 +705,7 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
             self.assert_copied(app, copies, before, field.value)
             self.assertEqual(field.selected_text, field.value)
             self.assertIsNone(app.screen.get_selected_text())
-            await self.click(app, pilot, app.query_one("#copy-selection"), "Copy")
+            await pilot.press("ctrl+shift+c")
             self.assertEqual(copies[-2:], [field.value, field.value])
             self.assertEqual(field.selected_text, field.value)
 

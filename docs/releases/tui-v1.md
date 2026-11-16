@@ -14,6 +14,26 @@ actual frozen successor, not reuse the earlier `1.7.110+g5573965` identity. Thes
 are the detailed manager notes for the combined
 [1.7 development release](1.7.md), including source-qualified sharing evidence.
 
+## Unreleased interaction follow-ups
+
+The follow-up work branches from published `v1.7.117.dev0` (`2f113ff`) and is
+integrated into `devel` for the next development release. It is not available
+merely by upgrading to that already-published version:
+
+- Sessions Disconnect beside Connect, plus in-field clear controls.
+- Debounced filtering and unchanged-view/incremental rendering, preserving
+  viewport, source identity and all monitoring samples.
+- Shortcut-only clipboard controls and typed reviews only for destructive actions.
+- Custom whole-number refresh interval from 1–60 seconds, default 1.
+- Path-first encrypted backup/inspect/restore inside the dashboard, private
+  TTY-backed password entry, authenticated metadata review and honest stage/
+  elapsed progress. Optional keys remain Advanced; no password is saved.
+
+Headless, synthetic process/age and native checks do not complete the historical
+UI/host acceptance described below. Relevant clean-source host backup/UI and
+cleanup observations remain a separate gate; no old retained fixture is replayed
+or failed evidence relabeled by this follow-up.
+
 ## Manager highlights
 
 The optional `oc-box tui` manager adds **Status, Settings, Sessions, Terminals,
@@ -25,7 +45,7 @@ replace it or add another chat client.
   fixed 0–100% CPU/RAM histories. Numeric workspace CPU retains 100% = one core;
   its bar uses observed quota capacity. Unknown/unlimited is not zero.
 - **Controlled monitoring:** one-second default Status/followed-log refresh,
-  1/2/5/10/30/60-second choices, auto-refresh toggle and no overlapping/queued
+  whole-number 1–60-second choices, auto-refresh toggle and no overlapping/queued
   queries. Expensive storage scans remain explicit. Demo uses fixed synthetic
   readings, not live host metrics.
 - **Grouped settings:** `s`, `F2` or Open all settings opens Monitoring, Display,
@@ -73,8 +93,9 @@ replace it or add another chat client.
   table/log rows, graphs, native terminal output and control labels; mouse release
   copies immediately without activating controls. Highlights remain visible over
   colored content, and meter bars use meaningful text glyphs. Copy view remains
-  available for the whole visible screen. Header
-  and modal clipboard controls preserve text-input focus. Paste copied uses
+  available for the whole visible screen through `Ctrl+Shift+Y`; `Ctrl+Shift+C`
+  repeats selection copy and `F1` explains shortcuts. Copy/Paste buttons are
+  removed. The `Ctrl+Shift+Insert` Paste copied shortcut uses
   only the in-app clipboard; external clipboard text arrives through the host
   terminal's normal paste command. Ordinary shell Ctrl+C/Ctrl+V and read-only
   boundaries are unchanged. Copies never become journal entries or recordings,

@@ -25,10 +25,12 @@ if AVAILABLE:
         DataTable,
         Input,
         Select,
+        Static,
         Switch,
         TabbedContent,
     )
     from oc_box.tui_settings import SettingsScreen, DEFAULT_SETTINGS
+    from oc_box.tui_clipboard import ClipboardInput
     from oc_box.tui_status import MonitorPanel
 
 
@@ -151,6 +153,56 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             app.query_one("#log-search", Input).value = "dashboard"
             await pilot.pause()
             self.assertEqual(len(app.logs.search(app.log_query)), 1)
+
+    async def test_session_disconnect_is_beside_connect_and_search_clear_is_local(self):
+        for size in ((140, 45), (80, 24)):
+            with self.subTest(size=size):
+                backend = SessionDemo()
+                app = DashboardApp(backend, read_only=True)
+                async with app.run_test(size=size) as pilot:
+                    await self.settle(app, pilot)
+                    app.action_tab("sessions")
+                    await pilot.pause()
+                    connect = app.query_one("#connect-sessions", Button)
+                    disconnect = app.query_one("#disconnect-sessions", Button)
+                    self.assertIs(connect.parent, disconnect.parent)
+                    self.assertEqual(connect.region.y, disconnect.region.y)
+                    self.assertLess(connect.region.right, disconnect.region.x)
+                    self.assertLessEqual(
+                        disconnect.region.right, disconnect.parent.content_region.right
+                    )
+                    self.assertEqual(backend.calls, [])
+                    await pilot.click("#connect-sessions")
+                    await self.settle(app, pilot)
+                    self.assertIsNotNone(app.catalog)
+                    search = app.query_one("#session-search", Input)
+                    search.value = "Root"
+                    for _ in range(100):
+                        await pilot.pause(0.02)
+                        if len(app.visible_sessions) == 1:
+                            break
+                    self.assertEqual(len(app.visible_sessions), 1)
+                    calls = list(backend.calls)
+                    generation = app._catalog_generation
+                    await pilot.click(search, offset=(search.region.width - 2, 1))
+                    for _ in range(100):
+                        await pilot.pause(0.02)
+                        if len(app.visible_sessions) == 2:
+                            break
+                    self.assertEqual(search.value, "")
+                    self.assertIs(app.focused, search)
+                    self.assertEqual(len(app.visible_sessions), 2)
+                    self.assertEqual(backend.calls, calls)
+                    self.assertEqual(backend.closed, 0)
+                    self.assertEqual(app._catalog_generation, generation)
+                    self.assertTrue(app.query_one("#delete", Button).disabled)
+                    self.assertTrue(app.query_one("#terminal-owner", Button).disabled)
+                    await pilot.click("#disconnect-sessions")
+                    await self.settle(app, pilot)
+                    self.assertIsNone(app.catalog)
+                    self.assertEqual(backend.closed, 1)
+                    self.assertEqual(backend.calls, calls)
+                self.assertEqual(backend.closed, 1)
 
     async def test_global_inventory_includes_children_and_archive_uses_native_patch(
         self,
@@ -450,8 +502,8 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             await pilot.press("s")
             self.assertIsInstance(app.screen, SettingsScreen)
             self.assertEqual(len(app.screen.query(".settings-topic")), 6)
-            self.assertEqual(app.screen.query_one("#pref-interval", Select).value, 1)
-            app.screen.query_one("#pref-interval", Select).value = 10
+            self.assertEqual(app.screen.query_one("#pref-interval", Input).value, "1")
+            app.screen.query_one("#pref-interval", Input).value = "17"
             app.screen.query_one("#pref-auto-refresh", Switch).value = False
             app.screen.query_one("#pref-log-follow", Switch).value = False
             app.screen.query_one("#pref-details", Switch).value = True
@@ -460,7 +512,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             await pilot.click("#preferences-apply")
             await pilot.pause()
             self.assertNotIsInstance(app.screen, SettingsScreen)
-            self.assertEqual(app.query_one("#refresh-interval", Select).value, 10)
+            self.assertEqual(app.query_one("#refresh-interval", Select).value, 17)
             self.assertFalse(app.query_one("#auto-refresh", Switch).value)
             self.assertFalse(app.query_one("#log-follow", Switch).value)
             self.assertFalse(app.query_one("#workspace-details", Collapsible).collapsed)
@@ -470,11 +522,13 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(backend.calls, [])
             await pilot.press("f2")
             self.assertIsInstance(app.screen, SettingsScreen)
-            app.screen.query_one("#pref-interval", Select).value = 60
+            app.screen.query_one("#pref-interval", Input).value = "59"
             await pilot.press("escape")
-            self.assertEqual(app.query_one("#refresh-interval", Select).value, 10)
+            self.assertEqual(app.query_one("#refresh-interval", Select).value, 17)
 
-    async def test_all_refresh_increments_and_invalid_settings_are_whitelisted(self):
+    async def test_refresh_interval_apply_accepts_all_integers_and_rejects_bad_types_atomically(
+        self,
+    ):
         app = DashboardApp(DemoBackend(), read_only=True, demo=True)
         async with app.run_test(size=(100, 30)) as pilot:
             await self.settle(app, pilot)
@@ -482,17 +536,164 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             values = dict(app.screen.values)
             await pilot.press("escape")
-            for interval in (1, 2, 5, 10, 30, 60):
-                app.apply_settings({**values, "interval": interval})
-                self.assertEqual(
-                    app.query_one("#refresh-interval", Select).value, interval
-                )
-            for interval in (0, -1, True, 1.5, 999):
-                app.apply_settings(
-                    {**values, "interval": interval, "auto_refresh": False}
-                )
-                self.assertEqual(app.query_one("#refresh-interval", Select).value, 60)
-                self.assertTrue(app.query_one("#auto-refresh", Switch).value)
+            for interval in range(1, 61):
+                with self.subTest(valid_interval=interval):
+                    app.apply_settings({**values, "interval": interval})
+                    self.assertEqual(
+                        app.query_one("#refresh-interval", Select).value, interval
+                    )
+            for name, interval in (
+                ("zero", 0),
+                ("negative", -1),
+                ("above maximum", 61),
+                ("large", 999),
+                ("true", True),
+                ("false", False),
+                ("fraction", 1.5),
+                ("integral float", 7.0),
+                ("nan", float("nan")),
+                ("infinity", float("inf")),
+                ("string", "7"),
+                ("blank", ""),
+                ("none", None),
+                ("list", [7]),
+                ("mapping", {"value": 7}),
+            ):
+                with self.subTest(invalid_interval=name):
+                    with patch.object(app, "_message") as message:
+                        app.apply_settings(
+                            {
+                                **values,
+                                "interval": interval,
+                                "auto_refresh": False,
+                                "session_filter": "must not apply",
+                                "log_query": "must not apply",
+                            }
+                        )
+                    self.assertEqual(
+                        app.query_one("#refresh-interval", Select).value, 60
+                    )
+                    self.assertTrue(app.query_one("#auto-refresh", Switch).value)
+                    self.assertEqual(app.query_one("#session-search", Input).value, "")
+                    self.assertEqual(app.query_one("#log-search", Input).value, "")
+                    message.assert_called_once_with(
+                        "Unsupported dashboard setting; no changes applied."
+                    )
+
+    async def test_settings_interval_input_named_validation_matrix_preserves_draft(
+        self,
+    ):
+        backend = SessionDemo()
+        app = DashboardApp(backend, read_only=True, demo=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.settle(app, pilot)
+            app.action_settings()
+            await pilot.pause()
+            modal = app.screen
+            interval = modal.query_one("#pref-interval", Input)
+            self.assertIsInstance(interval, ClipboardInput)
+            self.assertEqual(interval.type, "integer")
+            modal.query_one("#pref-session-filter", Input).value = "retained draft"
+            for name, raw in (
+                ("blank", ""),
+                ("fraction", "1.5"),
+                ("zero", "0"),
+                ("negative", "-1"),
+                ("above maximum", "61"),
+                ("nan", "NaN"),
+                ("infinity", "Infinity"),
+                ("boolean", "True"),
+                ("exponent", "1e1"),
+                ("whitespace", " 7 "),
+                ("huge number", "9" * 5000),
+            ):
+                with self.subTest(invalid_interval=name):
+                    interval.value = raw
+                    with patch.object(modal, "dismiss") as dismiss:
+                        await pilot.click("#preferences-apply")
+                        await pilot.pause()
+                    dismiss.assert_not_called()
+                    self.assertIs(app.screen, modal)
+                    self.assertEqual(
+                        app.query_one("#refresh-interval", Select).value, 1
+                    )
+                    self.assertEqual(app.query_one("#session-search", Input).value, "")
+                    self.assertEqual(
+                        modal.query_one("#pref-session-filter", Input).value,
+                        "retained draft",
+                    )
+                    self.assertIn(
+                        "1 to 60 seconds",
+                        str(modal.query_one("#pref-interval-error", Static).render()),
+                    )
+                    self.assertTrue(interval.has_focus)
+            interval.value = "7"
+            await pilot.click("#preferences-apply")
+            await pilot.pause()
+            self.assertNotIsInstance(app.screen, SettingsScreen)
+            self.assertEqual(app.query_one("#refresh-interval", Select).value, 7)
+            self.assertEqual(
+                app.query_one("#session-search", Input).value, "retained draft"
+            )
+            for name, value in (
+                ("custom middle", "17"),
+                ("custom near maximum", "59"),
+                ("upper boundary", "60"),
+                ("lower boundary", "1"),
+            ):
+                with self.subTest(valid_interval=name):
+                    app.action_settings()
+                    await pilot.pause()
+                    app.screen.query_one("#pref-interval", Input).value = value
+                    await pilot.click("#preferences-apply")
+                    await pilot.pause()
+                    self.assertNotIsInstance(app.screen, SettingsScreen)
+                    self.assertEqual(
+                        app.query_one("#refresh-interval", Select).value, int(value)
+                    )
+                    self.assertEqual(
+                        app.query_one("#session-search", Input).value, "retained draft"
+                    )
+            self.assertTrue(app.read_only)
+            self.assertEqual(backend.calls, [])
+
+    async def test_custom_refresh_interval_applies_to_tick_without_overlapping_or_queuing(
+        self,
+    ):
+        app = DashboardApp(DemoBackend(), read_only=True, demo=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.settle(app, pilot)
+            app._poll_timer.pause()
+            app.apply_settings({**DEFAULT_SETTINGS, "interval": 17})
+            app._last_report = app._last_logs = 100
+            with (
+                patch("oc_box.tui_app.time.monotonic", return_value=116),
+                patch.object(app, "refresh_report") as report,
+                patch.object(app, "refresh_logs") as logs,
+            ):
+                app._tick()
+                report.assert_not_called()
+                logs.assert_not_called()
+            with (
+                patch("oc_box.tui_app.time.monotonic", return_value=117),
+                patch.object(app, "refresh_report") as report,
+                patch.object(app, "refresh_logs") as logs,
+            ):
+                app._status_lock.acquire()
+                app._log_lock.acquire()
+                try:
+                    app._tick()
+                    app._tick()
+                    report.assert_not_called()
+                    logs.assert_not_called()
+                finally:
+                    app._status_lock.release()
+                    app._log_lock.release()
+                report.assert_not_called()
+                logs.assert_not_called()
+                app._tick()
+                report.assert_called_once_with()
+                logs.assert_called_once_with()
 
     async def test_diagnostics_and_controls_stay_aligned_across_screen_sizes(self):
         app = DashboardApp(DemoBackend(), read_only=True, demo=True)
@@ -568,7 +769,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     for name in app.available_themes
                     if name != DEFAULT_SETTINGS["theme"]
                 ),
-                "interval": 30,
+                "interval": 59,
                 "auto_refresh": False,
                 "details": True,
                 "session_scope": "project",
@@ -590,7 +791,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     app.screen.query_one("#pref-auto-refresh", Switch).value
                 )
                 self.assertEqual(
-                    app.screen.query_one("#pref-interval", Select).value, 1
+                    app.screen.query_one("#pref-interval", Input).value, "1"
                 )
                 self.assertEqual(
                     app.screen.query_one("#pref-theme", Select).value, "textual-dark"
@@ -609,7 +810,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     app.screen.query_one("#pref-log-query", Input).value, ""
                 )
-                self.assertEqual(app.query_one("#refresh-interval", Select).value, 30)
+                self.assertEqual(app.query_one("#refresh-interval", Select).value, 59)
                 self.assertTrue(app.read_only)
                 if apply:
                     await pilot.click("#preferences-apply")
@@ -617,7 +818,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.press("escape")
                 await pilot.pause()
                 self.assertEqual(
-                    app.query_one("#refresh-interval", Select).value, 1 if apply else 30
+                    app.query_one("#refresh-interval", Select).value, 1 if apply else 59
                 )
             app.action_settings()
             await pilot.pause()
@@ -754,22 +955,22 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("synthetic-private", message)
             close.assert_called_once()
 
-    async def test_header_copy_and_paste_controls_fit_and_preserve_input_focus(self):
+    async def test_shortcut_only_clipboard_keeps_search_space_and_input_focus(self):
         backend = SessionDemo()
         app = DashboardApp(backend, read_only=True, demo=True)
         async with app.run_test(size=(80, 24)) as pilot:
             await self.settle(app, pilot)
             for ident in ("copy-selection", "copy-view", "paste-copied"):
-                button = app.query_one("#" + ident, Button)
-                geometry = app.screen.find_widget(button)
-                self.assertEqual(
-                    geometry.region.intersection(geometry.clip), geometry.region
-                )
+                self.assertFalse(app.query("#" + ident))
             search = app.query_one("#log-search", Input)
+            geometry = app.screen.find_widget(search)
+            self.assertEqual(
+                geometry.region.intersection(geometry.clip), geometry.region
+            )
             search.value = "copy 界é"
             search.focus()
             search.action_select_all()
-            await pilot.click("#copy-selection")
+            await pilot.press("ctrl+shift+c")
             await pilot.pause()
             self.assertEqual(app.clipboard, "copy 界é")
             self.assertTrue(search.has_focus)
@@ -777,7 +978,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             app.copy_to_clipboard("pasted 界\nnot a second search line")
             search.value = "prefix "
             search.cursor_position = len(search.value)
-            await pilot.click("#paste-copied")
+            await pilot.press("ctrl+shift+insert")
             await pilot.pause()
             self.assertEqual(search.value, "prefix pasted 界")
             self.assertTrue(search.has_focus)
@@ -789,15 +990,18 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
         app = DashboardApp(backend, read_only=True)
         async with app.run_test(size=(80, 24)) as pilot:
             await self.settle(app, pilot)
-            await pilot.click("#copy-view")
+            await pilot.press("ctrl+shift+y")
             await pilot.pause()
             self.assertIn("Registered workspaces", app.clipboard)
-            self.assertIn("Copy view", app.clipboard)
-            self.assertIn("Paste copied", app.clipboard)
+            self.assertIn("Clipboard help", app.clipboard)
+            self.assertFalse(app.query("#copy-selection, #copy-view, #paste-copied"))
 
             app.action_settings()
             await pilot.pause()
-            await pilot.click(app.screen.query_one("#copy-view", Button))
+            self.assertFalse(
+                app.screen.query("#copy-selection, #copy-view, #paste-copied")
+            )
+            await pilot.press("ctrl+shift+y")
             await pilot.pause()
             self.assertIn("Dashboard settings", app.clipboard)
             self.assertIn("Reset to defaults", app.clipboard)
@@ -807,7 +1011,10 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             app.push_screen(Confirm("Synthetic deletion review", destructive=True))
             await pilot.pause()
             app.screen.query_one("#confirmation", Input).value = "DELETE"
-            await pilot.click(app.screen.query_one("#copy-view", Button))
+            self.assertFalse(
+                app.screen.query("#copy-selection, #copy-view, #paste-copied")
+            )
+            await pilot.press("ctrl+shift+y")
             await pilot.pause()
             self.assertIn("Synthetic deletion review", app.clipboard)
             self.assertIsInstance(app.screen, Confirm)
@@ -823,7 +1030,10 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             app.action_tab("logs")
             await pilot.pause()
             output = app.query_one("#log-output", RichLog)
-            with patch.object(output, "clear", wraps=output.clear) as clear:
+            with (
+                patch.object(output, "clear", wraps=output.clear) as clear,
+                patch.object(output, "write", wraps=output.write) as write,
+            ):
                 app._render_logs()
                 clear.assert_not_called()
                 app.screen.selections = {output: Selection(Offset(0, 0), Offset(5, 0))}
@@ -841,11 +1051,13 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await pilot.pause()
                 clear.assert_not_called()
+                write.assert_not_called()
                 self.assertEqual(app.screen.get_selected_text(), selected)
                 self.assertEqual(len(app.logs.search("New event")), 1)
                 app.screen.clear_selection()
                 app._render_logs()
-                clear.assert_called_once()
+                clear.assert_not_called()
+                write.assert_called_once()
 
     async def test_clipboard_shortcuts_preserve_native_control_keys(self):
         app = DashboardApp(SessionDemo())

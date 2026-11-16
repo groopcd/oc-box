@@ -492,16 +492,25 @@ focused text inputs or the native shell. A focused terminal keeps its keys,
 including `s`, `F2` and `Ctrl+L`; use `Ctrl-]` to detach its client without ending
 the native shell before using dashboard shortcuts.
 
+Nonempty editable search and form inputs have a right-edge `×` inside the field.
+Click it to clear that field and retain editing focus, without submitting,
+connecting or accessing the clipboard. Password and disabled fields are excluded.
+Session/log filtering waits for a 120 ms typing pause rather than rebuilding
+tables on every key. Input editing remains immediate. Unchanged views skip
+rebuilds, and favorites I/O is asynchronous; native discovery remains explicit
+and monitoring keeps the selected refresh interval.
+
 Drag-select visible text throughout the dashboard, including logs, graphs,
 terminal output and control labels. Releasing the mouse copies immediately;
 dragging a label never activates its control. Graph bars use copyable `█`/`░`
 glyphs. Completed text double/triple-clicks and keyboard selection in text fields
 also copy (`Ctrl+A`/`Ctrl+Shift+A` select all field text). Refresh, focus,
 programmatic selection and container output never
-trigger copying. **Copy** or forwarded `Ctrl+Shift+C` can repeat a copy;
-**Copy view** copies the whole visible screen. Dialogs have clipboard controls
-too. This is visible-viewport copying, not offscreen history export.
-**Paste copied** (`Ctrl+Shift+Insert`) uses only the last text copied inside the
+trigger copying. Forwarded `Ctrl+Shift+C` can repeat a copy;
+`Ctrl+Shift+Y` copies the whole visible screen. The same shortcuts work in ordinary
+dialogs; Copy/Paste buttons are removed. `F1` explains clipboard shortcuts and
+terminal paste behavior. This is visible-viewport copying, not offscreen history export.
+**Paste copied** (`Ctrl+Shift+Insert`, shortcut only) uses only the last text copied inside the
 dashboard and targets the focused text field or connected shell. For the desktop
 clipboard, use the host terminal's paste command, commonly `Ctrl+Shift+V` or
 `Shift+Insert`. Ordinary shell `Ctrl+C` and `Ctrl+V` remain unchanged. Clipboard
@@ -522,7 +531,7 @@ Raw report data and totals are unchanged. Full details/mounts remain in an
 expandable section, initially collapsed. System readings and monitoring settings
 remain available with no current workspace.
 
-Status and followed logs share an adjustable **1, 2, 5, 10, 30 or 60 second**
+Status and followed logs share an adjustable **whole-number 1–60 second**
 refresh interval, default **1 second**, and an auto-refresh control. Cheap metrics
 are batched; slow queries never overlap or queue refreshes, so cadence is
 best-effort rather than an exact timing guarantee. Expensive allocated storage
@@ -555,6 +564,11 @@ resizes and graphroot/runroot moves are deferred to a separate project. Existing
 explicit CLI `reset` remains outside the manager; there is no `podman update`
 action, resource-control RPC or resource-editing service extension.
 
+The Monitoring refresh field accepts any whole number from 1 to 60 seconds,
+default 1. Invalid or blank entries leave the window open with feedback and
+apply none of the pending edits. Reset fills 1; Apply activates it, and Cancel
+discards the draft. The quick Settings-tab selector supports the same range.
+
 The Sessions tab uses manual Connect/refresh. Host global discovery consumes the
 complete paginated native V2 API across projects, children and archived sessions. Host
 project views include controller archive associations only where provenance is
@@ -564,6 +578,16 @@ tab alone does not. Workspace connections lease only an existing ready private
 V2 owner, never the host service. The lease is held until Disconnect or dashboard
 exit and visibly keeps owner shutdown waiting. Favorites live in private UI
 state, not native pins.
+
+Disconnect is adjacent to Connect / refresh in the source toolbar. Moving the
+control does not change loading cancellation, native service ownership or lease
+release semantics.
+
+Non-destructive dashboard reviews use the Confirm button alone; they do not
+require typing `CONFIRM` or `RESTORE`. Typed operation-specific phrases remain
+for destructive actions such as deleting a session/archive or removing workspace
+storage. Button-only approval still consumes a single-use review and rechecks
+the target identity and permissions before dispatch.
 
 Archive/unarchive uses native V2 archive state. Archived V2 roots remain in history
 and synchronization inventories but are not selected by automatic workspace resume;
@@ -599,23 +623,44 @@ and verified recovery provenance; it never adds `--all` or `--delete-sessions`.
 Exit owning clients first. Purge can briefly start the container for final
 history synchronization; no forced stop or lock bypass is offered.
 
-Backup/restore hands reviewed operations to the **same pinned runtime** in the
-foreground host terminal, temporarily suspending the dashboard for existing
-masked password/age prompts. Passwords never enter dashboard fields, clipboard
-actions, argv, environment or plaintext files. Workspace full/portable `.ocbox`
-archives, inspection and new-directory restore retain the normal CLI contracts
-below; restored workspaces remain stopped. No output file or restore destination
-is overwritten, and whole-workspace archives may contain copied config/auth.
+Backup creation, inspection and restore run **inside the dashboard**, using the
+same pinned runtime in a separate private child. Enter the archive path; restore
+offers an editable, absent destination suggestion. Optional age recipients and
+existing identity-file paths are under Advanced. Default password-encrypted
+archives already contain an encrypted per-archive identity: no key file needs
+copying. The password is not saved and cannot be recovered by oc-box.
+
+Passwords use a custom masked, nonselectable editor feeding the existing child
+controlling-TTY reader, not an ordinary Input field. The manager now temporarily
+holds secret input in memory; guaranteed erasure, same-user debugger, swap or
+recording protection is not promised. Secrets never enter clipboard actions,
+widget values/messages, protocol metadata, argv, environment, plaintext files
+or journals. Private operations refuse Textual debug, developer tools and
+event-file logging. Clipboard/navigation shortcuts are fenced until child exit.
+For password confirmation, click its box or Shift+Tab before typing; queued
+first-password text is discarded.
+
+The operation modal shows the actual named stage, elapsed seconds and an
+indeterminate progress bar, not an invented percentage. Cancel or Ctrl+C requests
+normal cleanup and waits for real child exit; no automatic retry runs. A backup
+can stop an unowned source before requesting its password, so cancellation can
+leave that source stopped. Workspace full/portable `.ocbox` archives retain the
+normal CLI contracts below: fresh IDs, no overwrite and stopped restores.
+Whole-workspace archives may contain copied config/auth. Ordinary CLI password
+prompts remain unchanged; Storage removal and backup-file deletion retain their
+separate reviewed foreground handoff.
 
 Native V2 session-tree history instead uses encrypted `.ocsession` files:
 versioned, authenticated age components, at most 50 sessions, 100,000 messages
 and 64 MiB encoded history. Select the corresponding verified source in Sessions
 before backing up or restoring history. No private workspace is started for this
-connection. Session restore shows decrypted **metadata only** for a second typed
-review in the foreground terminal, assigns fresh session/message IDs, clears
+connection. Workspace and session restores show authenticated **metadata only**
+for an additional in-dashboard review. Click the reviewed restore action or
+focus it and press Space; Enter cannot approve this next review after password
+submission. Session restore assigns fresh session/message IDs, clears
 permissions/privileged configuration, and restores native parent links only
 within that new tree. It never executes restored work or overwrites old IDs.
-Partial failures report newly created/attempted IDs for explicit recovery; they
+Partial failures and cancellation retain observed/attempted IDs for explicit recovery; they
 are not atomic restores and trigger no automatic rollback/delete or retry.
 
 Delete backup file is a separate typed action for one selected, owned, private,

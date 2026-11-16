@@ -6,6 +6,8 @@ Reveal is explicit, prompt-local, and cleared before return/error. Terminal
 recordings, screen captures, resize reflow, or scrollback may retain revealed text.
 """
 
+import contextlib
+from contextvars import ContextVar
 import json
 import os
 from pathlib import Path
@@ -33,6 +35,41 @@ KEYS = {
     b"\x1b[3~": "delete",
 }
 MAX_PASSPHRASE_BYTES = 1024
+_OPERATION_OBSERVER = ContextVar("oc_box_secret_operation_observer", default=None)
+_OPERATION_CANCELLATION = ContextVar(
+    "oc_box_secret_operation_cancellation", default=None
+)
+BACKUP_PURPOSES = frozenset({"backup-new", "backup-confirm", "backup-unlock"})
+
+
+@contextlib.contextmanager
+def operation_prompts(observer, *, cancellation=None):
+    """Private operation child only; the controlling TTY remains authoritative.
+
+    The observer receives public readiness, never input. There is deliberately
+    no environment selector, stdin fallback or secret-returning callback.
+    """
+    token = _OPERATION_OBSERVER.set(observer)
+    cancellation_token = _OPERATION_CANCELLATION.set(cancellation)
+    try:
+        yield
+    finally:
+        _OPERATION_OBSERVER.reset(token)
+        _OPERATION_CANCELLATION.reset(cancellation_token)
+
+
+def operation_active():
+    return _OPERATION_OBSERVER.get() is not None
+
+
+def cancel_operation():
+    """Share the operation latch while nested CLI/prompt handlers own signals."""
+    latch = _OPERATION_CANCELLATION.get()
+    if latch is not None:
+        if latch.is_set():
+            return
+        latch.set()
+    raise KeyboardInterrupt
 
 
 def validate_minimum(length):
@@ -65,8 +102,21 @@ def passphrase_minimum(kind, override=None):
 
 def new_passphrase(kind, minimum, *, reader=None):
     minimum = validate_minimum(minimum)
-    reader = read_secret if reader is None else reader
-    first = reader(f"New {kind} passphrase ({minimum}+ characters): ")
+    if reader is None:
+
+        def reader(prompt, *, confirm=False):
+            return read_secret(
+                prompt,
+                purpose=("backup-confirm" if confirm else "backup-new")
+                if kind == "backup"
+                else None,
+            )
+
+        first = reader(f"New {kind} passphrase ({minimum}+ characters): ")
+        confirmation = lambda: reader(f"Confirm {kind} passphrase: ", confirm=True)
+    else:
+        first = reader(f"New {kind} passphrase ({minimum}+ characters): ")
+        confirmation = lambda: reader(f"Confirm {kind} passphrase: ")
     if (
         len(first) < minimum
         or any(char in first for char in ("\0", "\r", "\n"))
@@ -75,7 +125,7 @@ def new_passphrase(kind, minimum, *, reader=None):
         raise ValueError(
             f"Choose a single-line passphrase of {minimum} or more characters (maximum 1024 UTF-8 bytes)."
         )
-    if first != reader(f"Confirm {kind} passphrase: "):
+    if first != confirmation():
         raise ValueError("Passphrases do not match; no password was changed.")
     return first
 
@@ -203,7 +253,7 @@ class Editor:
         return prefix + field + suffix, max(0, position)
 
 
-def read_secret(prompt, *, allow_reveal=False, maximum=1024):
+def read_secret(prompt, *, allow_reveal=False, maximum=1024, purpose=None):
     """Mask input with a count; Ctrl+R toggles values only when allowed."""
     fd = os.open("/dev/tty", os.O_RDWR | os.O_CLOEXEC | os.O_NOCTTY)
     attributes = None
@@ -214,13 +264,20 @@ def read_secret(prompt, *, allow_reveal=False, maximum=1024):
     pasted = None
     paste_too_large = False
     success = False
+    observer = _OPERATION_OBSERVER.get()
+    notified = False
+    if observer is not None and (
+        purpose not in BACKUP_PURPOSES or allow_reveal or maximum != 1024
+    ):
+        os.close(fd)
+        raise OSError("Unsupported private operation prompt")
 
     def columns():
         size = os.get_terminal_size(fd).columns
         return size if size > 0 else 80
 
     def cancel(*_):
-        raise KeyboardInterrupt
+        cancel_operation()
 
     def draw():
         text, position = editor.line(prompt, columns())
@@ -261,6 +318,9 @@ def read_secret(prompt, *, allow_reveal=False, maximum=1024):
         enabled = True
         write(fd, "\x1b[?2004h")
         draw()
+        if observer is not None:
+            observer(ready=True, purpose=purpose, maximum=maximum)
+            notified = True
         previous_columns = columns()
         while True:
             if not select.select([fd], [], [], 0.1)[0]:
@@ -398,3 +458,5 @@ def read_secret(prompt, *, allow_reveal=False, maximum=1024):
                 for sig, previous in handlers.items():
                     signal.signal(sig, previous)
                 os.close(fd)
+                if notified:
+                    observer(ready=False, purpose=purpose, maximum=maximum)

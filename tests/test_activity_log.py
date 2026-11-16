@@ -15,14 +15,18 @@ from oc_box import activity_log as journal
 
 def _writer(root, start, count, ready, result):
     ready.wait(timeout=10)
-    result.put(
-        [
-            journal.record_event(
-                "command.finished", command="status", duration_ms=index, root=root
-            )
-            for index in range(start, start + count)
-        ]
-    )
+    # Test serialization, not the production 250 ms best-effort deadline under
+    # slow/contended fsync. Keep the longer bounded wait local to each child;
+    # every append still executes real locking, writes, fsync and rotation once.
+    with patch.object(journal, "_LOCK_TIMEOUT", 5.0):
+        result.put(
+            [
+                journal.record_event(
+                    "command.finished", command="status", duration_ms=index, root=root
+                )
+                for index in range(start, start + count)
+            ]
+        )
 
 
 class ActivityLogTests(unittest.TestCase):
@@ -308,6 +312,7 @@ class ActivityLogTests(unittest.TestCase):
         self.assertEqual(self.active.stat().st_size, journal._MAX_FILE_BYTES + 1)
 
     def test_busy_lock_is_bounded_and_diagnostic_failures_are_silent(self):
+        self.assertEqual(journal._LOCK_TIMEOUT, 0.25)
         self.seed()
         before = self.active.read_bytes()
         with (

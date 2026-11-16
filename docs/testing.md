@@ -223,8 +223,11 @@ that full details/mounts remain expandable and initially collapsed. Include no
 current workspace: System and monitoring settings must remain usable without
 fabricating workspace readings.
 
-Check cheap batched Status and followed-log refresh at the shared 1, 2, 5, 10, 30
-and 60 second choices, default 1 second, and auto-refresh on/off. Use controlled
+Check cheap batched Status and followed-log refresh at every whole-number
+interval from 1 through 60 seconds, default 1 second, and auto-refresh on/off.
+The custom Monitoring field must reject blank, fractional, nonnumeric and
+out-of-range drafts without applying other edits; Reset stages 1 and Cancel
+discards it. Include custom values such as 7, 17 and 59. Use controlled
 slow queries to verify no overlapping or queued refreshes; cadence is best-effort,
 not an exact wall-clock guarantee. Native session inventories remain manual
 Connect/refresh, and expensive allocated storage scans remain manual and bound
@@ -246,6 +249,19 @@ OpenCode `cli.json`/host settings. Settings shortcuts must not steal focused tex
 input or native-shell keys, including `s` and `F2`; detach with `Ctrl-]` before
 dashboard shortcuts. Keep log search available from every tab without stealing
 native terminal focus on refresh.
+
+For display regressions, run the synthetic workload in
+`tools/benchmark_tui_display.py` with the optional TUI dependencies. It uses
+32 synthetic workspaces, 1,000 session-metadata records and 2,000 log entries,
+not actual stores or Podman. Check deterministic work counts rather than tight
+wall-clock thresholds: a typing burst should coalesce to one final filter;
+unchanged session/log snapshots should not clear or repopulate the view.
+Verify immediate text/caret editing, final-filter delivery after the short
+debounce, stale callback rejection, same-store cursor/scroll preservation,
+different-store selection separation, and favorites I/O outside rendering.
+All metric samples and fixed-scale histories must remain represented, and a
+redraw must never become a clipboard gesture. Local benchmark timings do not
+establish real-terminal or host acceptance.
 
 Background Status/log/storage updates must leave Sessions rows, selection,
 cursor and scroll position unchanged. Check this with enough rows to scroll,
@@ -384,8 +400,14 @@ observations include:
   bounded nonblocking registration reads, typed one-workspace purge retaining
   project/history, and owner/lease/exposure refusal without forced cleanup.
   Explicit full/portable backup, inspection and new-directory restore through
-  actual foreground masked TTY prompts; no password can enter UI selection/copy,
-  argv/env, plaintext files, logs or journals. Read-only/demo gates apply again
+  private in-dashboard masked editing backed by the actual child controlling
+  TTY; no password can enter selectable Input/widget values/messages, UI
+  selection/copy, protocol metadata, argv/env, plaintext files, logs or journals.
+  Verify debug/developer/event-logging refusal, core-dump suppression, prompt
+  readiness/echo fences, confirmation focus and queued-input isolation, Enter
+  refusal on the next authenticated metadata review, global clipboard/help/
+  palette/clear/navigation fences through child exit, and local focus traversal.
+  Read-only/demo gates apply again
   at execution and source changes invalidate reviews.
 - Encrypted session-tree backup/restore to host and existing workspace sources,
   including history above 4 MiB, fresh IDs, cleared privileges, verified import,
@@ -401,12 +423,24 @@ observations include:
   must not activate it. Copy view remains optional, without exporting hidden/
   offscreen data. Programmatic selection, focus, refresh and container output
   never trigger copies. Host delivery depends on actual terminal OSC 52 support/
-  permissions. Check desktop
-  paste and the separately labelled in-app Paste copied control in text fields
-  and a connected shell; preserve ordinary shell Ctrl+C/Ctrl+V, focus, UTF-8/
+  permissions. Check desktop paste and the separate in-app Paste copied
+  shortcut in text fields and a connected shell; preserve ordinary shell
+  Ctrl+C/Ctrl+V, focus, UTF-8/
   framing/queue bounds, atomic size/capacity rejection, uncertainty-aware
   partial-transport failure notices, read-only refusals and no clipboard
   content in journals. Container output must not issue host clipboard writes.
+- In-dashboard backup progress must identify real stages and elapsed time with
+  an indeterminate bar, not fake percentages. Inspect only after explicit action,
+  route by bounded envelope structure outside the UI thread, retain editable fresh
+  destination suggestions, and refuse authentication without trying another store.
+  Cancel/Ctrl+C must latch one interrupt and wait for actual cleanup/exit, including
+  parent/control EOF, prompt/review transitions and post-dispatch cancellation.
+  Verify startup failures with no worker cannot abandon a child, nested handlers
+  retain the latch, descriptors do not leak to exec helpers, next-prompt IDs are
+  not clobbered, accepted cancellation cannot become ordinary success, and partial
+  session-import IDs survive interruption in normal and recovery paths. Run these
+  on fresh synthetic state; none of the earlier incomplete UI evidence is passed
+  merely by completing headless/process/age tests.
 - Private fixed-category journal creation, permissions and bounded rotation;
   synthetic argv/env/error/prompt/transcript sentinels must not enter generated
   entries. Verify readers do not create files, default log browsing does not
