@@ -269,6 +269,7 @@ class MetadataReview(ModalScreen):
     def __init__(self, metadata):
         super().__init__()
         self.metadata = metadata
+        self._decision_sent = False
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -294,7 +295,15 @@ class MetadataReview(ModalScreen):
     def on_button_pressed(self, event):
         if event.button.id in {"metadata-cancel", "metadata-approve"}:
             event.stop()
+            if self._decision_sent:
+                return
+            self._decision_sent = True
             self.dismiss(event.button.id == "metadata-approve")
+
+    def action_cancel_private_input(self):
+        if self.is_mounted and not self._decision_sent:
+            self._decision_sent = True
+            self.dismiss(False)
 
     def on_mount(self):
         self.query_one("#metadata-cancel", Button).focus()
@@ -488,6 +497,9 @@ class BackupWorkflow(ModalScreen):
                 if accepted is False
                 else "Cancellation requested; waiting for cleanup…"
             )
+
+    def action_cancel_private_input(self):
+        self.action_cancel_operation()
 
     def _restore_interrupt(self):
         handler = getattr(self, "_interrupt_handler", None)

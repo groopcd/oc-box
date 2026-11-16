@@ -179,6 +179,66 @@ class PrivateEditorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, [True])
             app._private_interaction = False
 
+    async def test_metadata_cancel_private_input_alias_declines_once_never_approves(
+        self,
+    ):
+        app = DashboardApp(DemoBackend(), demo=True)
+        async with app.run_test(size=(110, 40)) as pilot:
+            await self.begin(app, pilot)
+            app._private_interaction = True
+            result = []
+            review = MetadataReview({"format": "session", "session_count": 1})
+            app.push_screen(review, result.append)
+            await pilot.pause()
+            review.action_cancel_private_input()
+            review.action_cancel_private_input()
+            # A queued approval cannot reverse the already emitted cancellation.
+            review.on_button_pressed(
+                SimpleNamespace(
+                    button=SimpleNamespace(id="metadata-approve"),
+                    stop=Mock(),
+                )
+            )
+            await pilot.pause()
+            self.assertEqual(result, [False])
+            app._private_interaction = False
+
+    async def test_workflow_cancel_private_input_alias_preserves_cleanup_wait_without_start(
+        self,
+    ):
+        app = DashboardApp(DemoBackend(), demo=True)
+        async with app.run_test(size=(110, 40)) as pilot:
+            await self.begin(app, pilot)
+            workflow = BackupWorkflow(None, {"action": "workspace-inspect"})
+            with (
+                patch.object(BackupWorkflow, "_run"),
+                patch.object(workflow.transport, "start") as start,
+                patch.object(app, "suspend") as suspend,
+                patch.object(
+                    workflow,
+                    "action_cancel_operation",
+                    wraps=workflow.action_cancel_operation,
+                ) as cancel,
+            ):
+                app.push_screen(workflow)
+                await pilot.pause()
+                workflow.action_cancel_private_input()
+                cancel.assert_called_once_with()
+                self.assertTrue(workflow.transport._cancelled)
+                self.assertFalse(workflow.finished)
+                self.assertTrue(app._private_interaction)
+                self.assertTrue(
+                    workflow.query_one("#backup-operation-close", Button).disabled
+                )
+                self.assertIn(
+                    "Cancellation requested",
+                    str(workflow.query_one("#backup-operation-stage", Static).render()),
+                )
+                start.assert_not_called()
+                suspend.assert_not_called()
+                workflow._finished(None)
+                workflow.dismiss()
+
     async def test_advanced_keys_collapsed_and_host_creation_context_is_session_only(
         self,
     ):
