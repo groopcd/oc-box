@@ -59,8 +59,8 @@ class PrivateEditorTests(unittest.IsolatedAsyncioTestCase):
         transport = SimpleNamespace(submit_secret=Mock(), cancel=Mock())
         async with app.run_test(size=(110, 40)) as pilot:
             await self.begin(app, pilot)
-            app._private_interaction = True
             app.copy_to_clipboard("EXISTING_NONSECRET_CACHE")
+            app._private_interaction = True
             screen = PrivateSecretScreen(transport, {"id": 1, "purpose": "backup-new"})
             app.push_screen(screen)
             await pilot.pause()
