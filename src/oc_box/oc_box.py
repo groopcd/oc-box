@@ -1427,13 +1427,13 @@ def image_preview_cli_config():
 
 
 def validate_image_preview(version):
-    """Refuse unsupported launches/invalid input before registration or reset."""
+    """Return the private CLI bytes validated before registration or reset."""
     if opencode_compat.major(version) != 2:
         raise BoxError("--image-preview requires native OpenCode 2.x.")
-    image_preview_cli_config()
+    return image_preview_cli_config()
 
 
-def config_archive(data, *, image_preview=False):
+def config_archive(data, *, image_preview=False, image_preview_snapshot=None):
     """Snapshot user config as bytes. Extracted only inside the container."""
     source = (
         Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
@@ -1445,7 +1445,11 @@ def config_archive(data, *, image_preview=False):
     if image_preview:
         if not v2:
             raise BoxError("--image-preview requires native OpenCode 2.x.")
-        preview_config = image_preview_cli_config()
+        preview_config = (
+            image_preview_cli_config()
+            if image_preview_snapshot is None
+            else image_preview_snapshot
+        )
     local_plugins = {}
     replacements = {}
     sandbox_version = None
@@ -1522,9 +1526,9 @@ def config_archive(data, *, image_preview=False):
             relative = file.relative_to(source)
             if (
                 any(part in ("node_modules", ".git") for part in relative.parts)
+                or (image_preview and relative.parts[0] == "cli.json")
                 or not file.is_file()
                 or relative == Path("AGENTS.md")
-                or (image_preview and relative == Path("cli.json"))
                 or (file.name.startswith("service") and file.suffix == ".json")
                 or (
                     v2
@@ -1701,11 +1705,20 @@ def ensure_opencode_version(data, version):
     print(f"oc-box: OpenCode {version} matches the host version.", flush=True)
 
 
-def prepare_runtime(path, data, version, *, image_preview=False):
-    # Validate/snapshot the requested CLI edit before runtime installation/seeding.
+def prepare_runtime(
+    path, data, version, *, image_preview=False, image_preview_snapshot=None
+):
+    # Owning launches carry the preflight bytes past credential prompts/reset;
+    # never reopen that CLI input after resource removal.
     if image_preview and opencode_compat.major(version) != 2:
         raise BoxError("--image-preview requires native OpenCode 2.x.")
-    archive = config_archive(data, image_preview=True) if image_preview else None
+    archive = (
+        config_archive(
+            data, image_preview=True, image_preview_snapshot=image_preview_snapshot
+        )
+        if image_preview
+        else None
+    )
     # Install the unmodified upstream version currently installed on the host.
     # Node/npm/uv are also used by the user's ordinary MCP/LSP setup.
     ensure_opencode_version(data, version)
@@ -2572,21 +2585,26 @@ def launch_credentials(data, args):
             del args._opencode_release
 
 
-def launch(path, data, args):
+def launch(path, data, args, *, image_preview_snapshot=None):
     # Keep plaintext values out of persisted workspace metadata, os.environ,
     # and informational/maintenance/sync invocations. Launch unlock is local.
+    runtime_options = (
+        {"image_preview_snapshot": image_preview_snapshot}
+        if image_preview_snapshot is not None
+        else {}
+    )
     try:
         if args.command == "sync":
             if getattr(args, "no_vault", False):
                 raise BoxError("--no-vault is not a history-sync option.")
-            return launch_environment(path, data, args)
+            return launch_environment(path, data, args, **runtime_options)
         with launch_credentials(data, args):
-            return launch_environment(path, data, args)
+            return launch_environment(path, data, args, **runtime_options)
     except vault.VaultError as exc:
         raise BoxError(str(exc)) from exc
 
 
-def launch_environment(path, data, args):
+def launch_environment(path, data, args, *, image_preview_snapshot=None):
     version = getattr(args, "_opencode_release", None)
     if version is None:
         with loading_stage("Checking OpenCode version"):
@@ -2596,7 +2614,10 @@ def launch_environment(path, data, args):
             raise BoxError(
                 "--image-preview applies only to an owning start/reset TUI launch."
             )
-        validate_image_preview(version)
+        if opencode_compat.major(version) != 2:
+            raise BoxError("--image-preview requires native OpenCode 2.x.")
+        if image_preview_snapshot is None:
+            image_preview_snapshot = validate_image_preview(version)
     if opencode_compat.major(version) == 2 or credentials.has_unlocked_values():
         check_private_output()
     if data.get("opencode_version") != version:
@@ -2628,7 +2649,10 @@ def launch_environment(path, data, args):
                 data,
                 version,
                 **(
-                    {"image_preview": True}
+                    {
+                        "image_preview": True,
+                        "image_preview_snapshot": image_preview_snapshot,
+                    }
                     if getattr(args, "image_preview", False)
                     else {}
                 ),
@@ -3664,6 +3688,7 @@ def main(argv=None):
                 else {}
             ),
         )
+    image_preview_snapshot = None
     state_root().mkdir(parents=True, exist_ok=True, mode=0o700)
     path, data = find_workspace(
         args.project, args.workspace, allow_identity_change=args.command == "repair"
@@ -3683,7 +3708,7 @@ def main(argv=None):
         if args.no_vault and opencode_compat.major(version) != 2:
             raise BoxError("--no-vault requires native OpenCode 2.x.")
         if args.image_preview:
-            validate_image_preview(version)
+            image_preview_snapshot = validate_image_preview(version)
         if opencode_compat.major(version) == 2:
             check_private_output()
         args._opencode_release = version
@@ -3805,7 +3830,8 @@ def main(argv=None):
                 )
     if args.image_preview:
         version = getattr(args, "_opencode_release", None) or detect_opencode_release()
-        validate_image_preview(version)
+        if image_preview_snapshot is None:
+            image_preview_snapshot = validate_image_preview(version)
         args._opencode_release = version
     with workspace_lock(path), contextlib.ExitStack() as launch_context:
         if data.get("restore_incomplete") and args.command != "purge":
@@ -3879,7 +3905,16 @@ def main(argv=None):
                     raise BoxError("Change resource limits using 'oc-box reset'.")
                 data["pids"] = args.pids_limit
             atomic_json(path, data)
-            return launch(path, data, args)
+            return launch(
+                path,
+                data,
+                args,
+                **(
+                    {"image_preview_snapshot": image_preview_snapshot}
+                    if args.image_preview
+                    else {}
+                ),
+            )
         if args.command == "purge":
             purge(path, data, args)
     return 0
