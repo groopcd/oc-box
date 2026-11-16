@@ -7,6 +7,7 @@ events enter App.on_event so Textual's native Click synthesis is exercised too.
 from contextlib import asynccontextmanager
 import importlib.util
 import re
+import time
 import unittest
 from unittest.mock import patch
 
@@ -81,6 +82,22 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                 value = match.group()
                 return (x, y), (x + cell_len(value) - 1, y), value
         self.fail(f"No visible {text or pattern!r} in {type(widget).__name__}")
+
+    async def wait_for_log_hits(self, app, pilot, expected):
+        """Wait for normal debounced filtering to reach the visible count."""
+        label = app.query_one("#log-hits")
+        deadline = time.monotonic() + 2
+        while True:
+            region = label.region.intersection(app.screen.region)
+            strips = app.screen._compositor.render_strips()
+            visible = {
+                strips[y].crop(region.x, region.right).text.strip()
+                for y in range(region.y, region.bottom)
+            }
+            if expected in visible or time.monotonic() >= deadline:
+                self.assertIn(expected, visible, "Log filter did not settle visibly")
+                return
+            await pilot.pause(0.01)
 
     async def mouse(self, app, pilot, kind, point, *, button=1, when=None):
         x, y = point
@@ -297,7 +314,7 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
             field.value = "previous input selection"
             field.focus()
             field.selection = (0, 8)
-            await pilot.pause()
+            await self.wait_for_log_hits(app, pilot, "0 matches")
             self.assertEqual(copies, [], "programmatic Input selection must not copy")
 
             with self.subTest(gesture="fresh static selection"):
