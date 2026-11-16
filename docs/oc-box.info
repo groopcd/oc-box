@@ -460,6 +460,23 @@ succeeded: a request failure at the deadline also retains the
 ‘activity-timeout’ category.  No session/job identifiers, commands,
 transcript text or native errors are printed.
 
+If automatic post-stop recovery is not attempted, a separate
+fixed-category line explains its routing guards.  For example,
+‘custom-podman-options’ means the container baseline is outside this
+conservative path; ‘non-shell-jobs’ means the observations were not
+shell-only; ‘insufficient-shell-observations’ means fewer than two
+qualifying pairs were retained.  Control-state, attached-client and
+unverified-owner-close refusals are also distinguished.  These labels do
+not waive any guard or establish that a job completed.  Do not clear
+control markers, remove job rows or reset a workspace merely to bypass a
+refusal.
+
+The 30-second readiness budget precedes history export/import; it is not
+the duration limit for the entire synchronization.  An explicit ‘oc-box
+sync’ uses the checked-export path without that original owner's
+readiness wait.  Its later success does not prove that earlier running
+work was safe to ignore.
+
 Native OpenCode 2.2.6/2.2.7 can retain a cancelled background-shell job
 after a location reload, even with no foreground activity.  Such a row
 still blocks the wait; it is not safe to ignore terminal-status jobs
@@ -3261,20 +3278,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2730
 Node: Commands6242
-Node: Options84545
-Node: Lifecycle and persistence105612
-Node: Distribution images107732
-Node: Sessions and recovery112607
-Node: Devices and host permissions119192
-Node: Resource reports121538
-Node: Configuration and environment123649
-Node: Files134912
-Node: Exit status140856
-Node: Examples141709
-Node: Troubleshooting143795
-Node: Installation and manuals155147
-Node: Authors and license164399
-Node: See also165006
+Node: Options85489
+Node: Lifecycle and persistence106556
+Node: Distribution images108676
+Node: Sessions and recovery113551
+Node: Devices and host permissions120136
+Node: Resource reports122482
+Node: Configuration and environment124593
+Node: Files135856
+Node: Exit status141800
+Node: Examples142653
+Node: Troubleshooting144739
+Node: Installation and manuals156091
+Node: Authors and license165343
+Node: See also165950
 
 End Tag Table
 

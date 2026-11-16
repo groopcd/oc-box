@@ -303,35 +303,51 @@ class HistoryWaitTests(unittest.TestCase):
             ]
         }
         cases = (
-            ("two eligible", [(self.idle, cancelled), (self.idle, cancelled)], True),
+            (
+                "two eligible",
+                [(self.idle, cancelled), (self.idle, cancelled)],
+                True,
+                None,
+            ),
             (
                 "only last eligible",
                 [(self.busy, running), (self.idle, cancelled)],
                 False,
+                "insufficient-shell-observations",
             ),
             (
                 "foreground live",
                 [(self.idle, cancelled), (self.busy, cancelled)],
                 False,
+                "foreground-active",
             ),
-            ("mixed kind", [(self.idle, cancelled), (self.idle, mixed)], False),
+            (
+                "mixed kind",
+                [(self.idle, cancelled), (self.idle, mixed)],
+                False,
+                "non-shell-jobs",
+            ),
             (
                 "rehydrated running job",
                 [(self.idle, cancelled), (self.idle, running)],
                 True,
+                None,
             ),
             (
                 "empty inventory resets",
                 [(self.idle, cancelled), (self.idle, self.no_jobs)],
                 False,
+                "jobs-empty",
             ),
         )
-        for name, pairs, eligible in cases:
+        for name, pairs, eligible, reason in cases:
             with self.subTest(case=name):
                 self.api.reset_mock()
                 self.api.side_effect = [response for pair in pairs for response in pair]
                 error = self.assert_wait_error("activity-timeout", timeout=0.4)
                 self.assertEqual(error.recovery_eligible, eligible)
+                if reason is not None:
+                    self.assertEqual(error.recovery_reason, reason)
                 self.assertEqual(self.api.call_count, 4)
 
     def test_deadline_routing_needs_prior_pairs_and_distinguishes_real_timeout_causes(
@@ -383,19 +399,25 @@ class HistoryWaitTests(unittest.TestCase):
                         expired_call >= 5
                         and outcome in ("valid", "timeout", "wrapped-timeout"),
                     )
+                    if outcome in ("command-error", "json-error", "os-error"):
+                        self.assertEqual(error.recovery_reason, "activity-api-failed")
 
     def test_late_contradictory_or_malformed_responses_invalidate_prior_shell_pairs(
         self,
     ):
         cases = (
-            (5, self.busy),
-            (5, {"data": []}),
-            (6, self.no_jobs),
-            (6, {"data": {}}),
-            (6, {"data": [{**self.job, "kind": "subagent"}]}),
-            (6, {"data": [{**self.job, "status": "private-sentinel"}]}),
+            (5, self.busy, "foreground-active"),
+            (5, {"data": []}, "invalid-active-response"),
+            (6, self.no_jobs, "jobs-empty"),
+            (6, {"data": {}}, "invalid-jobs-response"),
+            (6, {"data": [{**self.job, "kind": "subagent"}]}, "non-shell-jobs"),
+            (
+                6,
+                {"data": [{**self.job, "status": "private-sentinel"}]},
+                "invalid-jobs-response",
+            ),
         )
-        for expired_call, response in cases:
+        for expired_call, response, reason in cases:
             with self.subTest(expired_call=expired_call, response=response):
                 self.api.reset_mock()
 
@@ -414,6 +436,7 @@ class HistoryWaitTests(unittest.TestCase):
                 self.api.side_effect = request
                 error = self.assert_wait_error("activity-timeout", timeout=1)
                 self.assertFalse(error.recovery_eligible)
+                self.assertEqual(error.recovery_reason, reason)
 
     def test_query_timeout_diagnostics_keep_partial_observations_unknown(self):
         for target in ("/api/session/active", "/api/experimental/job"):

@@ -32,6 +32,38 @@ ADMITTED = contextvars.ContextVar("oc_box_history_snapshot_admitted", default=No
 TRANSITION_BUDGET = 35
 SNAPSHOT_BUDGET = 180
 CLEANUP_BUDGET = 30
+CAPTURE_REFUSALS = frozenset(
+    (
+        "control-unavailable",
+        "unsupported-version",
+        "workspace-not-ready",
+        "incomplete-restore",
+        "custom-podman-options",
+        "invalid-container",
+        "ownership",
+        "nonpassive-container",
+        "automatic-container-work",
+        "shared-pid-namespace",
+        "mounts",
+    )
+)
+SKIP_REFUSALS = CAPTURE_REFUSALS | frozenset(
+    (
+        "control-state",
+        "control-uncertain",
+        "source-unavailable",
+        "readiness-unverified",
+        "insufficient-shell-observations",
+        "foreground-active",
+        "non-shell-jobs",
+        "jobs-empty",
+        "invalid-active-response",
+        "invalid-jobs-response",
+        "activity-api-failed",
+        "clients-not-detached",
+        "owner-close-unverified",
+    )
+)
 
 
 class RecoveryError(ValueError):
@@ -210,24 +242,72 @@ def _signature(box, data, info):
     )
 
 
-def capture(box, data, info, token):
+def capture(box, data, info, token, *, refusal=None):
     """Use startup's existing inspection; never probe or start a healthy owner."""
+
+    def reject(reason):
+        if refusal is not None:
+            refusal(reason if reason in CAPTURE_REFUSALS else "invalid-container")
+        return None
+
+    if not isinstance(token, str):
+        return reject("control-unavailable")
+    if data.get("opencode_version") not in history_reader.SUPPORTED:
+        return reject("unsupported-version")
+    if data.get("ready") is not True:
+        return reject("workspace-not-ready")
+    if data.get("restore_incomplete"):
+        return reject("incomplete-restore")
+    if data.get("podman_args"):
+        return reject("custom-podman-options")
     if (
-        not isinstance(token, str)
-        or data.get("opencode_version") not in history_reader.SUPPORTED
-        or data.get("ready") is not True
-        or data.get("restore_incomplete")
-        or data.get("podman_args")
-        or not isinstance(info, dict)
+        not isinstance(info, dict)
         or not isinstance(info.get("Id"), str)
         or not re.fullmatch(r"[a-f0-9]{64}", info["Id"])
     ):
-        return None
+        return reject("invalid-container")
     try:
         signature = _signature(box, data, info)
-    except (RecoveryError, KeyError, TypeError):
-        return None
+    except RecoveryError as exc:
+        return reject(exc.reason)
+    except (KeyError, TypeError):
+        return reject("invalid-container")
     return Source(info["Id"], token, signature)
+
+
+def skip_reasons(owner, timeout, *, closed=False):
+    """Explain routing only; these labels never authorize or relax recovery."""
+    reasons = []
+    if not timeout.recovery_eligible:
+        reasons.append(getattr(timeout, "recovery_reason", "readiness-unverified"))
+    if getattr(owner, "_history_source", None) is None:
+        reasons.append(getattr(owner, "_history_source_refusal", "source-unavailable"))
+    if closed:
+        clients = getattr(owner, "clients", None)
+        if type(clients) is not int or clients != 0:
+            reasons.append("clients-not-detached")
+        result = getattr(getattr(owner, "child", None), "returncode", None)
+        if type(result) is not int or result != 0:
+            reasons.append("owner-close-unverified")
+    return reasons
+
+
+def report_skipped(reasons):
+    """Print only fixed categories, never exception/metadata/job contents."""
+    safe = list(
+        dict.fromkeys(
+            reason
+            if isinstance(reason, str) and reason in SKIP_REFUSALS
+            else "unavailable"
+            for reason in reasons
+        )
+    )
+    print(
+        "oc-box: Automatic persisted-history snapshot not attempted ("
+        + ", ".join(safe or ["unavailable"])
+        + ").",
+        file=sys.stderr,
+    )
 
 
 def _command(box, arguments):

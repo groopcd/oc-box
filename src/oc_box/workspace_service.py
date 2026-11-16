@@ -234,6 +234,7 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
     phase = "foreground-query"
     observation = "unavailable"
     shell_pairs = 0
+    recovery_reason = "insufficient-shell-observations"
 
     def fail(category):
         if category == "activity-timeout":
@@ -241,6 +242,7 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
                 f"History wait timeout: phase={phase}; "
                 f"last complete observation: {observation}.",
                 recovery_eligible=shell_pairs >= 2,
+                recovery_reason=recovery_reason,
             ) from None
         raise box.BoxError(f"OpenCode 2.x history wait failed ({category}).") from None
 
@@ -287,7 +289,7 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
         return value
 
     def request(target):
-        nonlocal phase, shell_pairs
+        nonlocal phase, shell_pairs, recovery_reason
         budget = remaining()
         phase = (
             "foreground-query"
@@ -313,6 +315,7 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
                 error.__cause__, subprocess.TimeoutExpired
             ):
                 shell_pairs = 0
+                recovery_reason = "activity-api-failed"
             remaining()
             fail("activity-api-failed")
         value = (
@@ -330,6 +333,16 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             # stale routing hint behind. A real request timeout cannot manufacture
             # a qualifying pair, but does not erase prior validated observations.
             shell_pairs = 0
+            if value is None:
+                recovery_reason = (
+                    "invalid-active-response"
+                    if target == "/api/session/active"
+                    else "invalid-jobs-response"
+                )
+            elif target == "/api/session/active":
+                recovery_reason = "foreground-active"
+            else:
+                recovery_reason = "jobs-empty" if not value else "non-shell-jobs"
         remaining()
         return value
 
@@ -361,6 +374,8 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             if not active and jobs and all(job["kind"] == "shell" for job in jobs)
             else 0
         )
+        if shell_pairs:
+            recovery_reason = "insufficient-shell-observations"
         quiet = quiet + 1 if not active and not jobs else 0
         if quiet == 2:
             return

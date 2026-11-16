@@ -561,6 +561,19 @@ Keep the tested source/working-tree identity stable for each run. Required
 package/build-only publication validation remains separate; old accepted host
 reports do not become passes for the new source merely because guards match.
 
+Exit-routing regression coverage composes the real `launch_environment()`,
+`launch_client()`, baseline capture and readiness waiter, substituting only their
+external boundaries. A named matrix covers eligible recovery, custom-container
+refusal, non-shell jobs, one completed observation, unsafe/uncertain control,
+attached clients and failed/unverified owner-wrapper closure. Identical public
+activity counts must produce distinct fixed refusal categories without attempting
+live export after readiness failure, weakening recovery eligibility, changing
+client failure results or starting recovery before owner closure. Separate tests
+keep unknown diagnostic categories, exception contents and metadata out of output;
+capture diagnostics never add native probes or repair control state.
+This closes an observability/test-composition gap, not proof of the cause of an
+uninspected host timeout or new whole-container acceptance.
+
 The focused host runner adds opt-in `--history-recovery-case snapshot` and
 `--history-recovery-case stop-cancel`. Each invocation creates a separate fresh
 synthetic root. Their `oc-box-history-recovery-host-v2` reports require 12 and six

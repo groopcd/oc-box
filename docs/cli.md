@@ -373,6 +373,20 @@ observations, not proof of the current state or that a native request succeeded:
 a request failure at the deadline also retains the `activity-timeout` category.
 No session/job identifiers, commands, transcript text or native errors are printed.
 
+If automatic post-stop recovery is not attempted, a separate fixed-category line
+explains its routing guards. For example, `custom-podman-options` means the
+container baseline is outside this conservative path; `non-shell-jobs` means the
+observations were not shell-only; `insufficient-shell-observations` means fewer
+than two qualifying pairs were retained. Control-state, attached-client and
+unverified-owner-close refusals are also distinguished. These labels do not waive
+any guard or establish that a job completed. Do not clear control markers, remove
+job rows or reset a workspace merely to bypass a refusal.
+
+The 30-second readiness budget precedes history export/import; it is not the
+duration limit for the entire synchronization. An explicit `oc-box sync` uses
+the checked-export path without that original owner's readiness wait. Its later
+success does not prove that earlier running work was safe to ignore.
+
 Native OpenCode 2.2.6/2.2.7 can retain a cancelled background-shell job after a
 location reload, even with no foreground activity. Such a row still blocks the
 wait; it is not safe to ignore terminal-status jobs generally because their

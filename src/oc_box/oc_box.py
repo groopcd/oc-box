@@ -107,10 +107,17 @@ class HistoryPending(BoxError):
 class HistoryWaitTimeout(BoxError):
     """Keep the fixed refusal separate from count-only readiness diagnostics."""
 
-    def __init__(self, diagnostic, *, recovery_eligible=False):
+    def __init__(
+        self,
+        diagnostic,
+        *,
+        recovery_eligible=False,
+        recovery_reason="readiness-unverified",
+    ):
         super().__init__("OpenCode 2.x history wait failed (activity-timeout).")
         self.diagnostic = diagnostic
         self.recovery_eligible = recovery_eligible
+        self.recovery_reason = recovery_reason
 
 
 @contextlib.contextmanager
@@ -2519,6 +2526,7 @@ def launch_environment(path, data, args):
             exported = export_host_session(path, data, args.import_session)
     code = 1
     stop_token, source, cleanup_data = None, None, data
+    control_refusal = "control-unavailable"
     if (
         opencode_compat.major(version) == 2
         and args.command != "sync"
@@ -2526,9 +2534,15 @@ def launch_environment(path, data, args):
     ):
         try:
             stop_token = workspace_control.capture(path)
-        except (workspace_control.ControlError, OSError):
+        except workspace_control.ControlError as exc:
             # Optional recovery never repairs unsafe control state or prevents
             # the ordinary owning launch/cleanup from retaining its old behavior.
+            control_refusal = (
+                "control-uncertain"
+                if exc.category == "uncertain-control"
+                else "control-state"
+            )
+        except OSError:
             pass
     try:
         with loading_stage(f"Starting {data['distro']} container"):
@@ -2548,10 +2562,22 @@ def launch_environment(path, data, args):
                 else None
             )
             if owner:
+                refusals = []
                 source = history_recovery.capture(
-                    sys.modules[__name__], data, initial_info, stop_token
+                    sys.modules[__name__],
+                    data,
+                    initial_info,
+                    stop_token,
+                    refusal=refusals.append,
                 )
                 owner._history_source = source
+                owner._history_source_refusal = (
+                    control_refusal
+                    if stop_token is None
+                    else refusals[0]
+                    if refusals
+                    else "source-unavailable"
+                )
             code = launch_client(path, data, args, version, exported, owner)
         timeout = getattr(owner, "_history_timeout", None) if owner else None
         if isinstance(timeout, HistoryWaitTimeout):
@@ -2568,6 +2594,10 @@ def launch_environment(path, data, args):
             cleanup_data = {**data, "container": source.container_id}
             history_recovery.recover(sys.modules[__name__], path, data, source)
         elif timeout is not None:
+            if isinstance(timeout, HistoryWaitTimeout):
+                history_recovery.report_skipped(
+                    history_recovery.skip_reasons(owner, timeout, closed=True)
+                )
             print(
                 f"oc-box: history sync pending: {timeout}\n"
                 "Container data retained. Retry with 'oc-box sync'.",
@@ -2690,6 +2720,7 @@ def launch_client(path, data, args, version, exported, owner=None):
                     file=sys.stderr,
                 )
                 return code or 1
+            history_recovery.report_skipped(history_recovery.skip_reasons(owner, exc))
         print(
             f"oc-box: history sync pending: {exc}\nContainer data retained. Retry with 'oc-box sync'.",
             file=sys.stderr,

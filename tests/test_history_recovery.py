@@ -342,25 +342,79 @@ class HistoryRecoveryTests(unittest.TestCase):
 
     def test_capture_is_optional_and_never_uses_new_resource_operations(self):
         cases = (
-            {"ready": False},
-            {"opencode_version": "2.2.8"},
-            {"podman_args": ["--group-add=keep-groups"]},
-            {"restore_incomplete": True},
+            ({"ready": False}, "workspace-not-ready"),
+            ({"opencode_version": "2.2.8"}, "unsupported-version"),
+            ({"podman_args": ["--group-add=keep-groups"]}, "custom-podman-options"),
+            ({"restore_incomplete": True}, "incomplete-restore"),
         )
-        for changes in cases:
-            with self.subTest(changes=changes):
+        with patch.object(box, "run") as native:
+            for changes, reason in cases:
+                refusals = []
+                with self.subTest(changes=changes):
+                    self.assertIsNone(
+                        recovery.capture(
+                            box,
+                            {**self.data, **changes},
+                            self.info,
+                            self.token,
+                            refusal=refusals.append,
+                        )
+                    )
+                    self.assertEqual(refusals, [reason])
+            for bad in (
+                None,
+                {},
+                {**self.info, "Id": "not-an-id"},
+                {**self.info, "HostConfig": []},
+            ):
+                refusals = []
                 self.assertIsNone(
                     recovery.capture(
-                        box, {**self.data, **changes}, self.info, self.token
+                        box, self.data, bad, self.token, refusal=refusals.append
                     )
                 )
-        for bad in (
-            None,
-            {},
-            {**self.info, "Id": "not-an-id"},
-            {**self.info, "HostConfig": []},
-        ):
-            self.assertIsNone(recovery.capture(box, self.data, bad, self.token))
+                self.assertEqual(refusals, ["invalid-container"])
+            native.assert_not_called()
+
+    def test_refusal_diagnostics_never_expose_unknown_categories_or_probe_resources(
+        self,
+    ):
+        refusals = []
+        with patch.object(box, "run") as native:
+            self.assertIsNone(
+                recovery.capture(
+                    box, self.data, self.info, None, refusal=refusals.append
+                )
+            )
+            self.assertEqual(refusals, ["control-unavailable"])
+            refusals.clear()
+            self.assertEqual(
+                recovery.capture(
+                    box, self.data, self.info, self.token, refusal=refusals.append
+                ),
+                self.source,
+            )
+            self.assertEqual(refusals, [])
+            with patch.object(
+                recovery,
+                "_signature",
+                side_effect=recovery.RecoveryError("private-sentinel"),
+            ):
+                self.assertIsNone(
+                    recovery.capture(
+                        box, self.data, self.info, self.token, refusal=refusals.append
+                    )
+                )
+            self.assertEqual(refusals, ["invalid-container"])
+            native.assert_not_called()
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            recovery.report_skipped(
+                ["non-shell-jobs", "private-sentinel", {"private-sentinel": 1}, None]
+            )
+            recovery.report_skipped([])
+        self.assertIn("non-shell-jobs, unavailable", output.getvalue())
+        self.assertNotIn("private-sentinel", output.getvalue())
 
     def test_capture_uses_reader_exact_version_policy_not_a_second_allowlist(self):
         for release in ("2.2.6", "2.2.7", "2.3.0"):
@@ -401,6 +455,171 @@ class HistoryRecoveryTests(unittest.TestCase):
         self.assertIn(
             "original history-wait failure remains nonzero", self.output.getvalue()
         )
+
+    def test_real_exit_routing_distinguishes_identical_timeout_counts(self):
+        cases = {
+            "eligible-shell": {},
+            "unsafe-baseline": {
+                "custom_options": True,
+                "refusal": "custom-podman-options",
+            },
+            "non-shell": {"kind": "subagent", "refusal": "non-shell-jobs"},
+            "one-pair": {
+                "slow_query": True,
+                "refusal": "insufficient-shell-observations",
+            },
+            "uncertain-control": {
+                "control_failure": "uncertain-control",
+                "refusal": "control-uncertain",
+            },
+            "unsafe-control": {
+                "control_failure": "unsafe-control",
+                "refusal": "control-state",
+            },
+            "attached-client": {"clients": 1, "refusal": "clients-not-detached"},
+            "owner-close-failed": {
+                "wrapper_exit": 7,
+                "refusal": "owner-close-unverified",
+                "client_code": 7,
+            },
+            "owner-close-unknown": {
+                "wrapper_exit": None,
+                "refusal": "owner-close-unverified",
+            },
+        }
+        for name, case in cases.items():
+            with self.subTest(case=name):
+                data = {
+                    **self.data,
+                    "opencode_version": "2.3.0",
+                    "podman_args": ["--group-add=keep-groups"]
+                    if case.get("custom_options")
+                    else [],
+                }
+                args = box.parser().parse_args(["start"])
+                args._opencode_release = "2.3.0"
+                events, now, requests = [], [0.0], []
+                owner = SimpleNamespace(
+                    connection={"url": "http://127.0.0.1:1", "password": "synthetic"},
+                    publish=Mock(),
+                    wait_clients=Mock(),
+                    clients=case.get("clients", 0),
+                    child=SimpleNamespace(returncode=case.get("wrapper_exit", 0)),
+                )
+
+                @contextlib.contextmanager
+                def service(*_args):
+                    events.append("owner-open")
+                    try:
+                        yield owner
+                    finally:
+                        events.append("owner-closed")
+
+                def api(_box, _data, _connection, method, target, *, timeout):
+                    self.assertEqual(method, "GET")
+                    requests.append(target)
+                    now[0] += (
+                        timeout
+                        if case.get("slow_query") and len(requests) == 4
+                        else min(5, timeout)
+                    )
+                    return {
+                        "data": {}
+                        if target == "/api/session/active"
+                        else [
+                            {
+                                "id": "job_synthetic",
+                                "sessionID": "ses_synthetic",
+                                "kind": case.get("kind", "shell"),
+                                "status": "running",
+                            }
+                        ]
+                    }
+
+                def retry(*_args):
+                    self.assertEqual(events[-1], "owner-closed")
+                    events.append("recover")
+                    return True
+
+                output = io.StringIO()
+                with (
+                    contextlib.ExitStack() as boundaries,
+                    patch.object(box, "check_private_output"),
+                    patch.object(box, "start_container", return_value=self.info),
+                    patch.object(box, "prepare_runtime"),
+                    patch.object(box.workspace_service, "Owner", side_effect=service),
+                    patch.object(
+                        box, "refresh_sessions", return_value={"last": "ses_synthetic"}
+                    ),
+                    patch.object(
+                        box, "run_tui", return_value=case.get("client_code", 0)
+                    ),
+                    patch.object(box.workspace_service, "api", side_effect=api),
+                    patch.object(
+                        recovery.time, "monotonic", side_effect=lambda: now[0]
+                    ),
+                    patch.object(
+                        recovery.time,
+                        "sleep",
+                        side_effect=lambda seconds: now.__setitem__(
+                            0, now[0] + seconds
+                        ),
+                    ),
+                    patch.object(
+                        box,
+                        "loading_stage",
+                        side_effect=lambda *_a: contextlib.nullcontext(),
+                    ),
+                    patch.object(recovery, "recover", side_effect=retry) as recover,
+                    patch.object(box, "sync_sessions") as live_sync,
+                    patch.object(
+                        box,
+                        "stop_container",
+                        side_effect=lambda *_a: events.append("final-stop"),
+                    ),
+                    contextlib.redirect_stderr(output),
+                    contextlib.redirect_stdout(io.StringIO()),
+                ):
+                    if case.get("control_failure"):
+                        boundaries.enter_context(
+                            patch.object(
+                                workspace_control,
+                                "capture",
+                                side_effect=workspace_control.ControlError(
+                                    case["control_failure"]
+                                ),
+                            )
+                        )
+                    self.assertEqual(
+                        box.launch_environment(self.path, data, args),
+                        case.get("client_code", 0) or 1,
+                    )
+                self.assertIn(
+                    "last complete observation: foreground=0, jobs-running=1, "
+                    "jobs-completed=0, jobs-error=0, jobs-cancelled=0.",
+                    output.getvalue(),
+                )
+                live_sync.assert_not_called()
+                owner.wait_clients.assert_called_once()
+                if "refusal" not in case:
+                    recover.assert_called_once()
+                    self.assertEqual(
+                        events, ["owner-open", "owner-closed", "recover", "final-stop"]
+                    )
+                    self.assertNotIn("not attempted", output.getvalue())
+                else:
+                    recover.assert_not_called()
+                    self.assertEqual(
+                        events, ["owner-open", "owner-closed", "final-stop"]
+                    )
+                    self.assertIn(
+                        "Automatic persisted-history snapshot not attempted",
+                        output.getvalue(),
+                    )
+                    self.assertIn(case["refusal"], output.getvalue())
+                    self.assertEqual(
+                        output.getvalue().count("history sync pending:"), 1
+                    )
 
     def test_explicit_stop_publishes_intent_before_admission_without_launch_work(self):
         admission = workspace_control.admission
