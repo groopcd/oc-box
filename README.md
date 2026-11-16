@@ -213,7 +213,7 @@ session connections/actions are explicit; a host Connect may start the native
 host service, while workspace connections lease only an existing private owner.
 Compact aligned meters and fixed-scale CPU/RAM histories distinguish unavailable
 readings from zero. Status/followed-log refresh defaults to one second, with
-1/2/5/10/30/60-second choices and no overlapping queries. Sessions stay an
+any whole-number interval from 1–60 seconds and no overlapping queries. Sessions stay an
 on-demand snapshot: background refresh does not reset table scrolling or selection.
 Delayed session queries show animated, source-specific progress and explicit
 cancellation; failed actions show fixed, actionable notifications rather than raw
@@ -223,8 +223,10 @@ reported as unchanged.
 and Reset to defaults; these preferences cannot weaken CLI `--read-only` mode.
 Visible text is drag-selectable throughout the dashboard, including logs,
 graphs and control labels; releasing the mouse copies the selection immediately
-without activating the control. Graph bars use copyable text glyphs. **Copy**
-and **Copy view** remain available too. **Paste copied** uses only
+without activating the control. Graph bars use copyable text glyphs. There are no
+Copy/Paste buttons: `Ctrl+Shift+C` repeats a selection copy, `Ctrl+Shift+Y` copies
+the visible screen, and `F1` explains the shortcuts. **Paste copied**
+(`Ctrl+Shift+Insert`) uses only
 text copied inside this dashboard; use your terminal's normal paste command for
 the desktop clipboard. Clipboard actions are explicit and never journal text.
 Embedded terminals are experimental and reuse the native persistent-session

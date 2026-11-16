@@ -169,7 +169,9 @@ not gain a container-mode bypass from the existence of demo mode.
 | `q` | Quit outside a focused embedded terminal |
 | `Ctrl-]` | Detach the focused session-terminal client |
 | `Ctrl+Shift+C` | Copy selected text, when the terminal forwards this shortcut |
+| `Ctrl+Shift+Y` | Copy the whole visible screen as plain text |
 | `Ctrl+Shift+Insert` | Paste text copied inside the dashboard into the focused input or connected shell |
+| `F1` | Explain clipboard shortcuts and host-terminal paste behavior |
 | `Ctrl+A` / `Ctrl+Shift+A` in a text field | Select all field text and copy the completed selection |
 
 When terminal input is focused, ordinary keystrokes belong to the shell rather
@@ -201,7 +203,7 @@ Drag to select visible text throughout the dashboard: diagnostics, tables,
 logs, graphs, the embedded terminal and control labels. The highlight remains
 visible over colored logs, row cursors and meters. **Releasing the mouse copies
 the completed selection immediately**; no extra Copy click is required. A successful
-copy shows the same Clipboard notification as the Copy button. A label
+copy shows a Clipboard notification. There are no Copy or Paste buttons. A label
 drag never presses its button, changes its tab/dropdown, or activates a footer
 shortcut. Normal clicks still operate those controls. Scrollbar drags still
 scroll. Panel captions and settings group titles are selectable text as well.
@@ -211,7 +213,7 @@ plain-text copies are meaningful; clipboard text does not retain graph colors.
 Completed double/triple-click text selections and explicit keyboard selection
 in text fields (for example `Ctrl+A`, `Ctrl+Shift+A` or Shift+Arrow) also copy. There is no copy
 while dragging, or from programmatic selection, focus, refresh or container
-output. **Copy** and `Ctrl+Shift+C` (when forwarded by the host terminal) remain
+output. `Ctrl+Shift+C` (when forwarded by the host terminal) remains
 available for an explicit repeat copy. Text fields retain their normal Textual
 editing keys. In the native shell, ordinary `Ctrl+C` still interrupts and
 `Ctrl+V` keeps its shell meaning; neither is replaced by a clipboard shortcut.
@@ -219,9 +221,10 @@ editing keys. In the native shell, ordinary `Ctrl+C` still interrupts and
 start-of-line meaning in the focused native shell. A screen change or Escape
 cancels an unfinished selection without copying or activating the old control.
 
-**Copy view** is an additional shortcut for the whole current visible screen as
-plain text; it is not required for selecting control labels. Settings and review
-dialogs have their own clipboard controls. Copying is available in read-only
+**Copy view** (`Ctrl+Shift+Y`) copies the whole current visible screen as
+plain text; it is not required for selecting control labels. The same shortcuts
+work in ordinary settings and review dialogs without adding clipboard buttons.
+`F1` explains them. Copying is available in read-only
 mode and never confirms a dialog, changes a session, or starts a connection.
 Table/log/terminal selections cover the displayed viewport, not offscreen
 history. Scroll to the desired text before selecting. Followed-log display stays
@@ -233,7 +236,7 @@ and use your **host terminal's paste command**—commonly `Ctrl+Shift+V`,
 The dashboard does not read the desktop clipboard in the background or install
 clipboard helper programs.
 
-**Paste copied** (also `Ctrl+Shift+Insert`) instead pastes the last text copied
+**Paste copied** (`Ctrl+Shift+Insert`, shortcut only) instead pastes the last text copied
 **inside this dashboard**, not arbitrary current desktop clipboard contents.
 It targets only the focused, enabled text field or connected native terminal;
 it never connects or starts a shell. Single-line fields use normal terminal-paste

@@ -601,22 +601,24 @@ immediately; dragging a label never activates its control.  Graph bars
 use copyable ‘█’/‘░’ glyphs.  Completed text double/triple-clicks and
 keyboard selection in text fields also copy (‘Ctrl+A’/‘Ctrl+Shift+A’
 select all field text).  Refresh, focus, programmatic selection and
-container output never trigger copying.  **Copy** or forwarded
-‘Ctrl+Shift+C’ can repeat a copy; **Copy view** copies the whole visible
-screen.  Dialogs have clipboard controls too.  This is visible-viewport
-copying, not offscreen history export.  **Paste copied**
-(‘Ctrl+Shift+Insert’) uses only the last text copied inside the
-dashboard and targets the focused text field or connected shell.  For
-the desktop clipboard, use the host terminal's paste command, commonly
-‘Ctrl+Shift+V’ or ‘Shift+Insert’.  Ordinary shell ‘Ctrl+C’ and ‘Ctrl+V’
-remain unchanged.  Clipboard actions cannot weaken read-only mode or
-start a connection.  The dashboard never journals clipboard text or
-creates terminal recordings; copies are bounded to 1 MiB. Terminal
-pastes retain the 64 KiB UTF-8/framing/queue limit: size/capacity
-refusal queues no prefix; transport errors warn that delivery may be
-partial and must be inspected before retrying.  Host copying requires
-terminal OSC 52 support/permission; container-originated OSC clipboard
-requests remain blocked.  See ‘docs/tui.md’ for clipboard limits.
+container output never trigger copying.  Forwarded ‘Ctrl+Shift+C’ can
+repeat a copy; ‘Ctrl+Shift+Y’ copies the whole visible screen.  The same
+shortcuts work in ordinary dialogs; Copy/Paste buttons are removed.
+‘F1’ explains clipboard shortcuts and terminal paste behavior.  This is
+visible-viewport copying, not offscreen history export.  **Paste
+copied** (‘Ctrl+Shift+Insert’, shortcut only) uses only the last text
+copied inside the dashboard and targets the focused text field or
+connected shell.  For the desktop clipboard, use the host terminal's
+paste command, commonly ‘Ctrl+Shift+V’ or ‘Shift+Insert’.  Ordinary
+shell ‘Ctrl+C’ and ‘Ctrl+V’ remain unchanged.  Clipboard actions cannot
+weaken read-only mode or start a connection.  The dashboard never
+journals clipboard text or creates terminal recordings; copies are
+bounded to 1 MiB. Terminal pastes retain the 64 KiB UTF-8/framing/queue
+limit: size/capacity refusal queues no prefix; transport errors warn
+that delivery may be partial and must be inspected before retrying.
+Host copying requires terminal OSC 52 support/permission;
+container-originated OSC clipboard requests remain blocked.  See
+‘docs/tui.md’ for clipboard limits.
 
 Status has compact gold Full diagnostics (workspace) and green System
 (OS-reported) panels with aligned single-line RAM, CPU and Home FS
@@ -686,6 +688,13 @@ Favorites live in private UI state, not native pins.
 Disconnect is adjacent to Connect / refresh in the source toolbar.
 Moving the control does not change loading cancellation, native service
 ownership or lease release semantics.
+
+Non-destructive dashboard reviews use the Confirm button alone; they do
+not require typing ‘CONFIRM’ or ‘RESTORE’.  Typed operation-specific
+phrases remain for destructive actions such as deleting a
+session/archive or removing workspace storage.  Button-only approval
+still consumes a single-use review and rechecks the target identity and
+permissions before dispatch.
 
 Archive/unarchive uses native V2 archive state.  Archived V2 roots
 remain in history and synchronization inventories but are not selected
@@ -3280,20 +3289,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2730
 Node: Commands6242
-Node: Options85565
-Node: Lifecycle and persistence106632
-Node: Distribution images108752
-Node: Sessions and recovery113627
-Node: Devices and host permissions120212
-Node: Resource reports122558
-Node: Configuration and environment124669
-Node: Files135932
-Node: Exit status141876
-Node: Examples142729
-Node: Troubleshooting144815
-Node: Installation and manuals156167
-Node: Authors and license165419
-Node: See also166026
+Node: Options86057
+Node: Lifecycle and persistence107124
+Node: Distribution images109244
+Node: Sessions and recovery114119
+Node: Devices and host permissions120704
+Node: Resource reports123050
+Node: Configuration and environment125161
+Node: Files136424
+Node: Exit status142368
+Node: Examples143221
+Node: Troubleshooting145307
+Node: Installation and manuals156659
+Node: Authors and license165911
+Node: See also166518
 
 End Tag Table
 

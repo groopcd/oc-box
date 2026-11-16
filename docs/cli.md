@@ -502,10 +502,11 @@ dragging a label never activates its control. Graph bars use copyable `█`/`░
 glyphs. Completed text double/triple-clicks and keyboard selection in text fields
 also copy (`Ctrl+A`/`Ctrl+Shift+A` select all field text). Refresh, focus,
 programmatic selection and container output never
-trigger copying. **Copy** or forwarded `Ctrl+Shift+C` can repeat a copy;
-**Copy view** copies the whole visible screen. Dialogs have clipboard controls
-too. This is visible-viewport copying, not offscreen history export.
-**Paste copied** (`Ctrl+Shift+Insert`) uses only the last text copied inside the
+trigger copying. Forwarded `Ctrl+Shift+C` can repeat a copy;
+`Ctrl+Shift+Y` copies the whole visible screen. The same shortcuts work in ordinary
+dialogs; Copy/Paste buttons are removed. `F1` explains clipboard shortcuts and
+terminal paste behavior. This is visible-viewport copying, not offscreen history export.
+**Paste copied** (`Ctrl+Shift+Insert`, shortcut only) uses only the last text copied inside the
 dashboard and targets the focused text field or connected shell. For the desktop
 clipboard, use the host terminal's paste command, commonly `Ctrl+Shift+V` or
 `Shift+Insert`. Ordinary shell `Ctrl+C` and `Ctrl+V` remain unchanged. Clipboard
@@ -577,6 +578,12 @@ state, not native pins.
 Disconnect is adjacent to Connect / refresh in the source toolbar. Moving the
 control does not change loading cancellation, native service ownership or lease
 release semantics.
+
+Non-destructive dashboard reviews use the Confirm button alone; they do not
+require typing `CONFIRM` or `RESTORE`. Typed operation-specific phrases remain
+for destructive actions such as deleting a session/archive or removing workspace
+storage. Button-only approval still consumes a single-use review and rechecks
+the target identity and permissions before dispatch.
 
 Archive/unarchive uses native V2 archive state. Archived V2 roots remain in history
 and synchronization inventories but are not selected by automatic workspace resume;
