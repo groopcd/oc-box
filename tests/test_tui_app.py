@@ -175,12 +175,18 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNotNone(app.catalog)
                     search = app.query_one("#session-search", Input)
                     search.value = "Root"
-                    await pilot.pause()
+                    for _ in range(100):
+                        await pilot.pause(0.02)
+                        if len(app.visible_sessions) == 1:
+                            break
                     self.assertEqual(len(app.visible_sessions), 1)
                     calls = list(backend.calls)
                     generation = app._catalog_generation
                     await pilot.click(search, offset=(search.region.width - 2, 1))
-                    await pilot.pause()
+                    for _ in range(100):
+                        await pilot.pause(0.02)
+                        if len(app.visible_sessions) == 2:
+                            break
                     self.assertEqual(search.value, "")
                     self.assertIs(app.focused, search)
                     self.assertEqual(len(app.visible_sessions), 2)
