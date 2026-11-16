@@ -488,6 +488,10 @@ focused text inputs or the native shell. A focused terminal keeps its keys,
 including `s`, `F2` and `Ctrl+L`; use `Ctrl-]` to detach its client without ending
 the native shell before using dashboard shortcuts.
 
+Nonempty editable search and form inputs have a right-edge `×` inside the field.
+Click it to clear that field and retain editing focus, without submitting,
+connecting or accessing the clipboard. Password and disabled fields are excluded.
+
 Drag-select visible text throughout the dashboard, including logs, graphs,
 terminal output and control labels. Releasing the mouse copies immediately;
 dragging a label never activates its control. Graph bars use copyable `█`/`░`
@@ -565,6 +569,10 @@ tab alone does not. Workspace connections lease only an existing ready private
 V2 owner, never the host service. The lease is held until Disconnect or dashboard
 exit and visibly keeps owner shutdown waiting. Favorites live in private UI
 state, not native pins.
+
+Disconnect is adjacent to Connect / refresh in the source toolbar. Moving the
+control does not change loading cancellation, native service ownership or lease
+release semantics.
 
 Archive/unarchive uses native V2 archive state. Archived V2 roots remain in history
 and synchronization inventories but are not selected by automatic workspace resume;

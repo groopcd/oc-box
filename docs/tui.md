@@ -181,6 +181,10 @@ inputs alone, and background refresh does not take focus from the native termina
 The compact global header stays on one line and ellipsizes long
 labels rather than crowding out controls on small terminals; log search remains
 available from every tab.
+Nonempty editable search and form fields show an **× inside their right edge**.
+Click it to clear only that field and keep typing; it does not submit the form,
+connect to a source or access the clipboard. Password and disabled fields do
+not offer this control.
 Closing the dashboard disconnects only its clients and releases their leases;
 it does not directly stop the workspace owner or end its native persistent shell.
 If the owner was already waiting to exit, releasing its final client lease lets
@@ -336,6 +340,8 @@ into a running workspace.
 
 Session discovery is an explicit **Connect**, followed by manual refresh. Merely
 visiting the tab never discovers/starts a service or synchronizes archives.
+**Disconnect** sits beside **Connect / refresh** in the source toolbar, including
+on compact terminals. It retains the existing cancellation/lease-release behavior.
 Choose the connection before interpreting a selected session:
 
 The table is a static snapshot between explicit operations. Background status,
