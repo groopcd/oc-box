@@ -955,7 +955,7 @@ def cli(box, arguments, *, interaction=None):
     handlers = {}
 
     def cancel(*_):
-        raise KeyboardInterrupt
+        crypto.secret_prompt.cancel_operation()
 
     try:
         for sig in (signal.SIGTERM, signal.SIGHUP):

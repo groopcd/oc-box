@@ -62,6 +62,16 @@ def operation_active():
     return _OPERATION_OBSERVER.get() is not None
 
 
+def cancel_operation():
+    """Share the operation latch while nested CLI/prompt handlers own signals."""
+    latch = _OPERATION_CANCELLATION.get()
+    if latch is not None:
+        if latch.is_set():
+            return
+        latch.set()
+    raise KeyboardInterrupt
+
+
 def validate_minimum(length):
     if type(length) is not int or not 8 <= length <= MAX_PASSPHRASE_BYTES:
         raise ValueError("Minimum passphrase length must be an integer from 8 to 1024.")
@@ -267,12 +277,7 @@ def read_secret(prompt, *, allow_reveal=False, maximum=1024, purpose=None):
         return size if size > 0 else 80
 
     def cancel(*_):
-        latch = _OPERATION_CANCELLATION.get()
-        if latch is not None:
-            if latch.is_set():
-                return
-            latch.set()
-        raise KeyboardInterrupt
+        cancel_operation()
 
     def draw():
         text, position = editor.line(prompt, columns())

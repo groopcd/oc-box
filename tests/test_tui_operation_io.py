@@ -1,6 +1,7 @@
 """Synthetic private-process/PTY checks, not native or Podman acceptance."""
 
 import errno
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import json
 import os
@@ -12,6 +13,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+import termios
+import threading
 import time
 from types import SimpleNamespace
 import unittest
@@ -31,8 +34,9 @@ SOURCE = Path(channel.__file__).resolve().parent.parent
 FIXTURE = r'''
 import errno,os,signal,subprocess,sys,time
 from pathlib import Path
+from unittest.mock import patch
 sys.path.insert(0,SOURCE)
-from oc_box import backup_crypto,secret_prompt,tui_operation_io as channel,tui_operations
+from oc_box import backups,backup_crypto,secret_prompt,tui_operation_io as channel,tui_operations
 fds=tuple(int(v) for v in sys.argv[2::2])
 def execute(runtime,request,*,progress,interaction):
  scenario=request["scenario"]
@@ -63,7 +67,23 @@ for fd in fds:
   assert secret_prompt.read_secret("Backup passphrase: ",purpose="backup-unlock")=="x"
  elif scenario=="zero":
   return 0
- elif scenario in ("slow","prompt-slow"):
+ elif scenario=="complete":
+  pass
+ elif scenario=="backup-term-slow":
+  def synthetic_backup(*args,**kwargs):
+   progress(dispatched=True)
+   try:
+    interaction.stage("image")
+    while True: time.sleep(0.1)
+   finally:
+    interaction.stage("cleanup")
+    time.sleep(0.35)
+    interaction.inspection({"format":"session","session_count":0})
+  # Handler-only fixture: lifecycle body/tools are synthetic. The separate
+  # production-entrypoint test retains real root/container refusal.
+  with patch.object(backups.os,"geteuid",return_value=1000),patch.dict(os.environ,{"OC_BOX_CONTAINER":"0"}),patch.object(backup_crypto,"tools"),patch.object(backups,"make_backup",side_effect=synthetic_backup):
+   backups.cli(None,["backup","--output","/synthetic-unused-output"])
+ elif scenario in ("slow","prompt-slow","startup-slow"):
   progress(dispatched=True)
   try:
    if scenario=="prompt-slow":
@@ -74,6 +94,7 @@ for fd in fds:
   finally:
    interaction.stage("cleanup")
    time.sleep(0.35)
+   if "marker" in request: Path(request["marker"]).write_text("cleanup completed")
    interaction.inspection({"format":"session","session_count":0})
  else:
   raise RuntimeError("PRIVATE_RAW_ERROR")
@@ -85,6 +106,57 @@ sys.exit(channel.child(None,fds,execute=execute,check_request=tui_operations._ch
 
 
 class PrivateProtocolTests(unittest.TestCase):
+    def test_next_prompt_survives_reader_transition_during_secret_write_return(self):
+        process = channel.OperationProcess(None, {})
+        process.master, process.slave = pty.openpty()
+        attrs = termios.tcgetattr(process.slave)
+        attrs[3] &= ~(termios.ECHO | termios.ECHONL | termios.ICANON)
+        termios.tcsetattr(process.slave, termios.TCSANOW, attrs)
+        delivered, release = threading.Event(), threading.Event()
+        original_write = os.write
+        first = True
+
+        def delayed_write(fd, value):
+            nonlocal first
+            count = original_write(fd, value)
+            if fd == process.master and first:
+                first = False
+                delivered.set()
+                if not release.wait(5):
+                    raise OSError("Synthetic write barrier timed out")
+            return count
+
+        def event(kind, **fields):
+            process._accept(
+                {"version": 1, "seq": process._sequence + 1, "kind": kind, **fields}
+            )
+
+        try:
+            event("started")
+            event("prompt", id=1, purpose="backup-new", maximum=1024)
+            with (
+                patch.object(channel.os, "write", side_effect=delayed_write),
+                ThreadPoolExecutor(max_workers=1) as pool,
+            ):
+                future = pool.submit(
+                    process.submit_secret, 1, bytearray(b"synthetic-first")
+                )
+                try:
+                    self.assertTrue(delivered.wait(5))
+                    event("prompt-closed", id=1)
+                    event("prompt", id=2, purpose="backup-confirm", maximum=1024)
+                    self.assertEqual(process._prompt, 2)
+                finally:
+                    release.set()
+                future.result(timeout=5)
+                self.assertEqual(process._prompt, 2)
+                process.submit_secret(2, bytearray(b"synthetic-second"))
+                with self.assertRaises(channel.OperationIOError):
+                    process.submit_secret(2, bytearray(b"duplicate"))
+        finally:
+            release.set()
+            process.close()
+
     def test_fragmented_frames_duplicate_keys_limits_and_no_nonfinite_json(self):
         frame = channel._frame({"version": 1, "id": 2, "approved": True})
         parser = channel.Frames()
@@ -248,6 +320,61 @@ class PrivateProcessTests(unittest.TestCase):
         self.addCleanup(self.finish_process, process)
         return process
 
+    def test_postspawn_start_failure_owns_eof_cancel_drain_and_reap_without_run_worker(
+        self,
+    ):
+        for error in (OSError("Synthetic post-spawn failure"), KeyboardInterrupt()):
+            with self.subTest(error=type(error).__name__):
+                marker = self.root / ("cleanup-" + type(error).__name__)
+                process = channel.OperationProcess(
+                    self.runtime, {"scenario": "startup-slow", "marker": str(marker)}
+                )
+
+                def cleanup(process=process):
+                    if process.controls is not None:
+                        os.close(process.controls)
+                        process.controls = None
+                    if process.process is not None:
+                        process.process.wait(timeout=10)
+                    process.close()
+
+                self.addCleanup(cleanup)
+                original_blocking = os.set_blocking
+
+                def fail_after_spawn(fd, enabled):
+                    if fd != process.master or process.process is None:
+                        return original_blocking(fd, enabled)
+                    frames = channel.Frames()
+                    until = time.monotonic() + 10
+                    while time.monotonic() < until:
+                        import select
+
+                        if not select.select(
+                            [process.events], [], [], max(0, until - time.monotonic())
+                        )[0]:
+                            break
+                        for item in frames.feed(os.read(process.events, 65536)):
+                            if item.get("stage") == "image":
+                                self.assertFalse(process._ready)
+                                raise error
+                    raise AssertionError(
+                        "Synthetic child failed to reach startup barrier"
+                    )
+
+                with patch.object(
+                    channel.os, "set_blocking", side_effect=fail_after_spawn
+                ):
+                    with self.assertRaises(type(error)):
+                        process.start()
+                self.assertIsNotNone(process.process.poll())
+                self.assertEqual(marker.read_text(), "cleanup completed")
+                self.assertTrue(
+                    all(
+                        getattr(process, name) is None
+                        for name in ("master", "slave", "events", "controls")
+                    )
+                )
+
     def finish_process(self, process):
         if process.process.poll() is None:
             process.cancel()
@@ -369,6 +496,36 @@ class PrivateProcessTests(unittest.TestCase):
         self.assertEqual(result["code"], 130)
         self.assertGreaterEqual(time.monotonic() - start, 0.35)
         self.assertIn("inspection", [event["kind"] for event in events])
+
+    def test_nested_backup_term_handler_then_control_eof_raises_only_once(self):
+        process = self.launch("backup-term-slow")
+        events = []
+
+        def received(event):
+            events.append(event)
+            if event.get("stage") == "image":
+                os.kill(process.process.pid, signal.SIGTERM)
+            elif event.get("stage") == "cleanup":
+                os.close(process.controls)
+                process.controls = None
+
+        result = process.run(received)
+        self.assertEqual(result["code"], 130)
+        self.assertIn("inspection", [event["kind"] for event in events])
+
+    def test_cancel_before_consuming_queued_success_is_never_ordinary_success(self):
+        process = self.launch("complete")
+        self.assertEqual(process.process.wait(timeout=10), 0)
+        self.assertTrue(process.cancel())
+        with self.assertRaises(channel.OperationIOError):
+            process.run(lambda _: None)
+
+    def test_late_cancel_is_not_accepted_after_verified_outcome_admission(self):
+        process = self.launch("complete")
+        result = process.run(lambda _: None)
+        self.assertEqual(result["code"], 0)
+        self.assertFalse(process.cancel())
+        self.assertFalse(process._cancelled)
 
     def test_parent_control_eof_interrupts_blocked_engine_and_waits_for_cleanup(self):
         process = self.launch("slow")

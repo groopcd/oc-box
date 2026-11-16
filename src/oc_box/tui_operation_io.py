@@ -504,13 +504,14 @@ class OperationProcess:
         self.runtime, self.request = runtime, request
         self.process = None
         self.master = self.slave = self.events = self.controls = None
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._prompt = self._review = None
         self._prompt_open = None
         self._last_prompt = self._last_review = 0
         self._ready = self._cancelled = False
         self._result = None
         self._sequence = 0
+        self._outcome_admitted = False
 
     def start(self):
         if __package__:
@@ -561,15 +562,38 @@ class OperationProcess:
                 )
             os.set_blocking(self.master, False)
         except BaseException:
-            self.close()
+            # No run worker exists yet. Drop every extra parent endpoint before
+            # taking cancellation/drain/reap ownership ourselves; retaining the
+            # event writer here would prevent the drainer from observing EOF.
+            for fd in (event_write, control_read):
+                if fd is not None:
+                    os.close(fd)
+            event_write = control_read = None
+            self._abort_start()
             raise
         finally:
             for fd in (event_write, control_read):
                 if fd is not None:
                     os.close(fd)
 
+    def _abort_start(self):
+        self.cancel()
+        if self.controls is not None:
+            os.close(self.controls)
+            self.controls = None  # independent child watcher can now observe EOF
+        if self.process is not None:
+            try:
+                self.run(lambda _event: None)
+            except BaseException:
+                # run() owns normal cancellation and waits for actual exit.
+                # Preserve the original startup exception, never tool output.
+                self.process.wait()
+        self.close()
+
     def cancel(self):
         with self._lock:
+            if self._outcome_admitted:
+                return False  # verified child completion preceded this request
             self._cancelled = True
             if self._ready and self.process is not None and self.process.poll() is None:
                 self._ready = False  # send once; repeated signals can interrupt cleanup
@@ -577,6 +601,7 @@ class OperationProcess:
                     os.kill(self.process.pid, signal.SIGINT)
                 except ProcessLookupError:
                     pass
+            return True
 
     def submit_secret(self, ident, content):
         """Synchronous bounded write only; caller releases its private editor."""
@@ -597,10 +622,12 @@ class OperationProcess:
                     ord(c) < 32 or ord(c) == 127 for c in text
                 ):
                     _fail()
+                # Retire BEFORE delivery: the reader may accept closure plus a
+                # new prompt while this thread is still returning from write.
+                self._prompt = None
                 content.extend(b"\n")
                 if os.write(self.master, content) != len(content):
                     _fail()
-                self._prompt = None
         except Exception:
             self.cancel()
             raise OperationIOError() from None
@@ -618,8 +645,8 @@ class OperationProcess:
                 or self._cancelled
             ):
                 _fail()
-            _write(self.controls, {"version": 1, "id": ident, "approved": approved})
             self._review = None
+            _write(self.controls, {"version": 1, "id": ident, "approved": approved})
 
     def _accept(self, event):
         from_notice = None
@@ -781,9 +808,16 @@ class OperationProcess:
                             self.cancel()
                 # PTY bytes are intentionally discarded immediately.
             code = self.process.wait()
-            if failed or self._result is None or self._result["code"] != code:
-                _fail()
-            return self._result
+            with self._lock:
+                if (
+                    failed
+                    or self._result is None
+                    or self._result["code"] != code
+                    or (self._cancelled and code == 0)
+                ):
+                    _fail()
+                self._outcome_admitted = True
+                return self._result
         except BaseException:
             self.cancel()
             # Let the normal child finally blocks finish before releasing busy.

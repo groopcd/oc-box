@@ -958,6 +958,10 @@ def restore(catalog, plan, *, read_only=False, demo=False):
             observed = [
                 row["id"] for row in _inventory(catalog) if row["id"] in attempted
             ]
+        except KeyboardInterrupt:
+            raise SessionBackupError(
+                "cancelled", created_ids=observed, attempted_ids=attempted
+            ) from None
         except SessionBackupError:
             pass
         raise SessionBackupError(
