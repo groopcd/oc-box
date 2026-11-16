@@ -19,6 +19,7 @@ from textual.content import Content
 from textual.containers import Horizontal
 from textual.errors import NoWidget
 from textual.geometry import Offset
+from textual.screen import ModalScreen
 from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Footer, Input, RichLog
@@ -157,12 +158,45 @@ class ClipboardActions:
     with ``_accepts_clipboard_paste = True``; this never attaches a client.
     """
 
+    def _clipboard_private(self, widget=None):
+        """Check trusted privacy markers without inspecting editor contents.
+
+        The workflow's app-level shield covers submission and screen-transition
+        gaps. A private screen also fences every action. On ordinary screens,
+        the focused widget (or an explicit selection origin) inherits the fence
+        from any marked ancestor. Private editors need not inherit Input.
+        """
+        if getattr(self, "_private_interaction", False):
+            return True
+        if not self.screen_stack:
+            return False
+        if getattr(self.screen, "PRIVATE_INPUT", False) is True:
+            return True
+        candidate = self.focused if widget is None else widget
+        while candidate is not None:
+            if getattr(candidate, "PRIVATE_INPUT", False) is True:
+                return True
+            candidate = candidate.parent
+        return False
+
+    def _clipboard_private_selection(self):
+        return self._clipboard_private() or any(
+            self._clipboard_private(widget) for widget in self.screen.selections
+        )
+
     def enable_text_selection(self, screen=None):
         screen = self.screen if screen is None else screen
         previous = getattr(self, "_selection_adapted_screen", None)
         if previous is not None and previous is not screen:
             self._cancel_selection_gesture()
+        if getattr(screen, "PRIVATE_INPUT", False) is True:
+            screen.ALLOW_SELECT = False
         for widget in screen.walk_children(Widget):
+            if self._clipboard_private(widget):
+                # Never render/adapt private controls, including descendants
+                # that do not carry the marker themselves.
+                widget.ALLOW_SELECT = False
+                continue
             if widget.has_class("-textual-system"):
                 # Scrollbar drags must continue to scroll, not select content.
                 continue
@@ -230,6 +264,33 @@ class ClipboardActions:
         self._cancel_selection_gesture()
 
     async def on_event(self, event):
+        if self._clipboard_private():
+            self._cancel_selection_gesture()
+            if isinstance(event, events.Key) and event.key in {
+                "ctrl+c",
+                "super+c",
+                "ctrl+x",
+                "super+x",
+                "ctrl+v",
+                "super+v",
+                "ctrl+a",
+                "ctrl+shift+a",
+                "super+a",
+                "ctrl+insert",
+                "shift+delete",
+                "shift+insert",
+                "ctrl+shift+c",
+                "ctrl+shift+y",
+                "ctrl+shift+insert",
+                "ctrl+shift+v",
+            }:
+                # Fence native Screen/Input bindings as well as our actions,
+                # before they can inspect selections or the clipboard cache.
+                event.stop()
+                event.prevent_default()
+                return
+            await super().on_event(event)
+            return
         completed = None
         keyboard_input = None
         forwarded = event.is_forwarded
@@ -310,6 +371,8 @@ class ClipboardActions:
             return
         if origin is None or not origin.is_attached:
             return
+        if self._clipboard_private(origin) or self._clipboard_private_selection():
+            return
         try:
             if isinstance(origin, Input):
                 if self.focused is not origin:
@@ -324,6 +387,8 @@ class ClipboardActions:
             self._copy_clipboard_text(text)
 
     def _completed_input_selection(self, field):
+        if self._clipboard_private(field) or self._clipboard_private_selection():
+            return None
         if field.selected_text and not field.password:
             return field.selected_text
         selections = self.screen.selections
@@ -341,6 +406,8 @@ class ClipboardActions:
         return self.screen.get_selected_text()
 
     def clipboard_text_selection(self):
+        if self._clipboard_private_selection():
+            return None
         try:
             focused = self.focused
             selected = self.screen.get_selected_text()
@@ -359,6 +426,8 @@ class ClipboardActions:
     def copy_to_clipboard(self, text):
         # Input and Screen's standard copy bindings call this directly, not
         # our explicit action. Keep the same bound on every clipboard write.
+        if self._clipboard_private():
+            return False
         if not _fits_clipboard(text):
             self._clipboard_notice("Clipboard text exceeds the 1 MiB UTF-8 limit.")
             return False
@@ -373,6 +442,8 @@ class ClipboardActions:
         super().copy_to_clipboard(text)
 
     def _copy_clipboard_text(self, text):
+        if self._clipboard_private():
+            return
         if not isinstance(text, str) or not text:
             self._clipboard_notice("No text selected to copy.")
             return
@@ -390,11 +461,18 @@ class ClipboardActions:
         )
 
     def action_copy_selection(self, text=None):
+        if self._clipboard_private():
+            return
         if text is None:
             text = self.clipboard_text_selection()
         self._copy_clipboard_text(text)
 
     def action_copy_view(self):
+        if self._clipboard_private() or any(
+            self._clipboard_private(widget)
+            for widget in self.screen.walk_children(Widget)
+        ):
+            return
         try:
             # Textual 8.2.x has no public screen-to-plain-text API. This narrow
             # compositor call copies only the active screen's visible render,
@@ -407,6 +485,8 @@ class ClipboardActions:
         self._copy_clipboard_text(text)
 
     def action_paste_copied_text(self):
+        if self._clipboard_private():
+            return
         target = self.focused
         if (
             target is None
@@ -519,104 +599,49 @@ class ClipboardInput(SelectableViewport, Input):
             self.delete_selection()
 
 
-class ClipboardButton(Button):
-    """Clipboard control that preserves focus and an explicit copy candidate.
-
-    Screen clears a selection on mouse-up, before Button.Pressed. Capture only
-    the selection button's mouse-down candidate, and consume it once. There is
-    no clipboard write on mouse-down. A label drag selects/copies its text but
-    never activates the button; a normal click retains its original action.
-    """
-
-    FOCUS_ON_CLICK = False
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._clipboard_selection = None
-        self._clipboard_pointer = None
-        self._clipboard_cancelled = False
-
-    def consume_selection(self):
-        text, self._clipboard_selection = self._clipboard_selection, None
-        return text
-
-    def on_mouse_down(self, event):
-        self._clipboard_selection = None
-        self._clipboard_pointer = event.screen_offset
-        self._clipboard_cancelled = False
-        if self.id == "copy-selection" and event.button == 1:
-            self._clipboard_selection = self.app.clipboard_text_selection()
-
-    def on_mouse_move(self, event):
-        if (
-            self._clipboard_pointer is not None
-            and event.screen_offset != self._clipboard_pointer
-        ):
-            self._cancel_clipboard_capture()
-
-    def on_leave(self):
-        if self._clipboard_pointer is not None:
-            self._cancel_clipboard_capture()
-
-    def _cancel_clipboard_capture(self):
-        self._clipboard_selection = None
-        self._clipboard_pointer = None
-        self._clipboard_cancelled = True
-
-    def on_click(self, event):
-        if (
-            event.button != 1
-            or self._clipboard_cancelled
-            or (
-                self._clipboard_pointer is not None
-                and event.screen_offset != self._clipboard_pointer
-            )
-        ):
-            self._cancel_clipboard_capture()
-            event.stop()
-            event.prevent_default()
-        self._clipboard_pointer = None
-        self._clipboard_cancelled = False
-
-    def on_focus(self):
-        self._cancel_clipboard_capture()
-
-    def on_blur(self):
-        self._cancel_clipboard_capture()
-
-    def on_key(self, event):
-        self._cancel_clipboard_capture()
-
-
 class ClipboardBar(Horizontal):
-    """Compact clipboard controls for the active screen, including modals."""
+    """Invisible compatibility placeholder; clipboard actions use shortcuts."""
 
     DEFAULT_CSS = """
-    ClipboardBar { height: 3; }
-    ClipboardBar > ClipboardButton {
-        width: auto; min-width: 6; padding: 0 1; margin-right: 1;
-    }
+    ClipboardBar { display: none; height: 0; }
     """
 
     def on_mount(self):
         self.app.enable_text_selection(self.screen)
 
+
+class ClipboardHelp(ModalScreen):
+    """Discoverable shortcuts without clipboard reads or action buttons."""
+
+    BINDINGS = [("escape,f1", "close", "Close help")]
+    CSS = """
+    ClipboardHelp { align: center middle; }
+    ClipboardHelp > Static { width: 76; max-width: 95%; height: auto;
+      max-height: 95%; overflow-y: auto; padding: 1 2;
+      border: round $accent; background: $surface; }
+    """
+
     def compose(self):
-        yield ClipboardButton(
-            "Copy",
-            id="copy-selection",
-            tooltip="Copy selected text; desktop clipboard support depends on the terminal.",
+        from textual.widgets import Static
+
+        yield Static(
+            "Clipboard shortcuts\n\n"
+            "Ctrl+Shift+C       Copy selected text\n"
+            "Ctrl+Shift+Y       Copy screen (visible text only)\n"
+            "Ctrl+Shift+Insert  Paste copied text into the focused input or connected shell\n\n"
+            "Completed user text-selection gestures copy selected text. Merely "
+            "refreshing, focusing or programmatically selecting text never copies it.\n\n"
+            "Paste copied uses only this dashboard's in-app cache, not the current "
+            "desktop clipboard. For desktop text, use your terminal's paste command. "
+            "Copy delivery to the desktop depends on terminal clipboard support.\n\n"
+            "Ordinary Ctrl+C / Ctrl+V and shell control keys keep their focused "
+            "input or shell behavior. Shortcuts require terminal forwarding.\n\n"
+            "Escape or F1 closes help.",
+            markup=False,
         )
-        yield ClipboardButton(
-            "Copy view",
-            id="copy-view",
-            tooltip="Copy the active screen's visible text, including control labels.",
-        )
-        yield ClipboardButton(
-            "Paste copied",
-            id="paste-copied",
-            tooltip="Paste text copied in this app; use terminal paste for desktop text.",
-        )
+
+    def action_close(self):
+        self.dismiss()
 
 
 class _SelectableFooterKey(SelectableViewport, FooterKey):

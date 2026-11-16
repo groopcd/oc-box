@@ -39,8 +39,7 @@ if __package__:
     from .tui_terminal import NativeTerminal
     from .tui_clipboard import (
         ClipboardActions,
-        ClipboardBar,
-        ClipboardButton,
+        ClipboardHelp,
         ClipboardInput,
         ClipboardFooter,
         SelectableDataTable,
@@ -58,8 +57,7 @@ else:
     from tui_terminal import NativeTerminal
     from tui_clipboard import (
         ClipboardActions,
-        ClipboardBar,
-        ClipboardButton,
+        ClipboardHelp,
         ClipboardInput,
         ClipboardFooter,
         SelectableDataTable,
@@ -98,7 +96,6 @@ class Confirm(ModalScreen):
                     placeholder="Type DELETE to confirm", id="confirmation"
                 )
                 yield Static("", id="confirmation-error", markup=False)
-            yield ClipboardBar()
             with Horizontal():
                 yield Button("Cancel", id="cancel")
                 yield Button(
@@ -163,12 +160,14 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     TabPane { padding: 0 1; overflow-y: auto; }
     """
     BINDINGS = [
+        Binding("f1", "clipboard_help", "Clipboard help", priority=True),
         ("q", "quit", "Quit"),
         ("r", "refresh", "Refresh"),
         ("ctrl+l", "logs", "Search logs"),
         ("s", "settings", "Settings"),
         Binding("f2", "settings", show=False),
         Binding("ctrl+shift+c", "copy_selection", show=False, priority=True),
+        Binding("ctrl+shift+y", "copy_view", show=False, priority=True),
         Binding("ctrl+shift+insert", "paste_copied_text", show=False, priority=True),
         ("1", "tab('status')", "Status"),
         ("2", "tab('settings')", "Settings"),
@@ -241,21 +240,6 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             )
             yield Static("0 matches", id="log-hits", markup=False)
             yield Button("Logs", id="show-logs")
-            yield ClipboardButton(
-                "Copy",
-                id="copy-selection",
-                tooltip="Drag-select text, then copy it. Ctrl+Shift+C also copies if your terminal forwards it.",
-            )
-            yield ClipboardButton(
-                "Copy view",
-                id="copy-view",
-                tooltip="Copy the visible screen, including control labels. Offscreen text is not included.",
-            )
-            yield ClipboardButton(
-                "Paste copied",
-                id="paste-copied",
-                tooltip="Paste text copied within this dashboard into the focused field or connected shell. For desktop clipboard text, use your terminal's paste command.",
-            )
         with Horizontal(id="body"):
             with Vertical(id="sidebar"):
                 yield Label("Registered workspaces")
@@ -511,6 +495,14 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     def action_logs(self):
         self.action_tab("logs")
         self.query_one("#log-search", Input).focus()
+
+    def action_clipboard_help(self):
+        if self._clipboard_private():
+            return
+        if isinstance(self.screen, ClipboardHelp):
+            self.pop_screen()
+        else:
+            self.push_screen(ClipboardHelp())
 
     def action_settings(self):
         if isinstance(self.screen, ModalScreen):
@@ -926,13 +918,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         if self._management_button(event):
             return
         action = event.button.id
-        if action == "copy-selection":
-            self.action_copy_selection(event.button.consume_selection())
-        elif action == "copy-view":
-            self.action_copy_view()
-        elif action == "paste-copied":
-            self.action_paste_copied_text()
-        elif action == "refresh":
+        if action == "refresh":
             self.action_refresh()
         elif action == "show-logs":
             self.action_logs()
@@ -1708,6 +1694,20 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             )
 
     def check_action(self, action, parameters):
+        if self._clipboard_private() and action in {
+            "quit",
+            "help_quit",
+            "command_palette",
+            "clipboard_help",
+            "settings",
+            "logs",
+            "tab",
+            "refresh",
+            "copy_selection",
+            "copy_view",
+            "paste_copied_text",
+        }:
+            return False
         if (
             self._terminal_widget
             and self._terminal_widget.has_focus

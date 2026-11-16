@@ -8,9 +8,9 @@ from textual.validation import Integer
 from textual.widgets import Button, Input, Label, Select, Static, Switch
 
 if __package__:
-    from .tui_clipboard import ClipboardBar, ClipboardInput
+    from .tui_clipboard import ClipboardInput
 else:
-    from tui_clipboard import ClipboardBar, ClipboardInput
+    from tui_clipboard import ClipboardInput
 
 REFRESH_INTERVALS = tuple(range(1, 61))
 SESSION_SCOPES = (
@@ -174,7 +174,6 @@ class SettingsScreen(ModalScreen):
                         "shell input keeps its normal keys while focused.",
                         markup=False,
                     )
-            yield ClipboardBar()
             with Horizontal(id="preferences-actions"):
                 yield Button("Apply", id="preferences-apply", variant="primary")
                 yield Button("Reset to defaults", id="preferences-reset")

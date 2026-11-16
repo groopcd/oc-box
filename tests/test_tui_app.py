@@ -949,22 +949,22 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("synthetic-private", message)
             close.assert_called_once()
 
-    async def test_header_copy_and_paste_controls_fit_and_preserve_input_focus(self):
+    async def test_shortcut_only_clipboard_keeps_search_space_and_input_focus(self):
         backend = SessionDemo()
         app = DashboardApp(backend, read_only=True, demo=True)
         async with app.run_test(size=(80, 24)) as pilot:
             await self.settle(app, pilot)
             for ident in ("copy-selection", "copy-view", "paste-copied"):
-                button = app.query_one("#" + ident, Button)
-                geometry = app.screen.find_widget(button)
-                self.assertEqual(
-                    geometry.region.intersection(geometry.clip), geometry.region
-                )
+                self.assertFalse(app.query("#" + ident))
             search = app.query_one("#log-search", Input)
+            geometry = app.screen.find_widget(search)
+            self.assertEqual(
+                geometry.region.intersection(geometry.clip), geometry.region
+            )
             search.value = "copy 界é"
             search.focus()
             search.action_select_all()
-            await pilot.click("#copy-selection")
+            await pilot.press("ctrl+shift+c")
             await pilot.pause()
             self.assertEqual(app.clipboard, "copy 界é")
             self.assertTrue(search.has_focus)
@@ -972,7 +972,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             app.copy_to_clipboard("pasted 界\nnot a second search line")
             search.value = "prefix "
             search.cursor_position = len(search.value)
-            await pilot.click("#paste-copied")
+            await pilot.press("ctrl+shift+insert")
             await pilot.pause()
             self.assertEqual(search.value, "prefix pasted 界")
             self.assertTrue(search.has_focus)
@@ -984,15 +984,18 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
         app = DashboardApp(backend, read_only=True)
         async with app.run_test(size=(80, 24)) as pilot:
             await self.settle(app, pilot)
-            await pilot.click("#copy-view")
+            await pilot.press("ctrl+shift+y")
             await pilot.pause()
             self.assertIn("Registered workspaces", app.clipboard)
-            self.assertIn("Copy view", app.clipboard)
-            self.assertIn("Paste copied", app.clipboard)
+            self.assertIn("Clipboard help", app.clipboard)
+            self.assertFalse(app.query("#copy-selection, #copy-view, #paste-copied"))
 
             app.action_settings()
             await pilot.pause()
-            await pilot.click(app.screen.query_one("#copy-view", Button))
+            self.assertFalse(
+                app.screen.query("#copy-selection, #copy-view, #paste-copied")
+            )
+            await pilot.press("ctrl+shift+y")
             await pilot.pause()
             self.assertIn("Dashboard settings", app.clipboard)
             self.assertIn("Reset to defaults", app.clipboard)
@@ -1002,7 +1005,10 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             app.push_screen(Confirm("Synthetic deletion review", destructive=True))
             await pilot.pause()
             app.screen.query_one("#confirmation", Input).value = "DELETE"
-            await pilot.click(app.screen.query_one("#copy-view", Button))
+            self.assertFalse(
+                app.screen.query("#copy-selection, #copy-view, #paste-copied")
+            )
+            await pilot.press("ctrl+shift+y")
             await pilot.pause()
             self.assertIn("Synthetic deletion review", app.clipboard)
             self.assertIsInstance(app.screen, Confirm)

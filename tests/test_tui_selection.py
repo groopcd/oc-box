@@ -688,7 +688,7 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
             self.assert_copied(app, copies, before, field.value)
             self.assertEqual(field.selected_text, field.value)
             self.assertIsNone(app.screen.get_selected_text())
-            await self.click(app, pilot, app.query_one("#copy-selection"), "Copy")
+            await pilot.press("ctrl+shift+c")
             self.assertEqual(copies[-2:], [field.value, field.value])
             self.assertEqual(field.selected_text, field.value)
 
