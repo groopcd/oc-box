@@ -436,6 +436,81 @@ class DisplayPerformanceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(app.visible_sessions), 1000)
             self.assertTrue(field.has_focus)
 
+    async def test_late_table_event_matrix_ignores_pruned_default_screen(self):
+        app = DashboardApp(SyntheticBackend(), read_only=True, demo=True)
+        default_screen = None
+        late_events, dispatched = [], []
+        original_prune = app._prune
+        pruned = False
+
+        def record_dispatch(message):
+            if any(message is event for event in late_events):
+                dispatched.append(message)
+
+        async def prune(*nodes, **kwargs):
+            nonlocal pruned
+            result = await original_prune(*nodes, **kwargs)
+            if default_screen is None or default_screen not in nodes:
+                return result
+            pruned = True
+            self.assertFalse(app.is_running)
+            self.assertEqual(len(default_screen.children), 0)
+            catalog, visible = app.catalog, list(app.visible_sessions)
+            with (
+                patch.object(app, "_session_source_changed") as source_changed,
+                patch.object(app, "_render_workspace") as workspace,
+                patch.object(app, "_render_sessions") as sessions,
+                patch.object(app, "_session_details") as details,
+            ):
+                for event in late_events:
+                    with self.subTest(
+                        table=event.data_table.id, event=type(event).__name__
+                    ):
+                        self.assertFalse(event.data_table.is_attached)
+                        acknowledged = asyncio.Event()
+                        self.assertTrue(app.post_message(event))
+                        self.assertTrue(app.call_later(acknowledged.set))
+                        await asyncio.wait_for(acknowledged.wait(), timeout=5)
+                        self.assertIs(dispatched[-1], event)
+                        source_changed.assert_not_called()
+                        workspace.assert_not_called()
+                        sessions.assert_not_called()
+                        details.assert_not_called()
+                        self.assertIsNone(app.selected)
+                        self.assertIs(app.catalog, catalog)
+                        self.assertEqual(app.visible_sessions, visible)
+                        self.assertFalse(app._exception_event.is_set())
+            return result
+
+        # Textual 8.2.8 (supported <9) prunes the default screen before closing
+        # the app message queue. Hold only that boundary; native dispatch and a
+        # queued acknowledgement determine ordering, not sleeps or retries.
+        with patch.object(app, "_prune", prune):
+            async with app.run_test(
+                size=(120, 35), message_hook=record_dispatch
+            ) as pilot:
+                await self.ready(app, pilot)
+                app.catalog = Mock(origin="host", store="synthetic-store")
+                app.sessions = synthetic_sessions()
+                app._render_sessions()
+                app.action_tab("sessions")
+                await pilot.pause()
+                default_screen = app.default_screen
+                for selector in ("#workspaces", "#session-table"):
+                    table = app.query_one(selector, DataTable)
+                    key = table.ordered_rows[table.cursor_row].key
+                    for message_type in (
+                        DataTable.RowHighlighted,
+                        DataTable.RowSelected,
+                    ):
+                        late_events.append(message_type(table, table.cursor_row, key))
+                # A valid workspace row would change this selection if its
+                # late handler were allowed to run.
+                app.selected = None
+        self.assertTrue(pruned)
+        self.assertEqual(len(late_events), 4)
+        self.assertEqual(dispatched, late_events)
+
     async def test_slow_favorites_are_off_ui_thread_cached_and_store_qualified(self):
         app = DashboardApp(SyntheticBackend())
         entered, finish = threading.Event(), threading.Event()

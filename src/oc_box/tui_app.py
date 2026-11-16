@@ -916,6 +916,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         )
 
     def on_data_table_row_selected(self, event):
+        if not self.is_running or not event.data_table.is_attached:
+            return
         if event.data_table.id == "workspaces":
             target = str(event.row_key.value)
             if target != self.selected:
@@ -927,6 +929,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             self._session_details()
 
     def on_data_table_row_highlighted(self, event):
+        if not self.is_running or not event.data_table.is_attached:
+            return
         if event.data_table.id == "workspaces":
             # Ignore queued highlights from a table rebuild, not user movement.
             if event.cursor_row != event.data_table.cursor_row:

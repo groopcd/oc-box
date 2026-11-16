@@ -585,28 +585,57 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
     ):
         backend = SessionDemo()
         app = DashboardApp(backend, read_only=True, demo=True)
-        async with app.run_test(size=(120, 40)) as pilot:
+        apply_messages = []
+        apply_inputs = {}
+        invalid_intervals = (
+            ("blank", ""),
+            ("fraction", "1.5"),
+            ("zero", "0"),
+            ("negative", "-1"),
+            ("above maximum", "61"),
+            ("nan", "NaN"),
+            ("infinity", "Infinity"),
+            ("boolean", "True"),
+            ("exponent", "1e1"),
+            ("whitespace", " 7 "),
+            ("huge number", "9" * 5000),
+        )
+        valid_intervals = (
+            ("custom middle", "17"),
+            ("custom near maximum", "59"),
+            ("upper boundary", "60"),
+            ("lower boundary", "1"),
+        )
+
+        def record_apply(message):
+            if (
+                isinstance(message, Button.Pressed)
+                and message.button.id == "preferences-apply"
+                and not any(message is previous for previous, _ in apply_messages)
+            ):
+                apply_messages.append(
+                    (
+                        message,
+                        apply_inputs[message.button].value,
+                    )
+                )
+
+        async with app.run_test(size=(120, 40), message_hook=record_apply) as pilot:
             await self.settle(app, pilot)
             app.action_settings()
             await pilot.pause()
             modal = app.screen
+            # This matrix tests validation, not Textual's timer-based suppression
+            # of repeated mouse clicks while the button has its -active effect.
+            modal.query_one("#preferences-apply", Button).active_effect_duration = 0
             interval = modal.query_one("#pref-interval", Input)
+            # A successful Apply may reach the app's message hook only after
+            # its modal was dismissed; retain the synthetic input by button.
+            apply_inputs[modal.query_one("#preferences-apply", Button)] = interval
             self.assertIsInstance(interval, ClipboardInput)
             self.assertEqual(interval.type, "integer")
             modal.query_one("#pref-session-filter", Input).value = "retained draft"
-            for name, raw in (
-                ("blank", ""),
-                ("fraction", "1.5"),
-                ("zero", "0"),
-                ("negative", "-1"),
-                ("above maximum", "61"),
-                ("nan", "NaN"),
-                ("infinity", "Infinity"),
-                ("boolean", "True"),
-                ("exponent", "1e1"),
-                ("whitespace", " 7 "),
-                ("huge number", "9" * 5000),
-            ):
+            for name, raw in invalid_intervals:
                 with self.subTest(invalid_interval=name):
                     interval.value = raw
                     with patch.object(modal, "dismiss") as dismiss:
@@ -635,16 +664,15 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(
                 app.query_one("#session-search", Input).value, "retained draft"
             )
-            for name, value in (
-                ("custom middle", "17"),
-                ("custom near maximum", "59"),
-                ("upper boundary", "60"),
-                ("lower boundary", "1"),
-            ):
+            for name, value in valid_intervals:
                 with self.subTest(valid_interval=name):
                     app.action_settings()
                     await pilot.pause()
-                    app.screen.query_one("#pref-interval", Input).value = value
+                    interval = app.screen.query_one("#pref-interval", Input)
+                    apply_inputs[app.screen.query_one("#preferences-apply", Button)] = (
+                        interval
+                    )
+                    interval.value = value
                     await pilot.click("#preferences-apply")
                     await pilot.pause()
                     self.assertNotIsInstance(app.screen, SettingsScreen)
@@ -656,6 +684,15 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     )
             self.assertTrue(app.read_only)
             self.assertEqual(backend.calls, [])
+            self.assertEqual(len(apply_messages), 16)
+            self.assertEqual(
+                [value for _, value in apply_messages],
+                [
+                    *(value for _, value in invalid_intervals),
+                    "7",
+                    *(value for _, value in valid_intervals),
+                ],
+            )
 
     async def test_custom_refresh_interval_applies_to_tick_without_overlapping_or_queuing(
         self,
