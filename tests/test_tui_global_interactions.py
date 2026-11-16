@@ -98,14 +98,19 @@ class GlobalInteractionMatrixTests(unittest.IsolatedAsyncioTestCase):
                     )
                     app.push_screen(modal, result.append)
                     await pilot.pause()
+                    # This matrix tests approval policy, not Textual's native
+                    # active-feedback debounce, which discards a rapid second
+                    # click after the deliberately rejected empty phrase.
+                    modal.query_one("#confirm", Button).active_effect_duration = 0
                     self.assertFalse(
                         modal.query("#copy-selection, #copy-view, #paste-copied")
                     )
                     self.assertEqual(bool(modal.query("#confirmation")), destructive)
                     self.assertEqual(result, [])
                     if destructive:
-                        await pilot.click("#confirm")
+                        self.assertTrue(await pilot.click("#confirm"))
                         self.assertEqual(result, [])
+                        self.assertIs(app.screen, modal)
                         self.assertIn(
                             "Type DELETE exactly",
                             str(
@@ -113,8 +118,54 @@ class GlobalInteractionMatrixTests(unittest.IsolatedAsyncioTestCase):
                             ),
                         )
                         modal.query_one("#confirmation", Input).value = "DELETE"
-                    await pilot.click("#confirm" if approve else "#cancel")
+                        await pilot.pause()
+                    self.assertTrue(
+                        await pilot.click("#confirm" if approve else "#cancel")
+                    )
+                    await pilot.pause()
                     self.assertEqual(result, [approve])
+
+    async def test_rejected_confirmation_ignores_rapid_click_until_feedback_clears(
+        self,
+    ):
+        app = DashboardApp(DemoBackend(), demo=True)
+        async with app.run_test(size=(100, 34)) as pilot:
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            result = []
+            modal = Confirm("Synthetic destructive review", destructive=True)
+            await app.push_screen(modal, result.append)
+            await pilot.pause()
+            button = modal.query_one("#confirm", Button)
+            # Hold only the real button's feedback timer. Its actual callback
+            # below advances the native active state without sleeps or retries.
+            with (
+                patch.object(button, "set_timer") as feedback_timer,
+                patch.object(button, "press", wraps=button.press) as pressed,
+            ):
+                self.assertTrue(await pilot.click(button))
+                self.assertEqual(pressed.call_count, 1)
+                self.assertEqual(result, [])
+                self.assertIs(app.screen, modal)
+                self.assertIn(
+                    "Type DELETE exactly",
+                    str(modal.query_one("#confirmation-error", Static).render()),
+                )
+                self.assertTrue(button.has_class("-active"))
+                modal.query_one("#confirmation", Input).value = "DELETE"
+                await pilot.pause()
+                self.assertTrue(await pilot.click(button))
+                await pilot.pause()
+                self.assertEqual(pressed.call_count, 1)
+                self.assertEqual(result, [])
+                self.assertIs(app.screen, modal)
+                feedback_timer.assert_called_once()
+                feedback_timer.call_args.args[1]()
+                self.assertFalse(button.has_class("-active"))
+                self.assertTrue(await pilot.click(button))
+                await pilot.pause()
+                self.assertEqual(pressed.call_count, 2)
+                self.assertEqual(result, [True])
 
     async def test_help_exposes_shortcuts_without_copying_or_changing_underlying_review(
         self,
