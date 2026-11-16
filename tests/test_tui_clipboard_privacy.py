@@ -1,7 +1,7 @@
 """Trusted private-editor fences; no backup workflow or real secret material."""
 
 import unittest
-from unittest.mock import PropertyMock, patch
+from unittest.mock import Mock, PropertyMock, patch
 
 try:
     from textual import events
@@ -81,6 +81,26 @@ if App is not None:
             with PrivateGroup(id="private-group"):
                 yield OpaqueEditor()
 
+    class CancellableScreen(ModalScreen):
+        BINDINGS = [("ctrl+c", "cancel_private_input", "Cancel")]
+
+        def __init__(self):
+            super().__init__()
+            self.cancel = Mock()
+
+        def compose(self):
+            yield ClipboardInput(
+                "public text", id="public-input", select_on_focus=False
+            )
+            yield OpaqueEditor()
+
+        def action_cancel_private_input(self):
+            self.cancel()
+
+    class CancellablePrivateScreen(CancellableScreen):
+        PRIVATE_INPUT = True
+        ALLOW_SELECT = False
+
     class PrivacyFixtureApp(ClipboardActions, App):
         BINDINGS = [
             Binding("ctrl+shift+c", "copy_selection", priority=True),
@@ -105,6 +125,73 @@ if App is not None:
 
 @unittest.skipIf(App is None, "optional Textual not installed")
 class PrivateClipboardTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ctrl_c_cancels_private_screen_once_without_clipboard_reads(self):
+        for screen_type, shield in (
+            (CancellablePrivateScreen, False),
+            (CancellableScreen, True),
+        ):
+            with self.subTest(screen=screen_type.__name__, transition=shield):
+                app = PrivacyFixtureApp()
+                async with app.run_test(size=(80, 24)) as pilot:
+                    app._clipboard = "public cache"
+                    app._private_interaction = shield
+                    modal = screen_type()
+                    await app.push_screen(modal)
+                    editor = modal.query_one(OpaqueEditor)
+                    editor.focus()
+                    await pilot.pause()
+                    self.assertTrue(app._clipboard_private())
+                    with (
+                        patch.object(modal, "get_selected_text") as selection,
+                        patch.object(modal._compositor, "render_strips") as strips,
+                        patch.object(app, "_write_clipboard") as write,
+                        patch.object(
+                            type(app),
+                            "clipboard",
+                            new_callable=PropertyMock,
+                            side_effect=AssertionError(
+                                "private cancellation must not read cache"
+                            ),
+                        ),
+                    ):
+                        await pilot.press("ctrl+c")
+                        await pilot.pause()
+                        modal.cancel.assert_called_once_with()
+                        forwarded = events.Key("ctrl+c", None)
+                        forwarded._set_forwarded()
+                        await app.on_event(forwarded)
+                        await pilot.pause()
+                        modal.cancel.assert_called_once_with()
+                        selection.assert_not_called()
+                        strips.assert_not_called()
+                        write.assert_not_called()
+                    self.assertIs(app.screen, modal)
+                    self.assertTrue(app.is_running)
+                    self.assertEqual(editor.keys, [])
+                    self.assertEqual(editor.pastes, [])
+                    self.assertEqual(editor.forbidden, [])
+                    self.assertEqual(app.copies, [])
+                    self.assertEqual(app.notices, [])
+                    self.assertEqual(app.clipboard, "public cache")
+
+    async def test_nonprivate_ctrl_c_keeps_input_copy_instead_of_cancel_hook(self):
+        app = PrivacyFixtureApp()
+        async with app.run_test(size=(80, 24)) as pilot:
+            modal = CancellableScreen()
+            await app.push_screen(modal)
+            field = modal.query_one(Input)
+            field.focus()
+            field.selection = (0, len(field.value))
+            await pilot.pause()
+            self.assertFalse(app._clipboard_private())
+            self.assertEqual(app.copies, [])
+            await pilot.press("ctrl+c")
+            await pilot.pause()
+            modal.cancel.assert_not_called()
+            self.assertEqual(app.clipboard, "public text")
+            self.assertEqual(app.copies, ["public text"])
+            self.assertIs(app.focused, field)
+
     async def test_pending_private_interaction_fences_an_ordinary_screen(self):
         app = PrivacyFixtureApp()
         async with app.run_test(size=(80, 24)) as pilot:
