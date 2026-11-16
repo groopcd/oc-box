@@ -272,20 +272,25 @@ class DisplayPerformanceTests(unittest.IsolatedAsyncioTestCase):
         backend = ManyDemo()
         selected = f"{50:032x}"
         app = DashboardApp(backend, read_only=True, selected=selected, demo=True)
-        async with app.run_test(size=(100, 30)) as pilot:
-            await self.ready(app, pilot)
-            table = app.query_one("#workspaces", DataTable)
-            self.assertEqual(app.selected, selected)
-            self.assertEqual(table.cursor_row, 49)
-            self.assertGreater(table.scroll_y, 0)
-            region = table.scrollable_content_region.intersection(app.screen.region)
-            strips = app.screen._compositor.render_strips()
-            visible = "\n".join(
-                strips[y].crop(region.x, region.right).text
-                for y in range(region.y, region.bottom)
-            )
-            self.assertIn("project-49", visible)
-            self.assertEqual(backend.samples, 1)
+        # This checks first population, not how long layout takes under load.
+        # Control only periodic queries before mount; initial workers and
+        # Textual's frame/layout timers must still reveal the selected row.
+        with patch.object(app, "_tick") as scheduled_tick:
+            async with app.run_test(size=(100, 30)) as pilot:
+                await self.ready(app, pilot)
+                scheduled_tick()
+                table = app.query_one("#workspaces", DataTable)
+                self.assertEqual(app.selected, selected)
+                self.assertEqual(table.cursor_row, 49)
+                self.assertGreater(table.scroll_y, 0)
+                region = table.scrollable_content_region.intersection(app.screen.region)
+                strips = app.screen._compositor.render_strips()
+                visible = "\n".join(
+                    strips[y].crop(region.x, region.right).text
+                    for y in range(region.y, region.bottom)
+                )
+                self.assertIn("project-49", visible)
+                self.assertEqual(backend.samples, 1)
 
     async def test_changed_cells_and_structural_refresh_preserve_cursor_and_scroll(
         self,
