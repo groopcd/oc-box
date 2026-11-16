@@ -1739,6 +1739,9 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         terminal.focus()
 
     def on_unmount(self):
+        workflow = getattr(self, "_embedded_operation", None)
+        if workflow is not None and not workflow.finished:
+            workflow.transport.cancel()
         if self._poll_timer:
             self._poll_timer.stop()
         for kind, timer in self._filter_timers.items():
@@ -1767,18 +1770,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             )
 
     def check_action(self, action, parameters):
-        if self._clipboard_private() and action in {
-            "quit",
-            "help_quit",
-            "command_palette",
-            "clipboard_help",
-            "settings",
-            "logs",
-            "tab",
-            "refresh",
-            "copy_selection",
-            "copy_view",
-            "paste_copied_text",
+        # Keep the private workflow's app-wide shield and the clipboard
+        # screen/ancestor fences. Traversal stays within the active modal so
+        # keyboard users can deliberately focus its editor or Cancel button.
+        if self._clipboard_private() and action not in {
+            "focus_next",
+            "focus_previous",
         }:
             return False
         if (

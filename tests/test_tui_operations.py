@@ -592,6 +592,26 @@ class OperationTests(unittest.TestCase):
         self.assertEqual(plan.request["session"], session)
         self.assertIn("including native children", plan.review)
 
+    def test_archive_routing_uses_envelope_not_suffix_and_rechecks_open_file_identity(
+        self,
+    ):
+        for names, kind in (
+            (("key.age", "manifest.age", "sessions.age"), "session"),
+            (
+                ("key.age", "manifest.age", "project.age", "home.age", "registry.age"),
+                "workspace",
+            ),
+        ):
+            with self.subTest(kind=kind):
+                self.archive(names=names)
+                identity = operations.file_identity(self.output)
+                self.assertEqual(
+                    operations.archive_kind(self.output, expected=identity), kind
+                )
+                self.output.write_bytes(b"replaced")
+                with self.assertRaises(operations.OperationError):
+                    operations.archive_kind(self.output, expected=identity)
+
     def test_backup_delete_accepts_only_private_regular_recognized_archives(self):
         self.archive()
         self.output.chmod(0o644)

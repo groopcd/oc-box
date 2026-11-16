@@ -352,11 +352,11 @@ class ManagementInteractionTests(unittest.IsolatedAsyncioTestCase):
             )
             app._session_busy = False
 
-    async def test_foreground_handoff_has_no_dashboard_output_capture(self):
+    async def test_foreground_storage_handoff_has_no_dashboard_output_capture(self):
         app = DashboardApp(MetadataDemo())
         async with app.run_test(size=(120, 40)) as pilot:
             await self.settle(app, pilot)
-            request = {"action": "workspace-inspect", "synthetic": True}
+            request = {"action": "workspace-purge", "synthetic": True}
             with contextlib.ExitStack() as stack:
                 terminal = SimpleNamespace(isatty=lambda: True)
                 stack.enter_context(

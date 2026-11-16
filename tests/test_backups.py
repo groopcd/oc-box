@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -218,7 +219,7 @@ class WorkspaceBackupTests(unittest.TestCase):
         self.created.append(json.loads(json.dumps(data)))
         data["ready"] = False
 
-    def backup(self, portable=False):
+    def backup(self, portable=False, *, interaction=None):
         args = argparse.Namespace(
             project=self.project,
             workspace=None,
@@ -230,7 +231,7 @@ class WorkspaceBackupTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()),
             contextlib.redirect_stderr(io.StringIO()),
         ):
-            backups.make_backup(box, args)
+            backups.make_backup(box, args, interaction=interaction)
 
     def restore(self, destination):
         args = argparse.Namespace(
@@ -244,6 +245,41 @@ class WorkspaceBackupTests(unittest.TestCase):
         path, data = box.find_workspace(destination)
         assert path is not None and data is not None
         return path, data
+
+    def test_dashboard_progress_inspect_projection_and_cancelled_review_before_creation(
+        self,
+    ):
+        stages, inspections, reviews = [], [], []
+        interaction = SimpleNamespace(
+            stage=stages.append,
+            dispatched=lambda: None,
+            inspection=inspections.append,
+            review=lambda value: reviews.append(value) or False,
+        )
+        self.backup(interaction=interaction)
+        self.assertEqual(stages, ["project", "home", "registry", "image", "publishing"])
+        args = argparse.Namespace(file=self.archive, identity=[self.identity])
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            backups.inspect_backup(box, args, interaction=interaction)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(inspections[0]["format"], "workspace")
+        for secret in (
+            "synthetic-saved-value",
+            "EXAMPLE_TOKEN",
+            "configuration",
+            "podman_args",
+        ):
+            self.assertNotIn(secret, json.dumps(inspections))
+        destination = self.root / "dashboard-restored"
+        args.project = destination
+        before_operations = len(self.operations)
+        with self.assertRaises(KeyboardInterrupt):
+            backups.restore_backup(box, args, interaction=interaction)
+        self.assertFalse(destination.exists())
+        self.assertEqual(self.created, [])
+        self.assertEqual(len(self.operations), before_operations)
+        self.assertEqual(reviews[0]["destination"], str(destination))
 
     def test_v2_backup_restore_retains_major_selection_and_both_databases(self):
         self.data["opencode_version"] = "2.2.6"
