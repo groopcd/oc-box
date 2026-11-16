@@ -286,6 +286,11 @@ class ClipboardActions:
             }:
                 # Fence native Screen/Input bindings as well as our actions,
                 # before they can inspect selections or the clipboard cache.
+                if event.key == "ctrl+c" and not event.is_forwarded:
+                    # A trusted private workflow may cancel, but never copy.
+                    cancel = getattr(self.screen, "action_cancel_private_input", None)
+                    if callable(cancel):
+                        cancel()
                 event.stop()
                 event.prevent_default()
                 return
