@@ -170,6 +170,10 @@ def _check_database(path, *, allow_missing=False, timeout=1):
                 before.st_uid,
             ) or not stat.S_ISREG(after.st_mode):
                 raise Refusal("database-unsafe")
+            # Optional callers can retain the ORIGINAL validated binding rather
+            # than treating a later lstat/open as a new baseline. Existing
+            # Reader callers deliberately ignore this return value.
+            return before
     except (OSError, sqlite3.Error, ValueError) as error:
         if isinstance(error, Refusal):
             raise

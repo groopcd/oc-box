@@ -21,6 +21,7 @@ import tarfile
 import tempfile
 import threading
 import time
+import unicodedata
 import uuid
 
 if __package__:
@@ -29,6 +30,7 @@ if __package__:
         dependencies,
         history_reader,
         history_recovery,
+        native_tabs,
         opencode_compat,
         opencode_v2_io,
         paths,
@@ -44,6 +46,7 @@ else:
     import dependencies
     import history_reader
     import history_recovery
+    import native_tabs
     import opencode_compat
     import opencode_v2_io
     import paths
@@ -108,48 +111,183 @@ class HistoryPending(BoxError):
 class HistoryWaitTimeout(BoxError):
     """Keep the fixed refusal separate from count-only readiness diagnostics."""
 
-    def __init__(self, diagnostic, *, recovery_eligible=False):
+    def __init__(
+        self,
+        diagnostic,
+        *,
+        recovery_eligible=False,
+        recovery_reason="readiness-unverified",
+    ):
         super().__init__("OpenCode 2.x history wait failed (activity-timeout).")
         self.diagnostic = diagnostic
         self.recovery_eligible = recovery_eligible
+        self.recovery_reason = recovery_reason
 
 
 @contextlib.contextmanager
-def loading_stage(label, *, interval=5.0, stream=None):
+def loading_stage(label, *, interval=0.1, stream=None):
+    """Foreground CLI feedback; Python stream proxying must nest lexically.
+
+    This is not a cross-thread output/capture coordinator. Native subprocess
+    captures stay on their private file descriptors rather than these proxies.
+    """
     stream = sys.stderr if stream is None else stream
     started = time.monotonic()
     stopped = threading.Event()
-    print(f"oc-box: {label}...", file=stream, flush=True)
+    lock = threading.RLock()
+    drawn = False
+    partial_output = False
+    writable = True
+    worker = None
+    frames = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+    try:
+        frames.encode(getattr(stream, "encoding", None) or "ascii")
+    except (LookupError, UnicodeError):
+        frames = "|/-\\"
+    frame = 0
+    try:
+        fd = stream.fileno()
+        interactive = (
+            stream.isatty()
+            and os.environ.get("TERM") != "dumb"
+            and os.get_terminal_size(fd).columns > 1
+        )
+    except (AttributeError, OSError, ValueError):
+        interactive = False
+
+    def emit(text):
+        nonlocal writable
+        if writable:
+            try:
+                stream.write(text)
+                stream.flush()
+            except (OSError, ValueError):
+                # Progress is best-effort; do not replace the operation's error.
+                writable = False
+
+    def clear():
+        nonlocal drawn
+        if drawn:
+            emit("\r\x1b[K")
+            drawn = False
+
+    def clip(text, width):
+        result = []
+        for character in text:
+            cells = (
+                0
+                if unicodedata.combining(character)
+                else 2
+                if unicodedata.east_asian_width(character) in ("W", "F")
+                else 1
+            )
+            if cells > width:
+                break
+            result.append(character)
+            width -= cells
+        return "".join(result)
+
+    def render(suffix, *, final=False):
+        nonlocal drawn, frame
+        try:
+            # Query the actual output fd on every draw, including after resize;
+            # leave the last cell unused to avoid terminal autowrap.
+            width = max(os.get_terminal_size(fd).columns - 1, 0)
+        except (OSError, ValueError):
+            width = 0
+        spinner = "" if final else frames[frame % len(frames)] + " "
+        frame += 1
+        prefix = "".join(
+            character if character.isprintable() else " "
+            for character in f"oc-box: {spinner}{label}"
+        )
+        text = (
+            clip(prefix, width - len(suffix)) + suffix
+            if len(suffix) < width
+            else suffix.lstrip()[:width]
+        )
+        emit("\r\x1b[K" + text + ("\n" if final else ""))
+        drawn = not final
+
+    class StageOutput:
+        """Separate Python output without saving it or capturing child fds."""
+
+        def __init__(self, target):
+            self.target = target
+
+        def __getattr__(self, name):
+            return getattr(self.target, name)
+
+        def write(self, text):
+            nonlocal partial_output
+            with lock:
+                if text:
+                    clear()
+                count = self.target.write(text)
+                if text:
+                    partial_output = not text.endswith("\n")
+                return count
+
+        def writelines(self, lines):
+            for line in lines:
+                self.write(line)
+
+    def same_terminal(other):
+        if other is stream:
+            return True
+        try:
+            here, there = os.fstat(fd), os.fstat(other.fileno())
+            return other.isatty() and (here.st_dev, here.st_ino) == (
+                there.st_dev,
+                there.st_ino,
+            )
+        except (AttributeError, OSError, ValueError):
+            return False
 
     def heartbeat():
         while not stopped.wait(interval):
-            print(
-                f"oc-box: {label}... ({int(time.monotonic() - started)}s elapsed)",
-                file=stream,
-                flush=True,
-            )
+            with lock:
+                if not writable:
+                    return
+                if not partial_output:
+                    render(f"... ({int(time.monotonic() - started)}s elapsed)")
 
-    worker = threading.Thread(target=heartbeat, daemon=True)
-    worker.start()
-    try:
-        yield
-    except BaseException:
-        stopped.set()
-        worker.join()
-        print(
-            f"oc-box: {label} failed after {time.monotonic() - started:.1f}s",
-            file=stream,
-            flush=True,
-        )
-        raise
-    else:
-        stopped.set()
-        worker.join()
-        print(
-            f"oc-box: {label} done ({time.monotonic() - started:.1f}s)",
-            file=stream,
-            flush=True,
-        )
+    with contextlib.ExitStack() as redirects:
+        if interactive:
+            # Python warnings/status lines must not be overwritten by a redraw.
+            # Inherited subprocess fds and previously saved stream references
+            # remain direct output; this is not a terminal recorder or relay.
+            for name, redirect in (
+                ("stdout", contextlib.redirect_stdout),
+                ("stderr", contextlib.redirect_stderr),
+            ):
+                target = getattr(sys, name)
+                if same_terminal(target):
+                    redirects.enter_context(redirect(StageOutput(target)))
+            render("... (0s elapsed)")
+            worker = threading.Thread(target=heartbeat, daemon=True)
+            worker.start()
+        else:
+            emit(f"oc-box: {label}...\n")
+        failed = True
+        try:
+            yield
+            failed = False
+        finally:
+            stopped.set()
+            if worker is not None:
+                worker.join()
+            elapsed = time.monotonic() - started
+            suffix = (
+                f" failed after {elapsed:.1f}s" if failed else f" done ({elapsed:.1f}s)"
+            )
+            with lock:
+                if interactive:
+                    if partial_output:
+                        emit("\n")
+                    render(suffix, final=True)
+                else:
+                    emit(f"oc-box: {label}{suffix}\n")
 
 
 def run_tui(command):
@@ -1359,7 +1497,7 @@ def rewrite_config(value, key=None):
 
 
 def image_preview_cli_config():
-    """Build a private CLI copy, never editing or replacing the host input."""
+    """Freeze the unchanged CLI base for seeding, never a persistent opt-in."""
     source = (
         Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
         / "opencode"
@@ -1391,7 +1529,7 @@ def image_preview_cli_config():
                 except FileNotFoundError:
                     descriptor = None
                 if descriptor is not None:
-                    with os.fdopen(descriptor, encoding="utf-8") as stream:
+                    with os.fdopen(descriptor, encoding="utf-8", newline="") as stream:
                         info = os.fstat(stream.fileno())
                         if (
                             not stat.S_ISREG(info.st_mode)
@@ -1409,11 +1547,14 @@ def image_preview_cli_config():
             else {"$schema": "https://opencode.ai/v2/cli.json"}
         )
         for key in ("prompt", "session"):
-            section = config.setdefault(key, {})
+            section = config.get(key, {})
             if not isinstance(section, dict):
                 raise ValueError("CLI section must be an object")
-            section["image_preview"] = True
-        return (json.dumps(config, indent=2, allow_nan=False) + "\n").encode()
+        # Validate finite JSON values without altering image preferences, other
+        # settings, comments or formatting. Only the native client gets the
+        # separate two-boolean override, and only for this owner's lifetime.
+        encoded = (json.dumps(config, indent=2, allow_nan=False) + "\n").encode()
+        return text.encode() if text is not None else encoded
     except (OSError, UnicodeError) as exc:
         raise BoxError(refusal) from exc
     except (ValueError, BoxError) as exc:
@@ -2635,6 +2776,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
             exported = export_host_session(path, data, args.import_session)
     code = 1
     stop_token, source, cleanup_data = None, None, data
+    control_refusal = "control-unavailable"
     if (
         opencode_compat.major(version) == 2
         and args.command != "sync"
@@ -2642,9 +2784,15 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
     ):
         try:
             stop_token = workspace_control.capture(path)
-        except (workspace_control.ControlError, OSError):
+        except workspace_control.ControlError as exc:
             # Optional recovery never repairs unsafe control state or prevents
             # the ordinary owning launch/cleanup from retaining its old behavior.
+            control_refusal = (
+                "control-uncertain"
+                if exc.category == "uncertain-control"
+                else "control-state"
+            )
+        except OSError:
             pass
     try:
         with loading_stage(f"Starting {data['distro']} container"):
@@ -2665,21 +2813,52 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
             )
         if args.command == "sync":
             with loading_stage("Syncing session history"):
-                sync_sessions(path, data)
+                with (
+                    workspace_service.history_source(sys.modules[__name__], data)
+                    if opencode_compat.major(version) == 2
+                    else contextlib.nullcontext()
+                ):
+                    sync_sessions(path, data, announce=False)
+                if session_state(path).get("sessions"):
+                    print(
+                        "Session history synced to your normal host OpenCode database.",
+                        flush=True,
+                    )
             return 0
         with contextlib.ExitStack() as services:
             owner = (
                 services.enter_context(
-                    workspace_service.Owner(sys.modules[__name__], path, data)
+                    workspace_service.Owner(
+                        sys.modules[__name__],
+                        path,
+                        data,
+                        **(
+                            {"image_preview": args.image_preview}
+                            if getattr(args, "image_preview", False)
+                            else {}
+                        ),
+                    )
                 )
                 if opencode_compat.major(version) == 2
                 else None
             )
             if owner:
+                refusals = []
                 source = history_recovery.capture(
-                    sys.modules[__name__], data, initial_info, stop_token
+                    sys.modules[__name__],
+                    data,
+                    initial_info,
+                    stop_token,
+                    refusal=refusals.append,
                 )
                 owner._history_source = source
+                owner._history_source_refusal = (
+                    control_refusal
+                    if stop_token is None
+                    else refusals[0]
+                    if refusals
+                    else "source-unavailable"
+                )
             code = launch_client(path, data, args, version, exported, owner)
         timeout = getattr(owner, "_history_timeout", None) if owner else None
         if isinstance(timeout, HistoryWaitTimeout):
@@ -2696,6 +2875,10 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
             cleanup_data = {**data, "container": source.container_id}
             history_recovery.recover(sys.modules[__name__], path, data, source)
         elif timeout is not None:
+            if isinstance(timeout, HistoryWaitTimeout):
+                history_recovery.report_skipped(
+                    history_recovery.skip_reasons(owner, timeout, closed=True)
+                )
             print(
                 f"oc-box: history sync pending: {timeout}\n"
                 "Container data retained. Retry with 'oc-box sync'.",
@@ -2722,6 +2905,27 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                 )
 
 
+def native_tab_selection(data, last, connection):
+    """Keep history discovery distinct from the native client's open tab set."""
+    snapshot = native_tabs.inspect(sys.modules[__name__], data, connection=connection)
+    if snapshot.status == "missing":
+        return last, True
+    if snapshot.status == "invalid":
+        print(
+            "oc-box: Saved native tab state could not be verified; opening native home without reopening history.",
+            file=sys.stderr,
+        )
+        return None, False
+    inventory = list_container_sessions(data) if snapshot.tabs else []
+    try:
+        selected = native_tabs.choose(
+            snapshot, inventory, last, directory=container_project(data)
+        )
+    except native_tabs.TabError as exc:
+        raise BoxError(str(exc)) from None
+    return selected, False
+
+
 def launch_client(path, data, args, version, exported, owner=None):
     if exported is not None:
         with loading_stage("Importing and verifying host session"):
@@ -2730,9 +2934,21 @@ def launch_client(path, data, args, version, exported, owner=None):
         with loading_stage("Finding workspace session"):
             sessions = refresh_sessions(path, data)
     selected_session = sessions.get("last") if not args.new else None
+    allow_creation, created_session = True, False
+    if (
+        owner
+        and version in native_tabs.SUPPORTED
+        and args.command != "web"
+        and not any(
+            (args.new, exported is not None, getattr(args, "resume", False), args.model)
+        )
+    ):
+        selected_session, allow_creation = native_tab_selection(
+            data, selected_session, owner.connection
+        )
     if owner:
         selected_model = opencode_compat.model(args.model) if args.model else None
-        if not selected_session:
+        if not selected_session and allow_creation:
             payload = {"location": {"directory": container_project(data)}}
             if selected_model:
                 payload["model"] = selected_model
@@ -2747,6 +2963,7 @@ def launch_client(path, data, args, version, exported, owner=None):
             selected_session = created["data"]["id"]
             if not valid_session_id(selected_session):
                 raise BoxError("Invalid OpenCode 2.x session creation response.")
+            created_session = True
         elif selected_model:
             workspace_service.api(
                 sys.modules[__name__],
@@ -2765,10 +2982,21 @@ def launch_client(path, data, args, version, exported, owner=None):
         None if owner else args.model,
         server=owner.connection["url"] if owner else None,
     )
-    print(
-        f"oc-box: {data['distro']} | {data['project']} | {'new session' if args.new or not sessions.get('last') else 'resuming ' + sessions['last']}",
-        flush=True,
-    )
+    if owner:
+        selection = (
+            "new session"
+            if created_session
+            else "resuming " + selected_session
+            if selected_session is not None
+            else "native home (no open session selected)"
+        )
+    else:
+        selection = (
+            "new session"
+            if args.new or not sessions.get("last")
+            else "resuming " + sessions["last"]
+        )
+    print(f"oc-box: {data['distro']} | {data['project']} | {selection}", flush=True)
     try:
         if args.command == "web":
             assert owner is not None
@@ -2818,6 +3046,7 @@ def launch_client(path, data, args, version, exported, owner=None):
                     file=sys.stderr,
                 )
                 return code or 1
+            history_recovery.report_skipped(history_recovery.skip_reasons(owner, exc))
         print(
             f"oc-box: history sync pending: {exc}\nContainer data retained. Retry with 'oc-box sync'.",
             file=sys.stderr,
@@ -3107,7 +3336,7 @@ def parser():
     result.add_argument(
         "--image-preview",
         action="store_true",
-        help="V2 owning start/reset TUI only: enable prompt/session image previews in the private CLI config copy",
+        help="V2 owning start/reset TUI only: enable prompt/session image previews for this owner without changing saved CLI preferences",
     )
     result.add_argument(
         "--credential-mode",
@@ -3772,6 +4001,9 @@ def main(argv=None):
             with workspace_service.attach(
                 sys.modules[__name__], path, data
             ) as connection:
+                selected_session = workspace_service.require_session(
+                    sys.modules[__name__], connection
+                )
                 command = workspace_service.client_command(
                     sys.modules[__name__],
                     data,
@@ -3781,14 +4013,14 @@ def main(argv=None):
                         "-c",
                         (PACKAGE / "session_terminal.py").read_text(),
                         connection["url"],
-                        connection["session"],
+                        selected_session,
                         container_project(data),
                     ],
                     interactive=True,
                 )
                 print(
                     "oc-box: Attaching terminal client to session "
-                    + connection["session"]
+                    + selected_session
                     + "; the existing service and credentials are retained.",
                     flush=True,
                 )
@@ -3836,8 +4068,11 @@ def main(argv=None):
                         container_project(data),
                         "--server",
                         connection["url"],
-                        "--session",
-                        connection["session"],
+                        *(
+                            ["--session", connection["session"]]
+                            if connection["session"] is not None
+                            else []
+                        ),
                     ],
                     interactive=True,
                 )

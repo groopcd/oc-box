@@ -608,6 +608,123 @@ Keep the tested source/working-tree identity stable for each run. Required
 package/build-only publication validation remains separate; old accepted host
 reports do not become passes for the new source merely because guards match.
 
+Exit-routing regression coverage composes the real `launch_environment()`,
+`launch_client()`, baseline capture and readiness waiter, substituting only their
+external boundaries. A named matrix covers eligible recovery, custom-container
+refusal, non-shell jobs, one completed observation, unsafe/uncertain control,
+attached clients and failed/unverified owner-wrapper closure. Identical public
+activity counts must produce distinct fixed refusal categories without attempting
+live export after readiness failure, weakening recovery eligibility, changing
+client failure results or starting recovery before owner closure. Separate tests
+keep unknown diagnostic categories, exception contents and metadata out of output;
+capture diagnostics never add native probes or repair control state.
+This closes an observability/test-composition gap, not proof of the cause of an
+uninspected host timeout or new whole-container acceptance.
+
+#### History-sync performance and integrity
+
+Measure the whole pass, including private-service startup/shutdown, rather than
+only timing requests to an already warm service. Separate first import, unchanged
+history and one changed session. Use private synthetic source/destination stores,
+include child sessions and long paginated transcripts, and record the exact
+source/native identities. Never benchmark by rewriting a real user's archives.
+
+The native 2.3.0 source-only comparison used an integrated working tree based at
+`9f6e407`, with runtime/fixture hashes frozen and checked before/after each run.
+It compared original manual per-request source startup against the enabled
+quiet-source lease, including its preflight, startup, workspace lock and cleanup.
+Container startup/configuration refresh and interactive rendering were excluded.
+
+| Synthetic workload | Per-request source | Quiet source reuse | Time reduction |
+| --- | ---: | ---: | ---: |
+| Five sessions, first import | 8.253 s | 7.486 s | 9.3% |
+| Five sessions, unchanged | 2.432 s | 1.514 s | 37.8% |
+| Five sessions, one changed | 4.920 s | 3.766 s | 23.5% |
+| 109 sessions, unchanged | 46.448 s | 19.052 s | 59.0% / 2.44× |
+
+The five-session case included a child and 960 messages / 2.12 MB. The larger
+case first established real verified checkpoints with 109 imports and 109 fresh
+verification exports; neither warm arm fabricated state or skipped checked
+exports. Both larger warm passes retained checkpoint bytes and performed zero
+destination calls. Source native-service starts fell from 110 to one, plus one
+version probe; source Python inventory/export bridges remained 110 in each arm.
+
+These are single paired, quiet-eligible synthetic measurements, not statistical
+or production-host guarantees. Known jobs/schedules and unsupported sources keep
+the slower path. Existing-owner and post-stop-reader paths are unchanged.
+Destination writer reuse was investigated but not enabled: its longer lifetime
+was not established safe enough to replace the existing independent reads.
+
+Keep the following boundaries when optimizing:
+
+- Read every inventory page and perform full checked source exports. Timestamps
+  are not transcript-integrity tokens, and unfinished sessions must retain their
+  prior archives while independent sessions make verified progress.
+- Keep destination mutations/checkpoints serial. Child-cascade guards and full
+  host verification must remain independent fresh-native reads, not writer
+  self-confirmation or cached child inventories.
+- Avoid repeated source startup only with a private pass-local lease whose
+  eligibility, configuration/store selectors, credential lifetime and cleanup
+  are validated. Do not expose a shared or attachable maintenance service.
+- Prefer the existing slower path when safe reuse is unavailable. Never replay
+  an uncertain mutation or silently restart a failed optimized service.
+- Retain recovery's per-command admission, deadlines and source/destination
+  scheduler/system-configuration checks. Ordinary performance work is not a
+  waiver of the verified-stop recovery boundary.
+- Bound all helper lifetimes and private transport, reap owned children on every
+  exit path, and print overall success only after successful cleanup.
+
+Native tests must cover fresh independent readback, conflict/no-op detection,
+pending-neighbor progress and unchanged archive/checkpoint data. Process counts
+and elapsed times are useful measurements, not integrity or host-acceptance
+proofs. Rootless lifecycle acceptance remains host-only.
+
+#### Native terminal preferences and open tabs
+
+Native terminal preferences and tab membership are not the history inventory.
+`test_sync_config_preferences` checks opaque, container-local `cli.json`
+preservation, first-use host seeding, unsafe file/path refusals and cache/copy
+failure behavior. `test_native_tabs` checks bounded read-only native state and
+selection; `test_native_tab_routing` composes that policy with actual launcher
+selection and controller callbacks. Closing tabs must not remove exported
+sessions, invent a conversation at home or reactivate archived roots.
+
+Controller `info` refreshes hold a temporary metadata lease; only `attach`
+retains it after the reply. Admission inventory uses the isolated providerless
+client transport with an explicit existing endpoint, never owner credential
+forwarding or an implicitly discovered source. Session-bound clients refuse
+an unbound home state; location/catalog clients may retain their normal lease.
+
+The provider-free native 2.3.0 PTY fixtures exercise literal rendered X-close,
+final-tab close, quit/relaunch, explicit picker reopening, and real preference
+changes followed by production config refresh. Native owns every tab/preference
+write. Messages and source/host preservation are independently checked:
+
+```sh
+python3 -B tests/smoke_native_tabs_v2.py --opencode /srv/native/opencode-2.3.0
+python3 -B tests/smoke_native_preferences_v2.py --opencode /srv/native/opencode-2.3.0
+python3 -B tests/smoke_image_preview_preferences_v2.py --opencode /srv/native/opencode-2.3.0
+```
+
+The image/preference reconciliation fixture covers absent and explicitly false
+base image fields. Real native settings changes must save unrelated preferences
+without persisting the forced inline image booleans; UI cycles establish that
+the overlay is active and that unflagged restart returns to the base. Frozen
+pre-reset host bytes, first-use seeding, additional-client inheritance and
+noninteractive-client exclusion also retain focused unit coverage. This does
+not demonstrate actual terminal image rendering.
+
+These are synthetic local native checks, not interactive external-host
+acceptance, notification-delivery or permission-enforcement certification.
+Native stores open membership/order, not the last focused tab. An initialized
+empty native scope now remains at home; absent native state retains the legacy
+selection/creation path. Existing archived-root/history reports retain their
+original source identities and do not validate this new conditional UI policy.
+Before stable promotion, use fresh synthetic state on the exact clean candidate
+outside oc-box to observe production config refresh, X-close/final-close,
+quit/relaunch/picker reopening and terminal/web/sharing/secondary-client leases.
+Do not resume retained host fixtures or relabel prior unfinished UI gates.
+
 The focused host runner adds opt-in `--history-recovery-case snapshot` and
 `--history-recovery-case stop-cancel`. Each invocation creates a separate fresh
 synthetic root. Their `oc-box-history-recovery-host-v2` reports require 12 and six

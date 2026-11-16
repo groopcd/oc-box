@@ -85,6 +85,7 @@ class PackagingTests(unittest.TestCase):
                     "workspace_control.py",
                     "history_reader.py",
                     "history_recovery.py",
+                    "native_tabs.py",
                     "sharing.py",
                     "activity_log.py",
                     "tui_app.py",
@@ -110,6 +111,14 @@ class PackagingTests(unittest.TestCase):
                 ("sdist", name)
                 for name in (
                     "tests/test_session_sync.py",
+                    "tests/test_native_tabs.py",
+                    "tests/test_native_tab_routing.py",
+                    "tests/smoke_native_tabs_v2.py",
+                    "tests/smoke_native_preferences_v2.py",
+                    "tests/smoke_image_preview_preferences_v2.py",
+                    "tests/test_sync_config_preferences.py",
+                    "tests/test_history_source_lease.py",
+                    "tests/test_release_announcement_workflows.py",
                     "tests/test_update_channels.py",
                     "tests/test_channel_updater.py",
                     "tests/test_channel_installer.py",

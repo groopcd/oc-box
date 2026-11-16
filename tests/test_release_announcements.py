@@ -38,6 +38,30 @@ def fixture(channel="stable"):
     return identity, release
 
 
+def complete_post(
+    identity, release, copy="A tiny introduction.\n\n• One\n• Two\n• Three\n• Four"
+):
+    """Public full-copy fixture with the mandatory canonical framing."""
+    template = social.content(identity, release)[0]
+    heading, _, footer = template.partition("\n\n")
+    footer = footer[footer.index("\n\n") + 2 :]
+    return heading + "\n\n" + copy + "\n\n" + footer
+
+
+def with_full_post(release, text):
+    return {
+        **release,
+        "body": release["body"]
+        + "\n## LinkedIn post\n"
+        + social.POST_START
+        + "\n"
+        + text
+        + "\n"
+        + social.POST_END
+        + "\n",
+    }
+
+
 class MemoryGitHub:
     def __init__(self):
         self.files = {}
@@ -113,6 +137,91 @@ class ReleaseSummaryTests(unittest.TestCase):
             "a b c",
         )
 
+    def test_complete_post_keeps_intro_all_bullets_and_exact_public_copy(self):
+        for channel in ("stable", "devel"):
+            with self.subTest(channel=channel):
+                identity, release = fixture(channel)
+                text = complete_post(identity, release)
+                result, features = social.content(
+                    identity, with_full_post(release, text)
+                )
+                self.assertEqual(result, text)
+                self.assertIn("• Four", result)
+                self.assertEqual(features, social.highlights(release["body"]))
+                self.assertEqual(result.count("/releases/tag/"), 1)
+
+    def test_full_copy_refuses_missing_or_wrong_canonical_framing(self):
+        identity, release = fixture("devel")
+        text = complete_post(identity, release)
+        for bad in (
+            text.replace(identity["distribution_version"], "1.7.999.dev0"),
+            text.replace("development preview — experimental", "stable release"),
+            text.replace(
+                "/releases/tag/" + identity["tag"], "/releases/tag/v1.7.999.dev0"
+            ),
+            text.replace(
+                "This is a development prerelease, not a stable recommendation.", ""
+            ),
+        ):
+            with self.subTest(bad=bad), self.assertRaises(social.Refusal):
+                social.content(identity, with_full_post(release, bad))
+
+    def test_full_copy_refuses_controls_hidden_text_empty_or_ambiguous_blocks(self):
+        identity, release = fixture()
+        text = complete_post(identity, release)
+        for addition in ("\x00", "\x1b", "\r", "\t", "\u202e", "\u200b", "\ud800"):
+            with (
+                self.subTest(addition=repr(addition)),
+                self.assertRaises(social.Refusal),
+            ):
+                social.content(
+                    identity, with_full_post(release, text + addition + "end")
+                )
+        value = with_full_post(release, text)
+        for body in (
+            value["body"] + social.POST_START,
+            value["body"] + social.POST_END,
+            value["body"].replace(social.POST_END, ""),
+            value["body"].replace(social.POST_START, ""),
+            value["body"].replace(social.POST_START, "inline " + social.POST_START),
+            with_full_post(release, " \n ")["body"],
+        ):
+            with self.subTest(body=body), self.assertRaises(social.Refusal):
+                social.content(identity, {**release, "body": body})
+
+    def test_full_copy_only_normalizes_crlf_and_never_truncates(self):
+        identity, release = fixture("devel")
+        text = complete_post(
+            identity, release, "Whitespace  and `literal` &amp; text.\n\n• Four"
+        )
+        value = with_full_post(release, text)
+        self.assertEqual(
+            social.content(
+                identity, {**value, "body": value["body"].replace("\n", "\r\n")}
+            )[0],
+            text,
+        )
+        base = complete_post(identity, release, "")
+        remaining = social.MAX_POST_UTF16 - len(base.encode("utf-16-le")) // 2
+        for extra, succeeds in (
+            ("x" * remaining, True),
+            ("x" * (remaining + 1), False),
+            ("😀" * (remaining // 2) + "x" * (remaining % 2), True),
+            ("😀" * (remaining // 2 + 1), False),
+        ):
+            candidate = complete_post(identity, release, extra)
+            with self.subTest(
+                succeeds=succeeds, units=len(extra.encode("utf-16-le")) // 2
+            ):
+                if succeeds:
+                    self.assertEqual(
+                        social.content(identity, with_full_post(release, candidate))[0],
+                        candidate,
+                    )
+                else:
+                    with self.assertRaisesRegex(social.Refusal, "post-length"):
+                        social.content(identity, with_full_post(release, candidate))
+
 
 class AnnouncementTransactionTests(unittest.TestCase):
     def setUp(self):
@@ -164,7 +273,10 @@ class AnnouncementTransactionTests(unittest.TestCase):
                     return post
 
                 self.buffer.create.side_effect = create
-                result = self.run_announcement()
+                result = self.run_announcement(
+                    expected_text_sha256=social.sha(text.encode()),
+                    expected_image_sha256=social.sha(self.data),
+                )
                 self.assertEqual(result["outcome"], "submitted-to-buffer")
                 self.assertEqual(result["observed_buffer_status"], "sending")
                 self.assertTrue(self.github.writes[-1].endswith("-receipt.json"))
@@ -253,6 +365,96 @@ class AnnouncementTransactionTests(unittest.TestCase):
             self.run_announcement(post_id="post_123")
         self.buffer.create.assert_not_called()
         self.buffer.post.assert_not_called()
+
+    def test_new_devel_post_requires_both_exact_approval_hashes_before_any_mutation(
+        self,
+    ):
+        self.identity, self.release = fixture("devel")
+        text = social.content(self.identity, self.release)[0]
+        text_hash, image_hash = social.sha(text.encode()), social.sha(self.data)
+        for hashes in (
+            {},
+            {"expected_text_sha256": text_hash},
+            {"expected_image_sha256": image_hash},
+            {"expected_text_sha256": text_hash, "expected_image_sha256": ""},
+            {
+                "expected_text_sha256": text_hash,
+                "expected_image_sha256": image_hash.upper(),
+            },
+            {"expected_text_sha256": "b" * 64, "expected_image_sha256": image_hash},
+            {"expected_text_sha256": text_hash, "expected_image_sha256": "b" * 64},
+        ):
+            with self.subTest(hashes=hashes), self.assertRaises(social.Refusal):
+                self.run_announcement(**hashes)
+            self.assertEqual(self.github.writes, [])
+            self.buffer.channel.assert_not_called()
+            self.buffer.create.assert_not_called()
+            self.download.assert_not_called()
+
+    def test_changed_full_copy_or_rendered_card_invalidates_review(self):
+        self.identity, original = fixture("devel")
+        text = complete_post(self.identity, original)
+        self.release = with_full_post(original, text)
+        hashes = {
+            "expected_text_sha256": social.sha(text.encode()),
+            "expected_image_sha256": social.sha(self.data),
+        }
+        for change in ("copy", "card"):
+            with self.subTest(change=change):
+                self.release = with_full_post(
+                    original, text + ("!" if change == "copy" else "")
+                )
+                self.image.write_bytes(
+                    self.data + (b"changed" if change == "card" else b"")
+                )
+                with self.assertRaisesRegex(social.Refusal, "approved-content-changed"):
+                    self.run_announcement(**hashes)
+                self.assertEqual(self.github.writes, [])
+                self.buffer.channel.assert_not_called()
+                self.buffer.create.assert_not_called()
+
+    def test_stable_optional_hashes_are_enforced_if_supplied(self):
+        with self.assertRaisesRegex(social.Refusal, "approved-content-changed"):
+            self.run_announcement(
+                expected_text_sha256="b" * 64,
+                expected_image_sha256=social.sha(self.data),
+            )
+        self.assertEqual(self.github.writes, [])
+        self.buffer.create.assert_not_called()
+
+    def test_devel_approval_does_not_weaken_claim_receipt_or_reconciliation(self):
+        self.identity, self.release = fixture("devel")
+        text = social.content(self.identity, self.release)[0]
+        self.post["text"] = text
+        hashes = {
+            "expected_text_sha256": social.sha(text.encode()),
+            "expected_image_sha256": social.sha(self.data),
+        }
+        self.github.fail_suffix = "-receipt.json"
+        with self.assertRaises(social.Refusal):
+            self.run_announcement(**hashes)
+        self.buffer.reset_mock()
+        with self.assertRaisesRegex(social.Refusal, "pending-claim"):
+            self.run_announcement(**hashes)
+        self.github.fail_suffix = None
+        self.assertEqual(
+            self.run_announcement(post_id="post_123")["outcome"], "submitted-to-buffer"
+        )
+        self.buffer.post.assert_called_once_with("post_123")
+        self.buffer.create.assert_not_called()
+        self.buffer.reset_mock()
+        self.assertEqual(self.run_announcement()["outcome"], "already-submitted")
+        self.buffer.create.assert_not_called()
+        self.buffer.channel.assert_not_called()
+
+    def test_devel_reconcile_without_existing_bound_claim_cannot_create_or_upload(self):
+        self.identity, self.release = fixture("devel")
+        with self.assertRaisesRegex(social.Refusal, "reconciliation-claim-required"):
+            self.run_announcement(post_id="post_123")
+        self.assertEqual(self.github.writes, [])
+        self.buffer.channel.assert_not_called()
+        self.buffer.post.assert_not_called()
+        self.buffer.create.assert_not_called()
 
 
 class BufferClientTests(unittest.TestCase):
@@ -431,14 +633,24 @@ class NetworkAndEntryTests(unittest.TestCase):
         self.assertNotIn("synthetic-secret", errors.getvalue() + output.getvalue())
 
     def test_preview_has_no_buffer_or_release_asset_mutations(self):
-        identity, release = fixture()
-        env = {"GITHUB_REPOSITORY": social.REPOSITORY}
+        identity, release = fixture("devel")
+        release = with_full_post(release, complete_post(identity, release))
+        env = {
+            "GITHUB_REPOSITORY": social.REPOSITORY,
+            "LINKEDIN_ANNOUNCEMENTS": "true",
+            "BUFFER_API_KEY": "synthetic-secret",
+        }
+        data = b"\x89PNG\r\n\x1a\nsynthetic-only"
         with (
             tempfile.TemporaryDirectory() as work,
             patch.dict(os.environ, env, clear=True),
             patch.object(social.GitHub, "release", return_value=release),
             patch.object(social.check_release, "validate", return_value=identity),
-            patch.object(social.release_card, "render_card") as render,
+            patch.object(
+                social.release_card,
+                "render_card",
+                side_effect=lambda path, **kwargs: path.write_bytes(data),
+            ) as render,
             patch.object(social.GitHub, "upload") as upload,
             patch.object(social, "Buffer") as buffer,
             redirect_stdout(io.StringIO()),
@@ -451,6 +663,18 @@ class NetworkAndEntryTests(unittest.TestCase):
                 0,
             )
             self.assertTrue((output / "linkedin-post.txt").exists())
+            text_bytes = (output / "linkedin-post.txt").read_bytes()
+            self.assertEqual(text_bytes.decode(), social.content(identity, release)[0])
+            manifest = social.load((output / "linkedin-approval.json").read_bytes())
+            self.assertEqual(manifest["text_sha256"], social.sha(text_bytes))
+            self.assertEqual(manifest["image_sha256"], social.sha(data))
+            self.assertEqual(manifest["tag"], identity["tag"])
+            self.assertEqual(manifest["commit"], identity["commit"])
+            self.assertEqual(manifest["release_id"], release["id"])
+            self.assertEqual(
+                manifest["text_utf16_units"],
+                len(text_bytes.decode().encode("utf-16-le")) // 2,
+            )
             render.assert_called_once()
             upload.assert_not_called()
             buffer.assert_not_called()
@@ -525,6 +749,40 @@ class EnabledEntryGateTests(unittest.TestCase):
         self.assertEqual(self.events[:3], ["source", "pypi", "asset"])
         self.assertIn("create", self.events)
         self.buffer.create.assert_called_once()
+
+    def test_cli_devel_review_hashes_are_required_and_validated_before_writes(self):
+        self.identity, self.release = fixture("devel")
+        self.github.release.return_value = self.release
+        text = social.content(self.identity, self.release)[0]
+        self.post["text"] = text
+        self.assertEqual(self.run_main(), 1)
+        self.assertEqual(self.github.writes, [])
+        self.buffer.create.assert_not_called()
+        self.assertEqual(
+            self.run_main(
+                "announce",
+                "--expected-text-sha256",
+                social.sha(text.encode()),
+                "--expected-image-sha256",
+                social.sha(self.data),
+            ),
+            0,
+        )
+        self.buffer.create.assert_called_once()
+
+    def test_approval_inputs_cannot_turn_other_actions_into_creation(self):
+        for mode, extra in (
+            ("channels", []),
+            ("preview", []),
+            ("reconcile", ["--post-id", "post_123"]),
+        ):
+            with self.subTest(mode=mode):
+                self.assertEqual(
+                    self.run_main(mode, *extra, "--expected-text-sha256", "a" * 64),
+                    1,
+                )
+                self.assertEqual(self.github.writes, [])
+                self.buffer.create.assert_not_called()
 
     def test_source_or_pypi_refusal_prevents_every_mutation_in_both_modes(self):
         for gate in ("source", "pypi"):

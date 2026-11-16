@@ -56,7 +56,8 @@ layer until that container is reset or removed.
 
 On normal exit, oc-box exports conversation history to separate archive
 sessions in the normal host OpenCode database, then stops the container.
-Launching oc-box again resumes the original container session. Running
+Launching oc-box again restores the native terminal's saved open-session set
+when supported; closing a tab does not delete its synchronized history. Running
 processes do not survive a stop. Host OpenCode and its configuration are
 unchanged. On V2, ordinary tool permission asks for the actual container Build
 agent are auto-allowed; explicit session/mandatory-policy denials remain denied,
@@ -160,8 +161,21 @@ provided. Do not combine selectors when a single selector will do.
 On first launch, detect the host distro, create a labeled container and private
 home volume, install baseline tools, install the exact host OpenCode release,
 copy configuration, resolve plugin dependencies, and start a conversation.
-Afterward, start the existing environment and resume its latest recorded root
-conversation. `--new` starts another conversation in the same environment.
+Afterward, start the existing environment. Native V2 terminal clients preserve
+their open-tab membership independently of history synchronization: a closed tab
+stays closed, while its transcript and child sessions remain in the history
+inventory. If every tab was closed, the next default terminal launch opens native
+home without creating or reopening a conversation. Use native
+Ctrl+P → Switch session to reopen one. OpenCode records tab membership/order, not
+the exact focused tab; oc-box chooses only a verified open, unarchived root.
+
+This behavior uses the audited native 2.2.6/2.2.7/2.3.0 storage contract.
+Without saved native state for the current scope, V1 and legacy/first V2 launches
+retain latest-root selection. Explicit owning-launch `--resume`, import and model
+selections retain their deliberate selection behavior; `--new` starts another
+conversation in the same environment. Additional clients use only the existing
+owner's verified open default or native home, never a new historical selection.
+Archived roots remain synchronized but are never chosen automatically.
 
 ```sh
 mkdir -p ~/devel/demo
@@ -181,14 +195,31 @@ remains independent in every mode. `--no-vault` opts
 out for one owning V2 launch without saving policy. Configured vault failures
 abort before setup; they do not silently fall back to the environment.
 
-Cold startup includes image/package/plugin downloads; timed stage messages
-appear every five seconds. A loading line covers blank TUI startup frames and
-disappears when OpenCode draws text. Warm launches retain compatible caches.
+Cold startup includes image/package/plugin downloads. Interactive stage feedback,
+including history sync, uses one width-bounded spinning line with elapsed time;
+completion or failure replaces that line with one final result. Noninteractive
+or `TERM=dumb` output stays plain, with start/final lines and no periodic repeats.
+A separate loading line covers blank TUI startup frames and disappears when
+OpenCode draws text. Warm launches retain compatible caches.
 The container OpenCode version is verified against the host on every launch;
 exact upgrades and downgrades are supported, with no fallback to another release.
 With a V2 release supporting image previews, `--image-preview` enables prompt
-and transcript image previews in the private CLI configuration copy for this
-owning TUI launch. See the option below for compatibility and lifetime.
+and transcript image previews through an ephemeral native-CLI overlay for this
+owning TUI generation, without replacing saved private preferences. See the
+option below for compatibility and lifetime.
+
+Native V2 terminal preferences are container-local. Host `cli.json` seeds an
+absent private file, but later config refreshes preserve the container's existing
+file, including explicit permission, notification, theme and tab-scope choices.
+Use Ctrl+P → Open settings inside that container to change them. Normal server
+configuration, authentication and plugin refreshes remain separate. oc-box does
+not force autoaccept or copy the container's preferences back to the host.
+
+An owner may be ready at native home without a default conversation. Additional
+terminal TUIs preserve that state instead of forcing a historical root. Default
+session-shell and browser attachments require a verified open root; otherwise
+they refuse with guidance to open one or explicitly start with `--new`.
+Location-scoped sharing and metadata browsing do not invent a session.
 
 ### stop
 
@@ -313,6 +344,23 @@ preflight and replacement are not an atomic transaction with unrelated host clie
 An active oc-box launcher holds a workspace lock, so exit it before syncing.
 Use this after an OpenCode crash, missed exit-time sync, or host restart.
 Sync failure preserves container data; retry after resolving the error.
+For a quiet native 2.3.0 source, manual sync can reuse one private, unregistered
+source runtime for the pass instead of starting one for every export. Read-only
+preflight excludes durable jobs of every status, schedules, queued input and
+execution claims; execution-denial configuration and fresh discovery roots
+prevent integrations from being used by this optimization. Known pre-start
+incompatibilities keep the existing slower per-session path. Unsafe stores,
+unexpected startup/activity or unverified cleanup remain failures, not permission
+to replay an uncertain pass. The optimized source has a ten-minute active-lease
+budget with separate bounded startup/cleanup; verified per-session progress is
+retained if a later operation fails.
+
+This optimization does not apply to existing owners or post-stop recovery
+readers, and does not change their readiness/stop guarantees. Destination
+replacement, child guards and fresh-native verification remain serialized and
+unchanged. No metadata timestamp shortcut or parallel database mutation is used.
+Overall success is announced only after the private source lease closes cleanly.
+
 V2 exports are checked against the paginated projected transcript. An unfinished
 tail assistant, running user shell/compaction, or changing transcript leaves that
 session pending, while other sessions can still synchronize. In an inactive
@@ -376,6 +424,20 @@ validated, the observation is `unavailable`, not zero. These are previous
 observations, not proof of the current state or that a native request succeeded:
 a request failure at the deadline also retains the `activity-timeout` category.
 No session/job identifiers, commands, transcript text or native errors are printed.
+
+If automatic post-stop recovery is not attempted, a separate fixed-category line
+explains its routing guards. For example, `custom-podman-options` means the
+container baseline is outside this conservative path; `non-shell-jobs` means the
+observations were not shell-only; `insufficient-shell-observations` means fewer
+than two qualifying pairs were retained. Control-state, attached-client and
+unverified-owner-close refusals are also distinguished. These labels do not waive
+any guard or establish that a job completed. Do not clear control markers, remove
+job rows or reset a workspace merely to bypass a refusal.
+
+The 30-second readiness budget precedes history export/import; it is not the
+duration limit for the entire synchronization. An explicit `oc-box sync` uses
+the checked-export path without that original owner's readiness wait. Its later
+success does not prove that earlier running work was safe to ignore.
 
 Native OpenCode 2.2.6/2.2.7 can retain a cancelled background-shell job after a
 location reload, even with no foreground activity. Such a row still blocks the
@@ -1654,36 +1716,40 @@ oc-box --project ~/devel/demo --model github-copilot/gpt-6.1-sol
 ### --image-preview
 
 V2-only, for an **owning** start (the default command) or reset TUI launch.
-Set both `prompt.image_preview` and `session.image_preview` to `true` in the
-private container's `~/.config/opencode/cli.json`. These are terminal preferences,
+Set both `prompt.image_preview` and `session.image_preview` to `true` through
+`OPENCODE_CLI_CONFIG_CONTENT` for interactive full native TUI clients belonging to
+that owner. This overlay contains only those two image booleans: it does not set
+permissions, notifications or other preferences. These are terminal preferences,
 not `opencode.json` server settings. The current native V2 settings reference is
-at <https://opencode.ai/docs/cli/config>. A native V2 release supporting these
-settings is required; behavior and rendering on older releases are not
-established. Rendering also depends on native OpenCode and terminal capabilities.
-This option does not install a different OpenCode version or change permissions.
+at <https://opencode.ai/docs/cli/config>. A supporting native V2 release and host
+terminal are required; actual rendering on older releases is not established.
+This option does not install another OpenCode version or change permissions.
 
-oc-box merges these two fields into its host-derived CLI configuration snapshot,
-preserving all other values, including sibling prompt/session preferences.
-JSONC comments and trailing commas are accepted; the private copy is normalized
-to JSON. The host file, its comments, and the host OpenCode configuration are
-never edited. Missing CLI configuration is created only in the private copy.
+The persistent container `cli.json` remains the base. Existing container-local
+preferences and their original image values survive refreshes; a missing file is
+seeded from the validated host snapshot, without forced image values. JSONC
+comments, CRLF and trailing commas are retained in that base snapshot. The host
+file and host OpenCode configuration are never edited.
 Malformed/non-object input or non-object prompt/session sections are refused,
 not replaced. Symlinked paths, nonregular/hard-linked CLI files, foreign-owned
 config directories/files, and group/world-writable directories/files are refused.
 Validation runs before initial workspace registration or reset resource removal.
 The validated CLI bytes stay in launcher memory through credential prompts and
-the owning launch/reset. That exact snapshot is copied into the container:
-edits to the host `cli.json` made while a credential prompt is waiting are not
-reread after reset has removed resources. They apply on the next owning launch.
+the owning launch/reset. That exact snapshot supplies any needed first-use seed:
+edits to host `cli.json` while a credential prompt is waiting are not reread after
+reset has removed resources. They can apply to a later first-use seed, not
+overwrite an already saved container preference file.
 
 There is no saved workspace preference: repeat the flag on each owning TUI
-launch that needs it. The generated file remains in the private home after exit
-until the next configuration refresh. The next owning launch or `sync` without
-the flag replaces it with the normal host-derived copy; it does not force
-host-enabled previews off. Additional TUI clients inherit the current private
-copy but cannot supply this flag while an owner is running. V1, web, terminal/
-maintenance, informational commands, history sync, and other non-owning commands
-reject the flag without changing configuration.
+generation that needs the override. Additional full TUI clients inherit the
+owner's opt-in but cannot supply this flag while that owner is running. Inline
+image values remain authoritative for that generation; a subsequent unflagged
+owner uses the saved base again. Saving unrelated native UI settings during the
+flagged generation does not persist the forced image values. API/history clients
+and session-shell terminals receive no overlay. V1, web, terminal/maintenance,
+informational commands, history sync and other non-owning commands reject the
+flag without changing configuration. No image override is stored in the workspace
+registry or copied back to the host.
 
 ```sh
 oc-box --project ~/devel/demo --image-preview
@@ -2264,9 +2330,10 @@ native TUI, Ctrl+P → Open settings → Sessions → Permissions → autoaccept
 corresponding user setting (`cli.json` `session.permissions`). That broader
 preference can persist in the client's global CLI settings; oc-box does not
 enable it or edit normal host `cli.json`. It is not a blanket replacement for
-the Build-only default. The separate scripted global-vault host fixture has
-passed native tool/permission and reload checks. A new interactive TUI
-permission-prompt/reload pass is still pending; the scripted result is not
+the Build-only default. Inside oc-box, the saved CLI file belongs to that private
+container home and is retained across V2 config refreshes. The separate scripted
+global-vault host fixture has passed native tool/permission and reload checks.
+A new interactive TUI permission-prompt/reload pass is still pending; the scripted result is not
 interactive UI acceptance or security certification.
 
 HTTP endpoint keys in global config using localhost, 127.0.0.1, or ::1 are

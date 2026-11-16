@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import shutil
+import stat
 import sys
 import tarfile
 import tempfile
@@ -33,13 +34,30 @@ def sdk_only_manifest(manifest, plugin_package=PLUGIN_PACKAGE):
     )
 
 
+def native_cli_preferences(config):
+    """Return only an owned regular preferences file, without reading its contents."""
+    if config.is_symlink():
+        return None
+    preferences = config / "cli.json"
+    try:
+        info = preferences.lstat()
+    except FileNotFoundError:
+        return None
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_uid != os.getuid()
+        or info.st_nlink != 1
+    ):
+        raise ValueError("Unsafe native CLI preferences file")
+    return preferences
+
+
 def sync_config(home, payload, runtime_version=None):
-    plugin_package = (
-        "@opencode/plugin"
-        if runtime_version and runtime_version.startswith("2.")
-        else PLUGIN_PACKAGE
-    )
+    v2 = runtime_version is not None and runtime_version.startswith("2.")
+    plugin_package = "@opencode/plugin" if v2 else PLUGIN_PACKAGE
     config = Path(home) / ".config/opencode"
+    if v2 and config.parent.is_symlink():
+        raise ValueError("Unsafe native CLI preferences directory")
     config.parent.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(payload), mode="r:gz") as archive:
         members = archive.getmembers()
@@ -50,8 +68,18 @@ def sync_config(home, payload, runtime_version=None):
                 or name.is_absolute()
                 or ".." in name.parts
                 or "node_modules" in name.parts
+                or (
+                    v2
+                    and name.parts
+                    and name.parts[0] == "cli.json"
+                    and len(name.parts) != 1
+                )
             ):
                 raise ValueError("Unsafe config archive entry")
+        # Native V2 writes the user's terminal settings here. Seed from the host
+        # only when absent; subsequent refreshes must not reset explicit choices.
+        # Retain the whole file opaquely, including unknown/future native settings.
+        preferences = native_cli_preferences(config) if v2 else None
         dependencies = {
             member.name: archive.extractfile(member).read()
             for member in members
@@ -131,13 +159,31 @@ def sync_config(home, payload, runtime_version=None):
             if preserve:
                 modules.rename(cached)
             try:
-                if config.is_symlink():
-                    config.unlink()
-                elif config.exists():
-                    shutil.rmtree(config)
-                config.mkdir(mode=0o700)
+                if preferences is not None:
+                    # Leave preferences in place even if refresh fails or is
+                    # interrupted. Only the rest of the copied profile expires.
+                    config.chmod(0o700)
+                    preferences.chmod(0o600)
+                    for target in config.iterdir():
+                        if target == preferences:
+                            continue
+                        if target.is_dir() and not target.is_symlink():
+                            shutil.rmtree(target)
+                        else:
+                            target.unlink()
+                else:
+                    if config.is_symlink():
+                        config.unlink()
+                    elif config.exists():
+                        shutil.rmtree(config)
+                    config.mkdir(mode=0o700)
                 for member in members:
                     if preserve and member.name in DEPENDENCY_FILES:
+                        continue
+                    is_preferences = v2 and PurePosixPath(member.name) == PurePosixPath(
+                        "cli.json"
+                    )
+                    if preferences is not None and is_preferences:
                         continue
                     target = config / member.name
                     target.parent.mkdir(parents=True, exist_ok=True)
@@ -146,7 +192,7 @@ def sync_config(home, payload, runtime_version=None):
                         target.open("wb") as destination,
                     ):
                         shutil.copyfileobj(source, destination)
-                    target.chmod(member.mode & 0o777)
+                    target.chmod(0o600 if is_preferences else member.mode & 0o777)
                 for name, content in generated.items():
                     (config / name).write_bytes(content)
                 if not preserve and runtime_version is not None:

@@ -476,7 +476,7 @@ class DashboardBackend:
         try:
             connection = lease.__enter__()
             entered = True
-            target = session or connection["session"]
+            target = session if session is not None else connection["session"]
             if not self.box.valid_session_id(target):
                 raise TerminalAttachmentError("invalid-session")
             stage = "session"

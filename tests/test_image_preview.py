@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -80,9 +81,7 @@ class ImagePreviewTests(unittest.TestCase):
         self.cli.write_bytes(original)
         self.assertEqual(self.copied_cli(enabled=False)[0], original)
         enabled, mode = self.copied_cli()
-        result = json.loads(enabled)
-        self.assertIs(result["prompt"]["image_preview"], True)
-        self.assertIs(result["session"]["image_preview"], True)
+        self.assertEqual(enabled, original)
         self.assertEqual(mode, 0o600)
         self.assertEqual(self.cli.read_bytes(), original)
         self.assertEqual(self.copied_cli(enabled=False)[0], original)
@@ -93,8 +92,6 @@ class ImagePreviewTests(unittest.TestCase):
             result,
             {
                 "$schema": "https://opencode.ai/v2/cli.json",
-                "prompt": {"image_preview": True},
-                "session": {"image_preview": True},
             },
         )
         self.assertFalse(self.cli.exists())
@@ -102,7 +99,7 @@ class ImagePreviewTests(unittest.TestCase):
         self.assertEqual(json.loads(self.copied_cli()[0]), result)
         self.assertFalse(self.source.exists())
 
-    def test_nested_booleans_merge_without_changing_other_cli_settings(self):
+    def test_nested_image_preferences_and_other_cli_settings_remain_unchanged(self):
         for value in (None, False, True):
             with self.subTest(value=value):
                 original = {
@@ -118,10 +115,7 @@ class ImagePreviewTests(unittest.TestCase):
                 self.cli.write_text(json.dumps(original))
                 before = self.cli.stat()
                 copied = json.loads(self.copied_cli()[0])
-                expected = json.loads(json.dumps(original))
-                for key in ("prompt", "session"):
-                    expected[key]["image_preview"] = True
-                self.assertEqual(copied, expected)
+                self.assertEqual(copied, original)
                 self.assertEqual(json.loads(self.cli.read_text()), original)
                 after = self.cli.stat()
                 self.assertEqual(
@@ -137,13 +131,17 @@ class ImagePreviewTests(unittest.TestCase):
           "session": {"permissions": "prompt",},
         }"""
         self.cli.write_text(original)
-        result = json.loads(self.copied_cli()[0])
+        copied = self.copied_cli()[0]
+        self.assertEqual(copied, original.encode())
+        result = box.parse_jsonc(copied.decode())
         self.assertEqual(result["theme"]["name"], "https://example.test/a/*b*/")
-        self.assertEqual(result["prompt"], {"paste": "compact", "image_preview": True})
-        self.assertEqual(
-            result["session"], {"permissions": "prompt", "image_preview": True}
-        )
+        self.assertEqual(result["prompt"], {"paste": "compact"})
+        self.assertEqual(result["session"], {"permissions": "prompt"})
         self.assertEqual(self.cli.read_text(), original)
+        original_bytes = original.replace("\n", "\r\n").encode()
+        self.cli.write_bytes(original_bytes)
+        self.assertEqual(self.copied_cli()[0], original_bytes)
+        self.assertEqual(self.cli.read_bytes(), original_bytes)
 
     def test_invalid_or_nonobject_cli_is_refused_without_overwriting_input(self):
         cases = [
@@ -204,7 +202,7 @@ class ImagePreviewTests(unittest.TestCase):
         self.assertTrue(self.source.is_symlink())
         self.assertEqual(target.read_text(), '{"theme":{"name":"untouched"}}')
 
-    def test_config_refresh_applies_preview_then_returns_to_host_settings(self):
+    def test_config_refresh_seeds_base_without_persisting_one_launch_preview(self):
         original = {
             "prompt": {"image_preview": False, "paste": "full"},
             "session": {"image_preview": False, "permissions": "prompt"},
@@ -243,7 +241,7 @@ class ImagePreviewTests(unittest.TestCase):
                         (container_home / ".config/opencode/cli.json").read_text()
                     )
                     for key in ("prompt", "session"):
-                        self.assertIs(result[key]["image_preview"], enabled)
+                        self.assertIs(result[key]["image_preview"], False)
                     self.assertEqual(result["session"]["permissions"], "prompt")
                     self.assertEqual(result["prompt"]["paste"], "full")
         self.assertEqual(len(calls), 3)
@@ -261,7 +259,7 @@ class ImagePreviewTests(unittest.TestCase):
                 patch.object(box, "launch_client", return_value=0),
                 patch.object(
                     workspace_service, "Owner", return_value=contextlib.nullcontext()
-                ),
+                ) as owner,
             ):
                 self.assertEqual(
                     box.main(
@@ -270,6 +268,7 @@ class ImagePreviewTests(unittest.TestCase):
                     0,
                 )
                 self.assertTrue(prepare.call_args.kwargs["image_preview"])
+                self.assertIs(owner.call_args.kwargs["image_preview"], True)
                 self.assertNotIn("image_preview", box.read_json(self.path))
         with (
             patch.object(box, "launch_environment", return_value=0) as launch,
@@ -435,6 +434,7 @@ class ImagePreviewTests(unittest.TestCase):
                         (container_home / ".config/opencode/cli.json").read_bytes(),
                         snapshots[0],
                     )
+                    self.assertEqual(json.loads(snapshots[0]), original)
                     self.assertEqual(events.count("copy"), 1)
                     self.assertEqual(events.count("remove"), int(command == "reset"))
                     self.assertNotIn(original["theme"]["name"], self.path.read_text())
@@ -534,6 +534,194 @@ class ImagePreviewTests(unittest.TestCase):
         config.assert_not_called()
         attach.assert_not_called()
         credentials.assert_not_called()
+
+    def client_names(self, connection, arguments=None, *, interactive=True):
+        command = workspace_service.client_command(
+            box,
+            self.data,
+            connection,
+            arguments
+            or [
+                box.CONTAINER_OPENCODE,
+                box.container_project(self.data),
+                "--server",
+                connection["url"],
+            ],
+            interactive=interactive,
+        )
+        self.assertNotIn("OPENCODE_CLI_CONFIG_CONTENT", command.environment)
+        names = json.loads(command[command.index("-c") + 2])
+        return command, names
+
+    def test_only_two_image_booleans_reach_flagged_tui_clients(self):
+        connection = {
+            "url": "http://127.0.0.1:12345",
+            "password": "a" * 43,
+            "image_preview": True,
+        }
+        with patch.dict(
+            os.environ,
+            {
+                "OPENCODE_CLI_CONFIG_CONTENT": '{"session":{"permissions":"autoaccept"}}',
+                "UNRELATED_TOKEN": "synthetic-private-excerpt",
+            },
+        ):
+            command, names = self.client_names(connection)
+        self.assertEqual(
+            json.loads(names.pop("OPENCODE_CLI_CONFIG_CONTENT")),
+            {"prompt": {"image_preview": True}, "session": {"image_preview": True}},
+        )
+        self.assertNotIn("--auto", command)
+        self.assertNotIn("autoaccept", " ".join(command))
+        self.assertNotIn("synthetic-private-excerpt", " ".join(command))
+        self.assertNotIn("OPENCODE_CLI_CONFIG_CONTENT", names)
+        for enabled in (False, None):
+            base = {
+                key: value
+                for key, value in connection.items()
+                if key != "image_preview"
+            }
+            if enabled is not None:
+                base["image_preview"] = enabled
+            with self.subTest(enabled=enabled):
+                _, names = self.client_names(base)
+                self.assertNotIn("OPENCODE_CLI_CONFIG_CONTENT", names)
+
+    def test_image_override_is_not_forwarded_to_api_shell_or_background_clients(self):
+        connection = {
+            "url": "http://127.0.0.1:12345",
+            "password": "a" * 43,
+            "image_preview": True,
+        }
+        for arguments, interactive in (
+            ([box.CONTAINER_OPENCODE, "api", "get", "/api/info"], False),
+            ([box.CONTAINER_OPENCODE, "export", "ses_fixture"], False),
+            (["python3", "-c", "session-terminal-fixture"], True),
+            ([box.CONTAINER_OPENCODE, box.container_project(self.data)], False),
+        ):
+            with self.subTest(arguments=arguments):
+                _, names = self.client_names(
+                    connection, arguments, interactive=interactive
+                )
+                self.assertNotIn("OPENCODE_CLI_CONFIG_CONTENT", names)
+
+    def test_malformed_image_metadata_is_not_coerced_to_an_opt_in(self):
+        connection = {"url": "http://127.0.0.1:12345", "password": "a" * 43}
+        for invalid in (
+            None,
+            0,
+            1,
+            "true",
+            [],
+            {},
+            {"session": {"permissions": "autoaccept"}},
+        ):
+            with self.subTest(invalid=invalid):
+                value = {**connection, "image_preview": invalid}
+                with self.assertRaisesRegex(ValueError, "image-preview"):
+                    workspace_service.validate_endpoint(value)
+                with self.assertRaisesRegex(box.BoxError, "image-preview"):
+                    self.client_names(value)
+                with self.assertRaisesRegex(box.BoxError, "image-preview"):
+                    workspace_service.Owner(
+                        box, self.path, self.data, image_preview=invalid
+                    )
+
+    def test_owner_opt_in_is_ephemeral_and_inherited_by_attached_tui(self):
+        program = (
+            "import json,sys;"
+            "print(json.dumps({'url':'http://127.0.0.1:12345',"
+            "'password':'" + "a" * 43 + "'}),flush=True);sys.stdin.read()"
+        )
+
+        def local_exec(_data, _arguments):
+            return box.ContainerCommand([sys.executable, "-I", "-S", "-c", program], {})
+
+        info = {
+            "State": {"Running": True},
+            "Mounts": [
+                {
+                    "Source": self.data["project"],
+                    "Destination": box.container_project(self.data),
+                }
+            ],
+        }
+        before = self.path.read_bytes()
+        for enabled in (True, False):
+            with (
+                self.subTest(enabled=enabled),
+                patch.object(box, "exec_command", side_effect=local_exec),
+                patch.object(box, "inspect_owned", return_value=info),
+                patch.object(
+                    workspace_service.Owner, "default_session", return_value=None
+                ),
+                workspace_service.Owner(
+                    box, self.path, self.data, image_preview=enabled
+                ) as owner,
+            ):
+                owner.publish(None)
+                self.assertIs(owner.connection["image_preview"], enabled)
+                with workspace_service.attach(box, self.path, self.data) as attached:
+                    self.assertIs(attached["image_preview"], enabled)
+                    for connection in (owner.connection, attached):
+                        _, names = self.client_names(connection)
+                        self.assertEqual(
+                            "OPENCODE_CLI_CONFIG_CONTENT" in names, enabled
+                        )
+                self.assertEqual(self.path.read_bytes(), before)
+            self.assertIsNone(workspace_service.live_connection())
+            self.assertFalse(owner.address.exists())
+
+    def test_existing_native_preferences_survive_flagged_reset_and_later_unflagged_refresh(
+        self,
+    ):
+        self.cli.write_text(
+            '{"prompt":{"image_preview":true},"session":{"permissions":"prompt"}}'
+        )
+        container_home = self.root / "container-home"
+        preferences = container_home / ".config/opencode/cli.json"
+        preferences.parent.mkdir(parents=True)
+        private = b'{"prompt":{"image_preview":false},"session":{"permissions":"autoaccept"},"attention":{"notifications":true}}\n'
+        preferences.write_bytes(private)
+        for enabled in (True, True, False):
+            with self.subTest(enabled=enabled):
+                sync_config.sync_config(
+                    container_home,
+                    box.config_archive(self.data, image_preview=enabled),
+                    "2.3.0",
+                )
+                self.assertEqual(preferences.read_bytes(), private)
+
+    def test_additional_tui_inherits_owner_opt_in_without_config_or_unlock(self):
+        self.controller.return_value = True
+        self.cli.write_text("{invalid")
+        connection = {
+            "url": "http://127.0.0.1:12345",
+            "password": "a" * 43,
+            "image_preview": True,
+            "session": None,
+        }
+        with (
+            patch.object(box, "image_preview_cli_config") as config,
+            patch.object(
+                workspace_service,
+                "attach",
+                return_value=contextlib.nullcontext(connection),
+            ),
+            patch.object(box, "launch_credentials") as credentials,
+            patch.object(box, "prepare_runtime") as prepare,
+            patch.object(box, "run_tui", return_value=0) as tui,
+        ):
+            self.assertEqual(box.main(["--workspace", self.data["id"]]), 0)
+        command = tui.call_args.args[0]
+        names = json.loads(command[command.index("-c") + 2])
+        self.assertEqual(
+            json.loads(names["OPENCODE_CLI_CONFIG_CONTENT"]),
+            {"prompt": {"image_preview": True}, "session": {"image_preview": True}},
+        )
+        self.release.assert_not_called()
+        for operation in (config, credentials, prepare):
+            operation.assert_not_called()
 
 
 if __name__ == "__main__":

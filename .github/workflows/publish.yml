@@ -163,7 +163,8 @@ jobs:
   linkedin:
     needs: [build, publish]
     if: >-
-      vars.LINKEDIN_ANNOUNCEMENTS == 'true' &&
+      (endsWith(github.event.release.tag_name || inputs.release_tag, '.dev0') ||
+       vars.LINKEDIN_ANNOUNCEMENTS == 'true') &&
       needs.publish.result == 'success' &&
       needs.build.outputs.publish_validated == 'true'
     permissions:
@@ -171,5 +172,7 @@ jobs:
     uses: ./.github/workflows/linkedin.yml
     with:
       release_tag: ${{ github.event.release.tag_name || inputs.release_tag }}
+      # Both release events and manual PyPI publication MUST only preview devel.
+      action: ${{ endsWith(github.event.release.tag_name || inputs.release_tag, '.dev0') && 'preview' || 'announce' }}
     secrets:
-      BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
+      BUFFER_API_KEY: ${{ !endsWith(github.event.release.tag_name || inputs.release_tag, '.dev0') && secrets.BUFFER_API_KEY || '' }}
