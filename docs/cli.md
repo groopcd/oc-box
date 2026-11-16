@@ -380,8 +380,10 @@ completion notices can restart foreground work. A successful later `oc-box sync`
 checks native exports without the original owner's activity wait and does not
 prove that its retained job disappeared. The native job-cleanup issue is not
 repaired by the diagnostic or by the persisted-history snapshot described below.
+Native 2.3.0 drains the reload case, but can retain a running shell after its
+producer terminates; that retained work still blocks the ordinary live wait.
 
-For supported native 2.2.6/2.2.7 owners, a shell-only timeout can trigger **one
+For supported native 2.2.6/2.2.7/2.3.0 owners, a shell-only timeout can trigger **one
 post-stop persisted-history snapshot**. Two complete validated observations must
 have shown no foreground activity and only shell jobs. A later real query timeout
 does not manufacture an observation; a contradictory/malformed response or known

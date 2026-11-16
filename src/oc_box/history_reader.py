@@ -23,7 +23,11 @@ import tempfile
 import time
 
 CURRENT = contextvars.ContextVar("oc_box_history_reader", default=None)
-SUPPORTED = frozenset(("2.2.6", "2.2.7"))
+# Exact audited native versions only. 2.2.x retains cancelled reload jobs; 2.3.0
+# drains reload jobs but can retain a running shell after producer termination.
+# Both profiles require the same non-executing reader and unchanged durable jobs;
+# neither is a live-readiness exception or a claim of whole-container acceptance.
+SUPPORTED = frozenset(("2.2.6", "2.2.7", "2.3.0"))
 MAX_CONTROL = 16384
 MAX_PAYLOAD = 131072
 PATH = "/opt/oc-box/runtime/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"

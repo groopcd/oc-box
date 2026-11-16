@@ -1,6 +1,7 @@
 import contextlib
 import copy
 import io
+import itertools
 import json
 import os
 from pathlib import Path
@@ -361,6 +362,46 @@ class HistoryRecoveryTests(unittest.TestCase):
         ):
             self.assertIsNone(recovery.capture(box, self.data, bad, self.token))
 
+    def test_capture_uses_reader_exact_version_policy_not_a_second_allowlist(self):
+        for release in ("2.2.6", "2.2.7", "2.3.0"):
+            with self.subTest(release=release):
+                self.assertEqual(
+                    recovery.capture(
+                        box,
+                        {**self.data, "opencode_version": release},
+                        self.info,
+                        self.token,
+                    ),
+                    self.source,
+                )
+        for release in ("2.2.8", "2.3.1", "2.4.0", "2.3.0+unknown", None):
+            with self.subTest(release=release):
+                self.assertIsNone(
+                    recovery.capture(
+                        box,
+                        {**self.data, "opencode_version": release},
+                        self.info,
+                        self.token,
+                    )
+                )
+        with patch.object(recovery.history_reader, "SUPPORTED", frozenset()):
+            self.assertIsNone(recovery.capture(box, self.data, self.info, self.token))
+
+    def test_230_recovery_preserves_same_resource_sequence_and_failure_warning(self):
+        self.data["opencode_version"] = "2.3.0"
+        self.source = recovery.capture(box, self.data, self.info, self.token)
+        result, lease, sync = self.recover()
+        self.assertTrue(result)
+        self.assertEqual(self.calls.count("start"), 1)
+        self.assertEqual(self.calls.count("stop"), 2)
+        self.assertLess(self.calls.index("inspect-stopped"), self.calls.index("reader"))
+        self.assertFalse(self.running)
+        self.assertEqual(lease.call_args.args[1]["opencode_version"], "2.3.0")
+        sync.assert_called_once()
+        self.assertIn(
+            "original history-wait failure remains nonzero", self.output.getvalue()
+        )
+
     def test_explicit_stop_publishes_intent_before_admission_without_launch_work(self):
         admission = workspace_control.admission
 
@@ -473,7 +514,15 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
             (0, True, 0, None, True),
             (0, True, 0, 0, False),
         )
-        for client_code, eligible, clients, wrapper_exit, captured in cases:
+        for release, (
+            client_code,
+            eligible,
+            clients,
+            wrapper_exit,
+            captured,
+        ) in itertools.product(("2.2.7", "2.3.0"), cases):
+            self.data["opencode_version"] = release
+            self.args._opencode_release = release
             events = []
             owner = SimpleNamespace(
                 clients=clients, child=SimpleNamespace(returncode=wrapper_exit)
@@ -504,6 +553,7 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
 
             with (
                 self.subTest(
+                    release=release,
                     client_code=client_code,
                     eligible=eligible,
                     clients=clients,

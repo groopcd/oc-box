@@ -17,8 +17,11 @@ The development CLI/resource identity is `1.7.N.dev0+gHASH`.
 **The optional seven-tab manager and temporary sharing belong to experimental
 1.7 development releases, not stable 1.6.94.** Development publication is approved
 with explicit [acceptance limitations](releases/1.7.md#known-acceptance-limitations).
-It does not declare the unfinished dashboard restore/storage sequence passed,
-accept native OpenCode 2.3, or promote the manager to stable.
+It does not declare the unfinished dashboard restore/storage sequence passed
+or promote the manager to stable. The narrowly backported native OpenCode
+**2.3.0** persisted-history recovery extension has focused native/offline
+coverage, not new integrated external-host or dashboard acceptance. Other
+unaudited native versions remain refused by this recovery path.
 
 ## Select or preview a channel
 

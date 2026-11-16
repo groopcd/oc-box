@@ -515,7 +515,7 @@ fails. Eligibility is based on two prior complete validated pairs, not the final
 query phase: a tiny remaining CLI-query budget must not randomly disable the
 snapshot. A real timeout may retain those observations, but contradictory late
 responses and known non-timeout API failures invalidate them. All versions/kinds
-outside the supported 2.2.6/2.2.7 shell case retain the existing pending behavior.
+outside the supported 2.2.6/2.2.7/2.3.0 shell case retain the existing pending behavior.
 
 Unit/process matrices cover private stop intent before admission, stable locks,
 uncertain transition fences, immutable resource identity, stop/start/snapshot/stop
@@ -526,7 +526,7 @@ read-only SQLite connections and refuse every schedule row/unknown schema. The
 native scheduler's rewake path can run despite `-schedules`; no-schedules metadata
 and system-configuration guards are therefore prerequisites, not optional hints.
 
-`tests/smoke_history_recovery_v2.py` runs on unmodified 2.2.6 and 2.2.7. It closes
+`tests/smoke_history_recovery_v2.py` runs on unmodified 2.2.6, 2.2.7 and 2.3.0. It closes
 the old **local native process**, then exercises the production reader, real
 archive/import verification, retained running-looking job metadata, no invented
 notices and source/destination scheduler refusals. Provider/shell/plugin canaries
@@ -534,6 +534,32 @@ must not execute during the reader. It is included in `tests/smoke_v2.py`; it do
 not establish whole-container process death, actual rootless stop/start ordering
 or host acceptance. The original live timeout and nonzero result remain distinct
 from a successful checked snapshot; native job cleanup is still not repaired.
+
+The development 2.3.0 backport retains stable-line commits `328f83e`/`7f441b8`'s
+exact-version policy, source/destination guards and ownership-safe native fixture.
+On 2.3.0, reload drains jobs: the fixture instead creates a real held running shell,
+proves the ordinary live timeout, binds the owned shell before producer termination
+with a pidfd, then stops/reaps only those controlled local processes. It verifies
+complete durable job/schedule/message/part rows remain unchanged and refuses all
+eight source and eight destination scheduler cases, including unknown/WAL rows.
+`tests/test_native_recovery_process.py` covers ownership/identity refusal, no bare-PID
+signal fallback, descriptor cleanup and prior subreaper/umask restoration.
+These are focused local/native checks, not new external-host acceptance or a waiver
+of the unfinished dashboard checks. The devel host runner below is not ported to
+the current-native profile and still requires its recorded 2.2.6 version.
+
+For a narrow recovery backport, run from the repository root:
+
+```sh
+PYTHONPATH=src:tests python3 -B -m unittest \
+  test_history_reader test_history_recovery test_native_recovery_process
+python3 -B tests/smoke_history_recovery_v2.py \
+  --opencode /srv/native/opencode-2.3.0 --temp-dir /srv/private-tmp
+```
+
+Keep the tested source/working-tree identity stable for each run. Required
+package/build-only publication validation remains separate; old accepted host
+reports do not become passes for the new source merely because guards match.
 
 The focused host runner adds opt-in `--history-recovery-case snapshot` and
 `--history-recovery-case stop-cancel`. Each invocation creates a separate fresh

@@ -1,7 +1,7 @@
 """Bounded native V2 history-reader checks, never Podman lifecycle acceptance.
 
 Run with python3 -B tests/smoke_history_recovery_v2.py --opencode /path/to/opencode.
-Use unmodified 2.2.6 and 2.2.7 in separate runs. All stores/provider responses are
+Use unmodified 2.2.6, 2.2.7 and 2.3.0 in separate runs. All stores/provider responses are
 synthetic. Only the Podman exec boundary is replaced by local processes; reader
 leases, CLI/API transport, host guards, exports/imports and verification stay real.
 
@@ -12,6 +12,7 @@ same-ID restart proof. A frozen candidate still needs the external host runner.
 
 import argparse
 import contextlib
+import ctypes
 import io
 import json
 import os
@@ -41,6 +42,142 @@ from oc_box import history_reader, history_recovery
 
 
 CANARY = "SYNTHETIC_HISTORY_RECOVERY_AMBIENT"
+PR_SET_CHILD_SUBREAPER = 36
+PR_GET_CHILD_SUBREAPER = 37
+
+
+@contextlib.contextmanager
+def subreaper():
+    """Linux-only fixture hygiene; restore the caller's flag even on failure."""
+    require(sys.platform == "linux", "The native recovery fixture requires Linux.")
+    libc = ctypes.CDLL(None, use_errno=True)
+    previous = ctypes.c_int()
+    require(
+        libc.prctl(PR_GET_CHILD_SUBREAPER, ctypes.byref(previous), 0, 0, 0) == 0
+        and previous.value in (0, 1),
+        "Could not read the fixture subreaper state.",
+    )
+    try:
+        require(
+            libc.prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) == 0,
+            "Could not enable fixture subreaper.",
+        )
+        yield
+    finally:
+        require(
+            libc.prctl(PR_SET_CHILD_SUBREAPER, previous.value, 0, 0, 0) == 0,
+            "Could not restore the fixture subreaper state.",
+        )
+
+
+def process_identity(pid):
+    """Read only one known PID, never scan or select unrelated processes."""
+    root = Path(f"/proc/{pid}")
+    require(root.stat().st_uid == os.getuid(), "Synthetic process ownership changed.")
+    fields = (root / "stat").read_text().rsplit(")", 1)[1].split()
+    require(fields[0] not in ("Z", "X"), "Synthetic process is no longer live.")
+    return int(fields[1]), int(fields[19])  # parent PID and start ticks
+
+
+def shell_identity(pid, argv, project, producer):
+    root = Path(f"/proc/{pid}")
+    identity = process_identity(pid)
+    require(
+        (root / "cmdline").read_bytes()
+        == b"\0".join(os.fsencode(arg) for arg in argv) + b"\0"
+        and (root / "cwd").readlink() == project.resolve(),
+        "Synthetic shell command or directory changed.",
+    )
+    parent, visited = identity[0], {pid}
+    for _ in range(32):
+        require(
+            parent > 1 and parent not in visited, "Synthetic shell ancestry changed."
+        )
+        visited.add(parent)
+        ancestor = process_identity(parent)
+        if parent == producer.pid:
+            require(
+                producer.poll() is None,
+                "Private producer stopped before shell binding.",
+            )
+            return identity, ancestor[1]
+        parent = ancestor[0]
+    raise FixtureFailure("Synthetic shell ancestry exceeded its bound.")
+
+
+@contextlib.contextmanager
+def bound_shell(pidfile, argv, project, producer):
+    """Bind the live owned shell BEFORE producer death; never signal a bare PID."""
+    descriptor = None
+    try:
+        try:
+            require(
+                sys.platform == "linux"
+                and hasattr(os, "pidfd_open")
+                and hasattr(signal, "pidfd_send_signal")
+                and hasattr(os, "P_PIDFD"),
+                "The native recovery fixture requires Linux pidfd bindings.",
+            )
+            value = pidfile.read_text()
+            require(
+                value.isascii() and value.isdecimal() and len(value) <= 10,
+                "Invalid synthetic shell PID.",
+            )
+            pid = int(value)
+            require(1 < pid < 2**31, "Invalid synthetic shell PID.")
+            before = shell_identity(pid, argv, project, producer)
+            descriptor = os.pidfd_open(pid, 0)
+            require(
+                shell_identity(pid, argv, project, producer) == before,
+                "Synthetic shell identity changed while binding.",
+            )
+            signal.pidfd_send_signal(descriptor, 0, None, 0)
+        except (OSError, ValueError, IndexError):
+            raise FixtureFailure(
+                "Could not bind the live owned synthetic shell."
+            ) from None
+        yield descriptor
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def stop_bound_shell(descriptor):
+    """Signal/reap only the pidfd-bound child, including native-parent reaping."""
+    try:
+        with contextlib.suppress(ProcessLookupError):
+            signal.pidfd_send_signal(descriptor, signal.SIGKILL, None, 0)
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                status = os.waitid(os.P_PIDFD, descriptor, os.WEXITED | os.WNOHANG)
+            except ChildProcessError:
+                # The native intermediary may already have reaped the shell.
+                # pidfd fdinfo reports -1 only after that bound process is reaped;
+                # never consult a possibly reused /proc/<pid> for this decision.
+                fields = [
+                    line.split(":", 1)[1].strip()
+                    for line in Path(f"/proc/self/fdinfo/{descriptor}")
+                    .read_text()
+                    .splitlines()
+                    if line.startswith("Pid:")
+                ]
+                require(
+                    len(fields) == 1, "Could not verify the bound shell's reap state."
+                )
+                if fields == ["-1"]:
+                    return
+            else:
+                if status is not None:
+                    return
+            require(
+                time.monotonic() < deadline, "Held shell was not stopped and reaped."
+            )
+            time.sleep(0.02)
+    except (OSError, ValueError):
+        raise FixtureFailure(
+            "Could not stop and reap the bound synthetic shell."
+        ) from None
 
 
 def environment(root):
@@ -68,6 +205,7 @@ class LocalExec:
         self.history_only = False
         self.leases = 0
         self.host_calls = []
+        self.producers = []
 
     def __call__(self, command, *args, **kwargs):
         command = list(command)
@@ -78,7 +216,10 @@ class LocalExec:
                     "Recovery forwarded an ambient value to a host native command.",
                 )
                 self.host_calls.append(command[1:])
-            return self.popen(command, *args, **kwargs)
+            child = self.popen(command, *args, **kwargs)
+            if command[:3] == [self.binary, "serve", "--stdio"]:
+                self.producers.append(child)
+            return child
         require(command[:3] == ["podman", "exec", "-i"], "Unexpected Podman boundary.")
         if self.history_only:
             require(
@@ -126,27 +267,76 @@ def rows(database, table):
         return connection.execute(f'SELECT * FROM "{table}" ORDER BY id').fetchall()
 
 
-def add_paused_schedule(database, ident):
-    """Use a real native-created schema; never fabricate the guard's schema."""
+def persisted_history(database):
+    """Bind the LOCAL post-stop baseline without starting another native service."""
+    with contextlib.closing(
+        sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1)
+    ) as connection:
+        connection.execute("PRAGMA query_only=ON")
+        connection.execute("BEGIN")
+        return {
+            table: sorted(
+                connection.execute(f'SELECT * FROM "{table}"').fetchall(), key=repr
+            )
+            for table in ("job", "schedule", "session_message", "session_part")
+        }
+
+
+@contextlib.contextmanager
+def durable_schedule(database, ident, status, *, wal):
+    """Only add a test schedule to native's schema; never fabricate/edit jobs."""
     require(rows(database, "schedule") == [], "Synthetic scheduler was not empty.")
     with contextlib.closing(sqlite3.connect(database, timeout=1)) as connection:
+        if wal:
+            require(
+                connection.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",),
+                "Native fixture could not retain a committed schedule WAL.",
+            )
+            connection.execute("PRAGMA wal_autocheckpoint=0")
         connection.execute(
             'INSERT INTO schedule (id, session_id, action, "when", tz, status, '
-            "next_due_at, time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "next_due_at, last_message_id, time_created, time_updated) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "sch_fixture_history_recovery",
                 ident,
                 json.dumps({"prompt": "SYNTHETIC_NEVER_EXECUTE"}),
                 json.dumps({"type": "in", "in": "1 hour"}),
                 "UTC",
-                "paused",
+                status,
                 4_102_444_800_000,
+                "msg_fixture_recovery",
                 1,
                 1,
             ),
         )
         connection.commit()
-    return rows(database, "schedule")
+        try:
+            if wal:
+                require(
+                    Path(str(database) + "-wal").stat().st_size > 32,
+                    "Schedule was not present in the committed WAL.",
+                )
+            yield rows(database, "schedule")
+        finally:
+            # Fixture-authored schedules only. Production is never allowed to
+            # remove scheduler rows, and neither fixture nor reader edits jobs.
+            connection.execute(
+                "DELETE FROM schedule WHERE id = ?", ("sch_fixture_history_recovery",)
+            )
+            connection.commit()
+
+
+SCHEDULE_CASES = (
+    ("active", False),
+    ("paused", False),
+    ("done", False),
+    ("error", False),
+    ("cancelled", False),
+    ("unknown", False),
+    ("done", True),
+    ("unknown", True),
+)
 
 
 def expect_schedule_refusal(callback):
@@ -168,7 +358,11 @@ def exercise(binary, root):
     host_env = environment(root / "destination")
     host_env.pop("OPENCODE_DB")  # The host guard must discover native's DEFAULT DB.
     release = compat.version(bounded([binary, "--version"], source_env, project))
-    require(release in ("2.2.6", "2.2.7"), "Fixture requires native 2.2.6 or 2.2.7.")
+    require(
+        release in history_reader.SUPPORTED,
+        "Fixture requires an audited native version.",
+    )
+    profile = "producer-sigkill" if release == "2.3.0" else "reload-retained-cancelled"
     bounded(["git", "init", "--quiet"], source_env, project)
     data = {
         "id": "c" * 32,
@@ -182,13 +376,14 @@ def exercise(binary, root):
     (path.parent / "controller").mkdir()
     host_env["OC_BOX_STATE_HOME"] = str(root / "registry")
     host_env.update(PRIVATE_PROVIDER_TOKEN=CANARY, OPENCODE_AUTH_CONTENT=CANARY)
-    gate, starts, activations = (
-        root / name for name in ("release", "starts", "plugins")
+    gate, starts, activations, shell_pid = (
+        root / name for name in ("release", "starts", "plugins", "shell-pid")
     )
     script = root / "hold.py"
     script.write_text(
-        "import pathlib,sys,time\n"
-        "gate,starts=map(pathlib.Path,sys.argv[1:])\n"
+        "import os,pathlib,sys,time\n"
+        "gate,starts,pid=map(pathlib.Path,sys.argv[1:])\n"
+        "pid.write_text(str(os.getpid()))\n"
         "with starts.open('ab') as stream: stream.write(b'x')\n"
         "deadline=time.monotonic()+90\n"
         "while not gate.exists() and time.monotonic()<deadline: time.sleep(.02)\n"
@@ -208,7 +403,10 @@ def exercise(binary, root):
         + ",'x');}};\n"
     )
     provider = BackgroundProvider(
-        shlex.join([sys.executable, str(script), str(gate), str(starts)]), project
+        shlex.join(
+            [sys.executable, str(script), str(gate), str(starts), str(shell_pid)]
+        ),
+        project,
     )
     config = json.loads(provider.config(source_env["OPENCODE_CONFIG_CONTENT"]))
     config["plugins"] = [{"package": str(plugin)}]
@@ -289,31 +487,39 @@ def exercise(binary, root):
                 and job["sessionID"] == ident,
                 "Synthetic shell was not backgrounded.",
             )
-            old("POST", "/api/location/reload")
-            gate.touch()
-            provider.release.set()
-            until(
-                lambda: (
-                    inventory()[0] == {}
-                    and len(inventory()[1]) == 1
-                    and inventory()[1][0]["status"] == "cancelled"
+            if profile == "reload-retained-cancelled":
+                old("POST", "/api/location/reload")
+                gate.touch()
+                provider.release.set()
+                until(
+                    lambda: (
+                        inventory()[0] == {}
+                        and len(inventory()[1]) == 1
+                        and inventory()[1][0]["status"] == "cancelled"
+                    )
                 )
-            )
-            require(
-                inventory()[1][0]["id"] == job["id"],
-                "Reload retained a different synthetic job.",
-            )
+                require(
+                    inventory()[1][0]["id"] == job["id"],
+                    "Reload retained a different synthetic job.",
+                )
             try:
                 workspace_service.wait_history(
                     box, data, old.endpoint, timeout=3, interval=0.1
                 )
             except box.HistoryWaitTimeout as error:
+                expected = (
+                    "foreground=0, jobs-running=0, jobs-completed=0, "
+                    "jobs-error=0, jobs-cancelled=1."
+                    if profile == "reload-retained-cancelled"
+                    else "foreground=0, jobs-running=1, jobs-completed=0, "
+                    "jobs-error=0, jobs-cancelled=0."
+                )
                 require(
-                    error.diagnostic.endswith(
-                        "foreground=0, jobs-running=0, jobs-completed=0, "
-                        "jobs-error=0, jobs-cancelled=1."
-                    ),
-                    "Normal history refusal lacked a complete cancelled-job observation.",
+                    error.diagnostic.endswith(expected),
+                    "Normal history refusal lacked the profile's complete job observation.",
+                )
+                require(
+                    error.recovery_eligible, "Held shell was not recovery eligible."
                 )
             else:
                 raise FixtureFailure(
@@ -323,12 +529,40 @@ def exercise(binary, root):
             require(
                 provider.requests == 2, "Unexpected pre-recovery provider execution."
             )
+            if profile == "producer-sigkill":
+                require(len(local.producers) == 1, "Unexpected private producer count.")
+                producer = local.producers[0]
+                require(
+                    producer.poll() is None, "Private producer stopped prematurely."
+                )
+                with bound_shell(
+                    shell_pid,
+                    [
+                        sys.executable,
+                        str(script),
+                        str(gate),
+                        str(starts),
+                        str(shell_pid),
+                    ],
+                    project,
+                    producer,
+                ) as held:
+                    os.killpg(producer.pid, signal.SIGKILL)
+                    require(
+                        producer.wait(timeout=5) == -signal.SIGKILL,
+                        "Private producer was not killed and reaped.",
+                    )
+                    # The subreaper owns orphaned descendants. The still-open
+                    # pidfd binds this exact shell even if its old PID is reused.
+                    stop_bound_shell(held)
         # This is intentionally only the native LOCAL process boundary.
         require(not old.alive(), "Original native server was not closed before Reader.")
         stop_client()
         source_db = Path(source_env["XDG_DATA_HOME"]) / "opencode/oc-box-v2.db"
         job_rows = rows(source_db, "job")
         require(len(job_rows) == 1, "Original durable job row was not retained.")
+        persisted = persisted_history(source_db)
+        require(persisted["schedule"] == [], "Post-stop scheduler was not empty.")
         require(activations.exists(), "Synthetic plugin canary was never activated.")
         executions = (provider.requests, starts.read_bytes(), activations.read_bytes())
         # Persist an already-proven plugin/provider config. Reader and host CLI
@@ -337,6 +571,10 @@ def exercise(binary, root):
             saved = Path(env["XDG_CONFIG_HOME"]) / "opencode/opencode.json"
             saved.parent.mkdir(parents=True, exist_ok=True)
             saved.write_text(json.dumps(config))
+        # A session points back into this real project on both sides. Project
+        # policies can outrank ordinary configuration, so deny-inline alone is
+        # insufficient: production must also disable project discovery.
+        (project / "opencode.json").write_text(json.dumps(config))
         local.history_only = True
         deadline = time.monotonic() + 120
 
@@ -399,6 +637,9 @@ def exercise(binary, root):
                     )
             reader.assert_idle()
             current = bridge.checked_export(fresh, ident)
+            require(
+                current == before, "Recovery changed the checked source transcript."
+            )
             require(
                 current["messages"] == before["messages"],
                 "Recovery invented source history.",
@@ -475,23 +716,30 @@ def exercise(binary, root):
                 host_db.is_relative_to(Path(host_env["XDG_DATA_HOME"])),
                 "Destination escaped its private store.",
             )
-            scheduled = add_paused_schedule(host_db, state["host_sessions"][ident])
-            calls_before = len(local.host_calls)
-            expect_schedule_refusal(lambda: box.private_host_env(path, data))
-            require(
-                local.host_calls[calls_before:]
-                and all(
-                    call == ["--version"] or call[:3] == ["debug", "paths", "db"]
-                    for call in local.host_calls[calls_before:]
-                ),
-                "Destination guard ran native projection before refusing schedules.",
-            )
-            require(
-                rows(host_db, "schedule") == scheduled,
-                "Destination guard deleted scheduler state.",
-            )
+            for status, wal in SCHEDULE_CASES:
+                with durable_schedule(
+                    host_db, state["host_sessions"][ident], status, wal=wal
+                ) as scheduled:
+                    calls_before = len(local.host_calls)
+                    expect_schedule_refusal(lambda: box.private_host_env(path, data))
+                    require(
+                        local.host_calls[calls_before:]
+                        and all(
+                            call == ["--version"]
+                            or call[:3] == ["debug", "paths", "db"]
+                            for call in local.host_calls[calls_before:]
+                        ),
+                        "Destination guard ran native projection before refusing schedules.",
+                    )
+                    require(
+                        rows(host_db, "schedule") == scheduled,
+                        "Destination guard deleted scheduler state.",
+                    )
         require(history_reader.current() is None, "Reader context survived shutdown.")
-        scheduled = add_paused_schedule(source_db, ident)
+        require(
+            persisted_history(source_db) == persisted,
+            "Reader startup, export or shutdown changed post-stop jobs/schedules/history.",
+        )
         marker, observed_binary = root / "native-boot", root / "observe-native.py"
         observed_binary.write_text(
             f"#!{sys.executable}\nimport os,pathlib,sys\n"
@@ -511,16 +759,22 @@ def exercise(binary, root):
             patch.dict(os.environ, host_env, clear=True),
             patch.object(box, "CONTAINER_OPENCODE", str(observed_binary)),
         ):
-            expect_schedule_refusal(refused_reader)
+            for status, wal in SCHEDULE_CASES:
+                with durable_schedule(source_db, ident, status, wal=wal) as scheduled:
+                    expect_schedule_refusal(refused_reader)
+                    require(
+                        rows(source_db, "schedule") == scheduled,
+                        "Source guard deleted scheduler state.",
+                    )
         require(
             not marker.exists(), "Source guard booted native before schedule refusal."
         )
         require(
-            rows(source_db, "schedule") == scheduled,
-            "Source guard deleted scheduler state.",
+            rows(source_db, "job") == job_rows, "Source guard changed retained jobs."
         )
         require(
-            rows(source_db, "job") == job_rows, "Source guard changed retained jobs."
+            persisted_history(source_db) == persisted,
+            "Schedule refusals changed post-stop jobs/schedules/history.",
         )
         require(
             history_reader.current() is None
@@ -534,8 +788,16 @@ def exercise(binary, root):
             "Reader or a schedule guard executed a provider, shell or user plugin.",
         )
     print(
-        f"PASS: native {release} local-barrier retained-job recovery, one reader, "
+        f"PASS: native {release} {profile} local-barrier retained-job recovery, one reader, "
         "real archive/import verification and source/destination schedule refusals.",
+        flush=True,
+    )
+    print(
+        f"PROFILE: {profile}; live-timeout=1; producer-stopped-reaped=1; "
+        f"post-stop-jobs={len(job_rows)}; post-stop-schedules=0; "
+        "durable-jobs-schedules-transcripts-unchanged=1; "
+        f"source-schedule-refusals={len(SCHEDULE_CASES)}; "
+        f"destination-schedule-refusals={len(SCHEDULE_CASES)}.",
         flush=True,
     )
     print(
@@ -548,9 +810,12 @@ def exercise(binary, root):
 def main(binary, temp_dir=None):
     previous = os.umask(0o077)
     try:
-        with tempfile.TemporaryDirectory(
-            prefix="oc-box-history-recovery-v2-", dir=temp_dir
-        ) as temporary:
+        with (
+            subreaper(),
+            tempfile.TemporaryDirectory(
+                prefix="oc-box-history-recovery-v2-", dir=temp_dir
+            ) as temporary,
+        ):
             exercise(str(Path(binary).resolve()), Path(temporary))
     except FixtureFailure:
         raise
