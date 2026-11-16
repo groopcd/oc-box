@@ -235,7 +235,9 @@ session trees, one workspace, and all registered workspaces; there is no whole-h
 database wipe or unreviewed bulk removal. Reviewed workspace removal preserves
 project files and host history. Backup/restore supports existing encrypted full/
 portable workspace archives and encrypted native session-tree history, with
-foreground masked prompts and fresh-ID restoration. Backups and restores do not
+path-first controls, private masked prompts inside the dashboard, named stages,
+elapsed time and fresh-ID restoration. Optional recipient/identity controls live
+under Advanced; ordinary password backups need no key-file copying. Backups and restores do not
 silently overwrite existing files or start restored workspaces. CPU/RAM limit edits, quotas, resizes and
 storage moves remain deferred; resource settings are informational.
 

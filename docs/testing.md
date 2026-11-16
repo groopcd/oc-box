@@ -400,8 +400,14 @@ observations include:
   bounded nonblocking registration reads, typed one-workspace purge retaining
   project/history, and owner/lease/exposure refusal without forced cleanup.
   Explicit full/portable backup, inspection and new-directory restore through
-  actual foreground masked TTY prompts; no password can enter UI selection/copy,
-  argv/env, plaintext files, logs or journals. Read-only/demo gates apply again
+  private in-dashboard masked editing backed by the actual child controlling
+  TTY; no password can enter selectable Input/widget values/messages, UI
+  selection/copy, protocol metadata, argv/env, plaintext files, logs or journals.
+  Verify debug/developer/event-logging refusal, core-dump suppression, prompt
+  readiness/echo fences, confirmation focus and queued-input isolation, Enter
+  refusal on the next authenticated metadata review, global clipboard/help/
+  palette/clear/navigation fences through child exit, and local focus traversal.
+  Read-only/demo gates apply again
   at execution and source changes invalidate reviews.
 - Encrypted session-tree backup/restore to host and existing workspace sources,
   including history above 4 MiB, fresh IDs, cleared privileges, verified import,
@@ -417,12 +423,24 @@ observations include:
   must not activate it. Copy view remains optional, without exporting hidden/
   offscreen data. Programmatic selection, focus, refresh and container output
   never trigger copies. Host delivery depends on actual terminal OSC 52 support/
-  permissions. Check desktop
-  paste and the separately labelled in-app Paste copied control in text fields
-  and a connected shell; preserve ordinary shell Ctrl+C/Ctrl+V, focus, UTF-8/
+  permissions. Check desktop paste and the separate in-app Paste copied
+  shortcut in text fields and a connected shell; preserve ordinary shell
+  Ctrl+C/Ctrl+V, focus, UTF-8/
   framing/queue bounds, atomic size/capacity rejection, uncertainty-aware
   partial-transport failure notices, read-only refusals and no clipboard
   content in journals. Container output must not issue host clipboard writes.
+- In-dashboard backup progress must identify real stages and elapsed time with
+  an indeterminate bar, not fake percentages. Inspect only after explicit action,
+  route by bounded envelope structure outside the UI thread, retain editable fresh
+  destination suggestions, and refuse authentication without trying another store.
+  Cancel/Ctrl+C must latch one interrupt and wait for actual cleanup/exit, including
+  parent/control EOF, prompt/review transitions and post-dispatch cancellation.
+  Verify startup failures with no worker cannot abandon a child, nested handlers
+  retain the latch, descriptors do not leak to exec helpers, next-prompt IDs are
+  not clobbered, accepted cancellation cannot become ordinary success, and partial
+  session-import IDs survive interruption in normal and recovery paths. Run these
+  on fresh synthetic state; none of the earlier incomplete UI evidence is passed
+  merely by completing headless/process/age tests.
 - Private fixed-category journal creation, permissions and bounded rotation;
   synthetic argv/env/error/prompt/transcript sentinels must not enter generated
   entries. Verify readers do not create files, default log browsing does not

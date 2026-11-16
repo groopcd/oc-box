@@ -88,9 +88,10 @@ their checkout ownership distinct from unrelated source and flat installations.
   redaction is best-effort, not a guarantee of arbitrary-secret removal.
 - `tui_storage.py` / `tui_operations.py` / `tui_management.py`: three distinct
   host/selected/all-workspace scopes, canonical bounded registry reads and explicit
-  typed operation reviews. Host operations target individual session trees, never
-  a whole database. Workspace removal retains project/history and uses normal
-  locks/validators; no bulk wipe, shared-cache pruning or resource-limit edits.
+  operation reviews, typed only for destructive actions. Host operations target
+  individual session trees, never a whole database. Workspace removal retains
+  project/history and uses normal locks/validators; no bulk wipe, shared-cache
+  pruning or resource-limit edits.
   Hand secrets to existing masked foreground TTY prompts in the same pinned runtime,
   not selectable dashboard inputs or recorded output. Recheck review bindings in
   the child; ordinary CLI imports remain stdlib-only.

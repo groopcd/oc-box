@@ -619,23 +619,44 @@ and verified recovery provenance; it never adds `--all` or `--delete-sessions`.
 Exit owning clients first. Purge can briefly start the container for final
 history synchronization; no forced stop or lock bypass is offered.
 
-Backup/restore hands reviewed operations to the **same pinned runtime** in the
-foreground host terminal, temporarily suspending the dashboard for existing
-masked password/age prompts. Passwords never enter dashboard fields, clipboard
-actions, argv, environment or plaintext files. Workspace full/portable `.ocbox`
-archives, inspection and new-directory restore retain the normal CLI contracts
-below; restored workspaces remain stopped. No output file or restore destination
-is overwritten, and whole-workspace archives may contain copied config/auth.
+Backup creation, inspection and restore run **inside the dashboard**, using the
+same pinned runtime in a separate private child. Enter the archive path; restore
+offers an editable, absent destination suggestion. Optional age recipients and
+existing identity-file paths are under Advanced. Default password-encrypted
+archives already contain an encrypted per-archive identity: no key file needs
+copying. The password is not saved and cannot be recovered by oc-box.
+
+Passwords use a custom masked, nonselectable editor feeding the existing child
+controlling-TTY reader, not an ordinary Input field. The manager now temporarily
+holds secret input in memory; guaranteed erasure, same-user debugger, swap or
+recording protection is not promised. Secrets never enter clipboard actions,
+widget values/messages, protocol metadata, argv, environment, plaintext files
+or journals. Private operations refuse Textual debug, developer tools and
+event-file logging. Clipboard/navigation shortcuts are fenced until child exit.
+For password confirmation, click its box or Shift+Tab before typing; queued
+first-password text is discarded.
+
+The operation modal shows the actual named stage, elapsed seconds and an
+indeterminate progress bar, not an invented percentage. Cancel or Ctrl+C requests
+normal cleanup and waits for real child exit; no automatic retry runs. A backup
+can stop an unowned source before requesting its password, so cancellation can
+leave that source stopped. Workspace full/portable `.ocbox` archives retain the
+normal CLI contracts below: fresh IDs, no overwrite and stopped restores.
+Whole-workspace archives may contain copied config/auth. Ordinary CLI password
+prompts remain unchanged; Storage removal and backup-file deletion retain their
+separate reviewed foreground handoff.
 
 Native V2 session-tree history instead uses encrypted `.ocsession` files:
 versioned, authenticated age components, at most 50 sessions, 100,000 messages
 and 64 MiB encoded history. Select the corresponding verified source in Sessions
 before backing up or restoring history. No private workspace is started for this
-connection. Session restore shows decrypted **metadata only** for a second typed
-review in the foreground terminal, assigns fresh session/message IDs, clears
+connection. Workspace and session restores show authenticated **metadata only**
+for an additional in-dashboard review. Click the reviewed restore action or
+focus it and press Space; Enter cannot approve this next review after password
+submission. Session restore assigns fresh session/message IDs, clears
 permissions/privileged configuration, and restores native parent links only
 within that new tree. It never executes restored work or overwrites old IDs.
-Partial failures report newly created/attempted IDs for explicit recovery; they
+Partial failures and cancellation retain observed/attempted IDs for explicit recovery; they
 are not atomic restores and trigger no automatic rollback/delete or retry.
 
 Delete backup file is a separate typed action for one selected, owned, private,

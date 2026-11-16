@@ -526,25 +526,70 @@ process checkpoint. The encrypted version-1 envelope has exactly `key.age`,
 quiet source ownership and checked native exports are required; process-local
 checks do not eliminate races with other host processes.
 
-Session restore decrypts and validates before a metadata-only review in the
-foreground terminal. Type `RESTORE` there to authorize the fresh IDs shown in
-that review. Permissions and privileged configuration are cleared; parent links
+Session restore decrypts and validates before an additional metadata-only review
+inside the dashboard, retaining its plan and native connection in the same child.
+Click **Restore reviewed data**, or focus it and press Space, to approve the
+fresh IDs shown. Enter is intentionally ignored so queued password submission
+cannot approve the next review. Permissions and privileged configuration are cleared; parent links
 refer only to newly restored sessions. Existing history is not overwritten and
 restored work is not run. Native import success alone is not accepted: history
 and inventory are verified afterward. A partial failure reports observed new and
 attempted IDs for explicit recovery, not an atomic rollback or automatic delete.
 
-Age recipients and private identity-file paths are optional. Without a recipient,
-the dashboard suspends and the existing native host terminal prompts for a masked
-password. No password widget is added to the selectable/copyable dashboard, and
-no password enters argv, environment, plaintext staging, the clipboard cache or
-the journal. Host terminal recording can still capture deliberately displayed
-metadata. The dashboard resumes after the foreground command; raw command output
-is not recorded in its Logs tab.
+### Paths and passwords
 
-Ctrl-C is delivered to the foreground operation child, while the manager waits
-for that child's normal cleanup before resuming. Interrupting a multi-step
-operation is not an atomic rollback: inspect its explicit target before any retry.
+The archive path is the primary field. A blank workspace restore destination
+gets a visible, editable, absent sibling suggestion; displaying a suggestion
+creates nothing. Inspect/restore route from bounded envelope structure, not the
+filename suffix. Authentication failure never tries another engine or native
+store. Choose full/portable for creation; host scope creates one selected native
+session tree, not a whole-host backup.
+
+Age recipients and existing private identity-file paths are optional **Advanced**
+controls, initially collapsed. Ordinary password backups require no manual key
+copying: a fresh per-archive identity is generated in anonymous memory and stored
+encrypted in the archive. Choose a password and keep it safely; oc-box does not
+save it and cannot recover it. The provider vault is neither reused as a backup
+password nor included in a workspace archive.
+
+Create, inspect and restore stay in an operation modal. Password input is a
+custom masked, nonselectable editor, not Textual Input or ClipboardInput; it
+submits completed input only to the existing child's private controlling TTY.
+No reveal, automatic clipboard read, copied-text cache, search or clear-X action
+is available there. Explicit terminal paste remains bounded and single-line.
+Password confirmation starts empty and unfocused: click its box or Shift+Tab
+before typing. A lost password is not an automatic key-management problem that
+the dashboard silently resolves.
+
+The manager's transient private editor is part of the secret-memory trust
+boundary. Core dumps are disabled before private input, but Python memory
+erasure, same-user debugger, swap or terminal-recording protection is not
+guaranteed. Passwords are never stored as widget values/reactives/messages,
+protocol metadata, argv/env, plaintext files, clipboard content or journal
+entries. Private operations refuse Textual debugging, developer tools and
+event-file logging because those facilities can record input before widget
+handlers. Global copy/paste, help, palette and navigation are fenced through
+child exit, including gaps between dialogs; local focus traversal remains usable.
+
+### Progress and cancellation
+
+The modal shows **named stage + elapsed seconds + an indeterminate progress bar**.
+It does not estimate a byte/time percentage, scan extra data to manufacture a
+total, display raw child output or write a terminal transcript to Logs. Inspection
+shows a bounded metadata projection rather than arbitrary private manifest data.
+
+Cancel or Ctrl+C requests the operation child's normal cleanup. The dashboard
+waits for actual exit and verified completion before releasing its busy state.
+There is no forced operation kill, automatic retry or rollback. Backup's existing
+stop-before-password ordering is unchanged: cancellation can leave an unowned
+source container stopped. Partial session imports retain attempted versus
+observed fresh IDs, including cancellation after submission. Inspect the explicit
+target before retrying an unverified outcome. A cancellation after completion
+was already verified is identified as such, not reported as an accepted cancel.
+
+Ordinary CLI password prompts remain unchanged. Storage removal and encrypted
+file deletion retain their separate foreground handoff and destructive typed
+review.
 
 **Inspect backup** is explicit and available in CLI read-only mode. **Delete backup
 file** is a distinct typed operation on one owned, private, regular supported
@@ -575,7 +620,8 @@ Its bounded implementation/validation layers are:
 3. Explicit native host/workspace connections and guarded V2 session actions.
 4. Existing-client PTY embedding, interactive behavior and lease cleanup.
 5. Reviewed storage deletion and encrypted workspace/session backup/restore,
-   including foreground TTY prompts and privacy-safe failure notifications.
+   including private in-dashboard TTY-backed prompts, progress and privacy-safe
+   failure notifications.
 6. Clean-candidate host acceptance and review before any stable publication.
 
 Each integrated layer needs behavior-focused tests; declaring a phase does not
