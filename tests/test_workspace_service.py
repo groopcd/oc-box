@@ -554,6 +554,96 @@ class WorkspaceServiceTests(unittest.TestCase):
             "State": {"Running": True},
             "Mounts": [{"Source": str(project), "Destination": str(project)}],
         }
+        tabs = patch.object(
+            box.native_tabs,
+            "inspect",
+            return_value=box.native_tabs.Snapshot("missing", reason="absent"),
+        )
+        tabs.start()
+        self.addCleanup(tabs.stop)
+
+    def test_manual_sync_history_scope_closes_before_success_or_container_stop(self):
+        for outcome in ("success", "legacy-fallback", "sync-error", "cleanup-error"):
+            with self.subTest(outcome=outcome):
+                args = box.parser().parse_args(["sync"])
+                args._opencode_release = self.data["opencode_version"]
+                events = []
+                error = box.BoxError("synthetic-fixed-refusal")
+                box.atomic_json(
+                    box.session_file(self.path),
+                    {"sessions": ["ses_shared"], "last": "ses_shared"},
+                )
+
+                @contextlib.contextmanager
+                def history_scope(_box, data):
+                    self.assertIs(data, self.data)
+                    events.append("source-open")
+                    token = service.CONNECTION.set(
+                        None if outcome == "legacy-fallback" else self.connection
+                    )
+                    try:
+                        yield
+                    finally:
+                        service.CONNECTION.reset(token)
+                        events.append("source-closed")
+                        if outcome == "cleanup-error":
+                            raise error
+
+                def synchronize(path, data, *, announce):
+                    self.assertFalse(announce)
+                    self.assertEqual(path, self.path)
+                    self.assertIs(data, self.data)
+                    self.assertEqual(
+                        service.live_connection(),
+                        None if outcome == "legacy-fallback" else self.connection,
+                    )
+                    events.append("sync")
+                    if outcome == "sync-error":
+                        raise error
+
+                class Output(io.StringIO):
+                    def write(self, text):
+                        if text.startswith("Session history synced"):
+                            events.append("success")
+                        return super().write(text)
+
+                output = Output()
+                with (
+                    patch.object(box, "check_private_output"),
+                    patch.object(box, "start_container", return_value={}),
+                    patch.object(box, "prepare_runtime"),
+                    patch.object(
+                        service,
+                        "history_source",
+                        side_effect=history_scope,
+                    ) as source,
+                    patch.object(service, "Owner") as owner,
+                    patch.object(box, "sync_sessions", side_effect=synchronize),
+                    patch.object(
+                        box,
+                        "stop_container",
+                        side_effect=lambda *_a: events.append("container-stop"),
+                    ),
+                    contextlib.redirect_stdout(output),
+                    contextlib.redirect_stderr(io.StringIO()),
+                ):
+                    if outcome.endswith("-error"):
+                        with self.assertRaises(box.BoxError) as raised:
+                            box.launch_environment(self.path, self.data, args)
+                        self.assertIs(raised.exception, error)
+                    else:
+                        self.assertEqual(
+                            box.launch_environment(self.path, self.data, args), 0
+                        )
+                source.assert_called_once_with(box, self.data)
+                owner.assert_not_called()
+                self.assertEqual(
+                    events,
+                    ["source-open", "sync", "source-closed"]
+                    + ([] if outcome.endswith("-error") else ["success"])
+                    + ["container-stop"],
+                )
+                self.assertIsNone(service.live_connection())
 
     def test_endpoint_validation_refuses_remote_hosts_embedded_credentials_and_bad_passwords(
         self,
@@ -571,6 +661,63 @@ class WorkspaceServiceTests(unittest.TestCase):
                 service.validate_endpoint({**self.connection, "url": url})
         with self.assertRaises(ValueError):
             service.validate_endpoint({**self.connection, "password": "short"})
+
+    def test_ready_owner_can_represent_native_home_without_creating_a_session(self):
+        owner = service.Owner(box, self.path, self.data)
+        with patch.object(service, "api") as native:
+            owner.publish(None)
+            self.assertTrue(owner.ready)
+            self.assertIsNone(owner.session)
+            with self.assertRaisesRegex(box.BoxError, "Invalid live workspace"):
+                owner.publish("not-a-session")
+            native.assert_not_called()
+        self.assertIsNone(owner.child)
+
+    def test_unbound_session_consumers_refuse_before_browser_or_terminal_work(self):
+        connection = {**self.connection, "session": None}
+        with (
+            patch.object(service, "Gateway") as gateway,
+            patch.object(service, "api") as native,
+            patch.object(service, "client_command") as client,
+            patch.object(box, "prepare_runtime") as prepare,
+            patch.object(box, "launch_credentials") as credentials,
+            patch.object(box, "check_backend"),
+            patch("sys.stdin.isatty", return_value=True),
+            patch("sys.stdout.isatty", return_value=True),
+            patch.object(
+                service, "attach", return_value=contextlib.nullcontext(connection)
+            ),
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            with self.assertRaisesRegex(box.BoxError, "No open native session"):
+                service.web_session(
+                    box, self.data, connection, box.parser().parse_args(["web"])
+                )
+            with self.assertRaisesRegex(box.BoxError, "No open native session"):
+                box.main(["terminal", "--workspace", self.data["id"]])
+        for operation in (gateway, native, client, prepare, credentials):
+            operation.assert_not_called()
+
+    def test_secondary_tui_preserves_unbound_home_instead_of_forcing_history_root(self):
+        connection = {**self.connection, "session": None}
+        command = box.ContainerCommand(["synthetic-native-tui"], {})
+        with (
+            patch.object(box, "check_backend"),
+            patch.object(service, "controller_running", return_value=True),
+            patch.object(
+                service, "attach", return_value=contextlib.nullcontext(connection)
+            ),
+            patch.object(service, "client_command", return_value=command) as client,
+            patch.object(box, "run_tui", return_value=0),
+            patch.object(box, "prepare_runtime") as prepare,
+            patch.object(box, "launch_credentials") as credentials,
+            contextlib.redirect_stderr(io.StringIO()),
+        ):
+            self.assertEqual(box.main(["start", "--workspace", self.data["id"]]), 0)
+        self.assertNotIn("--session", client.call_args.args[3])
+        self.assertIn(connection["url"], client.call_args.args[3])
+        prepare.assert_not_called()
+        credentials.assert_not_called()
 
     def test_client_environment_and_argv_do_not_inherit_provider_or_vault_values(self):
         with patch.dict(
@@ -605,6 +752,45 @@ class WorkspaceServiceTests(unittest.TestCase):
         )
         self.assertIn("TERM", " ".join(command))
         self.assertNotIn("xterm\\nbad", " ".join(command))
+
+    def test_client_bootstrap_cannot_load_project_python_modules(self):
+        project = Path(self.data["project"])
+        marker = project / "unexpected-python-import"
+        shadow = (
+            "from pathlib import Path\n"
+            + f"Path({str(marker)!r}).write_text('unexpected')\n"
+            + "raise RuntimeError('project module must not run')\n"
+        )
+        (project / "json.py").write_text(shadow)
+        (project / "sitecustomize.py").write_text(shadow)
+        command = service.client_command(
+            box,
+            self.data,
+            self.connection,
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                "-c",
+                "import os; assert len(os.environ['OPENCODE_PASSWORD']) == 43; "
+                "assert 'PYTHONPATH' not in os.environ; print('isolated-client')",
+            ],
+        )
+        # Substitute only Podman exec; keep the actual production bootstrap.
+        arguments = command[command.index(self.data["container"]) + 1 :]
+        result = subprocess.run(
+            arguments,
+            env={**command.environment, "PYTHONPATH": str(project)},
+            cwd=project,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=5,
+            check=True,
+        )
+        self.assertEqual(result.stdout, "isolated-client\n")
+        self.assertFalse(marker.exists())
 
     def test_api_response_matrix_preserves_empty_success_json_and_failures(self):
         command = box.ContainerCommand(["synthetic-native-api"], {})
@@ -989,6 +1175,17 @@ class WorkspaceServiceTests(unittest.TestCase):
             box.workspace_lock(self.path),
             patch.object(box, "exec_command", side_effect=local_exec),
             patch.object(box, "inspect_owned", return_value=self.info),
+            patch.object(
+                service,
+                "tab_inventory",
+                return_value=[
+                    {
+                        "id": "ses_shared",
+                        "location": {"directory": self.data["project"]},
+                        "time": {"updated": 1},
+                    }
+                ],
+            ),
             owner,
         ):
             owner.publish("ses_shared")
@@ -1009,6 +1206,54 @@ class WorkspaceServiceTests(unittest.TestCase):
             thread.join(timeout=2)
             self.assertTrue(exited.is_set())
         self.assertFalse(owner.address.exists())
+        self.assertIsNone(service.live_connection())
+
+    def test_info_refresh_holds_only_a_temporary_metadata_lease(self):
+        owner = service.Owner(box, self.path, self.data)
+        program = (
+            "import json,os,sys;"
+            "print(json.dumps({'url':'http://127.0.0.1:12345',"
+            "'password':os.environ['OPENCODE_PASSWORD']}),flush=True);"
+            "sys.stdin.read()"
+        )
+
+        def local_exec(_data, _arguments):
+            return box.ContainerCommand(
+                [sys.executable, "-I", "-S", "-c", program],
+                {
+                    "PATH": os.environ["PATH"],
+                    "OPENCODE_PASSWORD": self.connection["password"],
+                },
+            )
+
+        def inspect(*_args, **_kwargs):
+            self.assertEqual(owner.clients, 1)
+            return box.native_tabs.Snapshot("valid")
+
+        with (
+            box.workspace_lock(self.path),
+            patch.object(box, "exec_command", side_effect=local_exec),
+            patch.object(box.native_tabs, "inspect", side_effect=inspect),
+            owner,
+        ):
+            owner.publish(None)
+            with socket.socket(socket.AF_UNIX) as stream:
+                stream.settimeout(3)
+                stream.connect(str(owner.address))
+                stream.sendall(
+                    (
+                        json.dumps({"action": "info", "workspace": self.data["id"]})
+                        + "\n"
+                    ).encode()
+                )
+                response = service.read_control(stream)
+                self.assertIsNone(response["session"])
+                with owner.condition:
+                    self.assertTrue(
+                        owner.condition.wait_for(lambda: owner.clients == 0, timeout=1)
+                    )
+                # The info socket remains open; it must not become an outer lease.
+                self.assertEqual(owner.clients, 0)
         self.assertIsNone(service.live_connection())
 
     def test_runtime_directory_must_be_private_and_generated_socket_never_overwrites_files(

@@ -6,17 +6,21 @@ memory/pipes; a fresh --stdio server never elects or modifies a shared service.
 
 import base64
 import contextlib
+from http.client import HTTPConnection
 import json
+import math
 import os
 from pathlib import Path
 import secrets
 import select
 import signal
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
 from urllib.parse import quote, urlparse
+from urllib.error import HTTPError
 from urllib.request import Request, build_opener, ProxyHandler
 
 # Constant, secret-free explanations that may be shown on the host. Only these
@@ -79,6 +83,45 @@ def fixed_message(stderr):
     return None
 
 
+def _deadline_timeout(deadline, maximum=60):
+    remaining = deadline - time.monotonic()
+    if not math.isfinite(remaining) or remaining <= 0:
+        raise FixedError(NOT_READY)
+    return min(maximum, remaining)
+
+
+def _deadline_http(parsed, method, path, data, headers, deadline):
+    """Public HTTPConnection socket access keeps every I/O within one budget."""
+    connection = HTTPConnection(
+        parsed.hostname, parsed.port, timeout=_deadline_timeout(deadline)
+    )
+    try:
+        connection.connect()
+        stream = connection.sock
+        stream.settimeout(_deadline_timeout(deadline))
+        connection.request(method, path, body=data, headers=headers)
+        stream.settimeout(_deadline_timeout(deadline))
+        with connection.getresponse() as response:
+            if response.status >= 400:
+                raise HTTPError(
+                    path, response.status, "Private request failed", {}, None
+                )
+            chunks = []
+            while True:
+                stream.settimeout(_deadline_timeout(deadline))
+                chunk = response.read1(65536)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+            _deadline_timeout(deadline)
+            body = b"".join(chunks)
+            value = json.loads(body) if body else None
+            _deadline_timeout(deadline)
+            return value
+    finally:
+        connection.close()
+
+
 def endpoint_request(endpoint):
     """Use a private loopback endpoint without persisting its credentials."""
     address, password = endpoint["url"], endpoint["password"]
@@ -99,12 +142,16 @@ def endpoint_request(endpoint):
     auth = "Basic " + base64.b64encode(("opencode:" + password).encode()).decode()
     opener = build_opener(ProxyHandler({}))
 
-    def request(method, path, data=None):
+    def request(method, path, data=None, *, deadline=None):
+        headers = {"Authorization": auth, "Content-Type": "application/json"}
+        encoded = json.dumps(data).encode() if data is not None else None
+        if deadline is not None:
+            return _deadline_http(parsed, method, path, encoded, headers, deadline)
         req = Request(
             address.rstrip("/") + path,
             method=method,
-            data=json.dumps(data).encode() if data is not None else None,
-            headers={"Authorization": auth, "Content-Type": "application/json"},
+            data=encoded,
+            headers=headers,
         )
         with opener.open(req, timeout=60) as response:
             body = response.read()
@@ -226,7 +273,9 @@ def checked_export(request, ident):
 
 
 @contextlib.contextmanager
-def server(binary, *, exit_info=None):
+def server(binary, *, exit_info=None, startup_deadline=None):
+    if startup_deadline is not None:
+        _deadline_timeout(startup_deadline)
     password = secrets.token_urlsafe(32)
     env = {**os.environ, "OPENCODE_PASSWORD": password}
     descriptor = os.memfd_create("oc-box-v2-errors", os.MFD_CLOEXEC)
@@ -242,11 +291,18 @@ def server(binary, *, exit_info=None):
         assert child.stdout is not None
         try:
             deadline = time.monotonic() + 45
+            if startup_deadline is not None:
+                deadline = min(deadline, startup_deadline)
             output = bytearray()
             while b"\n" not in output:
                 if child.poll() is not None or time.monotonic() > deadline:
                     raise FixedError(NOT_READY)
-                if select.select([child.stdout], [], [], 0.1)[0]:
+                wait = (
+                    0.1
+                    if startup_deadline is None
+                    else min(0.1, _deadline_timeout(deadline))
+                )
+                if select.select([child.stdout], [], [], wait)[0]:
                     output.extend(os.read(child.stdout.fileno(), 4096))
                 if len(output) > 65536:
                     raise FixedError(READINESS)
@@ -257,8 +313,17 @@ def server(binary, *, exit_info=None):
             # Migration is asynchronous in upstream. Do not mistake an empty
             # session list for successful completion and lose the resume ID.
             deadline = time.monotonic() + 120
+            if startup_deadline is not None:
+                deadline = min(deadline, startup_deadline)
             while True:
-                status = request("GET", "/api/experimental/migration/v1")
+                if startup_deadline is None:
+                    status = request("GET", "/api/experimental/migration/v1")
+                else:
+                    _deadline_timeout(deadline)
+                    status = request(
+                        "GET", "/api/experimental/migration/v1", deadline=deadline
+                    )
+                    _deadline_timeout(deadline)
                 if not isinstance(status, dict):
                     raise ValueError("Invalid OpenCode migration response.")
                 status = status.get("data", status)
@@ -268,7 +333,11 @@ def server(binary, *, exit_info=None):
                     raise ValueError(
                         "OpenCode's V1-to-V2 session migration failed or timed out; the original V1 database is retained."
                     )
-                time.sleep(0.1)
+                time.sleep(
+                    0.1
+                    if startup_deadline is None
+                    else min(0.1, _deadline_timeout(deadline))
+                )
             yield request
         finally:
             forced = False
@@ -349,6 +418,325 @@ def refresh_credentials(binary, entries):
                 )
 
 
+HISTORY_SOURCE_SUPPORTED = frozenset(("2.3.0",))
+HISTORY_SOURCE_MAX_PAYLOAD = 131072
+HISTORY_SOURCE_MARKER = "oc-box-history-source: "
+HISTORY_SOURCE_FALLBACKS = frozenset(
+    (
+        "database-missing",
+        "schedule-present",
+        "jobs-present",
+        "queued-work",
+        "execution-present",
+    )
+)
+HISTORY_SOURCE_ERRORS = frozenset(
+    (
+        "payload",
+        "database-unsafe",
+        "database-invalid",
+        "schedule-schema",
+        "system-config",
+        "job-schema",
+        "execution-schema",
+        "unsupported-version",
+        "activity",
+        "startup-timeout",
+        "lease-timeout",
+        "lease-ended",
+        "control",
+        "cleanup-failed",
+    )
+)
+
+
+class HistorySourceError(ValueError):
+    """Fixed diagnostics for the optional, non-recovery source lease."""
+
+    def __init__(self, category):
+        self.category = category if category in HISTORY_SOURCE_ERRORS else "payload"
+        super().__init__(self.category)
+
+
+def history_source_database(guards, database, *, deadline=None):
+    """Read execution metadata only; never initialize, migrate or edit a store.
+
+    This is stricter than the post-stop reader: *all* durable jobs, queued work
+    and claims exclude this optimization. They remain the original per-request
+    path's responsibility, not permission to recover or resume a job here.
+    """
+    try:
+        guards["_check_system_config"]()
+        binding = guards["_check_database"](database)
+    except guards["Refusal"] as error:
+        if error.category in HISTORY_SOURCE_FALLBACKS:
+            return error.category
+        raise HistorySourceError(error.category) from None
+    try:
+
+        def verify(info):
+            fields = ("st_dev", "st_ino", "st_uid", "st_mode", "st_nlink")
+            if (
+                binding is None
+                or not stat.S_ISREG(info.st_mode)
+                or info.st_uid != os.getuid()
+                or info.st_nlink != 1
+                or info.st_mode & 0o022
+                or any(getattr(info, key) != getattr(binding, key) for key in fields)
+            ):
+                raise HistorySourceError("database-unsafe")
+
+        verify(database.lstat())
+        with contextlib.ExitStack() as stack:
+            descriptor = os.open(database, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            stack.callback(os.close, descriptor)
+
+            def bound():
+                verify(os.fstat(descriptor))
+                verify(database.lstat())
+
+            bound()
+            connection = stack.enter_context(
+                contextlib.closing(
+                    sqlite3.connect(
+                        # Keep the canonical pathname so committed WAL rows remain
+                        # visible; /proc/fd and immutable URIs are not substitutes.
+                        database.as_uri() + "?mode=ro",
+                        uri=True,
+                        timeout=1
+                        if deadline is None
+                        else _deadline_timeout(deadline, 1),
+                    )
+                )
+            )
+            bound()
+            if deadline is not None:
+                connection.set_progress_handler(
+                    lambda: int(time.monotonic() >= deadline), 1000
+                )
+            connection.execute("PRAGMA query_only=ON")
+            connection.execute("BEGIN")
+
+            def table(name, required, primary):
+                if connection.execute(
+                    "SELECT type FROM sqlite_master WHERE name = ?", (name,)
+                ).fetchall() != [("table",)]:
+                    raise HistorySourceError(
+                        "execution-schema"
+                        if name.startswith("session")
+                        else "job-schema"
+                    )
+                columns = {
+                    row[1]: row
+                    for row in connection.execute("PRAGMA table_info('" + name + "')")
+                }
+                if (
+                    any(
+                        key not in columns or columns[key][2].upper() != kind
+                        for key, kind in required.items()
+                    )
+                    or not columns[primary][5]
+                ):
+                    raise HistorySourceError(
+                        "execution-schema"
+                        if name.startswith("session")
+                        else "job-schema"
+                    )
+
+            table(
+                "job",
+                {
+                    "notification_id": "TEXT",
+                    "id": "TEXT",
+                    "session_id": "TEXT",
+                    "kind": "TEXT",
+                    "status": "TEXT",
+                    "recovery": "TEXT",
+                },
+                "notification_id",
+            )
+            table("kv", {"key": "TEXT", "value": "TEXT"}, "key")
+            table(
+                "session_inbox",
+                {"id": "TEXT", "session_id": "TEXT", "delivery": "TEXT"},
+                "id",
+            )
+            table(
+                "session_v2",
+                {
+                    "id": "TEXT",
+                    "time_suspended": "INTEGER",
+                    "time_compacting": "INTEGER",
+                    "time_busy": "INTEGER",
+                    "time_idle": "INTEGER",
+                },
+                "id",
+            )
+            timestamps = ("time_suspended", "time_compacting", "time_busy", "time_idle")
+            if connection.execute(
+                "SELECT 1 FROM session_v2 WHERE "
+                + " OR ".join(
+                    "(" + name + " IS NOT NULL AND typeof(" + name + ") != 'integer')"
+                    for name in timestamps
+                )
+                + " LIMIT 1"
+            ).fetchone():
+                raise HistorySourceError("execution-schema")
+            # Include legacy background records: migration must not turn a
+            # superficially empty job table into resumed native work.
+            fallback = None
+            if connection.execute('SELECT 1 FROM "job" LIMIT 1').fetchone() or (
+                connection.execute(
+                    "SELECT 1 FROM kv WHERE key LIKE 'job.background/%' LIMIT 1"
+                ).fetchone()
+            ):
+                fallback = "jobs-present"
+            elif connection.execute("SELECT 1 FROM session_inbox LIMIT 1").fetchone():
+                fallback = "queued-work"
+            elif connection.execute(
+                "SELECT 1 FROM session_v2 WHERE time_suspended IS NOT NULL "
+                "OR time_compacting IS NOT NULL "
+                "OR (time_busy IS NOT NULL AND "
+                "(time_idle IS NULL OR time_busy > time_idle)) LIMIT 1"
+            ).fetchone():
+                fallback = "execution-present"
+            # Recheck schedules in the same read snapshot as jobs/claims.
+            if connection.execute("SELECT 1 FROM schedule LIMIT 1").fetchone():
+                fallback = "schedule-present"
+            bound()
+        verify(database.lstat())
+        if deadline is not None:
+            _deadline_timeout(deadline)
+    except OSError:
+        raise HistorySourceError("database-unsafe") from None
+    except sqlite3.Error:
+        if deadline is not None:
+            _deadline_timeout(deadline)
+        raise HistorySourceError("database-invalid") from None
+    return fallback
+
+
+def history_source_quiet(request, *, deadline=None):
+    """No foreground drain or job of any state may belong to this lease."""
+    for route, empty in (
+        ("/api/session/active", {}),
+        ("/api/experimental/job", []),
+    ):
+        response = (
+            request("GET", route)
+            if deadline is None
+            else request("GET", route, deadline=deadline)
+        )
+        if not isinstance(response, dict) or response.get("data") != empty:
+            raise HistorySourceError("activity")
+
+
+def _history_source_payload(deadline):
+    payload = bytearray()
+    while b"\n" not in payload:
+        if not select.select(
+            [sys.stdin], [], [], min(0.1, _deadline_timeout(deadline))
+        )[0]:
+            continue
+        chunk = os.read(0, min(4096, HISTORY_SOURCE_MAX_PAYLOAD + 1 - len(payload)))
+        if not chunk:
+            raise HistorySourceError("payload")
+        payload.extend(chunk)
+        if len(payload) > HISTORY_SOURCE_MAX_PAYLOAD:
+            raise HistorySourceError("payload")
+    if not payload.endswith(b"\n") or payload.count(b"\n") != 1:
+        raise HistorySourceError("payload")
+    return bytes(payload)
+
+
+def history_source_lease(binary):
+    """Container-only optional quiet source; never a recovery Reader or owner.
+
+    The caller holds its normal workspace lifecycle lock. There is no shared
+    service discovery, controller socket, config refresh or execution request.
+    Only the real source DATA directory survives in otherwise empty discovery
+    roots. This function runs in a disposable isolated Python process, not the
+    host interpreter: its environment/cwd changes are intentionally child-local.
+    """
+    startup_deadline = time.monotonic() + 45
+    # No asynchronous alarm is armed: native cleanup always receives its own
+    # finite wait/kill allowance, including a failure just before this deadline.
+    payload = _history_source_payload(startup_deadline)
+    if len(payload) > HISTORY_SOURCE_MAX_PAYLOAD or not payload.endswith(b"\n"):
+        raise HistorySourceError("payload")
+    settings = json.loads(payload)
+    if (
+        not isinstance(settings, dict)
+        or set(settings) != {"guards", "version", "home"}
+        or settings["version"] not in HISTORY_SOURCE_SUPPORTED
+        or not isinstance(settings["guards"], str)
+        or not isinstance(settings["home"], str)
+        or not settings["home"].startswith("/")
+        or os.path.normpath(settings["home"]) != settings["home"]
+        or "\0" in settings["home"]
+    ):
+        raise HistorySourceError("payload")
+    guards = {"__name__": "oc_box_source_guards"}
+    exec(settings["guards"], guards)
+    database = Path(settings["home"]) / ".local/share/opencode/oc-box-v2.db"
+    fallback = history_source_database(guards, database, deadline=startup_deadline)
+    if fallback:
+        print(json.dumps({"fallback": fallback}), flush=True)
+        return
+    # Clear create-time secrets before *any* native command. Reuse only the
+    # stdlib guard/environment helpers, not Reader's verified-stop lifetime.
+    with guards["_remote_environment"](settings["home"]) as (root, env):
+        os.chdir(root)
+        os.environ.clear()
+        os.environ.update(env)
+        version = subprocess.run(
+            [binary, "--version"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=_deadline_timeout(startup_deadline, 10),
+        )
+        try:
+            if version.returncode:
+                raise HistorySourceError("unsupported-version")
+            guards["_check_version"](version.stdout, settings["version"])
+        except guards["Refusal"]:
+            raise HistorySourceError("unsupported-version") from None
+        exit_info = {}
+        _deadline_timeout(startup_deadline)
+        with server(
+            binary, exit_info=exit_info, startup_deadline=startup_deadline
+        ) as request:
+            history_source_quiet(request, deadline=startup_deadline)
+            # Check once more before publishing; startup must not introduce
+            # durable work. A post-start refusal is fatal, never a fallback.
+            if history_source_database(guards, database, deadline=startup_deadline):
+                raise HistorySourceError("activity")
+            _deadline_timeout(startup_deadline)
+            print(json.dumps({"endpoint": request.endpoint}), flush=True)
+            lease_deadline = time.monotonic() + 600
+            while request.alive():
+                if time.monotonic() >= lease_deadline:
+                    raise HistorySourceError("lease-timeout")
+                if select.select(
+                    [sys.stdin],
+                    [],
+                    [],
+                    min(0.1, max(0, lease_deadline - time.monotonic())),
+                )[0]:
+                    if os.read(0, 1):
+                        raise HistorySourceError("control")
+                    break
+            else:
+                raise HistorySourceError("lease-ended")
+            final_deadline = time.monotonic() + 5
+            history_source_quiet(request, deadline=final_deadline)
+            if history_source_database(guards, database, deadline=final_deadline):
+                raise HistorySourceError("activity")
+        if exit_info != {"code": 0, "forced": False}:
+            raise HistorySourceError("cleanup-failed")
+
+
 def main(argv):
     action, binary = argv
     if action == "seed":
@@ -382,6 +770,8 @@ def main(argv):
                     sys.stdin.fileno(), 4096
                 ):
                     break
+    elif action == "history-source":
+        history_source_lease(binary)
     elif action == "plugins":
         with server(binary) as request:
             query = "?directory=" + quote(os.getcwd(), safe="")
@@ -429,6 +819,9 @@ def main(argv):
 if __name__ == "__main__":
     try:
         main(sys.argv[1:])
+    except HistorySourceError as error:
+        print(HISTORY_SOURCE_MARKER + error.category, file=sys.stderr)
+        sys.exit(2)
     except FixedError as error:
         # One of FIXED_MESSAGES only; the host re-checks it against the whitelist.
         print(MARKER + str(error), file=sys.stderr)

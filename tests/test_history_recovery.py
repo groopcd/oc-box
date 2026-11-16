@@ -547,6 +547,13 @@ class HistoryRecoveryTests(unittest.TestCase):
                     patch.object(box, "check_private_output"),
                     patch.object(box, "start_container", return_value=self.info),
                     patch.object(box, "prepare_runtime"),
+                    patch.object(
+                        box.native_tabs,
+                        "inspect",
+                        return_value=box.native_tabs.Snapshot(
+                            "missing", reason="absent"
+                        ),
+                    ),
                     patch.object(box.workspace_service, "Owner", side_effect=service),
                     patch.object(
                         box, "refresh_sessions", return_value={"last": "ses_synthetic"}

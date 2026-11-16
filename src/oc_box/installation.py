@@ -27,6 +27,7 @@ RUNTIME_FILES = (
     "workspace_control.py",
     "history_reader.py",
     "history_recovery.py",
+    "native_tabs.py",
     "session_terminal.py",
     "sharing.py",
     "plugin_compat.py",
