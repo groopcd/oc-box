@@ -207,35 +207,64 @@ class ManagementInteractionTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(app, pilot)
             result = []
             app.push_screen(
-                ActionReview("SYNTHETIC restore review", "RESTORE"), result.append
+                ActionReview("SYNTHETIC removal review", "DELETE WORKSPACE synthetic"),
+                result.append,
             )
             await pilot.pause()
-            app.screen.query_one("#operation-confirmation", Input).value = "RESTORE"
+            app.screen.query_one(
+                "#operation-confirmation", Input
+            ).value = "DELETE WORKSPACE synthetic"
             await pilot.click("#operation-confirm")
-            self.assertEqual(result, ["RESTORE"])
+            self.assertEqual(result, ["DELETE WORKSPACE synthetic"])
 
-    async def test_review_clipboard_buttons_bubble_without_confirming_an_action(self):
+    async def test_review_clipboard_shortcuts_never_confirm_an_action(self):
         app = DashboardApp(MetadataDemo(), demo=True)
         async with app.run_test(size=(120, 40)) as pilot:
             await self.settle(app, pilot)
             result = []
             app.push_screen(
-                ActionReview("SYNTHETIC management clipboard review", "CONFIRM"),
+                ActionReview("SYNTHETIC management clipboard review", "DELETE"),
                 result.append,
             )
             await pilot.pause()
-            app.copy_to_clipboard("CONFIRM")
+            self.assertFalse(
+                app.screen.query("#copy-selection, #copy-view, #paste-copied")
+            )
+            app.copy_to_clipboard("DELETE")
             field = app.screen.query_one("#operation-confirmation", Input)
             field.focus()
             await pilot.pause()
-            await pilot.click("#paste-copied")
-            self.assertEqual(field.value, "CONFIRM")
+            await pilot.press("ctrl+shift+insert")
+            self.assertEqual(field.value, "DELETE")
             self.assertEqual(result, [])
-            await pilot.click("#copy-view")
+            await pilot.press("ctrl+shift+y")
             self.assertIn("SYNTHETIC management clipboard review", app.clipboard)
             self.assertEqual(result, [])
             await pilot.click("#operation-cancel")
             self.assertEqual(result, [None])
+
+    async def test_non_destructive_review_approval_and_cancel_matrix(self):
+        app = DashboardApp(MetadataDemo(), demo=True)
+        async with app.run_test(size=(120, 40)) as pilot:
+            await self.settle(app, pilot)
+            for action in ("backup", "inspect", "restore to new directory"):
+                for approve in (False, True):
+                    with self.subTest(action=action, approve=approve):
+                        result = []
+                        app.push_screen(
+                            ActionReview(f"SYNTHETIC {action} review"), result.append
+                        )
+                        await pilot.pause()
+                        self.assertFalse(app.screen.query("#operation-confirmation"))
+                        self.assertEqual(
+                            app.screen.query_one("#operation-confirm", Button).variant,
+                            "primary",
+                        )
+                        self.assertEqual(result, [])
+                        await pilot.click(
+                            "#operation-confirm" if approve else "#operation-cancel"
+                        )
+                        self.assertEqual(result, [""] if approve else [None])
 
     async def test_child_failure_has_specific_visible_notification(self):
         from oc_box.tui_notifications import failure_notice

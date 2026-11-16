@@ -15,13 +15,13 @@ from textual.widgets import Button, DataTable, Input, Select, Static
 if __package__:
     from . import status_report, tui_operations, tui_storage
     from .tui_backend import plain
-    from .tui_clipboard import ClipboardBar, ClipboardInput, SelectableDataTable
+    from .tui_clipboard import ClipboardInput, SelectableDataTable
 else:
     import status_report
     import tui_operations
     import tui_storage
     from tui_backend import plain
-    from tui_clipboard import ClipboardBar, ClipboardInput, SelectableDataTable
+    from tui_clipboard import ClipboardInput, SelectableDataTable
 
 
 SCOPES = [
@@ -40,7 +40,7 @@ class ActionReview(ModalScreen):
     ActionReview Horizontal { height: 3; }
     """
 
-    def __init__(self, review, phrase):
+    def __init__(self, review, phrase=""):
         super().__init__()
         self.review, self.phrase = review, phrase
 
@@ -48,28 +48,36 @@ class ActionReview(ModalScreen):
         with Vertical():
             with VerticalScroll(id="operation-review-text"):
                 yield Static(plain(self.review, 32768), markup=False)
-            yield Static(f"Type exactly: {self.phrase}", markup=False)
-            yield ClipboardInput(
-                placeholder="Typed confirmation", id="operation-confirmation"
-            )
+            if self.phrase:
+                yield Static(f"Type exactly: {self.phrase}", markup=False)
+                yield ClipboardInput(
+                    placeholder="Typed confirmation", id="operation-confirmation"
+                )
             yield Static(
                 "Cancel makes no changes.",
                 id="operation-confirmation-status",
                 markup=False,
             )
-            yield ClipboardBar()
             with Horizontal():
                 yield Button("Cancel", id="operation-cancel")
-                yield Button("Confirm", id="operation-confirm", variant="error")
+                yield Button(
+                    "Confirm",
+                    id="operation-confirm",
+                    variant="error" if self.phrase else "primary",
+                )
 
     def on_button_pressed(self, event):
         if event.button.id not in {"operation-cancel", "operation-confirm"}:
-            return  # Clipboard controls must bubble to the normal app handlers.
+            return
         event.stop()
         if event.button.id == "operation-cancel":
             self.dismiss(None)
         elif event.button.id == "operation-confirm":
-            phrase = self.query_one("#operation-confirmation", Input).value
+            phrase = (
+                self.query_one("#operation-confirmation", Input).value
+                if self.phrase
+                else ""
+            )
             if phrase != self.phrase:
                 self.query_one("#operation-confirmation-status", Static).update(
                     "Confirmation does not match; nothing was changed."

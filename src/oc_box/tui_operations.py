@@ -493,13 +493,9 @@ class OperationController:
             "Passwords are entered masked in the native host terminal; no password is copied into the dashboard."
             " Whole-workspace archives can contain copied configuration/authentication and complete native history; protect the encrypted file."
         )
-        confirmation = (
-            "DELETE"
-            if action == "backup-delete"
-            else "RESTORE"
-            if action.endswith("restore")
-            else "CONFIRM"
-        )
+        # An empty phrase is explicit button approval, not authorization to
+        # skip this single-use review or its parent/child binding checks.
+        confirmation = "DELETE" if action == "backup-delete" else ""
         plan = OperationPlan(
             secrets.token_hex(24), action, confirmation, review, copy.deepcopy(request)
         )

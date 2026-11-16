@@ -25,7 +25,6 @@ if App is not None:
         MAX_CLIPBOARD_BYTES,
         ClipboardActions,
         ClipboardBar,
-        ClipboardButton,
         ClipboardInput,
         SelectableDataTable,
         SelectableRichLog,
@@ -68,6 +67,7 @@ if App is not None:
         """
         BINDINGS = [
             Binding("ctrl+shift+c", "copy_selection", priority=True),
+            Binding("ctrl+shift+y", "copy_view", priority=True),
             Binding("ctrl+shift+insert", "paste_copied_text", priority=True),
         ]
 
@@ -95,6 +95,7 @@ if App is not None:
             yield Select([("Visible choice", "visible")], value="visible")
             yield ClipboardBar()
             yield Button("Disabled action label", id="action", disabled=True)
+            yield Button("Ordinary action label", id="actionable")
 
         def on_mount(self):
             table = self.query_one(SelectableDataTable)
@@ -119,12 +120,6 @@ if App is not None:
 
         def on_button_pressed(self, event):
             self.button_calls.append(event.button.id)
-            if event.button.id == "copy-selection":
-                self.action_copy_selection(event.button.consume_selection())
-            elif event.button.id == "copy-view":
-                self.action_copy_view()
-            elif event.button.id == "paste-copied":
-                self.action_paste_copied_text()
 
     class SyntheticModal(ModalScreen):
         CSS = """
@@ -274,11 +269,12 @@ class ClipboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(terminal.get_selection(stale), ("", "\n"))
             self.assertEqual(app.copies, [])
 
-    async def test_copy_button_captures_before_mouse_up_and_preserves_input_focus(self):
+    async def test_copy_shortcut_preserves_selection_and_input_focus(self):
         app = ClipboardFixtureApp()
         async with app.run_test(size=(80, 36)) as pilot:
             search = app.query_one("#search", Input)
-            button = app.query_one("#copy-selection", ClipboardButton)
+            self.assertFalse(app.query("#copy-selection, #copy-view, #paste-copied"))
+            self.assertEqual(app.query_one(ClipboardBar).region.height, 0)
             await self.drag(
                 app,
                 pilot,
@@ -287,57 +283,61 @@ class ClipboardTests(unittest.IsolatedAsyncioTestCase):
                 app.query_one("#second"),
                 (3, 0),
             )
-            await self.mouse(app, pilot, events.MouseDown, button, (1, 0))
-            self.assertEqual(app.copies, ["first row  \nsec"])
-            await self.mouse(app, pilot, events.MouseUp, button, (1, 0))
-            self.assertIsNone(app.screen.get_selected_text())
+            self.assertEqual(app.clipboard_text_selection(), "first row  \nsec")
+            await pilot.press("ctrl+shift+c")
+            self.assertEqual(app.screen.get_selected_text(), "first row  \nsec")
             self.assertEqual(app.copies, ["first row  \nsec", "first row  \nsec"])
-            self.assertIsNone(button.consume_selection())
-            await pilot.pause(0.25)
+            app.screen.clear_selection()
             search.focus()
             await pilot.pause()
             search.selection = (4, 10)
-            await self.click(app, pilot, button)
+            # Programmatic selection is not itself a copy gesture.
+            await pilot.pause()
+            before = list(app.copies)
+            await pilot.press("ctrl+shift+c")
+            self.assertEqual(app.copies, before + ["search"])
             self.assertEqual(app.clipboard, "search")
             self.assertIs(app.focused, search)
-            self.assertTrue(button.allow_select)
+            self.assertEqual(search.selected_text, "search")
 
-    async def test_label_drag_copies_without_press_and_keyboard_clears_capture(self):
+    async def test_label_drag_copies_without_press_and_shortcut_has_no_stale_capture(
+        self,
+    ):
         app = ClipboardFixtureApp()
         async with app.run_test(size=(80, 36)) as pilot:
             search = app.query_one("#search", Input)
             search.selection = (0, 3)
-            button = app.query_one("#copy-selection", ClipboardButton)
-            await self.drag(app, pilot, button, (1, 0), button, (4, 0))
+            button = app.query_one("#actionable", Button)
+            await self.drag(app, pilot, button, (1, 0), button, (8, 0))
             self.assertEqual(len(app.copies), 1)
             self.assertEqual(app.clipboard, app.screen.get_selected_text())
             self.assertNotEqual(app.clipboard, "old")
             self.assertEqual(app.button_calls, [])
-            self.assertIsNone(button.consume_selection())
+            await pilot.press("escape")
+            search.focus()
+            await pilot.pause()
             search.selection = (0, 3)
-            await self.mouse(app, pilot, events.MouseDown, button, (1, 0))
-            button.focus()
-            await pilot.pause()
-            self.assertIsNone(button.consume_selection())
-            button.post_message(events.Key("escape", None))
-            await pilot.pause()
-            self.assertIsNone(button.consume_selection())
-            self.assertEqual(len(app.copies), 1)
-            view = app.query_one("#copy-view", ClipboardButton)
-            await self.mouse(app, pilot, events.MouseDown, view, (1, 0), button=3)
-            await self.mouse(app, pilot, events.MouseUp, view, (1, 0), button=3)
-            self.assertEqual(len(app.copies), 1)
+            await pilot.press("ctrl+shift+c")
+            self.assertEqual(app.clipboard, "old")
+            self.assertEqual(len(app.copies), 2)
+            self.assertEqual(app.button_calls, [])
+            app.screen.clear_selection()
+            button = app.query_one("#action", Button)
+            await self.mouse(app, pilot, events.MouseDown, button, (1, 0), button=3)
+            await self.mouse(app, pilot, events.MouseUp, button, (1, 0), button=3)
+            self.assertEqual(len(app.copies), 2)
+            self.assertEqual(app.button_calls, [])
 
     async def test_copy_view_includes_control_labels_but_not_hidden_model_data(self):
         app = ClipboardFixtureApp(read_only=True)
-        async with app.run_test(size=(80, 36)):
-            app.action_copy_view()
+        async with app.run_test(size=(80, 36)) as pilot:
+            await pilot.press("ctrl+shift+y")
             copied = app.clipboard
             for visible in (
                 "first row",
                 "Visible choice",
                 "Disabled action label",
-                "Copy view",
+                "Ordinary action label",
             ):
                 self.assertIn(visible, copied)
             for hidden in ("HIDDEN_WIDGET_DATA", "project-11", "LOG07"):
@@ -346,7 +346,7 @@ class ClipboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(all(not row.endswith(" ") for row in copied.splitlines()))
             self.assertFalse(copied.endswith("\n"))
 
-    async def test_modal_clipboard_bar_routes_only_the_active_visible_screen(self):
+    async def test_modal_clipboard_shortcuts_route_only_the_active_visible_screen(self):
         app = ClipboardFixtureApp()
         async with app.run_test(size=(80, 36)) as pilot:
             log = app.query_one(SelectableRichLog)
@@ -357,13 +357,11 @@ class ClipboardTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("COVERED_BACKGROUND", app.clipboard)
             await app.push_screen(SyntheticModal())
             await pilot.pause()
-            self.assertEqual(len(app.screen.query(ClipboardButton)), 3)
-            for button in app.screen.query(ClipboardButton):
-                self.assertTrue(button.tooltip)
-                self.assertTrue(button.allow_select)
-            await self.click(app, pilot, app.screen.query_one("#copy-view"))
+            self.assertFalse(app.screen.query(Button))
+            self.assertEqual(app.screen.query_one(ClipboardBar).region.height, 0)
+            await pilot.press("ctrl+shift+y")
             self.assertIn("Synthetic modal message", app.clipboard)
-            self.assertIn("Paste copied", app.clipboard)
+            self.assertIn("modal input", app.clipboard)
             self.assertNotIn("COVERED_BACKGROUND", app.clipboard)
             self.assertNotIn("HIDDEN_WIDGET_DATA", app.clipboard)
             field = app.screen.query_one("#modal-input", Input)
@@ -371,7 +369,7 @@ class ClipboardTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             field.selection = (0, 5)
             app._clipboard = "pasted"
-            await self.click(app, pilot, app.screen.query_one("#paste-copied"))
+            await pilot.press("ctrl+shift+insert")
             self.assertEqual(field.value, "pasted input")
             self.assertIs(app.focused, field)
 
