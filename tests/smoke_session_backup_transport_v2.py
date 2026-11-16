@@ -232,8 +232,10 @@ class NativeRuntime:
                 ]
             )
             require("-t" not in original and "--tty" not in original)
-            require(original[8:10] == ["python3", "-c"] and len(original) > 12)
-            names = json.loads(original[11])
+            require(
+                original[8:12] == ["python3", "-I", "-S", "-c"] and len(original) > 14
+            )
+            names = json.loads(original[13])
             require(
                 "OPENCODE_PASSWORD" not in names and names["PWD"] == str(self.project)
             )
@@ -248,7 +250,7 @@ class NativeRuntime:
             )
             # Only replace the Podman/Python environment-and-exec envelope. Keep
             # the production native CLI arguments unchanged, including --server.
-            actual = original[12:]
+            actual = original[14:]
             require(actual[0] == self.binary and "--server" in actual)
             require(actual[actual.index("--server") + 1] == self.endpoint["url"])
             kwargs["env"] = {
