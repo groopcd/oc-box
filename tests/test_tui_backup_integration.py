@@ -206,3 +206,54 @@ class BackupPrivacyIntegrationTests(unittest.IsolatedAsyncioTestCase):
                             screen.dismiss()
                     transport.submit_secret.assert_not_called()
                     app._private_interaction = False
+
+    async def test_private_submit_review_and_operation_buttons_remain_clickable(self):
+        app = DashboardApp(DemoBackend(), demo=True)
+        transport = SimpleNamespace(
+            submit_secret=Mock(), cancel=Mock(return_value=True), _cancelled=False
+        )
+        async with app.run_test(size=(110, 40)) as pilot:
+            await self.begin(app, pilot)
+            app._private_interaction = True
+            secret = PrivateSecretScreen(
+                transport, {"id": 4, "purpose": "backup-unlock"}
+            )
+            await app.push_screen(secret)
+            await pilot.pause()
+            await pilot.press(*SECRET)
+            await pilot.click("#private-secret-submit")
+            await pilot.pause()
+            transport.submit_secret.assert_called_once()
+            self.assertEqual(transport.submit_secret.call_args.args[1], bytearray())
+            secret.dismiss()
+            await pilot.pause()
+
+            reviews = []
+            await app.push_screen(
+                MetadataReview({"format": "session", "session_count": 1}),
+                reviews.append,
+            )
+            await pilot.pause()
+            await pilot.click("#metadata-approve")
+            await pilot.pause()
+            self.assertEqual(reviews, [True])
+            self.assertTrue(app._private_interaction)
+
+            operation = BackupWorkflow(None, {})
+            operation.transport = transport
+            closed = []
+            with patch.object(BackupWorkflow, "_run"):
+                await app.push_screen(operation, closed.append)
+                await pilot.pause()
+            await pilot.click("#backup-operation-close")
+            self.assertEqual(closed, [])
+            await pilot.click("#backup-operation-cancel")
+            await pilot.pause()
+            transport.cancel.assert_called_once_with()
+            self.assertIs(app.screen, operation)
+            operation._finished(None)
+            await pilot.pause()
+            await pilot.click("#backup-operation-close")
+            await pilot.pause()
+            self.assertEqual(closed, [None])
+            self.assertFalse(app._private_interaction)
