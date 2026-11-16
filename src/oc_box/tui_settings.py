@@ -79,7 +79,7 @@ class SettingsScreen(ModalScreen):
                         )
                     with Horizontal(classes="settings-row"):
                         yield Label("Refresh seconds (1–60)")
-                        yield Input(
+                        yield ClipboardInput(
                             str(self.values["interval"]),
                             type="integer",
                             validators=[Integer(minimum=1, maximum=60)],

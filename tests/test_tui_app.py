@@ -30,6 +30,7 @@ if AVAILABLE:
         TabbedContent,
     )
     from oc_box.tui_settings import SettingsScreen, DEFAULT_SETTINGS
+    from oc_box.tui_clipboard import ClipboardInput
     from oc_box.tui_status import MonitorPanel
 
 
@@ -540,6 +541,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             modal = app.screen
             interval = modal.query_one("#pref-interval", Input)
+            self.assertIsInstance(interval, ClipboardInput)
             self.assertEqual(interval.type, "integer")
             modal.query_one("#pref-session-filter", Input).value = "retained draft"
             for name, raw in (
