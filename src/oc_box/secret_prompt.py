@@ -36,21 +36,26 @@ KEYS = {
 }
 MAX_PASSPHRASE_BYTES = 1024
 _OPERATION_OBSERVER = ContextVar("oc_box_secret_operation_observer", default=None)
+_OPERATION_CANCELLATION = ContextVar(
+    "oc_box_secret_operation_cancellation", default=None
+)
 BACKUP_PURPOSES = frozenset({"backup-new", "backup-confirm", "backup-unlock"})
 
 
 @contextlib.contextmanager
-def operation_prompts(observer):
+def operation_prompts(observer, *, cancellation=None):
     """Private operation child only; the controlling TTY remains authoritative.
 
     The observer receives public readiness, never input. There is deliberately
     no environment selector, stdin fallback or secret-returning callback.
     """
     token = _OPERATION_OBSERVER.set(observer)
+    cancellation_token = _OPERATION_CANCELLATION.set(cancellation)
     try:
         yield
     finally:
         _OPERATION_OBSERVER.reset(token)
+        _OPERATION_CANCELLATION.reset(cancellation_token)
 
 
 def operation_active():
@@ -262,6 +267,11 @@ def read_secret(prompt, *, allow_reveal=False, maximum=1024, purpose=None):
         return size if size > 0 else 80
 
     def cancel(*_):
+        latch = _OPERATION_CANCELLATION.get()
+        if latch is not None:
+            if latch.is_set():
+                return
+            latch.set()
         raise KeyboardInterrupt
 
     def draw():

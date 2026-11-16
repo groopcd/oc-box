@@ -63,11 +63,14 @@ for fd in fds:
   assert secret_prompt.read_secret("Backup passphrase: ",purpose="backup-unlock")=="x"
  elif scenario=="zero":
   return 0
- elif scenario=="slow":
+ elif scenario in ("slow","prompt-slow"):
   progress(dispatched=True)
   try:
-   interaction.stage("image")
-   while True: time.sleep(0.1)
+   if scenario=="prompt-slow":
+    secret_prompt.read_secret("Backup passphrase: ",purpose="backup-unlock")
+   else:
+    interaction.stage("image")
+    while True: time.sleep(0.1)
   finally:
    interaction.stage("cleanup")
    time.sleep(0.35)
@@ -346,6 +349,25 @@ class PrivateProcessTests(unittest.TestCase):
         self.assertGreaterEqual(time.monotonic() - start, 0.35)
         self.assertEqual(result["code"], 130)
         self.assertTrue(result["uncertain"])
+        self.assertIn("inspection", [event["kind"] for event in events])
+
+    def test_prompt_interrupt_then_parent_eof_cannot_interrupt_cleanup_again(self):
+        process = self.launch("prompt-slow")
+        events = []
+
+        def received(event):
+            events.append(event)
+            if event["kind"] == "prompt":
+                process.cancel()
+            elif event["kind"] == "stage" and event["stage"] == "cleanup":
+                os.close(process.controls)
+                process.controls = None
+                process.cancel()
+
+        start = time.monotonic()
+        result = process.run(received)
+        self.assertEqual(result["code"], 130)
+        self.assertGreaterEqual(time.monotonic() - start, 0.35)
         self.assertIn("inspection", [event["kind"] for event in events])
 
     def test_parent_control_eof_interrupts_blocked_engine_and_waits_for_cleanup(self):

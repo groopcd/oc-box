@@ -433,19 +433,24 @@ def child(runtime, descriptors, *, execute, check_request):
         for number in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             previous[number] = signal.signal(number, cancel)
         interaction.start()
-        with secret_prompt.operation_prompts(interaction.observe_prompt):
+        with secret_prompt.operation_prompts(
+            interaction.observe_prompt, cancellation=cancellation
+        ):
             code = execute(
                 runtime, request, progress=state.update, interaction=interaction
             )
         if type(code) is not int:
             code = 1
     except KeyboardInterrupt:
+        cancellation.set()
         code = 130
         state["cancelled"] = True
         state["uncertain"] = state["uncertain"] or state["dispatched"]
     except Exception as caught:
         error = caught
         state["cancelled"] = getattr(caught, "reason", None) == "cancelled"
+        if state["cancelled"]:
+            cancellation.set()
         state["uncertain"] = state["uncertain"] or (
             state["cancelled"] and state["dispatched"]
         )
