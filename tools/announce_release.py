@@ -317,7 +317,7 @@ class Buffer:
     def post(self, post_id):
         require(isinstance(post_id, str) and IDENTIFIER.fullmatch(post_id), "post-id")
         return self.query(
-            "query($input: PostInput!) { post(input: $input) { id channelId text status } }",
+            "query($input: PostInput!) { post(input: $input) { id channelId text status externalLink } }",
             {"input": {"id": post_id}},
         )["post"]
 
@@ -460,7 +460,17 @@ def valid_post(post, channel_id, text_sha, post_id=None):
     )
 
 
-def announce(github, buffer, identity, release, channel_id, image, *, post_id=None):
+def announce(
+    github,
+    buffer,
+    identity,
+    release,
+    channel_id,
+    image,
+    *,
+    post_id=None,
+    approved_text=None,
+):
     """Durable claim BEFORE createPost; a missing receipt always stops a rerun."""
     bound = binding(identity, release, channel_id)
     stem = prefix(bound)
@@ -486,7 +496,14 @@ def announce(github, buffer, identity, release, channel_id, image, *, post_id=No
         valid_post(post, channel_id, claim["text_sha256"], post_id)
     else:
         require(post_id is None, "reconciliation-claim-required")
-        text, _ = content(identity, release)
+        if approved_text is None:
+            text, _ = content(identity, release)
+        else:
+            require(
+                isinstance(approved_text, str) and 0 < len(approved_text) <= 2800,
+                "approved-text",
+            )
+            text = approved_text
         data = image.read_bytes()
         require(
             0 < len(data) <= MAX_IMAGE and data.startswith(b"\x89PNG\r\n\x1a\n"),

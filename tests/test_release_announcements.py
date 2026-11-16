@@ -177,6 +177,34 @@ class AnnouncementTransactionTests(unittest.TestCase):
         self.buffer.create.assert_not_called()
         self.buffer.channel.assert_not_called()
 
+    def test_explicit_approved_text_does_not_use_or_modify_release_notes(self):
+        self.release["body"] = "Existing release notes without a highlights block."
+        original_body = self.release["body"]
+        approved = "Introducing oc-box.\nTwo channels: stable and devel."
+        self.buffer.create.return_value = {**self.post, "text": approved}
+        social.announce(
+            self.github,
+            self.buffer,
+            self.identity,
+            self.release,
+            self.channel,
+            self.image,
+            approved_text=approved,
+        )
+        self.assertEqual(self.buffer.create.call_args.args[1], approved)
+        self.assertEqual(self.release["body"], original_body)
+        self.buffer.create.reset_mock()
+        social.announce(
+            self.github,
+            self.buffer,
+            self.identity,
+            self.release,
+            self.channel,
+            self.image,
+            approved_text=approved,
+        )
+        self.buffer.create.assert_not_called()
+
     def test_claim_upload_failure_prevents_buffer_call(self):
         self.github.fail_suffix = "-claim.json"
         with self.assertRaises(social.Refusal):

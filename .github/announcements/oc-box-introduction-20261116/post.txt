@@ -1,0 +1,26 @@
+Introducing oc-box 📦
+
+Give OpenCode its own persistent Linux development environment—without installing every project dependency on your host.
+
+oc-box runs unmodified OpenCode inside rootless Podman workspaces, with:
+
+• Persistent tools, project environments and conversation history.
+• MCP servers, formatters and plugins running alongside OpenCode.
+• Seven Linux distro options, from Ubuntu and Debian to Fedora, Arch, Alpine and openSUSE.
+• An optional encrypted credential vault and full/portable workspace backups.
+• CPU, memory and process limits, plus explicit GPU/NPU device access when needed.
+• Native conversation UI, browser access and a persistent session terminal for supported OpenCode versions.
+
+Two release channels, one project:
+
+✅ Stable — the default channel for published stable releases.
+🧪 Devel — opt-in prereleases for trying new features and providing feedback. Experimental does not mean stable.
+
+Current stable: 1.6.94. Install from GitHub or PyPI, with pipx and uv supported for isolated CLI installations.
+
+Source, installation and documentation:
+https://github.com/groopcd/oc-box
+
+Rootless containers share the host kernel, and the mounted project remains writable.
+
+#OpenSource #Linux #OpenCode #Podman #DeveloperTools

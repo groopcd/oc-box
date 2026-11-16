@@ -14,7 +14,7 @@ on:
       action:
         description: Channels/preview never post; announce verifies public PyPI first
         type: choice
-        options: [channels, preview, announce, reconcile]
+        options: [channels, preview, announce, reconcile, introduce, introduction-status]
         default: channels
       release_tag:
         description: Published immutable release tag (not needed for channels)
@@ -33,6 +33,48 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  approved-introduction:
+    if: >-
+      github.repository == 'groopcd/oc-box' &&
+      github.ref == 'refs/heads/feature/linkedin-introduction' &&
+      (inputs.action == 'introduction-status' ||
+       (inputs.action == 'introduce' && vars.LINKEDIN_ANNOUNCEMENTS == 'true' &&
+        inputs.release_tag == 'v1.6.94'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # Existing release image + claim/receipt; no tag/package mutation.
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Check out the existing stable source for nonexecuting validation
+        if: inputs.action == 'introduce'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: v1.6.94
+          path: released-source
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Publish only the approved introduction, or read its status
+        env:
+          ACTION: ${{ inputs.action }}
+          POST_ID: ${{ inputs.post_id }}
+          BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
+          BUFFER_LINKEDIN_CHANNEL_ID: ${{ vars.BUFFER_LINKEDIN_CHANNEL_ID }}
+          LINKEDIN_ANNOUNCEMENTS: ${{ vars.LINKEDIN_ANNOUNCEMENTS }}
+          ANNOUNCEMENT_GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          if [[ "$ACTION" == introduce ]]; then
+            test -z "$POST_ID"
+            python -B tools/post_linkedin_introduction.py publish --source released-source
+          else
+            python -B tools/post_linkedin_introduction.py status --post-id "$POST_ID"
+          fi
+
   inspect:
     if: >-
       github.repository == 'groopcd/oc-box' &&
