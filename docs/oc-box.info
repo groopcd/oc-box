@@ -1825,10 +1825,11 @@ launch.  Set both ‘prompt.image_preview’ and ‘session.image_preview’ to
 ‘true’ in the private container's ‘~/.config/opencode/cli.json’.  These
 are terminal preferences, not ‘opencode.json’ server settings.  The
 current native V2 settings reference is at
-<https://opencode.ai/docs/cli/config>; older V2 releases may ignore
-unknown settings.  Rendering also depends on native OpenCode and
-terminal capabilities.  This option does not install a different
-OpenCode version or change permissions.
+<https://opencode.ai/docs/cli/config>.  A native V2 release supporting
+these settings is required; behavior and rendering on older releases are
+not established.  Rendering also depends on native OpenCode and terminal
+capabilities.  This option does not install a different OpenCode version
+or change permissions.
 
 oc-box merges these two fields into its host-derived CLI configuration
 snapshot, preserving all other values, including sibling prompt/session
@@ -1840,7 +1841,11 @@ non-object prompt/session sections are refused, not replaced.  Symlinked
 paths, nonregular/hard-linked CLI files, foreign-owned config
 directories/files, and group/world-writable directories/files are
 refused.  Validation runs before initial workspace registration or reset
-resource removal.
+resource removal.  The validated CLI bytes stay in launcher memory
+through credential prompts and the owning launch/reset.  That exact
+snapshot is copied into the container: edits to the host ‘cli.json’ made
+while a credential prompt is waiting are not reread after reset has
+removed resources.  They apply on the next owning launch.
 
 There is no saved workspace preference: repeat the flag on each owning
 TUI launch that needs it.  The generated file remains in the private
@@ -3304,19 +3309,19 @@ Node: Synopsis930
 Node: Description2730
 Node: Commands6242
 Node: Options84829
-Node: Lifecycle and persistence107947
-Node: Distribution images110067
-Node: Sessions and recovery114942
-Node: Devices and host permissions121527
-Node: Resource reports123873
-Node: Configuration and environment125984
-Node: Files137247
-Node: Exit status143191
-Node: Examples144044
-Node: Troubleshooting146130
-Node: Installation and manuals157482
-Node: Authors and license166734
-Node: See also167341
+Node: Lifecycle and persistence108342
+Node: Distribution images110462
+Node: Sessions and recovery115337
+Node: Devices and host permissions121922
+Node: Resource reports124268
+Node: Configuration and environment126379
+Node: Files137642
+Node: Exit status143586
+Node: Examples144439
+Node: Troubleshooting146525
+Node: Installation and manuals157877
+Node: Authors and license167129
+Node: See also167736
 
 End Tag Table
 

@@ -1612,8 +1612,9 @@ V2-only, for an **owning** start (the default command) or reset TUI launch.
 Set both `prompt.image_preview` and `session.image_preview` to `true` in the
 private container's `~/.config/opencode/cli.json`. These are terminal preferences,
 not `opencode.json` server settings. The current native V2 settings reference is
-at <https://opencode.ai/docs/cli/config>; older V2 releases may ignore unknown
-settings. Rendering also depends on native OpenCode and terminal capabilities.
+at <https://opencode.ai/docs/cli/config>. A native V2 release supporting these
+settings is required; behavior and rendering on older releases are not
+established. Rendering also depends on native OpenCode and terminal capabilities.
 This option does not install a different OpenCode version or change permissions.
 
 oc-box merges these two fields into its host-derived CLI configuration snapshot,
@@ -1625,6 +1626,10 @@ Malformed/non-object input or non-object prompt/session sections are refused,
 not replaced. Symlinked paths, nonregular/hard-linked CLI files, foreign-owned
 config directories/files, and group/world-writable directories/files are refused.
 Validation runs before initial workspace registration or reset resource removal.
+The validated CLI bytes stay in launcher memory through credential prompts and
+the owning launch/reset. That exact snapshot is copied into the container:
+edits to the host `cli.json` made while a credential prompt is waiting are not
+reread after reset has removed resources. They apply on the next owning launch.
 
 There is no saved workspace preference: repeat the flag on each owning TUI
 launch that needs it. The generated file remains in the private home after exit

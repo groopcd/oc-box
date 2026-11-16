@@ -314,6 +314,148 @@ class ImagePreviewTests(unittest.TestCase):
         self.assertEqual(self.path.read_bytes(), before)
         self.assertEqual(self.cli.read_text(), '{"prompt":false}')
 
+    def test_credential_wait_mutations_use_exact_preflight_snapshot(self):
+        cases = (
+            "malformed_json",
+            "unsafe_symlink",
+            "unsafe_write_access",
+            "unsafe_directory",
+        )
+        for command in ("start", "reset"):
+            for case in cases:
+                with self.subTest(command=command, mutation=case):
+                    if self.cli.is_dir() and not self.cli.is_symlink():
+                        (self.cli / "new-setting.json").unlink()
+                        self.cli.rmdir()
+                    else:
+                        self.cli.unlink(missing_ok=True)
+                    original = {
+                        "theme": {"name": "snapshot-before-credential-wait"},
+                        "prompt": {"paste": "full", "image_preview": False},
+                        "session": {"permissions": "prompt", "image_preview": False},
+                    }
+                    self.cli.write_text(json.dumps(original))
+                    self.cli.chmod(0o600)
+                    target = self.root / "post-preflight-cli.json"
+                    target.write_text('{"prompt":false}')
+                    target_before = target.read_bytes()
+                    container_home = self.root / (command + "-" + case)
+                    snapshots, events = [], []
+                    read_cli = box.image_preview_cli_config
+
+                    def snapshot():
+                        self.assertNotIn("credentials", events, "late CLI reread")
+                        value = read_cli()
+                        snapshots.append(value)
+                        return value
+
+                    @contextlib.contextmanager
+                    def credentials(data, args):
+                        if "credentials" not in events:
+                            self.assertEqual(len(snapshots), 1)
+                            if case == "malformed_json":
+                                self.cli.write_text("{malformed-after-preflight")
+                            elif case == "unsafe_symlink":
+                                self.cli.unlink()
+                                self.cli.symlink_to(target)
+                            elif case == "unsafe_directory":
+                                self.cli.unlink()
+                                self.cli.mkdir()
+                                (self.cli / "new-setting.json").write_text(
+                                    "post-preflight-directory-entry"
+                                )
+                            else:
+                                self.cli.chmod(0o666)
+                            events.append("credentials")
+                        self.assertNotIn("image_preview_snapshot", vars(args))
+                        self.assertNotIn("image_preview_snapshot", data)
+                        yield {}
+
+                    def remove(*args, **kwargs):
+                        self.assertIn("credentials", events)
+                        self.assertEqual(len(snapshots), 1)
+                        events.append("remove")
+
+                    def copy(arguments, **kwargs):
+                        self.assertIn("credentials", events)
+                        if command == "reset":
+                            self.assertIn("remove", events)
+                        events.append("copy")
+                        marker = original["theme"]["name"]
+                        self.assertNotIn(marker, json.dumps(list(arguments)))
+                        self.assertNotIn(marker, json.dumps(arguments.environment))
+                        sync_config.sync_config(
+                            container_home, kwargs["input"], "2.3.0"
+                        )
+                        return subprocess.CompletedProcess(
+                            arguments,
+                            0,
+                            b"Plugin dependencies will be resolved by OpenCode if needed.\n",
+                            b"",
+                        )
+
+                    with (
+                        patch.object(
+                            box, "image_preview_cli_config", side_effect=snapshot
+                        ) as read,
+                        patch.object(
+                            box, "launch_credentials", side_effect=credentials
+                        ),
+                        patch.object(box, "remove_resources", side_effect=remove),
+                        patch.object(box, "check_resource_controllers"),
+                        patch.object(box, "start_container"),
+                        patch.object(box, "stop_container"),
+                        patch.object(box, "ensure_opencode_version"),
+                        patch.object(
+                            box,
+                            "run",
+                            return_value=subprocess.CompletedProcess([], 0, "[]", ""),
+                        ),
+                        patch.object(box.subprocess, "run", side_effect=copy),
+                        patch.object(box, "launch_client", return_value=0),
+                        patch.object(
+                            workspace_service,
+                            "Owner",
+                            return_value=contextlib.nullcontext(),
+                        ),
+                    ):
+                        self.assertEqual(
+                            box.main(
+                                [
+                                    command,
+                                    "--workspace",
+                                    self.data["id"],
+                                    "--image-preview",
+                                ]
+                            ),
+                            0,
+                        )
+                    read.assert_called_once()
+                    self.assertEqual(
+                        (container_home / ".config/opencode/cli.json").read_bytes(),
+                        snapshots[0],
+                    )
+                    self.assertEqual(events.count("copy"), 1)
+                    self.assertEqual(events.count("remove"), int(command == "reset"))
+                    self.assertNotIn(original["theme"]["name"], self.path.read_text())
+                    self.assertEqual(target.read_bytes(), target_before)
+                    if case == "malformed_json":
+                        self.assertEqual(
+                            self.cli.read_text(), "{malformed-after-preflight"
+                        )
+                    elif case == "unsafe_symlink":
+                        self.assertTrue(self.cli.is_symlink())
+                        self.assertEqual(self.cli.readlink(), target)
+                    elif case == "unsafe_write_access":
+                        self.assertEqual(self.cli.stat().st_mode & 0o777, 0o666)
+                        self.assertEqual(json.loads(self.cli.read_text()), original)
+                    else:
+                        self.assertTrue(self.cli.is_dir())
+                        self.assertEqual(
+                            (self.cli / "new-setting.json").read_text(),
+                            "post-preflight-directory-entry",
+                        )
+
     def test_malformed_initial_config_fails_before_registration_or_setup(self):
         project = self.root / "fresh-project"
         project.mkdir()
