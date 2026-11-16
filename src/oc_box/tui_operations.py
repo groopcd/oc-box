@@ -490,7 +490,7 @@ class OperationController:
             "Restores never overwrite existing workspaces or session IDs.\n"
             "Close owning clients before workspace lifecycle operations. Existing locks and identity checks remain authoritative. "
             "A consistent workspace backup can stop an unowned running container and leaves it stopped.\n"
-            "Passwords are entered masked in the native host terminal; no password is copied into the dashboard."
+            "Passwords use the existing masked controlling-terminal reader, through the private dashboard prompt when embedded. Passwords are not saved."
             " Whole-workspace archives can contain copied configuration/authentication and complete native history; protect the encrypted file."
         )
         confirmation = (
@@ -535,7 +535,8 @@ class OperationController:
             self._plans.pop(plan.token, None)
 
 
-def _recognized_archive(path):
+def archive_kind(path, *, expected=None):
+    """Explicit read-only routing hint; engines still authenticate all input."""
     import tarfile
 
     if __package__:
@@ -544,7 +545,11 @@ def _recognized_archive(path):
         from backup_archive import BoundedTarInfo
     try:
         names = []
-        with tarfile.open(path, "r:", tarinfo=BoundedTarInfo) as archive:
+        path = real_path(path)
+        with (
+            _archive_source(path, expected) as source,
+            tarfile.open(fileobj=source, mode="r:", tarinfo=BoundedTarInfo) as archive,
+        ):
             for entry in archive:
                 if (
                     not entry.isfile()
@@ -570,10 +575,54 @@ def _recognized_archive(path):
         )
         if set(names) not in allowed:
             fail("unsupported-backup-file")
+        return "session" if "sessions.age" in names else "workspace"
     except OperationError:
         raise
     except Exception:
         fail("invalid-backup-file")
+
+
+@contextmanager
+def _archive_source(path, expected):
+    """Pin all ancestors and the regular input for the untrusted routing hint."""
+    parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        for component in path.parent.parts[1:]:
+            child = os.open(
+                component,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW,
+                dir_fd=parent,
+            )
+            os.close(parent)
+            parent = child
+        descriptor = os.open(
+            path.name,
+            os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+            dir_fd=parent,
+        )
+        with os.fdopen(descriptor, "rb") as source:
+            info = os.fstat(source.fileno())
+            identity = [
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+            ]
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or info.st_nlink != 1
+                or not 0 < info.st_size <= 16 * 1024**4
+                or (expected is not None and identity != expected)
+            ):
+                fail("unsafe-backup-file")
+            yield source
+    finally:
+        os.close(parent)
+
+
+def _recognized_archive(path):
+    archive_kind(path)
 
 
 def environment(runtime):
@@ -701,7 +750,29 @@ def handoff(runtime, request, *, on_result=None):
         return code
 
 
-def execute(runtime, request, *, progress=None):
+def _session_summary(value):
+    source = value.get("source", {})
+    summary = {
+        "format": "session",
+        **{
+            key: value[key]
+            for key in ("session_count", "message_count", "interrupted_assistant_count")
+            if key in value
+        },
+        **{
+            "source_" + key: source[key] for key in ("origin", "store") if key in source
+        },
+    }
+    if "id" in source:
+        summary["source_session"] = source["id"]
+    if isinstance(value.get("destination"), dict):
+        summary["destination"] = value["destination"]["directory"]
+    if "created_ids" in value:
+        summary["planned_ids"] = value["created_ids"]
+    return summary
+
+
+def execute(runtime, request, *, progress=None, interaction=None):
     def report(**fields):
         if progress is not None:
             progress(**fields)
@@ -715,6 +786,10 @@ def execute(runtime, request, *, progress=None):
     if request.get("state_root") != str(runtime.state_root().resolve()):
         fail("state-root-changed")
     report(operation=operation_tag(request["action"]))
+    if interaction is not None:
+        if request["action"] not in ACTIONS - {"backup-delete"}:
+            fail("unsupported-action")
+        interaction.stage("validating")
     if request["action"] == "workspace-purge":
         if __package__:
             from . import tui_storage
@@ -779,8 +854,16 @@ def execute(runtime, request, *, progress=None):
             )
             for identity in request["identities"]:
                 argv.extend(["--identity", identity])
-        report(dispatched=action != "workspace-inspect")
-        code = runtime.main(argv)
+        if interaction is None:
+            report(dispatched=action != "workspace-inspect")
+        if interaction is None:
+            code = runtime.main(argv)
+        else:
+            if __package__:
+                from . import backups
+            else:
+                import backups
+            code = backups.cli(runtime, argv, interaction=interaction)
         if code == 0:
             report(completed=True)
         return code
@@ -792,7 +875,10 @@ def execute(runtime, request, *, progress=None):
         from tui_sessions import SessionCatalog
     if action == "session-inspect":
         metadata = session_backups.inspect(archive, identities=request["identities"])
-        print(json.dumps(metadata, indent=2, ensure_ascii=True))
+        if interaction is None:
+            print(json.dumps(metadata, indent=2, ensure_ascii=True))
+        else:
+            interaction.inspection(_session_summary(metadata))
         report(completed=True)
         return 0
     backend = _OperationBackend(runtime, request=request)
@@ -826,6 +912,8 @@ def execute(runtime, request, *, progress=None):
             if selected != request["session"]:
                 fail("session-changed")
             report(dispatched=True)
+            if interaction is not None:
+                interaction.stage("encrypting")
             session_backups.backup(
                 catalog, selected["id"], archive, recipients=request["recipients"]
             )
@@ -837,20 +925,32 @@ def execute(runtime, request, *, progress=None):
                 identities=request["identities"],
             )
             try:
-                print(json.dumps(restore_plan.review, indent=2, ensure_ascii=True))
-                if (
-                    input(
-                        "Review the decrypted session metadata above. Type RESTORE to import fresh IDs: "
+                if interaction is None:
+                    print(json.dumps(restore_plan.review, indent=2, ensure_ascii=True))
+                    approved = (
+                        input(
+                            "Review the decrypted session metadata above. Type RESTORE to import fresh IDs: "
+                        )
+                        == "RESTORE"
                     )
-                    != "RESTORE"
-                ):
-                    print(
-                        "Session restore cancelled; no session imports were submitted."
-                    )
+                else:
+                    approved = interaction.review(_session_summary(restore_plan.review))
+                if not approved:
+                    if interaction is None:
+                        print(
+                            "Session restore cancelled; no session imports were submitted."
+                        )
                     report(cancelled=True)
                     return 1
                 report(dispatched=True)
-                session_backups.restore(catalog, restore_plan)
+                if interaction is not None:
+                    interaction.stage("verifying")
+                restored = session_backups.restore(catalog, restore_plan)
+                if interaction is not None:
+                    interaction.recovery(
+                        created_ids=restored["created_ids"],
+                        attempted_ids=restored["created_ids"],
+                    )
             finally:
                 restore_plan.close()
         print(
@@ -877,16 +977,22 @@ def execute(runtime, request, *, progress=None):
                 recovery[field] = list(values)
         if any(recovery.values()):
             report(uncertain=True)
-            print(
-                json.dumps(
-                    {
-                        "outcome": "session-import-unverified",
-                        "automatic_rollback": False,
-                        **recovery,
-                    },
-                    indent=2,
+            if interaction is not None:
+                interaction.recovery(
+                    created_ids=recovery.get("created_ids", []),
+                    attempted_ids=recovery.get("attempted_ids", []),
                 )
-            )
+            else:
+                print(
+                    json.dumps(
+                        {
+                            "outcome": "session-import-unverified",
+                            "automatic_rollback": False,
+                            **recovery,
+                        },
+                        indent=2,
+                    )
+                )
         raise
     finally:
         connection.close()
@@ -942,6 +1048,25 @@ def main(argv=None):
     }
     result_fd, notice, error, code = None, None, None, 1
     try:
+        if len(argv) == 8 and argv[::2] == [
+            "--request-fd",
+            "--event-fd",
+            "--control-fd",
+            "--tty-fd",
+        ]:
+            _host_guard()
+            if not all(value.isdigit() for value in argv[1::2]):
+                fail("invalid-options")
+            if __package__:
+                from . import tui_operation_io
+            else:
+                import tui_operation_io
+            return tui_operation_io.child(
+                box,
+                tuple(map(int, argv[1::2])),
+                execute=execute,
+                check_request=_checked_memory_fd,
+            )
         if (
             len(argv) not in (2, 4)
             or argv[0] != "--request-fd"
@@ -950,6 +1075,7 @@ def main(argv=None):
             fail("invalid-options")
         _host_guard()
         request_fd = int(argv[1])
+        os.set_inheritable(request_fd, False)
         if len(argv) == 4:
             if (
                 argv[2] != "--result-fd"
@@ -958,6 +1084,7 @@ def main(argv=None):
             ):
                 fail("invalid-options")
             result_fd = int(argv[3])
+            os.set_inheritable(result_fd, False)
             _checked_memory_fd(result_fd, "oc-box-dashboard-result")
         _checked_memory_fd(request_fd, "oc-box-dashboard-operation")
         with os.fdopen(os.dup(request_fd), "rb") as stream:

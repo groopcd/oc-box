@@ -467,6 +467,40 @@ class SessionBackupsTests(unittest.TestCase):
                 any(method in ("DELETE", "PATCH") for method, _, _ in target.calls)
             )
 
+    def test_cancel_after_native_commit_before_ack_retains_attempts_without_more_io(
+        self,
+    ):
+        self.backup()
+        original = copy.deepcopy(self.source.values)
+        for cancel_at in (1, 2):
+            with self.subTest(cancel_at=cancel_at):
+                destination = Native(transcript("ses_existing"))
+                catalog, plan = self.plan(destination)
+                planned = plan.review["created_ids"]
+                imports = []
+
+                def commit_then_interrupt(body):
+                    ident = body["info"]["id"]
+                    imports.append(ident)
+                    destination.values[ident] = copy.deepcopy(
+                        {key: body[key] for key in ("info", "messages")}
+                    )
+                    if len(imports) == cancel_at:
+                        raise KeyboardInterrupt
+                    return {"data": copy.deepcopy(body["info"])}
+
+                destination.import_hook = commit_then_interrupt
+                error = self.refused("cancelled", lambda: engine.restore(catalog, plan))
+                self.assertEqual(error.attempted_ids, tuple(planned[:cancel_at]))
+                self.assertEqual(error.created_ids, tuple(planned[: cancel_at - 1]))
+                self.assertEqual(destination.calls[-1][0], "POST")
+                self.assertEqual(len(destination.mutations()), cancel_at)
+                self.assertEqual(
+                    set(destination.values), {"ses_existing"} | set(imports)
+                )
+                self.assertIsNone(plan._payload)
+                self.assertEqual(self.source.values, original)
+
     def test_restore_plan_is_bound_integrity_checked_quiet_and_single_use(self):
         self.backup()
         for change in (

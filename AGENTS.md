@@ -94,6 +94,27 @@ their checkout ownership distinct from unrelated source and flat installations.
   Hand secrets to existing masked foreground TTY prompts in the same pinned runtime,
   not selectable dashboard inputs or recorded output. Recheck review bindings in
   the child; ordinary CLI imports remain stdlib-only.
+- `tui_operation_io.py` / `tui_backup_workflow.py`: the explicitly approved
+  backup-only in-dashboard exception to foreground prompt presentation. Use a
+  separate private controlling PTY and the existing child `secret_prompt` reader,
+  explicit bounded readiness/review/result channels, and a nonselectable custom
+  `PRIVATE_INPUT` editor/screen, never an ordinary Textual/ClipboardInput field.
+  The manager's transient private editor is now inside the secret-memory trust
+  boundary; do not claim guaranteed erasure or an unchanged memory boundary.
+  Passwords cross only the echo-disabled child PTY on completed submission, not
+  protocol metadata, widget values/reactives/messages, argv/env/files, clipboard
+  caches or logs. Hold an app-wide private-input shield through prompt closure.
+  Keep ordinary CLI controlling-TTY behavior unchanged, all production host
+  guards, native verification, archive formats and lifecycle safety authoritative.
+  Parent loss/cancel requests one interrupt and waits for real cleanup/exit;
+  no automatic retry, blind process-group kill or unacknowledged success.
+  Session cancellation retains attempted versus verified/observed fresh IDs,
+  never deletes them or imports more history to manufacture rollback. Core dumps
+  are disabled in manager/children before private input; this is not protection
+  against a same-user debugger, swap, terminal recording or all memory copies.
+  Refuse private dashboard operations when Textual debug, developer tools or
+  event-file logging are configured: framework input logging precedes widget
+  handlers, so selection exclusion alone is not a sufficient privacy boundary.
 - `session_backups.py`: encrypted bounded native V2 history, separate from full/
   portable workspace archives. Plaintext/key material stays in memory; no-overwrite
   age envelopes, quiet source checks, fresh IDs and cleared privileges on restore.

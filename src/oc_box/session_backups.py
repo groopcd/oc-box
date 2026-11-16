@@ -945,6 +945,12 @@ def restore(catalog, plan, *, read_only=False, demo=False):
             "warning": plan._review["warning"],
             "atomic": False,
         }
+    except KeyboardInterrupt:
+        # A native POST can commit before acknowledgement. Retain the attempt
+        # without probing/importing more history or rolling back any ID.
+        raise SessionBackupError(
+            "cancelled", created_ids=observed, attempted_ids=attempted
+        ) from None
     except SessionBackupError as error:
         # A transport can fail after commit. Observe only planned/attempted fresh
         # IDs, without discovering/deleting unrelated sessions or masking failure.

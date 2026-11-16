@@ -56,6 +56,7 @@ RUNTIME_FILES = (
     "tui_storage.py",
     "tui_operations.py",
     "tui_management.py",
+    "tui_operation_io.py",
     "tui_notifications.py",
     "session_backups.py",
     "version_info.py",

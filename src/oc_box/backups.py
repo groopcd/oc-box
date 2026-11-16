@@ -200,7 +200,7 @@ def activate_project(staging, destination):
         )
 
 
-def make_backup(box, args):
+def make_backup(box, args, *, interaction=None):
     crypto.validate_recipients(args.recipient or [])
     minimum = crypto.passphrase_minimum(
         args.recipient or [], getattr(args, "min_passphrase_length", None)
@@ -269,6 +269,8 @@ def make_backup(box, args):
                 "This container has additional bind mounts/volumes. Back up those separately and remove them from a dedicated backup fixture first; implicit capture of outside host data is refused."
             )
         if info["State"]["Running"]:
+            if interaction is not None:
+                interaction.dispatched()
             print(
                 "Stopping the existing container for a consistent backup. It will remain stopped; host editors/builds must also stay idle.",
                 flush=True,
@@ -301,12 +303,16 @@ def make_backup(box, args):
                     ),
                     ("registry.age", archive_command(box, "create", path.parent)),
                 ):
+                    if interaction is not None:
+                        interaction.stage(name.split(".")[0])
                     with box.loading_stage(
                         "Encrypting " + name.split(".")[0] + " backup"
                     ):
                         crypto.encrypt_stream(producer, recipient, staging / name)
                     parts[name] = crypto.digest(staging / name)
                 if not args.portable:
+                    if interaction is not None:
+                        interaction.stage("image")
                     with box.loading_stage("Capturing and encrypting container OS"):
                         image_tag = "localhost/oc-box-backup-" + uuid.uuid4().hex
                         image_id = command(
@@ -359,11 +365,15 @@ def make_backup(box, args):
                     prefix=".oc-box-backup-", dir=output.parent
                 )
                 temporary_output = Path(filename)
+                if interaction is not None:
+                    interaction.stage("publishing")
                 with os.fdopen(fd, "wb") as stream:
                     crypto.pack(staging, stream)
                     stream.flush()
                     os.fsync(stream.fileno())
                 # Atomic no-overwrite publication, not replace().
+                if interaction is not None:
+                    interaction.dispatched()
                 os.link(temporary_output, output)
                 temporary_output.unlink()
                 temporary_output = None
@@ -503,9 +513,34 @@ def validate_manifest(box, value):
         raise BackupError("Invalid extraction bound.")
 
 
-def inspect_backup(box, args):
+def dashboard_summary(manifest):
+    """Explicit metadata projection; unknown manifest/config fields stay private."""
+    return {
+        "format": "workspace",
+        **{
+            key: manifest[key]
+            for key in (
+                "kind",
+                "created_at",
+                "architecture",
+                "source_workspace_id",
+                "project",
+                "container_project",
+            )
+        },
+        "distro": manifest["configuration"]["distro"],
+        "session_count": len(manifest["sessions"].get("sessions", [])),
+    }
+
+
+def inspect_backup(box, args, *, interaction=None):
+    if interaction is not None:
+        interaction.stage("unlocking")
     with crypto.opened(args.file, args.identity or []) as (manifest, _, _):
         validate_manifest(box, manifest)
+        if interaction is not None:
+            interaction.inspection(dashboard_summary(manifest))
+            return
         summary = json.loads(json.dumps(manifest))
         summary["configuration"]["podman_args"] = [
             option.split("=", 1)[0] + "=[value omitted]"
@@ -514,7 +549,7 @@ def inspect_backup(box, args):
         print(json.dumps(summary, indent=2))
 
 
-def restore_backup(box, args):
+def restore_backup(box, args, *, interaction=None):
     box.check_backend(env=crypto.environment(), feature="restore")
     if args.project is None:
         raise BackupError(
@@ -547,6 +582,8 @@ def restore_backup(box, args):
         )
     if not destination.name or destination.name in (".", ".."):
         raise BackupError("Invalid restore destination.")
+    if interaction is not None:
+        interaction.stage("unlocking")
     with crypto.opened(args.file, args.identity or []) as (
         manifest,
         encrypted,
@@ -558,6 +595,13 @@ def restore_backup(box, args):
                 "Backup CPU architecture differs from this host. Native home/OS binaries cannot be restored safely here."
             )
         config = manifest["configuration"]
+        if interaction is not None and not interaction.review(
+            {
+                **dashboard_summary(manifest),
+                "destination": str(destination),
+            }
+        ):
+            raise KeyboardInterrupt
         print(
             "Restore keeps original in-container project/home paths to preserve session and tool references. It creates fresh host workspace IDs and leaves the container stopped."
         )
@@ -566,6 +610,8 @@ def restore_backup(box, args):
                 "Archived device mappings/additional Podman options are NOT activated; reconfigure them explicitly after inspecting backup-info."
             )
         ident = uuid.uuid4().hex
+        if interaction is not None:
+            interaction.dispatched()
         directory = box.state_root() / "workspaces" / ident
         project_stage = Path(
             tempfile.mkdtemp(prefix=".oc-box-restore-", dir=destination.parent)
@@ -629,6 +675,8 @@ def restore_backup(box, args):
                 )
                 box.atomic_json(directory / "workspace.json", data)
                 with box.loading_stage("Restoring project into private staging"):
+                    if interaction is not None:
+                        interaction.stage("project")
                     crypto.decrypt_stream(
                         encrypted / "project.age",
                         private,
@@ -671,6 +719,8 @@ def restore_backup(box, args):
                 volume_created = True
                 volume = owned_volume(box, data)
                 with box.loading_stage("Restoring private home and session database"):
+                    if interaction is not None:
+                        interaction.stage("home")
                     crypto.decrypt_stream(
                         encrypted / "home.age",
                         private,
@@ -687,6 +737,8 @@ def restore_backup(box, args):
                 # evidence below, not active control data for this new ID.
                 registry_stage = directory / "recovered-registry"
                 registry_stage.mkdir(mode=0o700)
+                if interaction is not None:
+                    interaction.stage("registry")
                 crypto.decrypt_stream(
                     encrypted / "registry.age",
                     private,
@@ -716,6 +768,8 @@ def restore_backup(box, args):
                 ):
                     raise BackupError("Recovered registry does not match manifest.")
                 if manifest["kind"] == "full":
+                    if interaction is not None:
+                        interaction.stage("image")
                     with box.loading_stage("Loading backed-up container OS image"):
                         crypto.decrypt_stream(
                             encrypted / "image.age",
@@ -765,6 +819,16 @@ def restore_backup(box, args):
                 data.pop("restore_staging_project", None)
                 box.atomic_json(directory / "workspace.json", data)
                 success = True
+            if interaction is not None:
+                interaction.inspection(
+                    {
+                        "format": "workspace",
+                        "workspace_id": ident,
+                        "destination": str(destination),
+                        "kind": manifest["kind"],
+                        "status": "stopped",
+                    }
+                )
             print(f"Restored stopped workspace {ident} at {destination}.")
             print(f"Resume with: oc-box --workspace {ident}")
             print(
@@ -818,6 +882,18 @@ def restore_backup(box, args):
                         f"Restore cleanup could not remove all new resources. Incomplete workspace {ident} retained for host inspection/purge; it cannot be started.",
                         file=sys.stderr,
                     )
+                    if interaction is not None:
+                        try:
+                            interaction.inspection(
+                                {
+                                    "format": "workspace",
+                                    "workspace_id": ident,
+                                    "destination": str(destination),
+                                    "status": "incomplete",
+                                }
+                            )
+                        except (Exception, KeyboardInterrupt):
+                            pass  # never interrupt remaining cleanup to report UI metadata
             if project_stage.exists():
                 remove_staged_tree(project_stage)
 
@@ -861,7 +937,7 @@ def parser_for(action):
     return parser
 
 
-def cli(box, arguments):
+def cli(box, arguments, *, interaction=None):
     action = arguments[0]
     args = parser_for(action).parse_args(arguments[1:])
     if os.environ.get("OC_BOX_CONTAINER") == "1":
@@ -886,11 +962,20 @@ def cli(box, arguments):
             handlers[sig] = signal.signal(sig, cancel)
         try:
             if action == "backup":
-                make_backup(box, args)
+                if interaction is None:
+                    make_backup(box, args)
+                else:
+                    make_backup(box, args, interaction=interaction)
             elif action == "backup-info":
-                inspect_backup(box, args)
+                if interaction is None:
+                    inspect_backup(box, args)
+                else:
+                    inspect_backup(box, args, interaction=interaction)
             else:
-                restore_backup(box, args)
+                if interaction is None:
+                    restore_backup(box, args)
+                else:
+                    restore_backup(box, args, interaction=interaction)
         except (KeyError, TypeError, IndexError, UnicodeError) as exc:
             raise BackupError(
                 "Invalid backup metadata or resource response; no existing workspace was overwritten."
