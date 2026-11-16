@@ -1,0 +1,406 @@
+"""Synthetic headless performance contracts, not host/runtime acceptance."""
+
+import asyncio
+import copy
+import importlib.util
+import threading
+import unittest
+from unittest.mock import Mock, patch
+
+AVAILABLE = all(importlib.util.find_spec(name) for name in ("textual", "pyte"))
+if AVAILABLE:
+    from textual.widgets import DataTable, Input, RichLog, Select
+
+    from oc_box.tui_app import DashboardApp
+    from oc_box.tui_logs import LogEntry
+    from oc_box.tui_status import MonitorPanel
+    from tools.benchmark_tui_display import (
+        SyntheticBackend,
+        benchmark,
+        synthetic_sessions,
+    )
+
+
+@unittest.skipUnless(AVAILABLE, "optional Textual/pyte dependencies are not installed")
+class DisplayPerformanceTests(unittest.IsolatedAsyncioTestCase):
+    async def ready(self, app, pilot):
+        await app.workers.wait_for_complete()
+        await pilot.pause()
+        app._poll_timer.pause()
+
+    async def test_fixed_workload_bounds_work_not_wall_clock(self):
+        result = await benchmark()
+        for scenario in (
+            "ten_unchanged_reports",
+            "ten_unchanged_session_renders",
+            "five_unchanged_log_snapshots",
+        ):
+            with self.subTest(scenario=scenario):
+                counts = result[scenario]
+                for key in (
+                    "workspace_clear",
+                    "workspace_add",
+                    "workspace_update",
+                    "session_clear",
+                    "session_add",
+                    "session_update",
+                    "favorite_reads",
+                    "log_search",
+                    "log_clear",
+                    "log_write",
+                    "backend_queries",
+                ):
+                    self.assertEqual(counts[key], 0, (scenario, key))
+        sessions = result["session_typing_burst"]
+        self.assertEqual(sessions["session_clear"], 1)
+        self.assertEqual(sessions["session_add"], 10)
+        self.assertEqual(sessions["favorite_reads"], 0)
+        logs = result["log_typing_burst"]
+        self.assertEqual(logs["log_search"], 1)
+        self.assertEqual(logs["log_clear"], 1)
+        self.assertEqual(logs["log_write"], 10)
+        self.assertEqual(logs["backend_queries"], 0)
+        # Histories continue recording every sample, even identical readings.
+        self.assertGreaterEqual(result["ten_unchanged_reports"]["monitor_update"], 10)
+
+    async def test_changed_cells_and_structural_refresh_preserve_cursor_and_scroll(
+        self,
+    ):
+        backend = SyntheticBackend()
+        app = DashboardApp(backend, read_only=True, demo=True)
+        async with app.run_test(size=(120, 35)) as pilot:
+            await self.ready(app, pilot)
+            app.catalog = Mock(origin="host", store="synthetic-store")
+            app.sessions = synthetic_sessions()
+            app._render_sessions()
+            app.action_tab("sessions")
+            await pilot.pause()
+            table = app.query_one("#session-table", DataTable)
+            table.move_cursor(row=80)
+            table.scroll_to(y=60, animate=False, force=True)
+            await pilot.pause()
+            selected = app._session()["id"]
+            scroll, cursor = table.scroll_offset, table.cursor_row
+            with (
+                patch.object(table, "clear", wraps=table.clear) as clear,
+                patch.object(table, "update_cell", wraps=table.update_cell) as update,
+            ):
+                app.sessions[80]["title"] = "Updated synthetic title"
+                app._render_sessions()
+                await pilot.pause()
+                clear.assert_not_called()
+                update.assert_called_once()
+                self.assertEqual(app._session()["id"], selected)
+                self.assertEqual(table.cursor_row, cursor)
+                self.assertEqual(table.scroll_offset, scroll)
+                self.assertEqual(
+                    table.get_row(selected)[2].plain, "Updated synthetic title"
+                )
+                # Sorting changes are structural, but the selected native ID
+                # and paused viewport must not jump to the beginning.
+                app.sessions[0]["time"]["updated"] = -1
+                app._render_sessions()
+                await pilot.pause()
+                clear.assert_called_once()
+                self.assertEqual(app._session()["id"], selected)
+                self.assertEqual(table.scroll_offset, scroll)
+                # Identical native IDs from a different store are not the
+                # previous selection namespace.
+                app.catalog = Mock(origin="host", store="another-synthetic-store")
+                app._render_sessions()
+                await pilot.pause()
+                self.assertEqual(table.cursor_row, 0)
+
+    async def test_status_changes_update_one_cell_and_keep_unknowns_and_sampling(self):
+        backend = SyntheticBackend()
+        app = DashboardApp(backend, read_only=True, demo=True)
+        async with app.run_test(size=(120, 35)) as pilot:
+            await self.ready(app, pilot)
+            table = app.query_one("#workspaces", DataTable)
+            table.move_cursor(row=20)
+            table.scroll_to(y=15, animate=False, force=True)
+            await pilot.pause()
+            selected, scroll = app.selected, table.scroll_offset
+            panel = app.query_one("#full-diagnostics", MonitorPanel)
+            report = copy.deepcopy(app.report)
+            report["workspaces"][20]["state"] = "stopped"
+            report["workspaces"][20]["metrics"]["cpu_percent"] = None
+            report["host"]["cpu_percent"] = None
+            samples = len(app.cpu_history)
+            with (
+                patch.object(table, "clear", wraps=table.clear) as clear,
+                patch.object(table, "update_cell", wraps=table.update_cell) as update,
+            ):
+                app._apply_report(report, False)
+                await pilot.pause()
+                clear.assert_not_called()
+                update.assert_called_once()
+                self.assertEqual(app.selected, selected)
+                self.assertEqual(table.scroll_offset, scroll)
+                self.assertEqual(table.get_row(selected)[1].plain, "stopped")
+                self.assertIsNone(app.cpu_history[-1])
+                self.assertEqual(len(app.cpu_history), samples + 1)
+                self.assertIsNone(panel.snapshot["metrics"]["cpu_percent"])
+                self.assertIn("n/a", panel.render().plain)
+
+    async def test_debounce_rejects_queued_stale_callbacks_and_uses_current_source(
+        self,
+    ):
+        app = DashboardApp(SyntheticBackend(), read_only=True, demo=True)
+        async with app.run_test(size=(120, 35)) as pilot:
+            await self.ready(app, pilot)
+            app.catalog = Mock(origin="host", store="synthetic-store")
+            app.sessions = synthetic_sessions()
+            app._render_sessions()
+            field = app.query_one("#session-search", Input)
+            callbacks, timers = [], []
+
+            def timer(_delay, callback):
+                callbacks.append(callback)
+                handle = Mock()
+                timers.append(handle)
+                return handle
+
+            with patch.object(app, "set_timer", side_effect=timer):
+                for value in ("Synthetic", "Synthetic 09", "Synthetic 099"):
+                    with field.prevent(Input.Changed):
+                        field.value = value
+                    app.on_input_changed(Input.Changed(field, value))
+            for handle in timers[:-1]:
+                handle.stop.assert_called_once()
+            table = app.query_one("#session-table", DataTable)
+            with patch.object(table, "clear", wraps=table.clear) as clear:
+                for callback in callbacks[:-1]:
+                    callback()
+                clear.assert_not_called()
+                callbacks[-1]()
+                clear.assert_called_once()
+                self.assertEqual(table.row_count, 10)
+                # A disconnected source cannot be resurrected by a queued
+                # callback, which reads current metadata rather than capturing it.
+                app._disconnect_sessions()
+                callbacks[-1]()
+                self.assertIsNone(app.catalog)
+                self.assertEqual(table.row_count, 0)
+
+    async def test_pilot_typing_and_clear_leave_final_value_and_caret_live(self):
+        app = DashboardApp(SyntheticBackend(), read_only=True, demo=True)
+        async with app.run_test(size=(120, 35)) as pilot:
+            await self.ready(app, pilot)
+            app.catalog = Mock(origin="host", store="synthetic-store")
+            app.sessions = synthetic_sessions()
+            app._render_sessions()
+            app.action_tab("sessions")
+            await pilot.pause()
+            field = app.query_one("#session-search", Input)
+            field.focus()
+            await pilot.press(*"Synthetic 099")
+            await pilot.pause(0.25)
+            self.assertEqual(field.value, "Synthetic 099")
+            self.assertEqual(field.cursor_position, len(field.value))
+            self.assertTrue(field.has_focus)
+            self.assertEqual(len(app.visible_sessions), 10)
+            await pilot.press("ctrl+a", "backspace")
+            await pilot.pause(0.25)
+            self.assertEqual(field.value, "")
+            self.assertEqual(field.cursor_position, 0)
+            self.assertEqual(len(app.visible_sessions), 1000)
+            self.assertTrue(field.has_focus)
+
+    async def test_slow_favorites_are_off_ui_thread_cached_and_store_qualified(self):
+        app = DashboardApp(SyntheticBackend())
+        entered, finish = threading.Event(), threading.Event()
+        ui_thread = threading.get_ident()
+        store = Mock()
+
+        def read():
+            self.assertNotEqual(threading.get_ident(), ui_thread)
+            entered.set()
+            finish.wait(5)
+            return [{"origin": "host", "store": "synthetic-store", "id": "ses_0000"}]
+
+        store.list.side_effect = read
+        async with app.run_test(size=(120, 35)) as pilot:
+            await self.ready(app, pilot)
+            app.favorites = store
+            app.catalog = Mock(origin="host", store="synthetic-store")
+            app.sessions = synthetic_sessions()
+            app._render_sessions()
+            app._refresh_favorites()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(entered.wait), 3)
+                field = app.query_one("#log-search", Input)
+                field.focus()
+                await pilot.press("r", "e", "a", "d", "y")
+                await pilot.pause(0.2)
+                self.assertEqual(field.value, "ready")
+                self.assertEqual(len(app.logs.search(app.log_query)), 0)
+                for _ in range(3):
+                    app._render_sessions()
+                    app._refresh_favorites()
+                store.list.assert_called_once()
+            finally:
+                finish.set()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            table = app.query_one("#session-table", DataTable)
+            self.assertEqual(table.get_row("ses_0000")[0].plain, "★")
+            app.catalog = Mock(origin="host", store="other-synthetic-store")
+            app._render_sessions()
+            self.assertEqual(table.get_row("ses_0000")[0].plain, "")
+
+    async def test_favorite_toggle_runs_off_ui_and_late_result_cannot_cross_stores(
+        self,
+    ):
+        app = DashboardApp(SyntheticBackend())
+        entered, finish = threading.Event(), threading.Event()
+        store = Mock()
+        ui_thread = threading.get_ident()
+
+        def toggle(origin, source, ident):
+            self.assertNotEqual(threading.get_ident(), ui_thread)
+            self.assertEqual(
+                (origin, source, ident), ("host", "synthetic-store", "ses_0000")
+            )
+            entered.set()
+            finish.wait(5)
+
+        store.toggle.side_effect = toggle
+        store.list.return_value = [
+            {"origin": "host", "store": "synthetic-store", "id": "ses_0000"}
+        ]
+        async with app.run_test(size=(120, 35)) as pilot:
+            await self.ready(app, pilot)
+            app.favorites = store
+            app.catalog = Mock(origin="host", store="synthetic-store")
+            app.sessions = synthetic_sessions()
+            app._render_sessions()
+            app._favorite()
+            try:
+                await asyncio.wait_for(asyncio.to_thread(entered.wait), 3)
+                app.catalog = Mock(origin="host", store="different-synthetic-store")
+                app._render_sessions()
+                app._favorite()
+                store.toggle.assert_called_once()
+            finally:
+                finish.set()
+            await app.workers.wait_for_complete()
+            await pilot.pause()
+            self.assertEqual(
+                app.query_one("#session-table", DataTable).get_row("ses_0000")[0].plain,
+                "",
+            )
+            # CLI read-only remains a hard fence before starting any I/O worker.
+            app.read_only = True
+            app._favorite()
+            store.toggle.assert_called_once()
+
+    async def test_pending_filters_are_invalidated_and_stopped_at_unmount(self):
+        app = DashboardApp(SyntheticBackend(), read_only=True, demo=True)
+        async with app.run_test(size=(120, 35)) as pilot:
+            await self.ready(app, pilot)
+            callbacks, timers = [], []
+
+            def timer(_delay, callback):
+                callbacks.append(callback)
+                handle = Mock()
+                timers.append(handle)
+                return handle
+
+            with patch.object(app, "set_timer", side_effect=timer):
+                app._schedule_filter("sessions")
+                app._schedule_filter("logs")
+        for handle in timers:
+            handle.stop.assert_called_once()
+        with (
+            patch.object(app, "_render_sessions") as sessions,
+            patch.object(app, "_render_logs") as logs,
+        ):
+            for callback in callbacks:
+                callback()
+            sessions.assert_not_called()
+            logs.assert_not_called()
+
+    async def test_appended_logs_do_not_rebuild_or_move_a_paused_viewport(self):
+        backend = SyntheticBackend()
+        app = DashboardApp(backend, read_only=True, demo=True)
+        async with app.run_test(size=(120, 35)) as pilot:
+            await self.ready(app, pilot)
+            app.action_logs()
+            await pilot.pause()
+            output = app.query_one("#log-output", RichLog)
+            # Replace the source with a short tail first; then append one line
+            # while staying under the existing bounded retention limit.
+            entries = backend.logs()[:100]
+            app._apply_logs(entries)
+            await pilot.pause()
+            output.scroll_to(y=20, animate=False, force=True)
+            await pilot.pause()
+            scroll = output.scroll_offset
+            with (
+                patch.object(output, "clear", wraps=output.clear) as clear,
+                patch.object(output, "write", wraps=output.write) as write,
+            ):
+                app._apply_logs(
+                    entries
+                    + [LogEntry("2026-01-01T13:00:00Z", "oc-box", "info", "New")]
+                )
+                await pilot.pause()
+                clear.assert_not_called()
+                write.assert_called_once()
+                self.assertEqual(output.scroll_offset, scroll)
+                self.assertIn("New", "".join(line.text for line in output.lines))
+
+    async def test_background_queries_remain_serial_while_input_is_usable(self):
+        class HeldBackend(SyntheticBackend):
+            hold = False
+
+            def __init__(self):
+                super().__init__()
+                self.entered = {"status": threading.Event(), "logs": threading.Event()}
+                self.finish = threading.Event()
+                self.counts = {"status": 0, "logs": 0}
+
+            def collect(self, *, scan_storage=False):
+                if self.hold:
+                    self.counts["status"] += 1
+                    self.entered["status"].set()
+                    self.finish.wait(5)
+                return super().collect(scan_storage=scan_storage)
+
+            def logs(self, workspace=None):
+                if self.hold:
+                    self.counts["logs"] += 1
+                    self.entered["logs"].set()
+                    self.finish.wait(5)
+                return super().logs(workspace)
+
+        backend = HeldBackend()
+        app = DashboardApp(backend, read_only=True, demo=True)
+        async with app.run_test(size=(120, 35)) as pilot:
+            await self.ready(app, pilot)
+            self.assertEqual(app.query_one("#refresh-interval", Select).value, 1)
+            backend.hold = True
+            app.refresh_report()
+            app.refresh_logs()
+            try:
+                for event in backend.entered.values():
+                    await asyncio.wait_for(asyncio.to_thread(event.wait), 3)
+                for _ in range(5):
+                    app.refresh_report()
+                    app.refresh_logs()
+                    app._tick()
+                field = app.query_one("#log-search", Input)
+                field.focus()
+                await pilot.press("1", "9", "9")
+                await pilot.pause(0.25)
+                self.assertEqual(field.value, "199")
+                self.assertTrue(field.has_focus)
+                self.assertEqual(backend.counts, {"status": 1, "logs": 1})
+            finally:
+                backend.finish.set()
+            await app.workers.wait_for_complete()
+
+
+if __name__ == "__main__":
+    unittest.main()
