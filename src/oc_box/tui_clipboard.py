@@ -18,6 +18,7 @@ from textual.binding import Binding
 from textual.content import Content
 from textual.containers import Horizontal
 from textual.errors import NoWidget
+from textual.geometry import Offset
 from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import Button, DataTable, Footer, Input, RichLog
@@ -435,9 +436,78 @@ class ClipboardActions:
 
 
 class ClipboardInput(SelectableViewport, Input):
-    """Standard input keys, with non-destructive refusal of an oversized cut."""
+    """Native Input editing plus a click-only clear action in its right padding.
+
+    The line-API Input isn't a container. Composite a single cell after its
+    normal border/padding rendering instead of wrapping/replacing the Input or
+    stealing text/cursor columns. The action is not selectable field content.
+    Passwords, disabled fields and paddingless/empty fields have no clear action.
+    """
 
     BINDINGS = [Binding("ctrl+a,super+a", "select_all", show=False)]
+
+    @property
+    def _clear_offset(self):
+        if (
+            self.password
+            or self.is_disabled
+            or not self.value
+            or not self.styles.padding.right
+            or not self.content_region.width
+            or not self.content_region.height
+        ):
+            return None
+        return Offset(
+            self.content_region.right + self.styles.padding.right - 1 - self.region.x,
+            self.content_region.y - self.region.y,
+        )
+
+    def render_lines(self, crop):
+        lines = super().render_lines(crop)
+        offset = self._clear_offset
+        if offset is not None and crop.contains(*offset):
+            x, y = offset - crop.offset
+            line = lines[y]
+            style = self.get_component_rich_style("input--placeholder")
+            lines = list(lines)
+            lines[y] = Strip.join(
+                (line.crop(0, x), Strip([Segment("×", style)]), line.crop(x + 1))
+            )
+        return lines
+
+    def on_mouse_down(self, event):
+        self._clear_pointer = None
+        if self._clear_offset is not None and event.offset == self._clear_offset:
+            if event.button == 1:
+                self._clear_pointer = event.screen_offset
+            # Do not let native Input start a text-selection gesture on ×.
+            event.stop()
+            event.prevent_default()
+
+    def on_mouse_move(self, event):
+        if event.screen_offset != getattr(self, "_clear_pointer", None):
+            self._clear_pointer = None
+
+    def on_leave(self):
+        self._clear_pointer = None
+
+    def on_click(self, event):
+        pointer = getattr(self, "_clear_pointer", None)
+        self._clear_pointer = None
+        if pointer is not None or (
+            self._clear_offset is not None and event.offset == self._clear_offset
+        ):
+            event.stop()
+            event.prevent_default()
+            if (
+                event.button == 1
+                and event.screen_offset == pointer
+                and event.offset == self._clear_offset
+            ):
+                # The native reactive setter validates/clamps selection and
+                # posts exactly one ordinary Input.Changed; never submit.
+                self.value = ""
+                self.focus()
 
     def action_cut(self):
         if self.selected_text and not _fits_clipboard(self.selected_text):

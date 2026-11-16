@@ -153,6 +153,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     .toolbar Button { min-width: 10; margin-right: 1; }
     .toolbar Button:last-child { margin-right: 0; }
     .toolbar Select { width: 24; }
+    #session-source-tools Select { width: 1fr; min-width: 12; }
+    #session-source-tools Button { width: auto; padding: 0 1; }
     .toolbar Label { width: auto; padding: 1; }
     .toolbar .setting-label { width: 28; padding: 1; }
     .toolbar SelectCurrent > #label { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
@@ -294,7 +296,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                             markup=False,
                         )
                 with TabPane("Sessions", id="sessions"):
-                    with Horizontal(classes="toolbar"):
+                    with Horizontal(id="session-source-tools", classes="toolbar"):
                         yield Select(
                             [
                                 ("Host · all projects", "global"),
@@ -306,6 +308,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                             id="session-scope",
                         )
                         yield Button("Connect / refresh", id="connect-sessions")
+                        yield Button("Disconnect", id="disconnect-sessions")
                     with Horizontal(id="session-progress"):
                         yield LoadingIndicator(id="session-spinner")
                         yield Static(
@@ -337,7 +340,6 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                             variant="error",
                             disabled=self.read_only,
                         )
-                        yield Button("Disconnect", id="disconnect-sessions")
                 with TabPane("Terminals", id="terminals"):
                     yield Static(
                         "Explicit connection only. A connection may create a native session shell "
