@@ -297,7 +297,7 @@ class PrivateEditorTests(unittest.IsolatedAsyncioTestCase):
                 workflow.dismiss()
 
     async def test_real_private_process_roundtrip_stays_inside_dashboard(self):
-        from test_tui_operation_io import FIXTURE, SOURCE, VALUE as CHILD_VALUE
+        from tests.test_tui_operation_io import FIXTURE, SOURCE, VALUE as CHILD_VALUE
 
         with tempfile.TemporaryDirectory(
             prefix="oc-box-private-dashboard-"
