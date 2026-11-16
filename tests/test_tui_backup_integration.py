@@ -10,6 +10,7 @@ if AVAILABLE:
     from oc_box.tui import DemoBackend
     from oc_box.tui_app import DashboardApp
     from oc_box.tui_backup_workflow import (
+        BackupWorkflow,
         MetadataReview,
         PrivateSecretScreen,
         SecretEditor,
@@ -152,3 +153,56 @@ class BackupPrivacyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, [True])
             self.assertTrue(app._private_interaction)
             app._private_interaction = False
+
+    async def test_ctrl_c_cancels_private_screens_without_clipboard_actions(self):
+        for kind in ("password", "review", "operation"):
+            with self.subTest(kind=kind):
+                app = DashboardApp(DemoBackend(), demo=True)
+                transport = SimpleNamespace(
+                    submit_secret=Mock(),
+                    cancel=Mock(return_value=True),
+                    _cancelled=False,
+                )
+                async with app.run_test(size=(110, 40)) as pilot:
+                    await self.begin(app, pilot)
+                    result = []
+                    if kind == "password":
+                        screen = PrivateSecretScreen(
+                            transport, {"id": 3, "purpose": "backup-unlock"}
+                        )
+                    elif kind == "review":
+                        screen = MetadataReview(
+                            {"format": "session", "session_count": 1}
+                        )
+                    else:
+                        screen = BackupWorkflow(None, {})
+                        screen.transport = transport
+                    with patch.object(BackupWorkflow, "_run"):
+                        await app.push_screen(screen, result.append)
+                        await pilot.pause()
+                    app._private_interaction = True
+                    if kind == "password":
+                        await pilot.press(*SECRET)
+                    with patch.object(app, "_write_clipboard") as write:
+                        await pilot.press("ctrl+c")
+                        for _ in range(100):
+                            await pilot.pause(0.02)
+                            if result or transport.cancel.called:
+                                break
+                        write.assert_not_called()
+                    if kind == "review":
+                        self.assertEqual(result, [False])
+                        transport.cancel.assert_not_called()
+                    else:
+                        transport.cancel.assert_called_once_with()
+                        self.assertIs(app.screen, screen)
+                        if kind == "password":
+                            self.assertEqual(
+                                screen.query_one(SecretEditor)._private_editor.chars, []
+                            )
+                            screen.dismiss()
+                        else:
+                            screen._finished(None)
+                            screen.dismiss()
+                    transport.submit_secret.assert_not_called()
+                    app._private_interaction = False
