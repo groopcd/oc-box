@@ -14,6 +14,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -1357,7 +1358,82 @@ def rewrite_config(value, key=None):
     )
 
 
-def config_archive(data):
+def image_preview_cli_config():
+    """Build a private CLI copy, never editing or replacing the host input."""
+    source = (
+        Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
+        / "opencode"
+    )
+    refusal = (
+        "--image-preview requires a regular, user-owned cli.json and config "
+        "directory without symlinks or group/world write access."
+    )
+    try:
+        # Do not silently follow a copied-config selector through a symlink.
+        if any(path.is_symlink() for path in (source, *source.parents)):
+            raise BoxError(refusal)
+        try:
+            directory = os.open(source, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            directory = None
+        text = None
+        if directory is not None:
+            try:
+                info = os.fstat(directory)
+                if info.st_uid != os.getuid() or info.st_mode & 0o022:
+                    raise BoxError(refusal)
+                try:
+                    descriptor = os.open(
+                        "cli.json",
+                        os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                        dir_fd=directory,
+                    )
+                except FileNotFoundError:
+                    descriptor = None
+                if descriptor is not None:
+                    with os.fdopen(descriptor, encoding="utf-8") as stream:
+                        info = os.fstat(stream.fileno())
+                        if (
+                            not stat.S_ISREG(info.st_mode)
+                            or info.st_uid != os.getuid()
+                            or info.st_nlink != 1
+                            or info.st_mode & 0o022
+                        ):
+                            raise BoxError(refusal)
+                        text = stream.read()
+            finally:
+                os.close(directory)
+        config = (
+            parse_jsonc(text)
+            if text is not None
+            else {"$schema": "https://opencode.ai/v2/cli.json"}
+        )
+        for key in ("prompt", "session"):
+            section = config.setdefault(key, {})
+            if not isinstance(section, dict):
+                raise ValueError("CLI section must be an object")
+            section["image_preview"] = True
+        return (json.dumps(config, indent=2, allow_nan=False) + "\n").encode()
+    except (OSError, UnicodeError) as exc:
+        raise BoxError(refusal) from exc
+    except (ValueError, BoxError) as exc:
+        # Never include config text or a parser's source excerpt in diagnostics.
+        if isinstance(exc, BoxError) and str(exc) == refusal:
+            raise
+        raise BoxError(
+            "--image-preview requires valid cli.json JSON/JSONC with an object "
+            "root and object-valued prompt/session settings; no config was changed."
+        ) from exc
+
+
+def validate_image_preview(version):
+    """Refuse unsupported launches/invalid input before registration or reset."""
+    if opencode_compat.major(version) != 2:
+        raise BoxError("--image-preview requires native OpenCode 2.x.")
+    image_preview_cli_config()
+
+
+def config_archive(data, *, image_preview=False):
     """Snapshot user config as bytes. Extracted only inside the container."""
     source = (
         Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
@@ -1365,6 +1441,11 @@ def config_archive(data):
     )
     release = data.get("opencode_version", "1.0.0")
     v2 = opencode_compat.major(release) == 2
+    preview_config = None
+    if image_preview:
+        if not v2:
+            raise BoxError("--image-preview requires native OpenCode 2.x.")
+        preview_config = image_preview_cli_config()
     local_plugins = {}
     replacements = {}
     sandbox_version = None
@@ -1443,6 +1524,7 @@ def config_archive(data):
                 any(part in ("node_modules", ".git") for part in relative.parts)
                 or not file.is_file()
                 or relative == Path("AGENTS.md")
+                or (image_preview and relative == Path("cli.json"))
                 or (file.name.startswith("service") and file.suffix == ".json")
                 or (
                     v2
@@ -1493,6 +1575,8 @@ def config_archive(data):
                     .encode()
                 )
             add_bytes(str(relative), content, file.stat().st_mode & 0o777)
+        if preview_config is not None:
+            add_bytes("cli.json", preview_config)
         if v2 and (local_plugins or sandbox_version):
             if any(
                 (source / name).exists()
@@ -1617,7 +1701,11 @@ def ensure_opencode_version(data, version):
     print(f"oc-box: OpenCode {version} matches the host version.", flush=True)
 
 
-def prepare_runtime(path, data, version):
+def prepare_runtime(path, data, version, *, image_preview=False):
+    # Validate/snapshot the requested CLI edit before runtime installation/seeding.
+    if image_preview and opencode_compat.major(version) != 2:
+        raise BoxError("--image-preview requires native OpenCode 2.x.")
+    archive = config_archive(data, image_preview=True) if image_preview else None
     # Install the unmodified upstream version currently installed on the host.
     # Node/npm/uv are also used by the user's ordinary MCP/LSP setup.
     ensure_opencode_version(data, version)
@@ -1631,7 +1719,8 @@ def prepare_runtime(path, data, version):
             capture=True,
             timeout=120,
         )
-    archive = config_archive(data)
+    if archive is None:
+        archive = config_archive(data)
     unpack = (PACKAGE / "sync_config.py").read_text()
     copy_command = exec_command(data, ["python3", "-c", unpack, version])
     # binary input requires the binary subprocess mode here.
@@ -2502,6 +2591,12 @@ def launch_environment(path, data, args):
     if version is None:
         with loading_stage("Checking OpenCode version"):
             version = detect_opencode_release()
+    if getattr(args, "image_preview", False):
+        if args.command not in ("start", "reset"):
+            raise BoxError(
+                "--image-preview applies only to an owning start/reset TUI launch."
+            )
+        validate_image_preview(version)
     if opencode_compat.major(version) == 2 or credentials.has_unlocked_values():
         check_private_output()
     if data.get("opencode_version") != version:
@@ -2528,7 +2623,16 @@ def launch_environment(path, data, args):
         with loading_stage(f"Starting {data['distro']} container"):
             initial_info = start_container(path, data)
         with loading_stage("Preparing OpenCode and syncing configuration"):
-            prepare_runtime(path, data, version)
+            prepare_runtime(
+                path,
+                data,
+                version,
+                **(
+                    {"image_preview": True}
+                    if getattr(args, "image_preview", False)
+                    else {}
+                ),
+            )
         if args.command == "sync":
             with loading_stage("Syncing session history"):
                 sync_sessions(path, data)
@@ -2970,6 +3074,11 @@ def parser():
     )
     result.add_argument("--model", help="OpenCode provider/model")
     result.add_argument(
+        "--image-preview",
+        action="store_true",
+        help="V2 owning start/reset TUI only: enable prompt/session image previews in the private CLI config copy",
+    )
+    result.add_argument(
         "--credential-mode",
         choices=("env", "selected", "vault"),
         help="with credentials, select env forwarding, explicit names, or the V2 global vault",
@@ -3216,6 +3325,16 @@ def main(argv=None):
         )
     if args.maintenance and args.command != "terminal":
         raise BoxError("--maintenance applies only to terminal.")
+    if args.image_preview and (
+        args.command not in ("start", "reset")
+        or args.status
+        or args.about
+        or args.version
+        or args.json
+    ):
+        raise BoxError(
+            "--image-preview applies only to an owning start/reset TUI launch."
+        )
     if args.no_vault and (
         args.command not in ("start", "reset", "web")
         or args.status
@@ -3563,6 +3682,8 @@ def main(argv=None):
                 version = detect_opencode_release()
         if args.no_vault and opencode_compat.major(version) != 2:
             raise BoxError("--no-vault requires native OpenCode 2.x.")
+        if args.image_preview:
+            validate_image_preview(version)
         if opencode_compat.major(version) == 2:
             check_private_output()
         args._opencode_release = version
@@ -3645,6 +3766,7 @@ def main(argv=None):
                     args.clear_devices,
                     args.clear_podman_args,
                     args.no_vault,
+                    args.image_preview,
                 )
             ):
                 raise BoxError(
@@ -3681,6 +3803,10 @@ def main(argv=None):
                 return workspace_service.web_session(
                     sys.modules[__name__], data, connection, args
                 )
+    if args.image_preview:
+        version = getattr(args, "_opencode_release", None) or detect_opencode_release()
+        validate_image_preview(version)
+        args._opencode_release = version
     with workspace_lock(path), contextlib.ExitStack() as launch_context:
         if data.get("restore_incomplete") and args.command != "purge":
             raise BoxError(
