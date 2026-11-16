@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 import threading
+from copy import deepcopy
 from pathlib import Path
 
 from rich.text import Text
@@ -200,6 +201,16 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         )
         self._last_report = self._last_logs = 0
         self._rendered_logs = None
+        self._log_snapshot = None
+        self._log_revision = 0
+        self._log_render_key = None
+        self._filter_timers = {}
+        self._filter_generations = {}
+        self._table_snapshots = {}
+        self._text_snapshots = {}
+        self._monitor_snapshots = {}
+        self._session_favorites = set()
+        self._favorites_busy = False
         self._catalog_generation = 0
         self.cpu_history = []
         self.ram_history = []
@@ -413,6 +424,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         )
         self._poll_timer = self.set_interval(0.25, self._tick)
         self._management_mount()
+        self._refresh_favorites()
         self.action_refresh()
 
     def _message(self, value):
@@ -648,21 +660,23 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             if selected != self.selected:
                 self._session_source_changed()
             self.selected = selected
-        table = self.query_one("#workspaces", DataTable)
-        table.clear()
-        for index, item in enumerate(workspaces):
-            table.add_row(
-                text(Path(item["project"]).name or item["project"]),
-                text(item["state"]),
-                key=item["workspace_id"],
-            )
-            if item["workspace_id"] == self.selected:
-                table.move_cursor(row=index)
+        self._update_table(
+            "#workspaces",
+            tuple(
+                (
+                    item["workspace_id"],
+                    (Path(item["project"]).name or item["project"], item["state"]),
+                )
+                for item in workspaces
+            ),
+            selected=self.selected,
+        )
         host = report.get("host", {})
         cpu = host.get("cpu_percent")
         cpu_label = "n/a" if cpu is None else f"{cpu:.1f}%"
         size = status_report.byte_size
-        self.query_one("#host-summary", Static).update(
+        self._update_text(
+            "#host-summary",
             f"oc-box {'DEMO · ' if self.demo else ''}{'READ ONLY · ' if self.read_only else ''}"
             f"CPU {cpu_label}  RAM {size(host.get('memory_bytes'))}/{size(host.get('memory_total_bytes'))}  "
             f"Workspaces {len(workspaces)}"
@@ -670,17 +684,91 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                 f" · {report['inventory_skipped']} invalid registrations skipped"
                 if report.get("inventory_skipped")
                 else ""
-            )
+            ),
         )
         self.cpu_history = (self.cpu_history + [cpu])[-60:]
         self.ram_history = (
             self.ram_history
             + [percentage(host.get("memory_bytes"), host.get("memory_total_bytes"))]
         )[-60:]
-        self.query_one("#system-report", MonitorPanel).update_snapshot(
-            host, self.cpu_history, self.ram_history
-        )
+        self._update_monitor("#system-report", host, self.cpu_history, self.ram_history)
         self._render_workspace()
+
+    def _update_text(self, selector, value):
+        if self._text_snapshots.get(selector) != value:
+            self.query_one(selector, Static).update(value)
+            self._text_snapshots[selector] = value
+
+    def _update_monitor(self, selector, snapshot, cpu_history=(), ram_history=()):
+        state = (snapshot, tuple(cpu_history), tuple(ram_history))
+        if self._monitor_snapshots.get(selector) != state:
+            self.query_one(selector, MonitorPanel).update_snapshot(*state)
+            # Storage scans update an existing report in place.
+            self._monitor_snapshots[selector] = deepcopy(state)
+
+    def _update_table(self, selector, rows, *, selected=None, source=None):
+        """Only changed cells touch Textual; structural changes retain the view.
+
+        A source switch is a new selection namespace even when native IDs match.
+        No table selection is copied or read here: redraw is not a user gesture.
+        """
+        previous_source, previous = self._table_snapshots.get(selector, (None, ()))
+        if previous_source == source and previous == rows:
+            return False
+        table = self.query_one(selector, DataTable)
+        same_source = previous_source == source
+        old_ids = tuple(key for key, _ in previous)
+        new_ids = tuple(key for key, _ in rows)
+        if same_source and old_ids == new_ids:
+            columns = tuple(table.columns)
+            for (key, old), (_, new) in zip(previous, rows):
+                for column, before, after in zip(columns, old, new):
+                    if before != after:
+                        table.update_cell(key, column, text(after), update_width=True)
+        else:
+            scroll = table.scroll_offset
+            cursor = table.cursor_row
+            if selected is None and same_source and 0 <= cursor < len(previous):
+                selected = previous[cursor][0]
+            table.clear()
+            for key, cells in rows:
+                table.add_row(*(text(cell) for cell in cells), key=key)
+            if new_ids:
+                row = (
+                    new_ids.index(selected)
+                    if selected in new_ids
+                    else min(cursor, len(new_ids) - 1)
+                    if same_source
+                    else 0
+                )
+                table.move_cursor(row=row, scroll=False)
+            if same_source:
+                table.scroll_to(x=scroll.x, y=scroll.y, animate=False, force=True)
+        self._table_snapshots[selector] = (source, rows)
+        if same_source and old_ids != new_ids:
+            # DataTable's coordinate watcher queues its own cursor-into-view
+            # after rebuilding dimensions, even with move_cursor(scroll=False).
+            # Restore after that callback, but not after a newer view/cursor.
+            table.call_after_refresh(
+                self._restore_table_scroll,
+                selector,
+                source,
+                rows,
+                table.cursor_row,
+                scroll,
+            )
+        return True
+
+    def _restore_table_scroll(self, selector, source, rows, cursor, scroll):
+        if (
+            not self.is_running
+            or not self.is_mounted
+            or self._table_snapshots.get(selector) != (source, rows)
+        ):
+            return
+        table = self.query_one(selector, DataTable)
+        if table.cursor_row == cursor:
+            table.scroll_to(x=scroll.x, y=scroll.y, animate=False, force=True)
 
     def _workspace(self):
         return next(
@@ -695,13 +783,15 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     def _render_workspace(self):
         self._render_management()
         item = self._workspace()
-        self.query_one("#full-diagnostics", MonitorPanel).update_snapshot(item)
+        self._update_monitor("#full-diagnostics", item)
         if not item:
-            self.query_one("#status-summary", Static).update(
-                "No registered workspaces. Host monitoring and logs remain available."
+            self._update_text(
+                "#status-summary",
+                "No registered workspaces. Host monitoring and logs remain available.",
             )
-            self.query_one("#settings-info", Static).update(
-                "Select a registered workspace to inspect its resource settings."
+            self._update_text(
+                "#settings-info",
+                "Select a registered workspace to inspect its resource settings.",
             )
             return
         size = status_report.byte_size
@@ -734,7 +824,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             *[plain(note) for note in item.get("notes", [])],
             f"Sample: {plain(self.report.get('sampled_at'))}",
         ]
-        self.query_one("#status-summary", Static).update("\n".join(values))
+        self._update_text("#status-summary", "\n".join(values))
         configured, effective = (
             item.get("configured_limits", {}),
             item.get("effective_limits"),
@@ -749,12 +839,13 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                 f"RAM {'unlimited' if ram == 0 else size(ram)} · "
                 f"PID {'unlimited' if pids == 0 else pids if pids is not None else 'n/a'}"
             )
-        self.query_one("#settings-info", Static).update(
+        self._update_text(
+            "#settings-info",
             f"Workspace {item['workspace_id']}\n"
             f"Saved: CPU {configured.get('cpu_cores')} · RAM {size(configured.get('memory_bytes'))} · PID {configured.get('pids')}\n"
             f"Effective: {effective_label}\n"
             "A CPU quota is not CPU affinity; a memory ceiling does not reserve RAM.\n"
-            "No enforced workspace disk quota is configured by oc-box."
+            "No enforced workspace disk quota is configured by oc-box.",
         )
 
     def on_data_table_row_selected(self, event):
@@ -790,8 +881,34 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     def on_input_changed(self, event):
         if event.input.id == "log-search":
             self.log_query = event.value
-            self._render_logs()
+            self._schedule_filter("logs")
         elif event.input.id == "session-search":
+            self._schedule_filter("sessions")
+
+    def _schedule_filter(self, kind):
+        # Input keeps its native immediate editing/caret behavior. Only the
+        # potentially large metadata/log view waits for a short typing pause.
+        generation = self._filter_generations.get(kind, 0) + 1
+        self._filter_generations[kind] = generation
+        previous = self._filter_timers.pop(kind, None)
+        if previous:
+            previous.stop()
+        self._filter_timers[kind] = self.set_timer(
+            0.12, lambda: self._finish_filter(kind, generation)
+        )
+
+    def _finish_filter(self, kind, generation):
+        # Timer.stop cannot retract an already queued callback.
+        if (
+            generation != self._filter_generations.get(kind)
+            or not self.is_running
+            or not self.is_mounted
+        ):
+            return
+        self._filter_timers.pop(kind, None)
+        if kind == "logs":
+            self._render_logs()
+        else:
             self._render_sessions()
 
     def on_select_changed(self, event):
@@ -931,36 +1048,54 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                 else entry
                 for entry in entries
             ]
-        for source in {entry.source for entry in entries}:
-            self.logs.replace(
-                source, [entry for entry in entries if entry.source == source]
-            )
+        snapshot = (workspace, tuple(entries))
+        if snapshot != self._log_snapshot:
+            for source in {entry.source for entry in entries}:
+                self.logs.replace(
+                    source, [entry for entry in entries if entry.source == source]
+                )
+            self._log_snapshot = snapshot
+            self._log_revision += 1
         self._render_logs()
 
     def _render_logs(self):
         source = self.query_one("#log-source", Select).value
         if source == "podman" and self.podman_workspace:
             source = "podman:" + self.podman_workspace
-        entries = self.logs.search(
-            self.log_query, source=None if source == "all" else source
-        )
         output = self.query_one("#log-output", RichLog)
         # Keep a highlighted log snapshot in place while it is being copied.
         # Collection still updates the bounded in-memory source buffers.
         if output.text_selection is not None:
             return
-        self.query_one("#log-hits", Static).update(f"{len(entries)} matches")
+        key = (self._log_revision, source, self.log_query.casefold())
+        if key == self._log_render_key:
+            return
+        entries = self.logs.search(
+            self.log_query, source=None if source == "all" else source
+        )
+        self._log_render_key = key
+        self._update_text("#log-hits", f"{len(entries)} matches")
         rendered = tuple(entries)
         if rendered == self._rendered_logs:
             return
+        # Follow snapshots commonly append a few entries. Do not clear the
+        # whole log (or move a paused viewport) just to append those lines.
+        previous = self._rendered_logs
+        appended = previous is not None and rendered[: len(previous)] == previous
         self._rendered_logs = rendered
-        output.clear()
-        for entry in entries:
+        scroll = output.scroll_offset
+        at_end = output.is_vertical_scroll_end
+        if not appended:
+            output.clear()
+        for entry in entries[len(previous) if appended else 0 :]:
             output.write(
                 text(
                     f"{entry.timestamp} [{entry.source}] {entry.level}: {entry.message}"
-                )
+                ),
+                scroll_end=at_end,
             )
+        if not at_end:
+            output.scroll_to(x=scroll.x, y=scroll.y, animate=False, force=True)
 
     def connect_sessions(self, scope, workspace, generation=None):
         if self.demo:
@@ -1195,6 +1330,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     def _apply_sessions(self, catalog, sessions):
         self.catalog, self.sessions = catalog, sessions
         self._catalog_generation += 1
+        self._refresh_favorites()
         self._render_sessions()
         self._message(
             f"Complete {catalog.origin} inventory: {len(sessions)} sessions, including children and archived entries."
@@ -1210,8 +1346,6 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     def _render_sessions(self):
         if not self.is_mounted:
             return
-        previous = self._session()
-        previous_id = previous["id"] if previous else None
         query = self.query_one("#session-search", Input).value.casefold()
         scope = self.query_one("#session-scope", Select).value
         workspace = self._workspace()
@@ -1249,23 +1383,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         ]
         values.sort(key=lambda s: s.get("time", {}).get("updated", 0), reverse=True)
         self.visible_sessions = values
-        favorites = set()
-        if self.favorites and values:
-            try:
-                favorites = {
-                    (f["origin"], f["store"], f["id"]) for f in self.favorites.list()
-                }
-            except Exception:
-                self._message(
-                    "Favorite state unavailable; native session inventory is unchanged."
-                )
-        table = self.query_one("#session-table", DataTable)
-        table.clear()
-        for index, session in enumerate(values):
+        rows = []
+        for session in values:
             favorite = (
                 self.catalog
                 and (self.catalog.origin, self.catalog.store, session["id"])
-                in favorites
+                in self._session_favorites
             )
             kind = (
                 "archived"
@@ -1274,16 +1397,21 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                 if session.get("parentID")
                 else "root"
             )
-            table.add_row(
-                text("★" if favorite else ""),
-                text(session["id"]),
-                text(session.get("title") or "Untitled"),
-                text(kind),
-                text(session["location"]["directory"]),
-                key=session["id"],
+            rows.append(
+                (
+                    session["id"],
+                    (
+                        "★" if favorite else "",
+                        session["id"],
+                        session.get("title") or "Untitled",
+                        kind,
+                        session["location"]["directory"],
+                    ),
+                )
             )
-            if session["id"] == previous_id:
-                table.move_cursor(row=index)
+        source = (self.catalog.origin, self.catalog.store) if self.catalog else None
+        if self._update_table("#session-table", tuple(rows), source=source):
+            self._session_details()
 
     def _session(self):
         index = self.query_one("#session-table", DataTable).cursor_row
@@ -1311,16 +1439,41 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         session = self._session()
         if self.read_only or not session or not self.catalog or not self.favorites:
             return
+        if self._favorites_busy:
+            self._message("Favorite metadata is busy; wait before changing it again.")
+            return
+        self._favorites_busy = True
+        self._load_favorites(self.favorites, self.catalog, session["id"])
+
+    def _refresh_favorites(self):
+        if self.favorites and not self._favorites_busy:
+            self._favorites_busy = True
+            self._load_favorites(self.favorites)
+
+    @work(thread=True, group="favorites", exit_on_error=False)
+    def _load_favorites(self, store, catalog=None, ident=None):
         try:
-            self.favorites.toggle(
-                self.catalog.origin, self.catalog.store, session["id"]
-            )
-            self._journal("session.favorited", self.catalog)
-            self._render_sessions()
+            if ident is not None:
+                store.toggle(catalog.origin, catalog.store, ident)
+                self._journal("session.favorited", catalog)
+            values = {(f["origin"], f["store"], f["id"]) for f in store.list()}
+            if self.is_running:
+                self.call_from_thread(self._apply_favorites, store, values)
         except Exception:
+            if self.is_running:
+                self.call_from_thread(self._apply_favorites, store, None)
+
+    def _apply_favorites(self, store, values):
+        self._favorites_busy = False
+        if not self.is_running or not self.is_mounted or store is not self.favorites:
+            return
+        if values is None:
             self._message(
-                "Favorite state could not be saved; native history was not changed."
+                "Favorite state unavailable; native session inventory is unchanged."
             )
+        elif values != self._session_favorites:
+            self._session_favorites = values
+            self._render_sessions()
 
     def _archive(self):
         session = self._session()
@@ -1527,6 +1680,10 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     def on_unmount(self):
         if self._poll_timer:
             self._poll_timer.stop()
+        for kind, timer in self._filter_timers.items():
+            timer.stop()
+            self._filter_generations[kind] += 1
+        self._filter_timers.clear()
         self._catalog_generation += 1
         self._cancel_pending_connection()
         if self._terminal_widget:

@@ -823,7 +823,10 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             app.action_tab("logs")
             await pilot.pause()
             output = app.query_one("#log-output", RichLog)
-            with patch.object(output, "clear", wraps=output.clear) as clear:
+            with (
+                patch.object(output, "clear", wraps=output.clear) as clear,
+                patch.object(output, "write", wraps=output.write) as write,
+            ):
                 app._render_logs()
                 clear.assert_not_called()
                 app.screen.selections = {output: Selection(Offset(0, 0), Offset(5, 0))}
@@ -841,11 +844,13 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                 )
                 await pilot.pause()
                 clear.assert_not_called()
+                write.assert_not_called()
                 self.assertEqual(app.screen.get_selected_text(), selected)
                 self.assertEqual(len(app.logs.search("New event")), 1)
                 app.screen.clear_selection()
                 app._render_logs()
-                clear.assert_called_once()
+                clear.assert_not_called()
+                write.assert_called_once()
 
     async def test_clipboard_shortcuts_preserve_native_control_keys(self):
         app = DashboardApp(SessionDemo())
