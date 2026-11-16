@@ -4,6 +4,7 @@ from types import MappingProxyType
 
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
+from textual.validation import Integer
 from textual.widgets import Button, Input, Label, Select, Static, Switch
 
 if __package__:
@@ -11,7 +12,7 @@ if __package__:
 else:
     from tui_clipboard import ClipboardBar, ClipboardInput
 
-REFRESH_INTERVALS = (1, 2, 5, 10, 30, 60)
+REFRESH_INTERVALS = tuple(range(1, 61))
 SESSION_SCOPES = (
     ("Host · all projects", "global"),
     ("Host · selected project", "project"),
@@ -51,6 +52,7 @@ class SettingsScreen(ModalScreen):
     .settings-row Label { width: 24; padding: 1 0; }
     .settings-row Select, .settings-row Input { width: 1fr; }
     .settings-row SelectCurrent > #label { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
+    #pref-interval-error { height: auto; color: $error; }
     #preferences-actions { height: 3; }
     #preferences-actions Button { margin-right: 1; }
     """
@@ -76,18 +78,17 @@ class SettingsScreen(ModalScreen):
                             self.values["auto_refresh"], id="pref-auto-refresh"
                         )
                     with Horizontal(classes="settings-row"):
-                        yield Label("Refresh interval")
-                        yield Select(
-                            [
-                                (f"{n} second{'s' if n != 1 else ''}", n)
-                                for n in REFRESH_INTERVALS
-                            ],
-                            value=self.values["interval"],
-                            allow_blank=False,
+                        yield Label("Refresh seconds (1–60)")
+                        yield Input(
+                            str(self.values["interval"]),
+                            type="integer",
+                            validators=[Integer(minimum=1, maximum=60)],
                             id="pref-interval",
                         )
+                    yield Static("", id="pref-interval-error", markup=False)
                     yield Static(
-                        "Status and followed logs use this interval. Slow queries never overlap or queue; storage scans remain manual.",
+                        "Use any whole number from 1 to 60 seconds. Status and followed logs use this interval. "
+                        "Slow queries never overlap or queue; storage scans remain manual.",
                         markup=False,
                     )
                 with Vertical(classes="settings-topic"):
@@ -193,11 +194,14 @@ class SettingsScreen(ModalScreen):
         ):
             self.query_one(selector, Switch).value = DEFAULT_SETTINGS[key]
         for key, selector in (
-            ("interval", "#pref-interval"),
             ("session_scope", "#pref-session-scope"),
             ("log_source", "#pref-log-source"),
         ):
             self.query_one(selector, Select).value = DEFAULT_SETTINGS[key]
+        self.query_one("#pref-interval", Input).value = str(
+            DEFAULT_SETTINGS["interval"]
+        )
+        self.query_one("#pref-interval-error", Static).update("")
         theme = DEFAULT_SETTINGS["theme"]
         self.query_one("#pref-theme", Select).value = (
             theme if theme in self.themes else self.values["theme"]
@@ -213,10 +217,29 @@ class SettingsScreen(ModalScreen):
         elif event.button.id == "preferences-reset":
             self.reset_defaults()
         elif event.button.id == "preferences-apply":
+            interval_input = self.query_one("#pref-interval", Input)
+            raw_interval = interval_input.value
+            try:
+                # Input's integer filter and validators are presentation aids,
+                # not the Apply boundary: programmatic values bypass filtering.
+                interval = int(raw_interval)
+            except (TypeError, ValueError):
+                interval = None
+            if (
+                not raw_interval.isascii()
+                or not raw_interval.isdecimal()
+                or interval not in REFRESH_INTERVALS
+            ):
+                self.query_one("#pref-interval-error", Static).update(
+                    "Enter a whole number from 1 to 60 seconds."
+                )
+                interval_input.focus()
+                interval_input.scroll_visible(animate=False)
+                return
             self.dismiss(
                 {
                     "auto_refresh": self.query_one("#pref-auto-refresh", Switch).value,
-                    "interval": self.query_one("#pref-interval", Select).value,
+                    "interval": interval,
                     "theme": self.query_one("#pref-theme", Select).value,
                     "details": self.query_one("#pref-details", Switch).value,
                     "session_scope": self.query_one(

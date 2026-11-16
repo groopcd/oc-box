@@ -420,14 +420,16 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     modal = app.screen
                     self.assertIsInstance(modal, SettingsScreen)
-                    modal.query_one("#pref-interval", Select).value = 5
+                    modal.query_one("#pref-interval", Input).value = "7"
                     await pilot.pause()
                     self.assertEqual(copies, [])
                     widget = modal.query_one("#" + action)
                     span = self.visible_span(app, widget, text)
                     before = await self.drag(app, pilot, copies, span)
                     self.assertIs(app.screen, modal, "drag must not Apply/dismiss")
-                    self.assertEqual(modal.query_one("#pref-interval", Select).value, 5)
+                    self.assertEqual(
+                        modal.query_one("#pref-interval", Input).value, "7"
+                    )
                     self.assertEqual(
                         app.query_one("#refresh-interval", Select).value, 1
                     )
