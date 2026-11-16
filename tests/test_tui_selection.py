@@ -692,7 +692,7 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
             field.value = "already selected input"
             field.focus()
             field.action_select_all()
-            await pilot.pause()
+            await self.wait_for_log_hits(app, pilot, "0 matches")
             self.assertEqual(copies, [])
             span = self.visible_span(app, app.query_one("#log-hits"), "0 matches")
             await self.drag(app, pilot, copies, span)
