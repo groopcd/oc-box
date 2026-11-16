@@ -394,6 +394,11 @@ update errors for both hosted runners and the Ubuntu distro container; see
 
 ### Release gate and publication checklist
 
+Optional LinkedIn feature announcements are configured separately through
+[Buffer](docs/release-announcements.md). They are disabled by default and run
+only after successful package publication, never as publication approval or a
+substitute for the acceptance/checksum checklist below.
+
 GitHub/curl and PyPI are separate installation methods with stable/devel release
 channels. Channel-aware `install.sh` and `oc-box upgrade` select published
 releases, not moving branch HEAD. Stable releases must belong to `master`;

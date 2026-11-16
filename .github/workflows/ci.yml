@@ -36,7 +36,7 @@ jobs:
           bash -n completions/oc-box
           shellcheck --shell=bash completions/oc-box
           python -m venv "$RUNNER_TEMP/tests"
-          "$RUNNER_TEMP/tests/bin/python" -m pip install 'cryptography>=44'
+          "$RUNNER_TEMP/tests/bin/python" -m pip install 'cryptography>=44' 'Pillow>=11,<13'
           "$RUNNER_TEMP/tests/bin/python" -B -m unittest discover -s tests -v
           python tools/build_docs.py --check
           git diff --check

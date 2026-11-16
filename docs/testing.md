@@ -64,6 +64,19 @@ evidence on the clean integrated candidate; a development prerelease is not an
 exception. Channel fixtures, build-only artifacts and unit/native results add
 no live Podman acceptance. Earlier host evidence below stays unchanged.
 
+### Optional social release announcements
+
+`tests/test_release_announcements.py` exercises synthetic Buffer/GitHub responses,
+stable/devel highlights, actual public-package identity handoff, default-off
+behavior, credential-safe requests, durable pre-mutation claims, rerun receipts
+and read-only reconciliation after uncertain outcomes. Existing release-channel
+and artifact-validator regressions remain independent and unchanged.
+`tests/test_release_card.py` checks deterministic bounded 1200×630 PNG rendering
+with optional Pillow; source/publication CI installs it only in isolated test
+tools, never as an ordinary oc-box dependency. These offline checks neither
+connect a real profile nor certify LinkedIn delivery. See
+[setup and limits](release-announcements.md); no live posting test is implied.
+
 ### Ubuntu CI package bootstrap
 
 `tools/ci_ubuntu_apt.py` generates a temporary, CI-only APT configuration for
