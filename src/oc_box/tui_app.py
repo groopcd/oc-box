@@ -1525,6 +1525,9 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         terminal.focus()
 
     def on_unmount(self):
+        workflow = getattr(self, "_embedded_operation", None)
+        if workflow is not None and not workflow.finished:
+            workflow.transport.cancel()
         if self._poll_timer:
             self._poll_timer.stop()
         self._catalog_generation += 1
@@ -1549,6 +1552,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             )
 
     def check_action(self, action, parameters):
+        if getattr(self, "_private_interaction", False):
+            return False
         if (
             self._terminal_widget
             and self._terminal_widget.has_focus
