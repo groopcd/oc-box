@@ -223,8 +223,11 @@ that full details/mounts remain expandable and initially collapsed. Include no
 current workspace: System and monitoring settings must remain usable without
 fabricating workspace readings.
 
-Check cheap batched Status and followed-log refresh at the shared 1, 2, 5, 10, 30
-and 60 second choices, default 1 second, and auto-refresh on/off. Use controlled
+Check cheap batched Status and followed-log refresh at every whole-number
+interval from 1 through 60 seconds, default 1 second, and auto-refresh on/off.
+The custom Monitoring field must reject blank, fractional, nonnumeric and
+out-of-range drafts without applying other edits; Reset stages 1 and Cancel
+discards it. Include custom values such as 7, 17 and 59. Use controlled
 slow queries to verify no overlapping or queued refreshes; cadence is best-effort,
 not an exact wall-clock guarantee. Native session inventories remain manual
 Connect/refresh, and expensive allocated storage scans remain manual and bound

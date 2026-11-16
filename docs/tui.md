@@ -266,7 +266,7 @@ are what the OS reports, not a promise of exclusive resources or physical host
 capacity. Presentation does not change underlying totals or the raw report data.
 
 Cheap metrics are batched. Status and followed logs share an adjustable refresh
-interval of **1, 2, 5, 10, 30 or 60 seconds**, default **1 second**, with an
+interval of **any whole number from 1 to 60 seconds**, default **1 second**, with an
 auto-refresh control. Cadence is best-effort: a slow query does not overlap or
 queue another refresh, so the selected interval is not an exact timing guarantee.
 Native session inventories still require explicit Connect and manual refresh.
@@ -293,7 +293,7 @@ window is also usable without a current workspace:
 
 | Topic | Controls and boundaries |
 | --- | --- |
-| Monitoring | Auto-refresh and the shared Status/followed-log interval: 1, 2, 5, 10, 30 or 60 seconds; default 1. |
+| Monitoring | Auto-refresh and a custom shared Status/followed-log interval: any whole number from 1 to 60 seconds; default 1. |
 | Display | Built-in Textual theme and expanded/collapsed diagnostics details. |
 | Sessions | Scope and text filter only; changing them never connects or refreshes a native inventory automatically. |
 | Logs | Follow, source and literal search; searches stay in memory and are never persisted or journaled. External sources retain their explicit opt-in and ownership guards. |
@@ -314,6 +314,11 @@ are neither persisted nor logged; they do not modify OpenCode `cli.json`, host
 settings, workspace resources or credential snapshots. There are no CPU/RAM/
 storage edit controls, resource-control RPCs, implicit resets or storage
 migrations. A settings Apply is not a resource Apply or native service reload.
+
+Enter refresh seconds directly in the Monitoring field. Blank, fractional or
+out-of-range values keep the dialog open with feedback and do not apply any of
+the other draft preferences. The quick Settings-tab selector supports the same
+1–60 range.
 
 If you deliberately need different create-time limits, exit the relevant
 clients/owner and use the existing CLI workflow outside the manager:

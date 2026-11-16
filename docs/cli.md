@@ -518,7 +518,7 @@ Raw report data and totals are unchanged. Full details/mounts remain in an
 expandable section, initially collapsed. System readings and monitoring settings
 remain available with no current workspace.
 
-Status and followed logs share an adjustable **1, 2, 5, 10, 30 or 60 second**
+Status and followed logs share an adjustable **whole-number 1–60 second**
 refresh interval, default **1 second**, and an auto-refresh control. Cheap metrics
 are batched; slow queries never overlap or queue refreshes, so cadence is
 best-effort rather than an exact timing guarantee. Expensive allocated storage
@@ -550,6 +550,11 @@ workspace resources or credentials. Live CPU/RAM limit edits, storage quotas,
 resizes and graphroot/runroot moves are deferred to a separate project. Existing
 explicit CLI `reset` remains outside the manager; there is no `podman update`
 action, resource-control RPC or resource-editing service extension.
+
+The Monitoring refresh field accepts any whole number from 1 to 60 seconds,
+default 1. Invalid or blank entries leave the window open with feedback and
+apply none of the pending edits. Reset fills 1; Apply activates it, and Cancel
+discards the draft. The quick Settings-tab selector supports the same range.
 
 The Sessions tab uses manual Connect/refresh. Host global discovery consumes the
 complete paginated native V2 API across projects, children and archived sessions. Host
