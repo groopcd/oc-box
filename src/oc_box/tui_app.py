@@ -8,12 +8,14 @@ from copy import deepcopy
 from pathlib import Path
 
 from rich.text import Text
-from textual import work
+from textual import events, work
 from textual.app import App, ComposeResult
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
+from textual.errors import NoWidget
 from textual.screen import ModalScreen
+from textual.scrollbar import ScrollBar
 from textual.worker import get_current_worker
 from textual.widgets import (
     Button,
@@ -207,6 +209,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._filter_timers = {}
         self._filter_generations = {}
         self._table_snapshots = {}
+        self._table_view_generations = {}
+        self._table_scroll_generations = {}
         self._text_snapshots = {}
         self._monitor_snapshots = {}
         self._session_favorites = set()
@@ -715,6 +719,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         previous_source, previous = self._table_snapshots.get(selector, (None, ()))
         if previous_source == source and previous == rows:
             return False
+        generation = self._table_view_generations.get(selector, 0) + 1
+        self._table_view_generations[selector] = generation
         table = self.query_one(selector, DataTable)
         same_source = previous_source == source
         old_ids = tuple(key for key, _ in previous)
@@ -748,27 +754,91 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         if same_source and old_ids != new_ids:
             # DataTable's coordinate watcher queues its own cursor-into-view
             # after rebuilding dimensions, even with move_cursor(scroll=False).
-            # Restore after that callback, but not after a newer view/cursor.
+            # Restore after that callback, but never over a newer view or user
+            # scroll. Offsets alone cannot distinguish that automatic scrolling
+            # from a wheel/scrollbar gesture with an unchanged cursor row.
             table.call_after_refresh(
                 self._restore_table_scroll,
                 selector,
-                source,
-                rows,
+                generation,
+                self._table_scroll_generations.get(selector, 0),
                 table.cursor_row,
                 scroll,
             )
         return True
 
-    def _restore_table_scroll(self, selector, source, rows, cursor, scroll):
+    def _restore_table_scroll(
+        self, selector, generation, scroll_generation, cursor, scroll
+    ):
         if (
             not self.is_running
             or not self.is_mounted
-            or self._table_snapshots.get(selector) != (source, rows)
+            or self._table_view_generations.get(selector) != generation
+            or self._table_scroll_generations.get(selector, 0) != scroll_generation
         ):
             return
         table = self.query_one(selector, DataTable)
         if table.cursor_row == cursor:
             table.scroll_to(x=scroll.x, y=scroll.y, animate=False, force=True)
+
+    async def on_event(self, event):
+        # Observe original input before routing: scrollbars stop mouse events,
+        # and a table's coordinate watcher also scrolls without user input.
+        # Keep the normal clipboard/selection event chain entirely intact.
+        if not event.is_forwarded and self.is_running and self.is_mounted:
+            self._track_table_scroll_intent(event)
+        await super().on_event(event)
+
+    def _track_table_scroll_intent(self, event):
+        widget = None
+        if isinstance(event, events.Key):
+            if event.key.rsplit("+", 1)[-1] not in (
+                "up",
+                "down",
+                "left",
+                "right",
+                "home",
+                "end",
+                "pageup",
+                "pagedown",
+            ):
+                return
+            widget = self.focused
+        elif isinstance(event, (events.MouseMove, events.MouseUp)):
+            # Capture remains with the scrollbar when a drag leaves its cells.
+            if isinstance(self.mouse_captured, ScrollBar):
+                widget = self.mouse_captured
+        elif isinstance(
+            event,
+            (
+                events.MouseScrollUp,
+                events.MouseScrollDown,
+                events.MouseScrollLeft,
+                events.MouseScrollRight,
+                events.MouseDown,
+            ),
+        ):
+            try:
+                widget, _ = self.screen.get_widget_at(*event.screen_offset)
+            except NoWidget:
+                return
+            if isinstance(event, events.MouseDown) and (
+                event.button != 1 or not isinstance(widget, ScrollBar)
+            ):
+                return
+        if widget is None or not widget.is_attached or widget.screen is not self.screen:
+            return
+        while widget is not None:
+            if isinstance(widget, DataTable) and widget.id in (
+                "workspaces",
+                "session-table",
+            ):
+                selector = "#" + widget.id
+                self._table_scroll_generations[selector] = (
+                    self._table_scroll_generations.get(selector, 0) + 1
+                )
+                return
+            widget = widget.parent
 
     def _workspace(self):
         return next(

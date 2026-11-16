@@ -5,10 +5,12 @@ import copy
 import importlib.util
 import threading
 import unittest
+from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 AVAILABLE = all(importlib.util.find_spec(name) for name in ("textual", "pyte"))
 if AVAILABLE:
+    from textual import events
     from textual.widgets import DataTable, Input, RichLog, Select
 
     from oc_box.tui_app import DashboardApp
@@ -27,6 +29,192 @@ class DisplayPerformanceTests(unittest.IsolatedAsyncioTestCase):
         await app.workers.wait_for_complete()
         await pilot.pause()
         app._poll_timer.pause()
+
+    async def paused_session_table(self, app, pilot):
+        await self.ready(app, pilot)
+        app.catalog = Mock(origin="host", store="synthetic-store")
+        app.sessions = synthetic_sessions()
+        app._render_sessions()
+        app.action_tab("sessions")
+        await pilot.pause()
+        table = app.query_one("#session-table", DataTable)
+        table.move_cursor(row=80)
+        table.scroll_to(y=60, animate=False, force=True)
+        await pilot.pause()
+        return table
+
+    @contextmanager
+    def held_scroll_restores(self, app, table):
+        """Delay only our restore, not Textual's automatic coordinate scroll."""
+        pending = []
+        original = table.call_after_refresh
+
+        def schedule(callback, *args, **kwargs):
+            if callback == app._restore_table_scroll:
+                pending.append(lambda: callback(*args, **kwargs))
+                return True
+            return original(callback, *args, **kwargs)
+
+        with patch.object(table, "call_after_refresh", side_effect=schedule):
+            yield pending
+
+    async def mouse(self, app, pilot, kind, point):
+        # Pilot's mouse helpers bypass App.on_event; use the actual incoming
+        # event route so stopped scrollbar events and capture are exercised.
+        x, y = point
+        widget, _ = app.screen.get_widget_at(x, y)
+        await app.on_event(
+            kind(
+                widget,
+                x,
+                y,
+                0,
+                0,
+                1,
+                False,
+                False,
+                False,
+                screen_x=x,
+                screen_y=y,
+            )
+        )
+        await pilot.pause()
+
+    async def test_deferred_restore_keeps_intervening_user_wheel_viewport(self):
+        app = DashboardApp(SyntheticBackend(), read_only=True, demo=True)
+        async with app.run_test(size=(120, 35)) as pilot:
+            table = await self.paused_session_table(app, pilot)
+            old_scroll = table.scroll_offset
+            with self.held_scroll_restores(app, table) as pending:
+                app.sessions[0]["time"]["updated"] = -1
+                app._render_sessions()
+                await pilot.pause()
+                cursor, automatic = table.cursor_row, table.scroll_offset
+                self.assertEqual(len(pending), 1)
+                point = table.content_region.offset + (3, 3)
+                await self.mouse(app, pilot, events.MouseScrollDown, point)
+                current = table.scroll_offset
+                self.assertNotEqual(current, automatic)
+                self.assertNotEqual(current, old_scroll)
+                self.assertEqual(table.cursor_row, cursor)
+                with patch.object(table, "scroll_to", wraps=table.scroll_to) as scroll:
+                    pending[0]()
+                    scroll.assert_not_called()
+                self.assertEqual(table.scroll_offset, current)
+
+    async def test_deferred_restore_keeps_intervening_captured_scrollbar_drag(self):
+        app = DashboardApp(SyntheticBackend(), read_only=True, demo=True)
+        async with app.run_test(size=(120, 35)) as pilot:
+            table = await self.paused_session_table(app, pilot)
+            with (
+                self.held_scroll_restores(app, table) as pending,
+                patch.object(app, "_write_clipboard") as copy,
+            ):
+                app.sessions[0]["time"]["updated"] = -1
+                app._render_sessions()
+                await pilot.pause()
+                scrollbar = table.vertical_scrollbar
+                region = scrollbar.region
+                point = next(
+                    (region.x, y)
+                    for y in range(region.y, region.bottom)
+                    if app.screen.get_style_at(region.x, y).meta.get("@mouse.down")
+                    == "grab"
+                )
+                await self.mouse(app, pilot, events.MouseDown, point)
+                destination = point
+                try:
+                    self.assertIs(app.mouse_captured, scrollbar)
+                    with patch.object(
+                        table, "scroll_to", wraps=table.scroll_to
+                    ) as scroll:
+                        pending[0]()
+                        scroll.assert_not_called()
+                    # A second restore can be queued while dragging, after the
+                    # mouse-down fence. Only real captured movement may fence it.
+                    app.sessions[1]["time"]["updated"] = -2
+                    app._render_sessions()
+                    await pilot.pause()
+                    automatic, cursor = table.scroll_offset, table.cursor_row
+                    self.assertEqual(len(pending), 2)
+                    destination = (point[0] - 3, min(region.bottom - 1, point[1] + 4))
+                    await self.mouse(app, pilot, events.MouseMove, destination)
+                    current = table.scroll_offset
+                    self.assertNotEqual(current, automatic)
+                    self.assertEqual(table.cursor_row, cursor)
+                    with patch.object(
+                        table, "scroll_to", wraps=table.scroll_to
+                    ) as scroll:
+                        for callback in pending:
+                            callback()
+                        scroll.assert_not_called()
+                    self.assertEqual(table.scroll_offset, current)
+                    copy.assert_not_called()
+                finally:
+                    await self.mouse(app, pilot, events.MouseUp, destination)
+
+    async def test_deferred_restore_rejects_view_aba_even_with_same_content_cursor(
+        self,
+    ):
+        app = DashboardApp(SyntheticBackend(), read_only=True, demo=True)
+        async with app.run_test(size=(120, 35)) as pilot:
+            table = await self.paused_session_table(app, pilot)
+            with self.held_scroll_restores(app, table) as pending:
+                app.sessions[0]["time"]["updated"] = -1
+                app._render_sessions()
+                await pilot.pause()
+                state_a = app._table_snapshots["#session-table"]
+                cursor = table.cursor_row
+                title = app.sessions[2]["title"]
+                app.sessions[2]["title"] = "Changed synthetic metadata"
+                app._render_sessions()
+                app.sessions[2]["title"] = title
+                app._render_sessions()
+                await pilot.pause()
+                self.assertEqual(app._table_snapshots["#session-table"], state_a)
+                self.assertEqual(table.cursor_row, cursor)
+                self.assertEqual(len(pending), 1)
+                table.scroll_to(y=30, animate=False, force=True)
+                await pilot.pause()
+                current = table.scroll_offset
+                with patch.object(table, "scroll_to", wraps=table.scroll_to) as scroll:
+                    pending[0]()
+                    scroll.assert_not_called()
+                self.assertEqual(table.scroll_offset, current)
+
+    async def test_deferred_restore_corrects_internal_scroll_without_user_gesture(self):
+        app = DashboardApp(SyntheticBackend(), read_only=True, demo=True)
+        async with app.run_test(size=(120, 35)) as pilot:
+            table = await self.paused_session_table(app, pilot)
+            previous = table.scroll_offset
+            with self.held_scroll_restores(app, table) as pending:
+                app.sessions[0]["time"]["updated"] = -1
+                app._render_sessions()
+                await pilot.pause()
+                self.assertEqual(len(pending), 1)
+                self.assertNotEqual(table.scroll_offset, previous)
+                with patch.object(table, "scroll_to", wraps=table.scroll_to) as scroll:
+                    pending[0]()
+                    scroll.assert_called_once()
+                self.assertEqual(table.scroll_offset, previous)
+
+    async def test_deferred_restore_respects_navigation_returning_to_same_cursor(self):
+        app = DashboardApp(SyntheticBackend(), read_only=True, demo=True)
+        async with app.run_test(size=(120, 35)) as pilot:
+            table = await self.paused_session_table(app, pilot)
+            with self.held_scroll_restores(app, table) as pending:
+                app.sessions[0]["time"]["updated"] = -1
+                app._render_sessions()
+                await pilot.pause()
+                cursor = table.cursor_row
+                table.focus()
+                await pilot.press("down", "up")
+                self.assertEqual(table.cursor_row, cursor)
+                current = table.scroll_offset
+                with patch.object(table, "scroll_to", wraps=table.scroll_to) as scroll:
+                    pending[0]()
+                    scroll.assert_not_called()
+                self.assertEqual(table.scroll_offset, current)
 
     async def test_fixed_workload_bounds_work_not_wall_clock(self):
         result = await benchmark()
