@@ -710,13 +710,16 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         A source switch is a new selection namespace even when native IDs match.
         No table selection is copied or read here: redraw is not a user gesture.
         """
+        had_view = selector in self._table_snapshots
         previous_source, previous = self._table_snapshots.get(selector, (None, ()))
         if previous_source == source and previous == rows:
             return False
         generation = self._table_view_generations.get(selector, 0) + 1
         self._table_view_generations[selector] = generation
         table = self.query_one(selector, DataTable)
-        same_source = previous_source == source
+        # A first/empty view has no paused viewport to restore over the initial
+        # selected row. None is also the workspace table's real source identity.
+        same_source = had_view and bool(previous) and previous_source == source
         old_ids = tuple(key for key, _ in previous)
         new_ids = tuple(key for key, _ in rows)
         if same_source and old_ids == new_ids:
@@ -741,7 +744,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                     if same_source
                     else 0
                 )
-                table.move_cursor(row=row, scroll=False)
+                table.move_cursor(row=row, scroll=not same_source)
             if same_source:
                 table.scroll_to(x=scroll.x, y=scroll.y, animate=False, force=True)
         self._table_snapshots[selector] = (source, rows)

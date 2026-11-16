@@ -13,6 +13,7 @@ if AVAILABLE:
     from textual import events
     from textual.widgets import DataTable, Input, RichLog, Select
 
+    from oc_box.tui import DemoBackend
     from oc_box.tui_app import DashboardApp
     from oc_box.tui_logs import LogEntry
     from oc_box.tui_status import MonitorPanel
@@ -250,6 +251,41 @@ class DisplayPerformanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(logs["backend_queries"], 0)
         # Histories continue recording every sample, even identical readings.
         self.assertGreaterEqual(result["ten_unchanged_reports"]["monitor_update"], 10)
+
+    async def test_initial_workspace_selector_below_viewport_is_visible(self):
+        class ManyDemo(DemoBackend):
+            def __init__(self):
+                self.samples = 0
+
+            def collect(self, *, scan_storage=False):
+                self.samples += 1
+                report = super().collect(scan_storage=scan_storage)
+                template = report["workspaces"][0]
+                report["workspaces"] = []
+                for index in range(50):
+                    item = copy.deepcopy(template)
+                    item["workspace_id"] = f"{index + 1:032x}"
+                    item["project"] = f"/synthetic/project-{index:02}"
+                    report["workspaces"].append(item)
+                return report
+
+        backend = ManyDemo()
+        selected = f"{50:032x}"
+        app = DashboardApp(backend, read_only=True, selected=selected, demo=True)
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.ready(app, pilot)
+            table = app.query_one("#workspaces", DataTable)
+            self.assertEqual(app.selected, selected)
+            self.assertEqual(table.cursor_row, 49)
+            self.assertGreater(table.scroll_y, 0)
+            region = table.scrollable_content_region.intersection(app.screen.region)
+            strips = app.screen._compositor.render_strips()
+            visible = "\n".join(
+                strips[y].crop(region.x, region.right).text
+                for y in range(region.y, region.bottom)
+            )
+            self.assertIn("project-49", visible)
+            self.assertEqual(backend.samples, 1)
 
     async def test_changed_cells_and_structural_refresh_preserve_cursor_and_scroll(
         self,
