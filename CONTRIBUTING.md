@@ -411,6 +411,11 @@ update errors for both hosted runners and the Ubuntu distro container; see
 
 ### Release gate and publication checklist
 
+Optional LinkedIn feature announcements are configured separately through
+[Buffer](docs/release-announcements.md). They are disabled by default and run
+only after successful package publication, never as publication approval or a
+substitute for the acceptance/checksum checklist below.
+
 Stable/devel are release channels; GitHub/curl and PyPI are installation methods.
 The channel-aware bootstrap/updater selects immutable published releases and
 verifies their tag/source/version/branch, not arbitrary moving HEAD. See
