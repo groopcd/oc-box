@@ -553,7 +553,7 @@ print('PASS: installed vault extra encrypts, unlocks, and selects without exposi
             exercise = """import asyncio
 from oc_box.tui import DemoBackend
 from oc_box.tui_app import DashboardApp
-from textual.widgets import Select
+from textual.widgets import Input
 async def check():
     app=DashboardApp(DemoBackend(), read_only=True, demo=True)
     async with app.run_test(size=(80,24)) as pilot:
@@ -563,7 +563,7 @@ async def check():
         assert len(app.logs.search('ready'))==1
         app.action_settings()
         await pilot.pause()
-        assert app.screen.query_one('#pref-interval', Select).value==1
+        assert app.screen.query_one('#pref-interval', Input).value=='1'
         await pilot.press('escape')
 asyncio.run(check())
 print('PASS: installed TUI extra renders the synthetic dashboard without Podman or user state.')
