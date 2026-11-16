@@ -231,6 +231,7 @@ conversation in the same environment.
      mkdir -p ~/devel/demo
      oc-box --project ~/devel/demo
      oc-box start --project ~/devel/demo --new
+     oc-box --project ~/devel/demo --image-preview
 
 For V2, initialize and populate the host vault **before the first
 project launch** to use the global default immediately; see secrets
@@ -250,7 +251,10 @@ messages appear every five seconds.  A loading line covers blank TUI
 startup frames and disappears when OpenCode draws text.  Warm launches
 retain compatible caches.  The container OpenCode version is verified
 against the host on every launch; exact upgrades and downgrades are
-supported, with no fallback to another release.
+supported, with no fallback to another release.  With a V2 release
+supporting image previews, ‘--image-preview’ enables prompt and
+transcript image previews in the private CLI configuration copy for this
+owning TUI launch.  See the option below for compatibility and lifetime.
 
 4.4 stop
 ========
@@ -1813,7 +1817,45 @@ otherwise normal OpenCode provider/model preferences apply.
 
      oc-box --project ~/devel/demo --model github-copilot/gpt-6.1-sol
 
-5.24 -credential-mode env|selected|vault
+5.24 -image-preview
+===================
+
+V2-only, for an **owning** start (the default command) or reset TUI
+launch.  Set both ‘prompt.image_preview’ and ‘session.image_preview’ to
+‘true’ in the private container's ‘~/.config/opencode/cli.json’.  These
+are terminal preferences, not ‘opencode.json’ server settings.  The
+current native V2 settings reference is at
+<https://opencode.ai/docs/cli/config>; older V2 releases may ignore
+unknown settings.  Rendering also depends on native OpenCode and
+terminal capabilities.  This option does not install a different
+OpenCode version or change permissions.
+
+oc-box merges these two fields into its host-derived CLI configuration
+snapshot, preserving all other values, including sibling prompt/session
+preferences.  JSONC comments and trailing commas are accepted; the
+private copy is normalized to JSON. The host file, its comments, and the
+host OpenCode configuration are never edited.  Missing CLI configuration
+is created only in the private copy.  Malformed/non-object input or
+non-object prompt/session sections are refused, not replaced.  Symlinked
+paths, nonregular/hard-linked CLI files, foreign-owned config
+directories/files, and group/world-writable directories/files are
+refused.  Validation runs before initial workspace registration or reset
+resource removal.
+
+There is no saved workspace preference: repeat the flag on each owning
+TUI launch that needs it.  The generated file remains in the private
+home after exit until the next configuration refresh.  The next owning
+launch or ‘sync’ without the flag replaces it with the normal
+host-derived copy; it does not force host-enabled previews off.
+Additional TUI clients inherit the current private copy but cannot
+supply this flag while an owner is running.  V1, web, terminal/
+maintenance, informational commands, history sync, and other non-owning
+commands reject the flag without changing configuration.
+
+     oc-box --project ~/devel/demo --image-preview
+     oc-box reset --project ~/devel/demo --image-preview
+
+5.25 -credential-mode env|selected|vault
 ========================================
 
 With ‘credentials’, save an explicit forwarding mode for that workspace.
@@ -1829,7 +1871,7 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.25 -no-vault
+5.26 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -1848,7 +1890,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.26 -env-secret NAME
+5.27 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -1861,7 +1903,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.27 -vault-secret NAME
+5.28 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -1873,7 +1915,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.28 -clear-credentials
+5.29 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -1885,7 +1927,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.29 -output FILE
+5.30 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -1895,7 +1937,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.30 -portable
+5.31 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -1905,7 +1947,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.31 -recipient AGE_KEY
+5.32 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -1916,7 +1958,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.32 -identity FILE
+5.33 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -1927,7 +1969,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.33 -cpus NUMBER
+5.34 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -1938,7 +1980,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.34 -memory SIZE
+5.35 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -1950,7 +1992,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.35 -pids-limit NUMBER
+5.36 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -1958,7 +2000,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.36 -device MAPPING
+5.37 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -1972,7 +2014,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.37 -podman-arg=-OPTION[=VALUE]
+5.38 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -1999,7 +2041,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.38 -clear-devices
+5.39 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -2010,7 +2052,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.39 -clear-podman-args
+5.40 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -2020,7 +2062,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.40 -delete-sessions
+5.41 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -2029,7 +2071,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.41 -all
+5.42 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -2037,7 +2079,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.42 -y, -yes
+5.43 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -3261,20 +3303,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2730
 Node: Commands6242
-Node: Options84545
-Node: Lifecycle and persistence105612
-Node: Distribution images107732
-Node: Sessions and recovery112607
-Node: Devices and host permissions119192
-Node: Resource reports121538
-Node: Configuration and environment123649
-Node: Files134912
-Node: Exit status140856
-Node: Examples141709
-Node: Troubleshooting143795
-Node: Installation and manuals155147
-Node: Authors and license164399
-Node: See also165006
+Node: Options84829
+Node: Lifecycle and persistence107947
+Node: Distribution images110067
+Node: Sessions and recovery114942
+Node: Devices and host permissions121527
+Node: Resource reports123873
+Node: Configuration and environment125984
+Node: Files137247
+Node: Exit status143191
+Node: Examples144044
+Node: Troubleshooting146130
+Node: Installation and manuals157482
+Node: Authors and license166734
+Node: See also167341
 
 End Tag Table
 

@@ -167,6 +167,7 @@ conversation. `--new` starts another conversation in the same environment.
 mkdir -p ~/devel/demo
 oc-box --project ~/devel/demo
 oc-box start --project ~/devel/demo --new
+oc-box --project ~/devel/demo --image-preview
 ```
 
 For V2, initialize and populate the host vault **before the first project launch**
@@ -185,6 +186,9 @@ appear every five seconds. A loading line covers blank TUI startup frames and
 disappears when OpenCode draws text. Warm launches retain compatible caches.
 The container OpenCode version is verified against the host on every launch;
 exact upgrades and downgrades are supported, with no fallback to another release.
+With a V2 release supporting image previews, `--image-preview` enables prompt
+and transcript image previews in the private CLI configuration copy for this
+owning TUI launch. See the option below for compatibility and lifetime.
 
 ### stop
 
@@ -1600,6 +1604,40 @@ OpenCode provider/model preferences apply.
 
 ```sh
 oc-box --project ~/devel/demo --model github-copilot/gpt-6.1-sol
+```
+
+### --image-preview
+
+V2-only, for an **owning** start (the default command) or reset TUI launch.
+Set both `prompt.image_preview` and `session.image_preview` to `true` in the
+private container's `~/.config/opencode/cli.json`. These are terminal preferences,
+not `opencode.json` server settings. The current native V2 settings reference is
+at <https://opencode.ai/docs/cli/config>; older V2 releases may ignore unknown
+settings. Rendering also depends on native OpenCode and terminal capabilities.
+This option does not install a different OpenCode version or change permissions.
+
+oc-box merges these two fields into its host-derived CLI configuration snapshot,
+preserving all other values, including sibling prompt/session preferences.
+JSONC comments and trailing commas are accepted; the private copy is normalized
+to JSON. The host file, its comments, and the host OpenCode configuration are
+never edited. Missing CLI configuration is created only in the private copy.
+Malformed/non-object input or non-object prompt/session sections are refused,
+not replaced. Symlinked paths, nonregular/hard-linked CLI files, foreign-owned
+config directories/files, and group/world-writable directories/files are refused.
+Validation runs before initial workspace registration or reset resource removal.
+
+There is no saved workspace preference: repeat the flag on each owning TUI
+launch that needs it. The generated file remains in the private home after exit
+until the next configuration refresh. The next owning launch or `sync` without
+the flag replaces it with the normal host-derived copy; it does not force
+host-enabled previews off. Additional TUI clients inherit the current private
+copy but cannot supply this flag while an owner is running. V1, web, terminal/
+maintenance, informational commands, history sync, and other non-owning commands
+reject the flag without changing configuration.
+
+```sh
+oc-box --project ~/devel/demo --image-preview
+oc-box reset --project ~/devel/demo --image-preview
 ```
 
 ### --credential-mode env|selected|vault

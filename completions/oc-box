@@ -30,7 +30,7 @@ _oc_box()
     local command='' action='' word skip=0 positional=0 ended=0 i
     local commands='start stop sync reset repair terminal web tui share upgrade secrets credentials backup backup-info restore purge list distros status doctor completion'
     local selectors='--project --workspace'
-    local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault'
+    local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview'
     local help='-h --help' options
     COMPREPLY=()
     (( COMP_CWORD > 0 )) && prev=${COMP_WORDS[COMP_CWORD-1]}
@@ -99,7 +99,7 @@ _oc_box()
 
     case $command in
         start) options="$help $selectors $launch" ;;
-        reset) options="$help $selectors --distro --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault" ;;
+        reset) options="$help $selectors --distro --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview" ;;
         sync) options="$help $selectors" ;;
         stop|repair) options="$help $selectors" ;;
         terminal) options="$help $selectors --maintenance" ;;

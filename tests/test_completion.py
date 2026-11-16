@@ -130,7 +130,7 @@ fi
         self.assertEqual(self.complete("--status", "--j"), ["--json"])
         self.assertEqual(self.complete("--status", "--n"), [])
         self.assertEqual(self.complete("sync", "--im"), [])
-        self.assertEqual(self.complete("reset", "--im"), [])
+        self.assertEqual(self.complete("reset", "--imp"), [])
         self.assertEqual(self.complete("secrets", "set", "--min"), [])
         self.assertEqual(
             self.complete("secrets", "passwd", "--min"), ["--min-passphrase-length"]
@@ -199,6 +199,36 @@ fi
         ):
             with self.subTest(command=command):
                 self.assertEqual(self.complete(command, "--no-v"), [])
+
+    def test_image_preview_is_offered_only_for_owning_tui_launches(self):
+        self.assertEqual(self.complete("--image-p"), ["--image-preview"])
+        for command in ("start", "reset"):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    self.complete(command, "--image-p"), ["--image-preview"]
+                )
+        for command in (
+            "web",
+            "stop",
+            "sync",
+            "repair",
+            "terminal",
+            "upgrade",
+            "secrets",
+            "credentials",
+            "backup",
+            "backup-info",
+            "restore",
+            "purge",
+            "list",
+            "distros",
+            "status",
+            "doctor",
+            "completion",
+            "--status",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--image-p"), [])
 
     def test_vault_mode_completes_with_separate_and_equals_values(self):
         self.assertEqual(
