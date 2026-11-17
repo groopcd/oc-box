@@ -286,11 +286,15 @@ class MonitorPanel(Static):
 
 
 def _card_percentage(used, total):
-    """Finite, capped gauge value; zero capacity is not a measured zero."""
+    """Actual finite percentage; only the visual bar saturates at 100%.
+
+    Zero/unknown capacity and ratios that overflow remain unavailable, never a
+    fabricated exact 100% in the accompanying numeric caption.
+    """
     used, total = numeric(used), numeric(total)
     if used is None or total is None or total == 0:
         return None
-    return min(1.0, used / total) * 100
+    return numeric(used / total * 100)
 
 
 def _card_memory(used, total, *, unlimited=False):

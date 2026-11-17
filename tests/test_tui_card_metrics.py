@@ -50,7 +50,9 @@ def workspace_snapshot():
 
 @unittest.skipUnless(AVAILABLE, "optional Textual dependencies are not installed")
 class CardValueTests(unittest.TestCase):
-    def test_numeric_gauges_reject_invalid_values_and_cap_finite_ratios(self):
+    def test_numeric_percentages_reject_invalid_values_without_capping_finite_ratios(
+        self,
+    ):
         for value in (None, math.nan, math.inf, -1, True, "12", 10**400):
             with self.subTest(value=value):
                 self.assertIsNone(status._card_percentage(value, 100))
@@ -58,7 +60,10 @@ class CardValueTests(unittest.TestCase):
         self.assertIsNone(status._card_percentage(0, 0))
         self.assertEqual(status._card_percentage(0, 100), 0)
         self.assertEqual(status._card_percentage(200, 400), 50)
-        self.assertEqual(status._card_percentage(1e308, 1e-308), 100)
+        self.assertEqual(status._card_percentage(500, 400), 125)
+        self.assertEqual(status._card_percentage(3, 2), 150)
+        self.assertIsNone(status._card_percentage(1e308, 1e-308))
+        self.assertIsNone(status._card_percentage(1e308, 1))
         self.assertEqual(status._card_percentage(1e308, 1e308), 100)
 
     def test_metadata_counts_require_nonnegative_exact_integers(self):
@@ -206,6 +211,93 @@ class CardWidgetTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("RAM ▁ ▄", cards.render().plain)
             cards.update_snapshot({})
             self.assertIn("Workspaces n/a/n/a running/registered", cards.render().plain)
+
+    async def test_over_quota_cpu_and_ram_keep_actual_percentages_with_saturated_bars(
+        self,
+    ):
+        app = CardApp()
+        async with app.run_test(size=(140, 48)) as pilot:
+            inspector = app.query_one(status.WorkspaceInspector)
+            item = workspace_snapshot()
+            item["metrics"].update(cpu_percent=500, memory_bytes=12 * GIB)
+            inspector.update_snapshot(item)
+            for width in WIDTHS:
+                await pilot.resize_terminal(width, 48)
+                await pilot.pause()
+                content = inspector.render()
+                self.assertTrue(
+                    all(cell_len(row.plain) <= width for row in content.split("\n"))
+                )
+                if width >= 32:
+                    self.assertIn("CPU 500.0%", content.plain)
+                    for caption in ("125% of quota", "150% of limit"):
+                        with self.subTest(width=width, caption=caption):
+                            row = next(
+                                row
+                                for row in content.split("\n")
+                                if caption in row.plain
+                            )
+                            bar_width = min(32, width - 4 - len(caption) - 1)
+                            self.assertEqual(row.plain.count("█"), bar_width)
+                            self.assertNotIn("░", row.plain)
+                    self.assertNotIn("100% of quota", content.plain)
+                    self.assertNotIn("100% of limit", content.plain)
+
+    async def test_host_ram_and_home_fs_over_capacity_captions_remain_uncapped(self):
+        app = CardApp()
+        async with app.run_test(size=(140, 48)):
+            cards = app.query_one(status.HostResourceCards)
+            host = host_snapshot()
+            host["memory_bytes"] = 24 * GIB
+            host["filesystem"]["used_bytes"] = 384 * GIB
+            cards.update_snapshot(host)
+            content = cards.render()
+            gauge_row = content.plain.splitlines()[2]
+            self.assertEqual(gauge_row.count("150%"), 2)
+            for segment in gauge_row.split("│")[3:6:2]:
+                self.assertIn("150%", segment)
+                self.assertIn("█", segment)
+                self.assertNotIn("░", segment)
+            self.assertTrue(
+                all(cell_len(row.plain) <= 140 for row in content.split("\n"))
+            )
+
+    async def test_overflowed_resource_ratios_stay_unknown_instead_of_false_100_percent(
+        self,
+    ):
+        app = CardApp()
+        async with app.run_test(size=(140, 48)) as pilot:
+            inspector = app.query_one(status.WorkspaceInspector)
+            item = workspace_snapshot()
+            item["metrics"].update(cpu_percent=1e308, memory_bytes=1e308)
+            item["effective_limits"].update(cpu_cores=1e-308, memory_bytes=1e-308)
+            inspector.update_snapshot(item)
+            for width in WIDTHS:
+                await pilot.resize_terminal(width, 48)
+                await pilot.pause()
+                content = inspector.render()
+                self.assertTrue(
+                    all(cell_len(row.plain) <= width for row in content.split("\n"))
+                )
+                self.assertNotIn("100% of quota", content.plain)
+                self.assertNotIn("100% of limit", content.plain)
+                self.assertNotIn("█", content.plain)
+                if width >= 32:
+                    self.assertIn("quota n/a", content.plain)
+                    self.assertIn("limit n/a", content.plain)
+                    self.assertIn("····", content.plain)
+            await pilot.resize_terminal(140, 48)
+            await pilot.pause()
+            cards = app.query_one(status.HostResourceCards)
+            host = host_snapshot()
+            host.update(memory_bytes=1e308, memory_total_bytes=1e-308)
+            host["filesystem"].update(used_bytes=1e308, total_bytes=1e-308)
+            cards.update_snapshot(host)
+            for segment in cards.render().plain.splitlines()[2].split("│")[3:6:2]:
+                self.assertIn("n/a", segment)
+                self.assertIn("····", segment)
+                self.assertNotIn("█", segment)
+                self.assertNotIn("100%", segment)
 
     async def test_literal_metadata_and_no_unrequested_configuration_details(self):
         app = CardApp()
