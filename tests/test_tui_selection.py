@@ -258,7 +258,7 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(copies, [])
 
     async def test_table_meter_bars_and_history_have_selectable_plain_text(self):
-        async with self.dashboard() as (app, pilot, copies, _):
+        async with self.dashboard(size=(140, 44)) as (app, pilot, copies, _):
             surfaces = (
                 ("table", "#workspaces", "example", None),
                 ("workspace RAM", "#full-diagnostics", None, r"[█░]{4,}"),
@@ -276,6 +276,13 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                     before = await self.drag(app, pilot, copies, span)
                     self.assert_highlight(app, span)
                     self.assert_copied(app, copies, before, span[2])
+        # Compact mode intentionally replaces individual gauges with a resource
+        # strip; its visible memory reading remains selectable/copyable.
+        async with self.dashboard(size=(80, 24)) as (app, pilot, copies, _):
+            span = self.visible_span(app, app.query_one("#system-report"), "6.0 GiB")
+            before = await self.drag(app, pilot, copies, span)
+            self.assert_highlight(app, span)
+            self.assert_copied(app, copies, before, "6.0 GiB")
 
     async def test_panel_and_settings_captions_copy_their_actual_title_text(self):
         async with self.dashboard() as (app, pilot, copies, _):
@@ -399,7 +406,9 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                             select.expanded, "drag must not open the selector"
                         )
                     elif control == "collapsible":
-                        self.assertTrue(app.query_one(Collapsible).collapsed)
+                        self.assertTrue(
+                            app.query_one("#workspace-details", Collapsible).collapsed
+                        )
                     else:
                         self.assertTrue(app.query_one("#log-follow", Switch).value)
                         self.assertTrue(
@@ -421,7 +430,9 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                         self.assertTrue(select.expanded)
                         await pilot.press("escape")
                     else:
-                        self.assertFalse(app.query_one(Collapsible).collapsed)
+                        self.assertFalse(
+                            app.query_one("#workspace-details", Collapsible).collapsed
+                        )
                     self.assertEqual(
                         copies, copied, "an ordinary click is not a text drag"
                     )

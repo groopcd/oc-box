@@ -739,6 +739,10 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             app.query_one("#auto-refresh", Switch).value = False
             for dimensions in ((80, 24), (100, 30), (140, 45), (220, 70)):
                 with self.subTest(dimensions=dimensions):
+                    was_compact = app._compact_layout
+                    prior_fold = app.query_one(
+                        "#workspace-inspector", Collapsible
+                    ).collapsed
                     await pilot.resize_terminal(*dimensions)
                     app.action_tab("status")
                     await pilot.pause()
@@ -747,7 +751,9 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     inspector = app.query_one("#workspace-inspector", Collapsible)
                     inventory = app.query_one("#workspace-card")
                     if dimensions[0] < 118:
-                        self.assertTrue(inspector.collapsed)
+                        self.assertEqual(
+                            inspector.collapsed, prior_fold if was_compact else True
+                        )
                         self.assertEqual(inspector.region.x, inventory.region.x)
                         inspector.collapsed = False
                         await pilot.pause()
