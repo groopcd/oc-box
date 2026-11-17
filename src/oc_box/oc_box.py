@@ -2938,7 +2938,6 @@ def launch_client(path, data, args, version, exported, owner=None):
     if (
         owner
         and version in native_tabs.SUPPORTED
-        and args.command != "web"
         and not any(
             (args.new, exported is not None, getattr(args, "resume", False), args.model)
         )

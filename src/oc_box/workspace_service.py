@@ -566,6 +566,48 @@ def tab_inventory(box, data, connection, *, timeout=4):
     return inventory
 
 
+def web_session_catalog(box, data, connection, members, *, timeout=4):
+    """Explicit chooser only: same private service, membership + native GET.
+
+    Unlike tab_inventory this permits already-open worktree/moved/archived/child
+    IDs. It must not be used by automatic owner selection or history sync.
+    """
+    if connection.get("workspace") != data["id"]:
+        raise box.BoxError("Web session catalog does not match the workspace.")
+    validate_endpoint(connection)
+    command = client_command(
+        box,
+        data,
+        connection,
+        [
+            "python3",
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            (box.PACKAGE / "opencode_v2_io.py").read_text(),
+            "web-sessions",
+            box.CONTAINER_OPENCODE,
+        ],
+    )
+    result = box.run(
+        command,
+        input=json.dumps(
+            {
+                "members": list(members),
+                "endpoint": {key: connection[key] for key in ("url", "password")},
+            }
+        ),
+        capture=True,
+        private=True,
+        timeout=timeout,
+    )
+    inventory = json.loads(result.stdout)
+    if not isinstance(inventory, list):
+        raise box.BoxError("Invalid private web session catalog.")
+    return inventory
+
+
 def api(box, data, connection, method, target, value=None, *, timeout=60):
     args = [
         box.CONTAINER_OPENCODE,
@@ -1128,9 +1170,15 @@ class Gateway:
                         import web_attachments
                     if web_attachments.matches(headers):
                         web_attachments.serve(
-                            stream, headers, child, self.url, self.session_route()
+                            stream, headers, child, self.url, self.native_session_route
                         )
                         return
+                if __package__:
+                    from . import web_sessions
+                else:
+                    import web_sessions
+                if web_sessions.respond(self, stream, child, bytes(headers)):
+                    return
                 pairing = bytes(headers).startswith(b"GET /auth/connect/")
                 child.stdin.write(headers)
                 child.stdin.flush()
@@ -1184,22 +1232,36 @@ class Gateway:
                 self.capacity.release()
 
     def entry_route(self):
+        return self.session_route()
+
+    def session_link(self, ident):
+        """Chooser row destination; the iframe always uses the native route."""
+        native = self.native_session_route(ident)
         if self.attachments:
             if __package__:
                 from . import web_attachments
             else:
                 import web_attachments
-            return web_attachments.PATH
-        return self.session_route()
+            return web_attachments.session_link(ident)
+        return native
 
     def session_route(self):
-        encoded = base64.urlsafe_b64encode(self.url.encode()).decode().rstrip("=")
-        return (
-            "/server/"
-            + encoded
-            + "/session/"
-            + require_session(self.box, self.connection)
-        )
+        # Native browser tabs are client-local, not the native TUI's open tabs.
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        return web_sessions.INDEX
+
+    def native_session_route(self, ident):
+        """A selected native row, never the default chooser/entry route."""
+        if not self.box.valid_session_id(ident):
+            raise self.box.BoxError("Invalid native web session ID.")
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        return web_sessions.native_session_route(self.url, ident)
 
     def __exit__(self, *_):
         self.closed.set()
@@ -1218,7 +1280,6 @@ class Gateway:
 
 
 def web_session(box, data, connection, args):
-    selected_session = require_session(box, connection)
     options = {}
     if getattr(args, "attachments", False):
         if __package__:
@@ -1244,9 +1305,7 @@ def web_session(box, data, connection, args):
             raise box.BoxError("Invalid native OpenCode browser pairing response.")
         link = gateway.url + "/auth/connect/" + pair["code"]
         print(
-            "oc-box: OpenCode web session "
-            + selected_session
-            + "\n"
+            "oc-box: OpenCode web workspace session index\n"
             + link
             + "\nThis one-use link grants access to this workspace service. Keep this command open; Ctrl-C closes web access.",
             flush=True,

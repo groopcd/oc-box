@@ -282,9 +282,19 @@ class ReleaseChannelTests(unittest.TestCase):
         for name in ("ci.yml", "distros.yml"):
             with self.subTest(workflow=name):
                 self.assertIn(
-                    "branches: [master, devel, 'feature/**']",
+                    "branches: [master, devel, 'feature/**', 'fix/**']",
                     (APP / ".github/workflows" / name).read_text(),
                 )
+        native = (APP / ".github/workflows/ci.yml").read_text()
+        command = 'python3 -B tests/smoke_web_sessions_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"'
+        self.assertEqual(native.count(command), 1)
+        self.assertLess(
+            native.index("tests/smoke_sharing_v2.py"), native.index(command)
+        )
+        attachments = 'python3 -B tests/smoke_web_attachments_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"'
+        self.assertEqual(native.count(attachments), 1)
+        self.assertLess(native.index(command), native.index(attachments))
+        self.assertIn("@opencode/cli@2.2.6", native)
 
 
 class BuildBackendChannelTests(unittest.TestCase):

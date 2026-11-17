@@ -47,18 +47,17 @@
     return !!data && (data.files.length > 0 || Array.from(data.types).includes("Files"));
   }
 
-  function workspaceFrame(frame, origin, prefix) {
+  function workspaceFrame(frame, origin, route) {
     const realm = frame.contentWindow;
     const url = new URL(realm.location.href);
-    if (url.origin !== origin || !url.pathname.startsWith(prefix) ||
-        !/^ses[A-Za-z0-9_-]+$/.test(url.pathname.slice(prefix.length))) {
-      throw new Error("Open a native session on this workspace before adding attachments.");
+    if (url.origin !== origin || url.pathname !== route ||
+        !/^\/server\/[A-Za-z0-9_-]+\/session\/ses[A-Za-z0-9_-]+$/.test(route)) {
+      throw new Error("Return to this wrapper's selected native session, or select another row in the chooser.");
     }
     return { realm, doc: realm.document, href: url.href };
   }
 
   function adapter(frame, origin, route, notice) {
-    const prefix = route.slice(0, route.lastIndexOf("/") + 1);
     const forwarded = new WeakSet();
     const installed = new WeakSet();
     let busy = false;
@@ -70,9 +69,14 @@
       }
       busy = true;
       try {
-        const before = workspaceFrame(frame, origin, prefix);
+        const before = workspaceFrame(frame, origin, route);
         const copies = await snapshot(files, before.realm);
-        const after = workspaceFrame(frame, origin, prefix);
+        let after;
+        try {
+          after = workspaceFrame(frame, origin, route);
+        } catch (_error) {
+          throw new Error("The native session changed while reading files. Nothing was forwarded; drop again.");
+        }
         if (before.doc !== after.doc || before.href !== after.href) {
           throw new Error("The native session changed while reading files. Nothing was forwarded; drop again.");
         }
@@ -99,7 +103,7 @@
           "Each attachment must be nonempty and at most 20 MiB.",
           "A drop may contain at most 40 MiB.",
           "The selected file changed; choose it again.",
-          "Open a native session on this workspace before adding attachments.",
+          "Return to this wrapper's selected native session, or select another row in the chooser.",
           "The native session changed while reading files. Nothing was forwarded; drop again.",
           "The original drop target is no longer available. Nothing was forwarded; drop again.",
         ].includes(_error.message);
@@ -110,7 +114,7 @@
     }
 
     function install() {
-      const { doc } = workspaceFrame(frame, origin, prefix);
+      const { doc } = workspaceFrame(frame, origin, route);
       if (installed.has(doc)) return;
       installed.add(doc);
       // Explicit wrapper-wide browser event normalization, not native private hooks.

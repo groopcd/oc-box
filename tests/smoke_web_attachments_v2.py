@@ -3,8 +3,11 @@
 python3 -B tests/smoke_web_attachments_v2.py --opencode /path/to/opencode-v2
 
 Only fresh private synthetic state is used. Standard native pairing cookies,
-bundled app assets and API media admission remain unmodified. Podman exec alone
-is replaced with a local pipe relay. Deliberate resume=false fixture admissions
+bundled app assets and API media admission remain unmodified. Outer Podman exec
+is replaced with a local pipe relay. A synthetic chooser catalog contains real
+native API sessions; actual TUI membership belongs to smoke_web_sessions_v2.py.
+The HTTP client does not test normal browser keep-alive or rendering.
+Deliberate resume=false fixture admissions
 below test native PNG/PDF handling; the production adapter has no prompt call.
 """
 
@@ -28,6 +31,7 @@ from oc_box import (
     opencode_compat,
     opencode_v2_io as bridge,
     web_attachments,
+    web_sessions,
     workspace_service,
 )
 from smoke_session_sync_v2 import bounded, private_environment, require, seed
@@ -78,9 +82,23 @@ def exercise(binary, root):
                 "Fixture inherited credentials.",
             )
             ident = seed(native, "ses_web_attachments", project)
-            before = native("GET", "/api/experimental/session/" + ident + "/export")
-            inbox = native("GET", "/api/session/" + ident + "/inbox")
-            connection = {**native.endpoint, "version": release, "session": ident}
+            other = seed(native, "ses_web_other", project)
+            members = [ident, other]
+            catalog = [
+                native("GET", "/api/session/" + selected)["data"]
+                for selected in members
+            ]
+            before = {
+                selected: native(
+                    "GET", "/api/experimental/session/" + selected + "/export"
+                )
+                for selected in members
+            }
+            inbox = {
+                selected: native("GET", "/api/session/" + selected + "/inbox")
+                for selected in members
+            }
+            connection = {**native.endpoint, "version": release, "session": None}
 
             def local_relay(_box, _data, port):
                 return box.ContainerCommand(
@@ -92,6 +110,9 @@ def exercise(binary, root):
                 patch.object(
                     workspace_service, "relay_command", side_effect=local_relay
                 ),
+                patch.object(
+                    web_sessions, "open_sessions", return_value=(catalog, "valid")
+                ),
                 workspace_service.Gateway(
                     box, {}, connection, attachments=True
                 ) as gateway,
@@ -100,7 +121,9 @@ def exercise(binary, root):
                     ProxyHandler({}), HTTPCookieProcessor(CookieJar())
                 )
                 try:
-                    browser.open(gateway.url + web_attachments.PATH, timeout=10)
+                    browser.open(
+                        gateway.url + web_attachments.session_link(ident), timeout=10
+                    )
                 except HTTPError as error:
                     require(error.code == 401, "Unpaired adapter did not refuse.")
                 else:
@@ -114,19 +137,41 @@ def exercise(binary, root):
                     timeout=10,
                 ) as reply:
                     require(
-                        reply.geturl() == gateway.url + web_attachments.PATH,
-                        "Wrong adapter redirect.",
+                        reply.geturl() == gateway.url + web_sessions.INDEX,
+                        "Pairing did not open the chooser.",
+                    )
+                    chooser = reply.read()
+                    require(
+                        b"Open native OpenCode Home" in chooser,
+                        "Native Home navigation missing.",
+                    )
+                for selected in members:
+                    link = web_attachments.session_link(selected)
+                    require(link.encode() in chooser, "Selected wrapper row missing.")
+                    with browser.open(gateway.url + link, timeout=10) as reply:
+                        body = reply.read()
+                    require(
+                        b"oc-box attachment adapter" in body, "Adapter page missing."
                     )
                     require(
-                        b"oc-box attachment adapter" in reply.read(),
-                        "Adapter page missing.",
+                        (
+                            'data-route="'
+                            + gateway.native_session_route(selected)
+                            + '"'
+                        ).encode()
+                        in body,
+                        "Wrapper iframe did not target the selected native session.",
+                    )
+                    require(
+                        b'data-route="' + web_sessions.INDEX.encode() not in body,
+                        "Wrapper incorrectly framed the chooser.",
                     )
                 with browser.open(
                     gateway.url + web_attachments.SCRIPT, timeout=10
                 ) as reply:
                     require(b"DataTransfer" in reply.read(), "Adapter script missing.")
                 with browser.open(
-                    gateway.url + gateway.session_route(), timeout=10
+                    gateway.url + gateway.native_session_route(ident), timeout=10
                 ) as reply:
                     html = reply.read().decode()
                     asset = re.search(r'<script[^>]*\bsrc="(/_assets/[^"]+\.js)"', html)
@@ -143,7 +188,7 @@ def exercise(binary, root):
                 try:
                     browser.open(
                         Request(
-                            gateway.url + web_attachments.PATH,
+                            gateway.url + web_attachments.session_link(ident),
                             headers={"Origin": "https://outside.invalid"},
                         ),
                         timeout=10,
@@ -154,18 +199,25 @@ def exercise(binary, root):
                     raise AssertionError("Foreign-origin wrapper was accepted.")
 
             require(
-                native("GET", "/api/experimental/session/" + ident + "/export")
-                == before,
+                all(
+                    native("GET", "/api/experimental/session/" + selected + "/export")
+                    == before[selected]
+                    for selected in members
+                ),
                 "Wrapper reads changed retained history.",
             )
             require(
-                native("GET", "/api/session/" + ident + "/inbox") == inbox,
+                all(
+                    native("GET", "/api/session/" + selected + "/inbox")
+                    == inbox[selected]
+                    for selected in members
+                ),
                 "Wrapper reads admitted or queued user input.",
             )
             print(
                 "PASS native "
                 + release
-                + ": authenticated wrapper/assets, foreign-origin refusal, unchanged history/inbox."
+                + ": synthetic two-row chooser, selected wrappers/native iframe routes, authenticated assets, foreign-origin refusal, unchanged history/inboxes."
             )
 
             # Explicit, separate fixture mutation, never a production drop action.

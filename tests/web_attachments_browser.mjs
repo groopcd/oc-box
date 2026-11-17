@@ -179,6 +179,7 @@ assert.equal(api.MAX_TOTAL, 41943040);
 for (const href of [
   "https://outside.invalid/server/local/session/ses_synthetic",
   origin + "/server/other/session/ses_synthetic",
+  origin + "/server/local/session/ses_wrong_target",
   origin + "/settings",
 ]) {
   const f = fixture();

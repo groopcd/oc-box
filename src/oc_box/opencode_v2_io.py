@@ -11,6 +11,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import secrets
 import select
 import signal
@@ -197,6 +198,105 @@ def session_inventory(request, directory):
         if not isinstance(cursor, str) or not cursor or cursor in cursors:
             raise FixedError(INVENTORY_CURSOR)
         cursors.add(cursor)
+
+
+def web_session_info(info):
+    """Validate metadata for explicit browsing, not startup/history eligibility."""
+
+    def ident(value):
+        return (
+            isinstance(value, str)
+            and len(value) <= 128
+            and re.fullmatch(r"ses[A-Za-z0-9_-]+", value) is not None
+        )
+
+    def timestamp(value):
+        return type(value) in (int, float) and 0 <= value <= 2**53 - 1
+
+    if (
+        not isinstance(info, dict)
+        or not ident(info.get("id"))
+        or not isinstance(info.get("location"), dict)
+        or not isinstance(info["location"].get("directory"), str)
+        or not info["location"]["directory"].startswith("/")
+        or not isinstance(info.get("time"), dict)
+        or not timestamp(info["time"].get("updated"))
+        or (
+            info["time"].get("archived") is not None
+            and not timestamp(info["time"]["archived"])
+        )
+        or (info.get("parentID") is not None and not ident(info["parentID"]))
+    ):
+        raise FixedError(INVENTORY_ENTRY)
+    return info
+
+
+def service_session_catalog(request):
+    """Complete THIS private service's metadata; no directory/root/archive filter.
+
+    Separate from session_inventory: this is only an explicit web chooser's
+    discovery input, never a broader history-sync or automatic-resume scope.
+    """
+    query = "/api/session?order=asc&limit=100"
+    values, identities, cursors = [], set(), set()
+    cursor = None
+    while True:
+        page = request(
+            "GET", query + ("&cursor=" + quote(cursor, safe="") if cursor else "")
+        )
+        if (
+            not isinstance(page, dict)
+            or not isinstance(page.get("data"), list)
+            or not isinstance(page.get("cursor"), dict)
+        ):
+            raise FixedError(INVENTORY)
+        for info in page["data"]:
+            web_session_info(info)
+            if info["id"] in identities:
+                raise FixedError(INVENTORY_INCONSISTENT)
+            identities.add(info["id"])
+            values.append(info)
+        cursor = page["cursor"].get("next")
+        if cursor is None:
+            return values
+        if not isinstance(cursor, str) or not cursor or cursor in cursors:
+            raise FixedError(INVENTORY_CURSOR)
+        cursors.add(cursor)
+
+
+def verified_web_sessions(request, members):
+    """Read-only membership intersection, with native GET identity verification."""
+    if (
+        not isinstance(members, list)
+        or len(members) > 4096
+        or any(
+            not isinstance(ident, str)
+            or len(ident) > 128
+            or re.fullmatch(r"ses[A-Za-z0-9_-]+", ident) is None
+            for ident in members
+        )
+        or len(set(members)) != len(members)
+    ):
+        raise FixedError(INVENTORY_ENTRY)
+    catalog = {info["id"] for info in service_session_catalog(request)}
+    verified = []
+    for ident in members:
+        if ident not in catalog:
+            continue
+        try:
+            reply = request("GET", "/api/session/" + quote(ident, safe=""))
+        except HTTPError as error:
+            if error.code != 404:
+                raise
+            error.close()
+            continue
+        if not isinstance(reply, dict):
+            raise FixedError(INVENTORY_ENTRY)
+        info = web_session_info(reply.get("data"))
+        if info["id"] != ident:
+            raise FixedError(INVENTORY_INCONSISTENT)
+        verified.append(info)
+    return verified
 
 
 def checked_export(request, ident):
@@ -760,6 +860,13 @@ def main(argv):
                 else checked_export(request, settings["session"])
             )
             print(json.dumps(value), flush=True)
+    elif action == "web-sessions":
+        settings = json.load(sys.stdin)
+        # Mandatory existing endpoint: never discover/start a service here.
+        value = verified_web_sessions(
+            endpoint_request(settings["endpoint"]), settings["members"]
+        )
+        print(json.dumps(value), flush=True)
     elif action == "lease":
         with server(binary) as request:
             # Control credentials are returned only through the owner's pipe,

@@ -673,7 +673,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             native.assert_not_called()
         self.assertIsNone(owner.child)
 
-    def test_unbound_session_consumers_refuse_before_browser_or_terminal_work(self):
+    def test_unbound_terminal_refuses_before_native_work(self):
         connection = {**self.connection, "session": None}
         with (
             patch.object(service, "Gateway") as gateway,
@@ -689,10 +689,6 @@ class WorkspaceServiceTests(unittest.TestCase):
             ),
             contextlib.redirect_stderr(io.StringIO()),
         ):
-            with self.assertRaisesRegex(box.BoxError, "No open native session"):
-                service.web_session(
-                    box, self.data, connection, box.parser().parse_args(["web"])
-                )
             with self.assertRaisesRegex(box.BoxError, "No open native session"):
                 box.main(["terminal", "--workspace", self.data["id"]])
         for operation in (gateway, native, client, prepare, credentials):

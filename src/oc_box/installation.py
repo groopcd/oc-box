@@ -26,6 +26,7 @@ RUNTIME_FILES = (
     "workspace_service.py",
     "web_attachments.py",
     "web_attachments.js",
+    "web_sessions.py",
     "workspace_control.py",
     "history_reader.py",
     "history_recovery.py",

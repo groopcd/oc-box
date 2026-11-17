@@ -16,7 +16,7 @@ from pathlib import Path
 import re
 import select
 import time
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 SUPPORTED = frozenset(("2.2.6", "2.3.0"))
 # Stay inside native's existing service-worker navigation exclusion. Do not
@@ -25,6 +25,34 @@ PATH = "/auth/oc-box-attachments"
 SCRIPT = PATH + "/adapter.js"
 MAX_HEADERS = 16384
 MAX_REPLY_HEADERS = 65536
+
+
+def session_link(ident):
+    if (
+        not isinstance(ident, str)
+        or re.fullmatch(r"ses[A-Za-z0-9_-]{1,125}", ident) is None
+    ):
+        raise ValueError("session")
+    return PATH + "?" + urlencode({"session": ident})
+
+
+def selection(target):
+    """Exactly one explicit native session; no owner/Home/first-row fallback."""
+    if target == SCRIPT:
+        return None
+    path, separator, query = target.partition("?")
+    if path != PATH or not separator:
+        raise ValueError("route")
+    pairs = parse_qsl(
+        query, keep_blank_values=True, strict_parsing=True, max_num_fields=1
+    )
+    if len(pairs) != 1 or pairs[0][0] != "session":
+        raise ValueError("route")
+    ident = pairs[0][1]
+    # Also refuse ambiguous/noncanonical encodings and dangling separators.
+    if target != session_link(ident):
+        raise ValueError("route")
+    return ident
 
 
 def matches(raw):
@@ -44,8 +72,7 @@ def request(raw, origin):
     method, target, _ = first
     if method not in ("GET", "HEAD"):
         raise ValueError("method")
-    if target not in (PATH, SCRIPT):
-        raise ValueError("route")
+    selection(target)
     headers = {}
     for line in lines:
         key, separator, value = line.partition(":")
@@ -142,7 +169,7 @@ details{max-width:90em}summary{cursor:pointer}
 20 MiB per file, 40 MiB and eight files per drop. Signatures are checked, not a
 full document safety scan. DOCX and other formats are not supported here.</p>
 <p>The adapter strips competing URL/text flavors from real file drops.
-Files remain in the native draft until you press native Send; verify its thumbnails.
+No prompt/inference Send occurs until you press native Send; verify its thumbnails.
 Your selected native model must support images/PDF for inline model input.
 Native may otherwise upload to its container temporary directory as a path.</p>
 <p>Native browser draft storage (including IndexedDB), container history and
@@ -188,6 +215,6 @@ def serve(stream, raw, child, origin, native_route):
     body = (
         (Path(__file__).with_name("web_attachments.js")).read_bytes()
         if target == SCRIPT
-        else page(native_route)
+        else page(native_route(selection(target)))
     )
     response(stream, 200, body, head=method == "HEAD", javascript=target == SCRIPT)

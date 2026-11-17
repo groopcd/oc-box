@@ -391,8 +391,38 @@ oc-box web --project ~/devel/demo
 oc-box terminal --project ~/devel/demo
 ```
 
-The browser uses upstream's short-lived one-use pairing link and opens the same
-session through the native web app. A host relay binds only `127.0.0.1`, forwards
+The browser uses upstream's short-lived one-use pairing link and opens an
+authenticated oc-box session index at `/auth/oc-box-sessions`. This first-party
+`/auth/` path bypasses native's service-worker navigation fallback without
+changing or disabling that worker. The index lists all verified
+open native TUI tabs in this private service, including idle sessions, in native
+tab order. Select a link to open that session in the unmodified native web app
+in a separate browser tab; keep the index open or return to its URL and refresh
+to see later TUI membership changes. Native browser tabs are client-local and
+are **not** automatically seeded or synchronized with TUI tabs. Already-open
+archived sessions, moved/worktree locations and saved child IDs are not silently
+filtered: each listed ID must belong to native's saved tab membership and pass
+an identity-matching GET from this same private service. Unopened history and
+missing/deleted IDs are not listed. Native normally groups child navigation
+under its root tab; the index does not invent a family tab.
+Global TUI tab scope does not combine private workspace services or host history.
+For restored workspaces, the saved scope uses the retained internal launch path;
+sessions within that scope may legitimately have other directories.
+If saved TUI membership is unavailable, the index labels that limitation and
+does not guess a current session or list historical sessions.
+An empty saved scope stays empty; unverifiable state shows a retry message.
+The chooser always offers **Open native OpenCode Home**, including when there
+are no TUI tabs, saved membership is missing, or an authenticated index query
+fails. This explicit link opens the unmodified native Home at `/`, where you can
+create or open a browser session without first running a TUI. It does not choose
+historical sessions, add fake TUI rows, or create a session by itself. Browser-only
+tabs remain native-client local and do not populate this TUI membership list.
+These explicit browsing rules do not broaden automatic owner resume or history
+synchronization. Owner resume keeps its existing eligible-root policy; history
+sync keeps its existing discovery and archive semantics, including children and
+archived history.
+
+A host relay binds only `127.0.0.1`, forwards
 HTTP/streaming/WebSocket bytes through Podman exec to container loopback, and
 does not publish a container port, allow LAN access, or join the host OpenCode
 service. Links grant access to the workspace service; do not share or log them.
@@ -417,19 +447,32 @@ For browser-provided screenshot/image/PDF attachments, opt in explicitly:
 oc-box web --project ~/devel/demo --attachments
 ```
 
-This opens a visibly labeled oc-box wrapper around the **unmodified native web
-app**, not a host-side OpenCode TUI. It uses only the existing loopback relay and
+Pairing still opens the session chooser. Each verified TUI row now links to a
+visibly labeled oc-box wrapper for **that selected session**, containing the
+unmodified native web app, not a host-side OpenCode TUI. The iframe never loads
+the chooser or silently substitutes an owner/first session. A wrapper URL requires
+exactly one valid `session` query parameter; unknown or duplicate parameters refuse.
+The chooser's native Home link stays available for fresh/empty scopes and
+browser-only tabs. That direct Home link is not an attachment wrapper: the adapter
+currently targets explicitly selected existing sessions, not Home/new-session
+drafts or automatically mirrored browser tabs. If the iframe navigates to another
+session, the adapter refuses forwarding; select that session's chooser row to
+open its own wrapper instead. There is no last-used/owner/other-session fallback.
+It uses only the existing loopback relay and
 native pairing/authentication. Native OpenCode **2.2.6 and 2.3.0 only** are
 source-checked; other versions refuse the adapter rather than assuming
-compatibility. Omit the option for the unchanged native web interface.
+compatibility. Omit the option for chooser links directly to the native web app.
 
 Wait for the native composer to load, then drag the screenshot from Spectacle
 into it (or use the wrapper's drop area/file chooser). Actual browser `File`
 objects are copied and forwarded as a file-only standard DOM drop. This avoids
 native's competing `text/plain` `file:` flavor turning an actual file drop into
 a path mention. There is no model tool request, per-image host approval, private
-widget lookup or native source/binary patch. **Nothing is sent automatically**:
-check native thumbnails, edit the native prompt and press native Send yourself.
+widget lookup or native source/binary patch. **No prompt/inference Send happens
+automatically**: check native thumbnails, edit the native prompt and press native
+Send yourself. Native may stage attachment bytes into its container temporary
+directory before Send, especially when using its file/path fallback. "Draft"
+does not mean the bytes remain exclusively in the host browser.
 The adapter cannot acknowledge native draft admission through a public API, so
 its forwarding notice is not proof of a thumbnail or successful model input.
 Do not drop while changing the native session; an observed route/document change

@@ -54,6 +54,53 @@ native composer thumbnail admission, provider interpretation, live rootless
 Podman isolation or new host acceptance. No native source/binary modifications
 or private widget selector hooks are used by the adapter.
 
+The composed chooser routes each verified row through an explicit selected-ID
+wrapper link when attachments are enabled, while native Home remains separate.
+Strict missing/duplicate/unknown selection parameters refuse; wrapper iframes
+use native session routes, never the chooser. The native attachment fixture uses
+a synthetic catalog of real native API sessions to isolate this HTTP composition;
+the separate four-tab fixture below owns actual TUI membership verification.
+Pinned baseline 2.2.6 CI invokes both fixtures. Neither HTTP fixture is proof of
+normal browser connection reuse or real browser file-drop admission.
+
+**Pending integration gate:** normal Chromium pairing on the original
+`5c9fd883ded5d83c09a5d5e2842c739afd65647f` failed with a redirected wrapper 404:
+the Gateway classified only the first request of a persistent connection.
+That failure is retained, and a fresh-cookie diagnostic is not a normal-flow
+pass. The separately developed Gateway response/connection repair and subsequent
+normal-browser checks remain required; this integration does not implement a
+duplicate transport fix or claim the issue accepted.
+
+### Open TUI sessions in the web interface
+
+`tests/test_web_sessions.py` checks four-session membership, complete paginated
+catalogs, native tab order, idle versus active semantics, restored launch scopes,
+global/cwd scope, already-open archived/moved/worktree/child IDs, unopened-history
+and foreign-service exclusions, identity-matching native GETs, empty/missing/
+invalid state, owning-web selection, HTML escaping, native service-worker routing
+boundaries and authenticated relay behavior. Native port-scoped cookies and
+Origin checks remain authoritative. Empty/missing and authenticated error pages
+retain explicit native Home navigation without invented session rows. Automatic
+resume/history policy is separate.
+
+Run `python3 -B tests/smoke_web_sessions_v2.py --opencode /path/to/opencode`
+separately with native 2.2.6 and 2.3.0. It opens four tabs using native PTYs in
+fresh synthetic stores, including a real Git worktree, a native-moved root and
+a native-archived root, then exercises the production index with real native
+HTTP pairing, session GETs and public web-shell routes. Only the outer Podman
+exec boundary is replaced with local processes. Fixture state is retained under
+a fresh temporary directory, including on failure. This does not render a
+browser, certify browser-local tab seeding (which is not implemented), or
+establish external-host/rootless-Podman acceptance.
+
+The script first checks fresh, unbound HTTP pairing into an empty chooser and
+its explicit native Home link, with unchanged missing TUI state and empty session
+inventory. Use `--home-only` to run just this bounded read-only navigation check
+without a TUI or session create/open/prompt mutations. Native Home web-shell
+availability is not rendered Home chat or installed-service-worker acceptance.
+The existing V2 CI job runs the default combined script against pinned 2.2.6;
+both source/package and distro workflows also trigger on `fix/**` branches.
+
 ### Reviewed 5573965 candidate evidence
 
 The following is a review of retained evidence for clean
