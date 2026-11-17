@@ -204,10 +204,12 @@ oc-box tui --workspace WORKSPACE_ID --read-only
 oc-box tui --demo
 ```
 
-Its seven tabs are **Status, Settings, Sessions, Terminals, Logs, Storage, and
-Backup/restore**. The first five shortcuts remain unchanged; `6` and `7` open
-the new tabs. Log search
-stays available across tabs (`Ctrl+L` opens Logs), including when follow is
+Its seven sections are **Status, Settings, Sessions, Terminals, Logs, Storage, and
+Backup/restore**, retaining shortcuts `1`–`7`. The card redesign uses a navy
+theme, resource cards, workspace table and contextual inspector; a compact
+section picker replaces the navigation rail on narrow terminals. The workspace
+picker remains available in the header across sections. Log search
+stays available (`Ctrl+L` opens Logs), including when follow is
 paused. Browsing never starts, resets, syncs, or unlocks a workspace. Native V2
 session connections/actions are explicit; a host Connect may start the native
 host service, while workspace connections lease only an existing private owner.
@@ -215,6 +217,9 @@ Compact aligned meters and fixed-scale CPU/RAM histories distinguish unavailable
 readings from zero. Status/followed-log refresh defaults to one second, with
 any whole-number interval from 1–60 seconds and no overlapping queries. Sessions stay an
 on-demand snapshot: background refresh does not reset table scrolling or selection.
+The Overview activity card shows only already-retained oc-box categories, not
+external output or agent/token/GPU telemetry. Storage and encrypted backup forms
+use scoped cards without changing their reviewed action/secret-input boundaries.
 Delayed session queries show animated, source-specific progress and explicit
 cancellation; failed actions show fixed, actionable notifications rather than raw
 native errors. Lost acknowledgements leave the outcome unverified, not falsely

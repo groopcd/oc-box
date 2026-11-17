@@ -207,21 +207,31 @@ opt-in: require a verified owned selected container, tail 500, 1 MiB and
 redaction. Tests of known patterns are not proof that arbitrary secrets are
 removed. This stage has no native OpenCode logfile reader.
 
-**Optional headless UI layer.** Exercise all seven tabs and `1`–`7`, `r`, `q`,
+**Optional headless UI layer.** Exercise all seven sections and `1`–`7`, `r`, `q`,
 `Ctrl+L`, `s`/`F2` and focused-terminal routing with Textual's headless behavior
-tools. Check compact one-line header ellipsis at small widths without hiding log
+tools. Check the wide rail and compact header section picker without hiding log
 search. Search must stay visible and case-insensitive/literal across tabs, source
 changes, follow and pause. Check global retention of at most 2000 entries and
 the 1000-generated-entry display bound per refresh.
 
-Verify bounded gold Full diagnostics and green System (OS-reported) panels,
-aligned single-line RAM/CPU/Home FS meters and short fixed 0–100% CPU/RAM
+Verify bounded host resource cards and the selected-workspace inspector,
+compact resource-strip rendering and short fixed 0–100% CPU/RAM
 histories, not auto-scaled sparklines. Use synthetic readings, including
 workspace CPU above 100% (100% = one core), observed quota normalization, unknown/
 unlimited capacity, unavailable readings and unchanged raw totals/data. Check
 that full details/mounts remain expandable and initially collapsed. Include no
 current workspace: System and monitoring settings must remain usable without
-fabricating workspace readings.
+fabricating workspace readings. Include 80×24, 100×30, 140×44 and wide layouts,
+header/context selection from every section, empty/partial inventories, selected
+identity/viewport preservation and no extra backend work from navigation or
+filtering. Card defaults must retain selectable built-in themes.
+Queued/detached picker events must be ignored before root/private reset queries;
+valid private-shield changes reset to the admitted context without actions.
+Oversubscribed quota captions must retain actual finite percentages while bars
+saturate visually; unknown/unlimited values must never become false utilization.
+The activity card must use already-retained oc-box categories only and respect
+selection/clipboard/privacy boundaries. Existing secret and native-terminal
+fences are not a cosmetic implementation detail to replace.
 
 Check cheap batched Status and followed-log refresh at every whole-number
 interval from 1 through 60 seconds, default 1 second, and auto-refresh on/off.

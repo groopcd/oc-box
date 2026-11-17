@@ -533,7 +533,8 @@ changing the workspace, its owner or the validation guard. `--demo` and isolated
 unit tests can still use editable source because they do not attach to that mount.
 
 Initially select one existing project/workspace, or omit selectors for the registered
-workspace overview. The sidebar still permits switching between registrations.
+workspace overview. The header workspace picker permits switching registrations
+from every section without connecting to a native source.
 Browsing does not create/start a workspace, take lifecycle
 ownership, reset, sync, refresh credentials or unlock the vault. `--read-only`
 disables native session mutation, backup creation/restore/deletion, workspace
@@ -544,11 +545,12 @@ execution inside a container: no host services, actual registry/log access or
 host/workspace actions. Refreshing demo data does not animate those sample values;
 use normal host mode (optionally `--read-only`) for live measurements.
 
-The seven tabs are Status, Settings, Sessions, Terminals, Logs, Storage and
+The seven sections are Status, Settings, Sessions, Terminals, Logs, Storage and
 Backup/restore. `1`–`7` select
-them; `r` refreshes and `q` quits outside a focused embedded terminal. The
-compact one-line header ellipsizes long labels and keeps case-insensitive literal
-log search available from every tab, including while follow is paused; `Ctrl+L`
+them; `r` refreshes and `q` quits outside a focused embedded terminal. A left
+navigation rail is used on wide terminals; below 118 columns it becomes a header
+section picker. The header keeps case-insensitive literal
+log search available from every section, including while follow is paused; `Ctrl+L`
 opens Logs and focuses search. `s` or `F2` opens all dashboard settings outside
 focused text inputs or the native shell. A focused terminal keeps its keys,
 including `s`, `F2` and `Ctrl+L`; use `Ctrl-]` to detach its client without ending
@@ -584,14 +586,24 @@ be partial and must be inspected before retrying.
 Host copying requires terminal OSC 52 support/permission; container-originated
 OSC clipboard requests remain blocked. See `docs/tui.md` for clipboard limits.
 
-Status has compact gold Full diagnostics (workspace) and green System
-(OS-reported) panels with aligned single-line RAM, CPU and Home FS meters and
-short fixed 0–100% CPU/RAM histories, not auto-scaled sparklines. Workspace CPU
+Status is a card-based Overview: host CPU, RAM, OS-reported Home FS capacity and
+running/registered workspace counts, followed by a workspace inventory and
+selected-workspace inspector. Wide host cards collapse to a compact resource
+panel at narrow widths. The inspector folds below the table on compact layouts
+and remains explicitly expandable. Native source context stays distinct from the
+selected workspace. Short CPU/RAM histories use fixed 0–100% scales, not
+auto-scaled sparklines. Workspace CPU
 numbers retain 100% = one core; the meter uses observed CPU quota when known.
 Unknown/unlimited capacity and unavailable readings are not shown as fake zeros.
 Raw report data and totals are unchanged. Full details/mounts remain in an
-expandable section, initially collapsed. System readings and monitoring settings
+expandable section, initially collapsed. Host readings and monitoring settings
 remain available with no current workspace.
+
+The workspace table uses only supplied project/state/CPU/RAM data and explicit
+private-home scan results. Stopped/unknown readings are not fabricated zeros.
+The retained-activity card shows existing oc-box journal categories only; it does
+not load external logs, inspect agent calls or add GPU/token/cost telemetry.
+Storage/Backup use scoped cards while retaining all explicit action reviews.
 
 Status and followed logs share an adjustable **whole-number 1–60 second**
 refresh interval, default **1 second**, and an auto-refresh control. Cheap metrics
@@ -615,7 +627,7 @@ connection), Logs (follow/source/search), read-only Resources (saved/observed),
 and read-only Safety/terminals (CLI-selected mode). **Reset to defaults** fills
 the form with factory dashboard preferences; click Apply to activate them, or
 Esc/Cancel to discard the reset. Defaults include one-second automatic refresh,
-the dark theme, collapsed details, global session scope, followed logs from all
+the `oc-box-navy` theme, collapsed details, global session scope, followed logs from all
 loaded sources, and empty search filters. It never resets containers, history,
 favorites, retained logs or the CLI-selected safety mode. Esc/Cancel discards edits;
 Apply changes only allowlisted dashboard preferences **for this session**, with

@@ -109,6 +109,14 @@ The initial UI dependency ranges are `textual>=8.2.8,<9` and
 `pyte>=0.8.2,<0.9`. These are optional dashboard dependencies, not replacements
 for host Podman or OpenCode.
 
+## Card redesign availability
+
+The card layout is feature-branch work on `feature/tui-card-redesign`, based on
+the later `devel` source that includes the history-sync integration. It is not
+automatically included in an already-published development package, and this
+branch does not itself constitute a `devel` merge, release or new interactive
+host acceptance. Channel upgrades select published releases, not branch HEAD.
+
 ## Launch and navigation
 
 ```sh
@@ -126,7 +134,8 @@ oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 
 Run normal mode on the Linux host as your regular unprivileged user, with real
 TTY input/output. A selector initially focuses the chosen existing
-project/workspace; the sidebar still permits switching registrations.
+project/workspace; the header workspace picker permits switching registrations
+from every section. It changes context only, never connects or starts a service.
 Without one it offers the registered workspace overview.
 Opening the manager does not create an environment or become its lifecycle
 owner. `--read-only` disables session mutation, backup creation/restoration/deletion,
@@ -257,13 +266,33 @@ output as sensitive. OSC clipboard requests emitted by container applications
 remain stripped; only completed user selections or explicit dashboard copy
 actions write to the host clipboard.
 
-## Seven tabs
+## Seven sections
+
+Shortcuts `1`–`7` keep their existing order. Wide terminals use a left navigation
+rail. Below 118 columns the rail becomes a section picker in the header, leaving
+more cells for the working view. The workspace picker and literal log search stay
+available across sections; the compact header occupies two rows.
+
+The default `oc-box-navy` theme uses restrained cyan headings, green/amber
+resource accents and thin card borders. Built-in Textual themes remain selectable
+in Settings. The visual inspiration is the supplied terminal dashboard and
+[gputaskman](https://github.com/shanselman/gputaskman), not its GPU/model telemetry.
 
 ### 1. Status
 
-Status presents two compact, bounded panels: gold **Full diagnostics** for the
-selected workspace and green **System (OS-reported)** for system readings. Aligned
-RAM, CPU and Home FS rows use single-line meters. Short in-memory CPU/RAM
+Status presents shallow **Host CPU**, **Host RAM**, **Host Home FS** and
+**Workspaces** cards, a workspace inventory and a **Selected workspace** inspector.
+The table's CPU/RAM readings come from the existing report; private-home sizes
+remain unknown until explicitly scanned. Running/registered counts are metadata,
+not active native-session or job counts. The retained-activity card shows only
+already-loaded `oc-box` journal categories, never external logs or agent calls.
+No new telemetry collector is added.
+
+Host cards combine into a compact resource strip at narrow widths. The inspector
+folds beneath the table when entering compact layout; its title explicitly
+expands it. A manually expanded inspector remains open when resizing within
+compact mode. Terminals and Logs retain their useful cells instead of acquiring
+decorative resource cards. Short in-memory CPU/RAM
 histories use a fixed 0–100% scale, not an auto-scaled sparkline that exaggerates
 small changes. Full workspace details and mount information remain available in
 an expandable section, initially collapsed; the Settings display controls can
@@ -314,7 +343,7 @@ window is also usable without a current workspace:
 
 **Reset to defaults** stages factory dashboard preferences without closing the
 window or immediately changing the active dashboard. Defaults are automatic
-one-second refresh, `textual-dark`, collapsed details, global session scope,
+one-second refresh, `oc-box-navy`, collapsed details, global session scope,
 following all loaded log sources, and empty session/log filters. **Apply** makes
 them active; **Esc** or **Cancel** discards the reset. No reset touches containers,
 resource limits, history, favorites or retained log entries, and it cannot weaken
