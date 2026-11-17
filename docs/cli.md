@@ -14,6 +14,8 @@ oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS]
 oc-box repair [--project PATH | --workspace ID]
 oc-box terminal [--project PATH | --workspace ID] [--maintenance]
 oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
+oc-box attach PATH --session ID [--project PATH | --workspace ID] [--text TEXT] [--send] [--acknowledge-risk]
+oc-box attach --broker --session ID [--project PATH | --workspace ID]
 oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
 oc-box list
 oc-box distros
@@ -305,6 +307,90 @@ This uses OpenCode's experimental client-MCP WebSocket API. An unsupported
 native version refuses sharing without editing configuration. It is not a
 promise of compatibility with every V2 version or an accepted live host pass;
 see the focused validation requirements in `docs/testing.md`.
+
+### attach
+
+**Experimental, host-only, V2 2.2.6/2.2.7/2.3.0 only:** disclose one host image
+to an explicitly selected native session in an already running workspace.
+`--session` is required in both modes. The session must belong to the workspace's
+exact native project directory; observed archived targets or staged native
+reverts are refused. This command never starts a workspace, refreshes auth/config,
+unlocks the vault, or selects a session automatically. Put `attach` first.
+The native API has no atomic precondition for this check: a revert staged between
+the final target check and prompt admission can still be committed by native
+OpenCode. Do not stage/revise a revert concurrently with direct attachment.
+
+The ordinary native TUI runs inside the container and cannot directly resolve an
+outside host path. Mainline OpenCode has no public host drop/paste interceptor
+used by this feature: pasting or dropping a screenshot path is **not transparent
+autoattachment**. Choose the broker workflow below, or issue a direct host command.
+This feature uses no mainline OpenCode modification or container plugin relocation.
+
+For repeated screenshots, start a foreground broker once in a second **host
+terminal**, using the ID of the intended native conversation:
+
+```sh
+oc-box attach --broker --session ses_example --project ~/devel/demo
+```
+
+Keep that terminal open. In the OpenCode conversation, drop/paste the screenshot
+**path** and explicitly ask it to use the printed MCP server's `request_image`
+tool, followed by `read_attachment(id)`. For example, ask: “Use request_image for
+/tmp/Spectacle.example/Screenshot.png, then read_attachment with the returned ID
+and examine the screenshot.” The host terminal shows each proposed file and its
+disclosure warning. Independently type `attach` there to authorize **each file**;
+an agent's request, native permission approval, earlier approval or pasted path
+is never host consent.
+
+`request_image` captures an approved image and returns only an opaque expiring
+ID. `read_attachment(id)` returns that captured image at most once, to the same
+native caller session verified through native `_meta` context. It does not reopen
+the host path. Wrong-session, missing-context, expired and reused requests refuse.
+The broker exposes no `list_directory`, text-read, live-read or clipboard tool.
+Unlike `share`, it grants no continuing access to a folder or file. Broker mode
+forbids a positional PATH, `--text`, `--send` and `--acknowledge-risk`; it always
+requires independent typed host approval.
+
+Alternatively, append one native image **user message** directly from a host
+terminal:
+
+```sh
+oc-box attach /tmp/Spectacle.example/Screenshot.png \
+  --session ses_example --project ~/devel/demo
+oc-box attach /tmp/Spectacle.example/Screenshot.png \
+  --session ses_example --project ~/devel/demo \
+  --text 'Explain this screenshot.' --send
+```
+
+Read the warning and type `attach`, or use `--acknowledge-risk` for explicitly
+authorized noninteractive direct use. Without `--text`, the message text is
+`Please examine this host image.` This is a queued native user message, **not a
+draft attachment chip**. Without `--send`, oc-box requests native `resume: false`;
+with `--send`, it requests queueing plus `resume: true`. An already active native
+execution may consume queued input even without `--send`: neither mode promises
+that inference stays stopped. Direct mode requires PATH.
+
+Both modes capture a single regular, single-link PNG/JPEG/GIF/WebP image of at
+most 8 MiB using the sharing path/content guards. Folders, symlinks, special
+files, protected host/application/credential paths and unsafe source changes are
+refused. No project staging file, mount, host listener, saved MCP configuration
+or container recreation is introduced. oc-box does not forward the host path or
+image bytes in native argv, or record them in its activity journal or project
+files. A path you paste into OpenCode or submit as a tool argument is itself
+disclosed to native history/provider processing.
+
+The foreground broker holds an explicit existing-workspace client lease. Ctrl-C,
+workspace stop, disconnect or native reload ends that connection and further
+retrieval; no reconnect or regrant is automatic. Exit the broker when done so
+normal owner synchronization/stop can proceed. A new broker needs fresh consent.
+
+**Disclosure persists:** native OpenCode may normalize/store the image and send
+it to a model provider; transcripts, logs, backups and agent-created copies can
+retain it. Grant expiry, one-use delivery and broker shutdown cannot recall data
+already disclosed. Images and pasted paths are untrusted input, not a guarantee
+against prompt injection. These experimental workflows have separate validation
+requirements in `docs/testing.md`; earlier `share` host acceptance does not accept
+this attachment feature.
 
 ### sync
 
@@ -1558,6 +1644,42 @@ existing listener. The container service's own random loopback port stays privat
 Web-only. Print the native one-use browser pairing link instead of invoking the
 host browser. The foreground relay still runs until Ctrl-C or workspace stop.
 
+### --session ID
+
+Attach-only, required in both direct and broker modes. Select the exact native
+target session, for example `--session ses_example`, at the running workspace's
+native project directory. A workspace ID, host archive association or session at
+a different/nested directory is not sufficient. Observed archived sessions and
+staged native reverts refuse; no default session is inferred.
+
+### --broker
+
+Attach-only. Keep a foreground host-terminal client-MCP broker open for explicit
+`request_image` proposals and one-use `read_attachment(id)` image retrieval.
+Every file requires independently typing `attach` in the host terminal.
+Incompatible with positional PATH, `--text`, `--send` and `--acknowledge-risk`.
+It does not intercept native paste/drop, browse folders or grant live file access.
+
+### --text TEXT
+
+Direct attach-only. Set the text of the native image user message. The default
+is `Please examine this host image.` This is not a draft prompt or an instruction
+for the host broker. Forbidden with `--broker`.
+
+### --send
+
+Direct attach-only. Request native queueing and `resume: true` for the image user
+message; omission requests `resume: false`. Active native execution can still
+consume queued input without this flag. Neither setting guarantees stopped
+inference or creates a draft attachment chip. Forbidden with `--broker`.
+
+### --acknowledge-risk
+
+Share and direct attach-only. Replace typed host disclosure confirmation for
+explicitly authorized noninteractive use, without suppressing the warning.
+This is not blanket native permission approval. Forbidden with `attach --broker`,
+where every file always needs independent typed host approval.
+
 ### --project PATH
 
 Select an existing project directory; relative paths resolve from the host
@@ -1974,6 +2096,8 @@ sync                   kept      kept; archive sync     kept; stopped
 terminal (V1/maintenance) kept     kept; no archive sync  kept; prior run state
 terminal (V2 attach)    kept      shared current session kept; owner controls stop
 web (V2)               kept      shared current session kept; sync/stop on last client
+attach (V2 direct)     kept      image message retained kept; existing owner only
+attach (V2 broker)     kept      disclosed data retained kept; lease until broker exits
 reset                  kept      kept, same session ID  rebuilt
 purge                  kept      deleted                deleted
 purge --delete-sessions kept      deleted                deleted

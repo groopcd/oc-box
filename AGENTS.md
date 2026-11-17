@@ -166,6 +166,16 @@ their checkout ownership distinct from unrelated source and flat installations.
   fixed errors. Disconnect is not recall of disclosed data. Native/offline checks
   are not host acceptance; defer publication until TUI/regression and focused host
   sharing checks are complete.
+- `attachments.py` / `attachment_io.py`: explicit host image snapshots and
+  session-bound, expiring, one-use native client-MCP grants, or direct native
+  image input through stdin-only private admission. Remote path proposals are
+  never authorization: broker mode requires independent per-image host TTY
+  consent, including uniform denial for missing/protected/special paths. Preserve
+  pre-consent descriptor pinning, response backpressure and no automatic regrant.
+  Keep the native TUI/container boundary unchanged; there is no public transparent
+  host-drop interceptor. Native queued input is not a composer draft or an
+  inactivity guarantee. Refuse observed staged reverts and document the residual
+  native check/admission race; no host acceptance follows from offline probes.
 - `tools/test_sharing_podman.py` and its provider/archive helpers are a separate
   source-pinned host harness, not a change to an already frozen release candidate.
   Keep host guards, verified fresh private stores, controlling-PTY consent,

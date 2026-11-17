@@ -332,6 +332,51 @@ limits and lifecycle details. Its 37-check scripted host acceptance belongs to
 the earlier exact `5573965` source and native 2.2.6, not automatically to every
 later development build; see [the evidence scope](docs/releases/1.7.md#reviewed-earlier-source-evidence).
 
+### Host screenshots for one session (experimental)
+
+The native TUI runs inside the container, so an outside host screenshot path is
+not directly readable there. This feature does **not** transparently intercept
+native drop/paste. For repeated screenshots, start a broker once in a second
+**host terminal**, explicitly choosing the intended native session:
+
+```sh
+oc-box attach --broker --session ses_example --project ~/devel/demo
+```
+
+Keep it open. Drop/paste the screenshot **path** in that OpenCode conversation
+and explicitly ask OpenCode to use the printed server's `request_image`, then
+`read_attachment(id)`. The host terminal must independently approve **every file**
+by typing `attach`. The request returns an opaque expiring ID; image retrieval
+is single-use and bound to the same native caller session via native `_meta`
+context. This is a captured image, not live access: no folder listing, text read,
+mount, listener, saved MCP configuration or automatic regrant.
+
+For a direct image user message instead, run on the host:
+
+```sh
+oc-box attach /tmp/Spectacle.example/Screenshot.png \
+  --session ses_example --project ~/devel/demo
+```
+
+The default message text is `Please examine this host image.` Add `--text` to
+change it and `--send` to request native queueing with resume. Without `--send`,
+native resume is false, but active execution may still consume the queued
+message: this is **not a draft chip or a guarantee of stopped inference**.
+Direct mode prints a disclosure warning and needs typed `attach` confirmation
+unless explicitly authorized with `--acknowledge-risk`. Broker mode forbids
+PATH, `--text`, `--send` and `--acknowledge-risk`.
+
+Both modes require an existing ready workspace, `--session`, an exact native
+project-directory match and supported OpenCode V2 2.2.6/2.2.7/2.3.0. Observed
+archived or staged-revert targets refuse. Only single PNG/JPEG/GIF/WebP snapshots
+up to 8 MiB pass the sharing path/content guards. No starts, credential refresh
+or vault unlock occur; no native code or plugin relocation is required.
+**Native history/provider processing may retain or normalize the image;
+disconnect and grant expiry do not undo disclosure.** Paths pasted into
+OpenCode are also disclosed. See [attach](docs/cli.md#attach) for lifecycle and
+safety details and [testing](docs/testing.md#experimental-host-image-attachments)
+for its separate, not-yet-host-accepted validation scope.
+
 ### V2 conversation archives
 
 History synchronization includes paginated root, fork, archived, and child/subagent

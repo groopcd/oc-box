@@ -110,6 +110,62 @@ disclosed, not a stable manager pass. See
 [the source-qualified evidence](docs/testing.md#reviewed-5573965-candidate-evidence)
 and [known limitations](docs/releases/1.7.md#known-acceptance-limitations).
 
+## Explicit host-image attachments
+
+Experimental `oc-box attach` is separate from continuing `share` access. It
+requires an existing ready private V2 workspace and an explicit native
+`--session` at that workspace's exact native project directory, on supported
+2.2.6/2.2.7/2.3.0 only. Observed archived or staged-revert targets refuse.
+Native prompt admission has no atomic compare-and-swap precondition: a revert
+staged after the final check can still be committed by OpenCode. Do not edit a
+staged revert concurrently with direct attachment.
+It never starts a workspace, refreshes credentials/configuration, unlocks the
+vault, installs/relocates native plugins or modifies mainline OpenCode.
+
+Direct `attach PATH` prints a disclosure warning and requires typed host
+`attach` consent, or explicit `--acknowledge-risk` for noninteractive use. It
+queues an image user message, not a draft attachment chip. Default native
+`resume: false` is not a stopped-inference fence: an already active execution
+can consume queued input. `--send` explicitly requests queueing and resume.
+
+`attach --broker` runs in a foreground host terminal using the existing native
+client-MCP transport and an explicit existing-workspace lease. Every
+`request_image` path proposal requires independent typed `attach` approval on
+the host; remote permission approval, prompt text or earlier consent is never
+authority to disclose another file. Broker mode forbids PATH, `--text`,
+`--send` and `--acknowledge-risk`. It returns an opaque expiring ID for the
+approved captured image, not a path capability. `read_attachment(id)` delivers
+that snapshot at most once to the same native caller session, checked through
+native `_meta` context. Missing context, wrong-session, expired and reused
+retrievals refuse. The exposed native tool catalog is location-visible; native
+caller-session checks, not catalog visibility or a supplied session argument,
+enforce this delivery restriction.
+
+There is no directory listing, arbitrary text read, live reread, mount, host
+listener, project staging file, persistent MCP configuration or automatic
+reconnect/regrant. The sharing source guards apply to one regular single-link
+PNG/JPEG/GIF/WebP file up to 8 MiB, including protected-path, link, special-file
+and source-change refusals. oc-box does not put the host path/image content in
+native argv, its activity journal or project files. This is not a scanner for
+sensitive screenshot content or a security boundary against host root or a
+malicious same-user process.
+
+The ordinary container TUI has no direct host path access, and this feature
+does not install a transparent drop/paste interceptor. Users start the broker
+in a second host terminal and explicitly ask OpenCode to propose a pasted
+screenshot path with `request_image`, then use `read_attachment`. A pasted path
+or tool argument can itself enter native history/logging/provider processing.
+Only the separate host confirmation authorizes the image capture.
+
+Ctrl-C, stop, disconnect or native reload ends further broker retrieval; expiry
+and one-use delivery limit future access, not retention. Native OpenCode may
+normalize/store image content, send it to providers and retain it in transcripts,
+logs, backups or agent-created copies. No operation recalls disclosed bytes.
+Treat image contents and path text as untrusted input, including prompt injection.
+Earlier sharing or dashboard host evidence does not accept this feature; its
+unit/native and external-host requirements are documented separately in
+[the test strategy](docs/testing.md#experimental-host-image-attachments).
+
 ## Global V2 host credential vault and policy overrides
 
 With OpenCode 2.x, workspace clients use native private

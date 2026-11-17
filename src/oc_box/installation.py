@@ -30,6 +30,8 @@ RUNTIME_FILES = (
     "native_tabs.py",
     "session_terminal.py",
     "sharing.py",
+    "attachments.py",
+    "attachment_io.py",
     "plugin_compat.py",
     "plugin_bridge.js",
     "backups.py",

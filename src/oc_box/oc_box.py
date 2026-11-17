@@ -3251,6 +3251,7 @@ def parser():
             "completion",
             "tui",
             "share",
+            "attach",
         ),
         default="start",
     )
@@ -3538,6 +3539,12 @@ def completion_parser():
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "attach":
+        if __package__:
+            from .attachments import cli
+        else:
+            from attachments import cli
+        return cli(sys.modules[__name__], arguments[1:])
     if arguments and arguments[0] == "share":
         if __package__:
             from .sharing import cli
@@ -3598,6 +3605,10 @@ def main(argv=None):
     if args.command == "share":
         raise BoxError(
             "Use 'oc-box share PATH' first, followed by its workspace selector; see --help."
+        )
+    if args.command == "attach":
+        raise BoxError(
+            "Use 'oc-box attach' first, followed by PATH or --broker and --session; see 'oc-box attach --help'."
         )
     if args.command == "web" and not hasattr(args, "port"):
         raise BoxError(
