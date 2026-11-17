@@ -557,12 +557,13 @@ assuming a reaped host-side Podman wrapper proves the remote service stopped.
 #### Post-stop persisted-history snapshot candidate
 
 `history_recovery.py`, `history_reader.py` and `workspace_control.py` add a one-shot
-snapshot path after eligible shell-only timeouts. The ordinary live wait still
+snapshot path after eligible timeouts. The original profile is shell-only; the
+native 2.3.0 retained-subagent extension is described below. The ordinary live wait still
 fails. Eligibility is based on two prior complete validated pairs, not the final
 query phase: a tiny remaining CLI-query budget must not randomly disable the
 snapshot. A real timeout may retain those observations, but contradictory late
 responses and known non-timeout API failures invalidate them. All versions/kinds
-outside the supported 2.2.6/2.2.7/2.3.0 shell case retain the existing pending behavior.
+outside the supported version-specific profiles retain the existing pending behavior.
 
 Unit/process matrices cover private stop intent before admission, stable locks,
 uncertain transition fences, immutable resource identity, stop/start/snapshot/stop
@@ -620,6 +621,46 @@ keep unknown diagnostic categories, exception contents and metadata out of outpu
 capture diagnostics never add native probes or repair control state.
 This closes an observability/test-composition gap, not proof of the cause of an
 uninspected host timeout or new whole-container acceptance.
+
+#### Retained subagent jobs on native 2.3.0
+
+The upstream `v2.3.0` implementation (`a6b15d33daf6ab7d35569f6d711fdb630b9f04e7`)
+merges durable job rows with a process-local job registry. Its foreground-active
+endpoint describes process-local execution, not historical transcripts. A new
+unregistered process can therefore expose zero foreground sessions alongside
+retained running subagent jobs. Ten jobs alone are not evidence of a slow active
+query, and a timeout in the `foreground-query` phase does not establish that one
+request consumed the whole budget.
+
+The dedicated `smoke_history_subagent_recovery_v2.py` fixture creates real native
+subagents through a bounded loopback provider, closes/reaps the producer, and
+exercises the full production `Reader`, unchanged checked exports, host archive
+imports and independent native verification. It observes one reader and no
+additional provider, shell or plugin execution. Durable jobs, execution claims,
+inbox and history must remain unchanged, with no fabricated completion notice.
+Saved and project configuration canaries, source/destination schedule refusals,
+and ambient credential exclusion remain part of the test boundary.
+
+Only exact native 2.3.0 gains shell/subagent snapshot eligibility after repeated
+validated foreground-idle observations. The live wait still refuses all pending
+jobs, and the original nonzero interruption result remains. Before native history
+processing, the new profile validates durable job schemas and recovery metadata;
+image/unknown kinds, unknown recovery forms and legacy background rows refuse.
+The source remains unregistered, while destination clients remain standalone.
+Managed restart continuity and ordinary workspace preparation are not fallbacks.
+The original source/destination scheduler, ownership, stop-intent, uncertain-start,
+cleanup and fresh-verification guards remain authoritative.
+
+```sh
+python3 -B tests/smoke_history_subagent_recovery_v2.py \
+  --opencode /srv/native/opencode-2.3.0
+```
+
+These are synthetic local/native checks, not whole-container stop/restart or a
+new external-host acceptance. The earlier 42-check history and 12/six recovery
+reports retain their original source, harness and native identities; they do not
+accept this new profile. Image-job recovery remains unaccepted. Do not infer the
+kind or cause of a real user's retained jobs from a matching synthetic count.
 
 #### History-sync performance and integrity
 

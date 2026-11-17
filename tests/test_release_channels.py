@@ -1,6 +1,8 @@
+import fnmatch
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -281,9 +283,25 @@ class ReleaseChannelTests(unittest.TestCase):
         self.assertNotIn("skip-existing", workflow)
         for name in ("ci.yml", "distros.yml"):
             with self.subTest(workflow=name):
-                self.assertIn(
-                    "branches: [master, devel, 'feature/**']",
-                    (APP / ".github/workflows" / name).read_text(),
+                source = (APP / ".github/workflows" / name).read_text()
+                selected = re.search(
+                    r"(?m)^  push:\n    branches: \[([^\]\n]+)\]$", source
+                )
+                self.assertIsNotNone(selected)
+                filters = [item.strip().strip("'\"") for item in selected[1].split(",")]
+                branches = ["master", "devel", "feature/history-sync"]
+                if name == "ci.yml":
+                    branches.append("fix/devel-history-sync-timeout")
+                for branch in branches:
+                    with self.subTest(branch=branch):
+                        self.assertTrue(
+                            any(fnmatch.fnmatchcase(branch, item) for item in filters)
+                        )
+                self.assertFalse(
+                    any(
+                        fnmatch.fnmatchcase("unrelated-branch", item)
+                        for item in filters
+                    )
                 )
 
 

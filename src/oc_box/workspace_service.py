@@ -600,20 +600,36 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
     transcript completeness: user shell fibers and unsettled projected messages
     need a separate check in the export path. Persistent PTYs are not activity.
     Timeout diagnostics contain only the phase and the last fully validated pair
-    of inventory counts, never native identifiers, commands, responses or errors.
+    of status/kind counts, never native identifiers, commands, responses or errors.
+    Exact native 2.3.0 may route retained shell/subagent jobs to a guarded
+    unregistered post-stop reader; older/unknown versions retain shell-only hints.
     """
+    if __package__:
+        from . import history_reader
+    else:
+        import history_reader
 
     phase = "foreground-query"
     observation = "unavailable"
-    shell_pairs = 0
-    recovery_reason = "insufficient-shell-observations"
+    kind_observation = "unavailable"
+    kinds = history_reader.SNAPSHOT_JOB_KINDS.get(
+        data.get("opencode_version"), frozenset(("shell",))
+    )
+    insufficient = (
+        "insufficient-job-observations"
+        if "subagent" in kinds
+        else "insufficient-shell-observations"
+    )
+    job_pairs = 0
+    recovery_reason = insufficient
 
     def fail(category):
         if category == "activity-timeout":
             raise box.HistoryWaitTimeout(
                 f"History wait timeout: phase={phase}; "
+                f"last complete job kinds: {kind_observation}; "
                 f"last complete observation: {observation}.",
-                recovery_eligible=shell_pairs >= 2,
+                recovery_eligible=job_pairs >= 2,
                 recovery_reason=recovery_reason,
             ) from None
         raise box.BoxError(f"OpenCode 2.x history wait failed ({category}).") from None
@@ -661,7 +677,7 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
         return value
 
     def request(target):
-        nonlocal phase, shell_pairs, recovery_reason
+        nonlocal phase, job_pairs, recovery_reason
         budget = remaining()
         phase = (
             "foreground-query"
@@ -686,7 +702,7 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             if not isinstance(error, subprocess.TimeoutExpired) and not isinstance(
                 error.__cause__, subprocess.TimeoutExpired
             ):
-                shell_pairs = 0
+                job_pairs = 0
                 recovery_reason = "activity-api-failed"
             remaining()
             fail("activity-api-failed")
@@ -698,13 +714,13 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
         if value is None or (
             bool(value)
             if target == "/api/session/active"
-            else not value or any(job["kind"] != "shell" for job in value)
+            else not value or any(job["kind"] not in kinds for job in value)
         ):
             # A late successful response can contradict the last complete pair.
             # Validate/reset BEFORE checking the deadline; it must never leave a
             # stale routing hint behind. A real request timeout cannot manufacture
             # a qualifying pair, but does not erase prior validated observations.
-            shell_pairs = 0
+            job_pairs = 0
             if value is None:
                 recovery_reason = (
                     "invalid-active-response"
@@ -737,17 +753,22 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             f"{name}={value if value < 10000 else '9999+'}"
             for name, value in counts.items()
         )
+        kind_observation = ", ".join(
+            f"{kind}={count if count < 10000 else '9999+'}"
+            for kind in ("shell", "subagent", "image")
+            for count in (sum(job["kind"] == kind for job in jobs),)
+        )
         # This requests only a post-STOP snapshot, never a live readiness waiver.
         # Durable shell rows can hydrate as running on the next owner. The
         # ordinary timeout already stops genuine pending work too; recovery must
         # preserve that failure/interruption result, irrespective of job status.
-        shell_pairs = (
-            shell_pairs + 1
-            if not active and jobs and all(job["kind"] == "shell" for job in jobs)
+        job_pairs = (
+            job_pairs + 1
+            if not active and jobs and all(job["kind"] in kinds for job in jobs)
             else 0
         )
-        if shell_pairs:
-            recovery_reason = "insufficient-shell-observations"
+        if job_pairs:
+            recovery_reason = insufficient
         quiet = quiet + 1 if not active and not jobs else 0
         if quiet == 2:
             return

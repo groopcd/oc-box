@@ -54,6 +54,7 @@ SKIP_REFUSALS = CAPTURE_REFUSALS | frozenset(
         "source-unavailable",
         "readiness-unverified",
         "insufficient-shell-observations",
+        "insufficient-job-observations",
         "foreground-active",
         "non-shell-jobs",
         "jobs-empty",

@@ -213,6 +213,7 @@ def check_archives(directory):
             "tests/test_history_reader.py",
             "tests/test_history_recovery.py",
             "tests/smoke_history_recovery_v2.py",
+            "tests/smoke_history_subagent_recovery_v2.py",
             "tests/test_private_memory.py",
             "tests/test_private_output.py",
             "tests/test_ci_ubuntu_apt.py",

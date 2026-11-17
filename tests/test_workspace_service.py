@@ -281,11 +281,17 @@ class HistoryWaitTests(unittest.TestCase):
                     self.assertEqual(
                         error.diagnostic,
                         "History wait timeout: phase=poll-delay; "
+                        "last complete job kinds: "
+                        + ", ".join(
+                            f"{name}={int(name == kind)}"
+                            for name in ("shell", "subagent", "image")
+                        )
+                        + "; "
                         f"last complete observation: foreground=0, {counts}.",
                     )
                     self.assertNotIn(job["id"], error.diagnostic)
                     self.assertNotIn(job["sessionID"], error.diagnostic)
-                    self.assertNotIn(kind, error.diagnostic)
+                    self.assertIn(f"{kind}=1", error.diagnostic)
                     self.assertEqual(
                         error.recovery_eligible,
                         kind == "shell",
@@ -349,6 +355,127 @@ class HistoryWaitTests(unittest.TestCase):
                 if reason is not None:
                     self.assertEqual(error.recovery_reason, reason)
                 self.assertEqual(self.api.call_count, 4)
+
+    def test_exact_230_profile_allows_only_shell_subagent_hints_never_live_success(
+        self,
+    ):
+        versions = (None, "2.2.6", "2.2.7", "2.3.0", "2.3.1", "2.3.0+unknown")
+        for version in versions:
+            for kinds in (
+                ("shell",),
+                ("subagent",),
+                ("shell", "subagent"),
+                ("image",),
+                ("shell", "image"),
+            ):
+                for status in ("running", "completed", "error", "cancelled"):
+                    with self.subTest(version=version, kinds=kinds, status=status):
+                        self.api.reset_mock()
+                        data = {**self.data, "opencode_version": version}
+                        jobs = [
+                            {**self.job, "kind": kind, "status": status}
+                            for kind in kinds
+                        ]
+                        self.api.side_effect = lambda *args, jobs=jobs, **kwargs: (
+                            self.idle
+                            if args[4] == "/api/session/active"
+                            else {"data": jobs}
+                        )
+                        with self.assertRaises(box.HistoryWaitTimeout) as raised:
+                            service.wait_history(
+                                box, data, self.connection, timeout=0.5, interval=0.25
+                            )
+                        eligible = set(kinds) <= (
+                            {"shell", "subagent"} if version == "2.3.0" else {"shell"}
+                        )
+                        self.assertEqual(raised.exception.recovery_eligible, eligible)
+                        self.assertEqual(self.api.call_count, 4)
+                        self.assertNotIn(
+                            "private-sentinel", raised.exception.diagnostic
+                        )
+                        for kind in ("shell", "subagent", "image"):
+                            self.assertIn(
+                                f"{kind}={int(kind in kinds)}",
+                                raised.exception.diagnostic,
+                            )
+
+    def test_230_late_contradictions_and_errors_invalidate_subagent_hint(self):
+        cases = (
+            (5, self.busy, "foreground-active"),
+            (5, {"data": []}, "invalid-active-response"),
+            (6, self.no_jobs, "jobs-empty"),
+            (6, {"data": {}}, "invalid-jobs-response"),
+            (6, {"data": [{**self.job, "kind": "image"}]}, "non-shell-jobs"),
+            (6, {"data": [{**self.job, "status": "unknown"}]}, "invalid-jobs-response"),
+            (5, box.BoxError("private-sentinel"), "activity-api-failed"),
+            (6, ValueError("private-sentinel"), "activity-api-failed"),
+            (5, OSError("private-sentinel"), "activity-api-failed"),
+        )
+        for expired_call, response, reason in cases:
+            with self.subTest(expired_call=expired_call, reason=reason):
+                self.api.reset_mock()
+
+                def request(*args, **kwargs):
+                    if self.api.call_count == expired_call:
+                        self.advance(kwargs["timeout"])
+                        if isinstance(response, BaseException):
+                            raise response
+                        return response
+                    return (
+                        self.idle
+                        if args[4] == "/api/session/active"
+                        else {"data": [{**self.job, "kind": "subagent"}]}
+                    )
+
+                self.api.side_effect = request
+                with self.assertRaises(box.HistoryWaitTimeout) as raised:
+                    service.wait_history(
+                        box,
+                        {**self.data, "opencode_version": "2.3.0"},
+                        self.connection,
+                        timeout=1,
+                    )
+                self.assertFalse(raised.exception.recovery_eligible)
+                self.assertEqual(raised.exception.recovery_reason, reason)
+
+    def test_230_real_query_timeouts_preserve_only_prior_complete_eligible_pairs(self):
+        for expired_call in (1, 3, 5, 6):
+            for wrapped in (False, True):
+                with self.subTest(expired_call=expired_call, wrapped=wrapped):
+                    self.api.reset_mock()
+
+                    def request(*args, **kwargs):
+                        if self.api.call_count == expired_call:
+                            self.advance(kwargs["timeout"])
+                            error = subprocess.TimeoutExpired(
+                                "private-sentinel", kwargs["timeout"]
+                            )
+                            if wrapped:
+                                outer = box.BoxError("private-sentinel")
+                                outer.__cause__ = error
+                                raise outer
+                            raise error
+                        return (
+                            self.idle
+                            if args[4] == "/api/session/active"
+                            else {"data": [{**self.job, "kind": "subagent"}]}
+                        )
+
+                    self.api.side_effect = request
+                    with self.assertRaises(box.HistoryWaitTimeout) as raised:
+                        service.wait_history(
+                            box,
+                            {**self.data, "opencode_version": "2.3.0"},
+                            self.connection,
+                            timeout=1,
+                        )
+                    self.assertEqual(
+                        raised.exception.recovery_eligible, expired_call >= 5
+                    )
+                    self.assertEqual(
+                        raised.exception.recovery_reason,
+                        "insufficient-job-observations",
+                    )
 
     def test_deadline_routing_needs_prior_pairs_and_distinguishes_real_timeout_causes(
         self,
@@ -463,6 +590,7 @@ class HistoryWaitTests(unittest.TestCase):
                     self.assertEqual(
                         error.diagnostic,
                         f"History wait timeout: phase={phase}; "
+                        "last complete job kinds: unavailable; "
                         "last complete observation: unavailable.",
                     )
 
@@ -487,6 +615,7 @@ class HistoryWaitTests(unittest.TestCase):
                     self.assertEqual(
                         error.diagnostic,
                         f"History wait timeout: phase={phase}; "
+                        "last complete job kinds: shell=0, subagent=0, image=0; "
                         "last complete observation: foreground=0, jobs-running=0, "
                         "jobs-completed=0, jobs-error=0, jobs-cancelled=0.",
                     )
@@ -502,6 +631,7 @@ class HistoryWaitTests(unittest.TestCase):
         self.assertEqual(
             error.diagnostic,
             "History wait timeout: phase=poll-delay; "
+            "last complete job kinds: shell=9999+, subagent=0, image=0; "
             "last complete observation: foreground=9999+, jobs-running=0, "
             "jobs-completed=9999+, jobs-error=0, jobs-cancelled=0.",
         )
