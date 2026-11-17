@@ -280,8 +280,8 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
     async def test_panel_and_settings_captions_copy_their_actual_title_text(self):
         async with self.dashboard() as (app, pilot, copies, _):
             for selector, title in (
-                ("#full-diagnostics", "Full workspace diagnostics"),
-                ("#system-report", "System (OS-reported)"),
+                ("#full-diagnostics", "Selected workspace"),
+                ("#system-report", "Host resources (OS-reported)"),
             ):
                 with self.subTest(caption=title):
                     span = self.visible_span(app, app.query_one(selector), title)
@@ -368,7 +368,7 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                         widget = app.query_one("#show-logs")
                         text = "Logs"
                     elif control == "tab":
-                        widget = app.query_one("#--content-tab-settings")
+                        widget = app.query_one("#nav-settings")
                         text = "Settings"
                     elif control == "collapsible":
                         widget = app.query_one("#workspace-details CollapsibleTitle")

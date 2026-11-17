@@ -340,7 +340,9 @@ class DisplayPerformanceTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 self.assertEqual(table.cursor_row, 0)
 
-    async def test_status_changes_update_one_cell_and_keep_unknowns_and_sampling(self):
+    async def test_status_changes_update_only_changed_cells_and_keep_unknowns_and_sampling(
+        self,
+    ):
         backend = SyntheticBackend()
         app = DashboardApp(backend, read_only=True, demo=True)
         async with app.run_test(size=(120, 35)) as pilot:
@@ -363,7 +365,10 @@ class DisplayPerformanceTests(unittest.IsolatedAsyncioTestCase):
                 app._apply_report(report, False)
                 await pilot.pause()
                 clear.assert_not_called()
-                update.assert_called_once()
+                self.assertEqual(update.call_count, 3)
+                self.assertEqual(
+                    {call.args[0] for call in update.call_args_list}, {selected}
+                )
                 self.assertEqual(app.selected, selected)
                 self.assertEqual(table.scroll_offset, scroll)
                 self.assertEqual(table.get_row(selected)[1].plain, "stopped")

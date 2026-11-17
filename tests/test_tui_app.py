@@ -744,10 +744,17 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     full = app.query_one("#full-diagnostics", MonitorPanel)
                     system = app.query_one("#system-report", MonitorPanel)
-                    self.assertEqual(full.region.x, system.region.x)
-                    self.assertEqual(full.region.width, system.region.width)
-                    self.assertLessEqual(full.region.bottom, system.region.y)
-                    self.assertLessEqual(full.region.height, 7)
+                    inspector = app.query_one("#workspace-inspector", Collapsible)
+                    inventory = app.query_one("#workspace-card")
+                    if dimensions[0] < 118:
+                        self.assertTrue(inspector.collapsed)
+                        self.assertEqual(inspector.region.x, inventory.region.x)
+                        inspector.collapsed = False
+                        await pilot.pause()
+                    else:
+                        self.assertGreater(inspector.region.x, inventory.region.x)
+                    self.assertLessEqual(full.region.right, system.region.right)
+                    self.assertLessEqual(full.region.height, 12)
                     self.assertLessEqual(system.region.height, 8)
                     for panel in (full, system):
                         self.assertTrue(
@@ -831,7 +838,8 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     app.screen.query_one("#pref-interval", Input).value, "1"
                 )
                 self.assertEqual(
-                    app.screen.query_one("#pref-theme", Select).value, "textual-dark"
+                    app.screen.query_one("#pref-theme", Select).value,
+                    DEFAULT_SETTINGS["theme"],
                 )
                 self.assertFalse(app.screen.query_one("#pref-details", Switch).value)
                 self.assertEqual(
@@ -1029,7 +1037,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(app, pilot)
             await pilot.press("ctrl+shift+y")
             await pilot.pause()
-            self.assertIn("Registered workspaces", app.clipboard)
+            self.assertIn("WORKSPACES", app.clipboard)
             self.assertIn("Clipboard help", app.clipboard)
             self.assertFalse(app.query("#copy-selection, #copy-view, #paste-copied"))
 

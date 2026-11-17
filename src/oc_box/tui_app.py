@@ -48,7 +48,13 @@ if __package__:
         SelectableDataTable,
         SelectableRichLog,
     )
-    from .tui_status import MonitorPanel, numeric, percentage
+    from .tui_status import (
+        HostResourceCards,
+        MonitorPanel,
+        WorkspaceInspector,
+        numeric,
+        percentage,
+    )
     from .tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
     from .tui_management import ManagementActions, StoragePanel, BackupPanel
 else:
@@ -66,7 +72,13 @@ else:
         SelectableDataTable,
         SelectableRichLog,
     )
-    from tui_status import MonitorPanel, numeric, percentage
+    from tui_status import (
+        HostResourceCards,
+        MonitorPanel,
+        WorkspaceInspector,
+        numeric,
+        percentage,
+    )
     from tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
     from tui_management import ManagementActions, StoragePanel, BackupPanel
 
@@ -177,7 +189,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     #workspace-inspector > Contents { padding: 0; }
     #workspace-source-context { height: auto; color: $text-muted; padding: 0 1; }
     #workspace-details { padding: 0; border: none; margin: 0; }
-    #scan-storage { width: auto; min-width: 12; margin: 0 1; }
+    #scan-storage { width: auto; min-width: 12; margin: 0 1;
+      border: round $primary 25%; background: $surface; color: $primary; }
     #activity-card { height: 8; margin-top: 1; }
     #overview-activity { height: 4; text-wrap: nowrap; text-overflow: ellipsis; }
     #status-summary, #settings-info, #terminal-info { height: auto; padding: 1; }
@@ -208,8 +221,16 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     Screen.compact #sidebar, Screen.compact #view-title,
     Screen.compact #monitoring-state { display: none; }
     Screen.compact #section-picker { display: block; }
-    Screen.compact #host-summary { width: 17; min-width: 17; }
-    Screen.compact #workspace-picker { width: 1fr; }
+    Screen.compact #dashboard-header { height: 1; }
+    Screen.compact #host-summary { width: 17; min-width: 17; margin: 0 1; }
+    Screen.compact #workspace-picker { width: 1fr; height: 1; }
+    Screen.compact #section-picker { height: 1; }
+    Screen.compact #dashboard-header Select > SelectCurrent {
+      height: 1; border: none; padding: 0 1; }
+    Screen.compact #log-tools { height: 1; }
+    Screen.compact #log-search { height: 1; border: none; padding: 0 1; }
+    Screen.compact #log-hits { height: 1; padding: 0 1; }
+    Screen.compact #log-tools Button { height: 1; border: none; padding: 0 1; }
     Screen.compact #overview-body { layout: vertical; }
     Screen.compact #workspace-card { width: 1fr; height: 11; margin-right: 0; }
     Screen.compact #workspace-inspector { width: 1fr; }
@@ -346,7 +367,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             with TabbedContent(id="content", initial="status"):
                 with TabPane("Status", id="status"):
                     with VerticalScroll(id="status-dashboard"):
-                        yield MonitorPanel("system", id="system-report")
+                        yield HostResourceCards("system", id="system-report")
                         with Horizontal(id="overview-body"):
                             with Vertical(id="workspace-card", classes="card"):
                                 yield Static(
@@ -368,7 +389,9 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                                 collapsed=False,
                                 id="workspace-inspector",
                             ):
-                                yield MonitorPanel("workspace", id="full-diagnostics")
+                                yield WorkspaceInspector(
+                                    "workspace", id="full-diagnostics"
+                                )
                                 yield Static(
                                     "Native sessions: not connected.",
                                     id="workspace-source-context",
@@ -1017,7 +1040,10 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                 for index, (column, before, after) in enumerate(zip(columns, old, new)):
                     if before != after:
                         table.update_cell(
-                            key, column, self._table_text(selector, index, after)
+                            key,
+                            column,
+                            self._table_text(selector, index, after),
+                            update_width=selector != "#workspaces",
                         )
         else:
             scroll = table.scroll_offset
