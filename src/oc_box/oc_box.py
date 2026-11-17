@@ -290,14 +290,125 @@ def loading_stage(label, *, interval=0.1, stream=None):
                     emit(f"oc-box: {label}{suffix}\n")
 
 
-def run_tui(command):
+def run_tui(command, *, file_drops=None):
     # Lazy import also keeps noninteractive CLI/library consumers lightweight.
     if __package__:
         from .terminal_ui import run_tui as relay
     else:
         from terminal_ui import run_tui as relay
 
-    return relay(command, env=getattr(command, "environment", None))
+    return relay(
+        command,
+        env=getattr(command, "environment", None),
+        **({"file_drops": file_drops} if file_drops is not None else {}),
+    )
+
+
+def validate_host_drop(version=None):
+    if __package__:
+        from . import host_drop
+    else:
+        import host_drop
+    try:
+        return host_drop.preflight(version)
+    except host_drop.DropError as error:
+        raise BoxError(str(error)) from None
+
+
+def configure_host_drop(path, data, args, version):
+    """Resolve the separate host preference before unlock or lifecycle changes."""
+    if getattr(args, "_host_drop_resolved", False):
+        return
+    if __package__:
+        from . import workspace_preferences
+    else:
+        import workspace_preferences
+    requested = getattr(args, "host_drop", None)
+    if requested is not None and type(requested) is not bool:
+        raise BoxError("Invalid host file-drop preference.")
+    try:
+        # Validate even when overriding: corrupt policy is not permission to
+        # replace an unverified workspace's preference file.
+        saved = workspace_preferences.enabled(path, data["id"])
+        wanted = saved if requested is None else requested
+        enabled = False
+        if wanted:
+            try:
+                # Automatic noninteractive/unsupported terminals must not add
+                # a version probe ahead of ordinary credential validation.
+                if version is None:
+                    validate_host_drop()
+                    version = detect_opencode_release()
+                    args._opencode_release = version
+                validate_host_drop(version)
+                enabled = True
+            except BoxError:
+                if requested is True:
+                    raise
+                if sys.stdin.isatty() and sys.stdout.isatty():
+                    print(
+                        "oc-box: Host importing is unavailable for this client; "
+                        "the workspace preference is unchanged.",
+                        flush=True,
+                    )
+        if requested is not None:
+            workspace_preferences.set_host_drop(path, data["id"], requested)
+            print(
+                "oc-box: Saved workspace host importing: "
+                + ("enabled." if requested else "disabled.")
+                + " Existing clients keep their current setting.",
+                flush=True,
+            )
+    except workspace_preferences.PreferenceError as error:
+        raise BoxError(str(error)) from None
+    args._host_drop_enabled = enabled
+    args._host_drop_resolved = True
+
+
+def effective_host_drop(args):
+    return bool(getattr(args, "_host_drop_enabled", getattr(args, "host_drop", False)))
+
+
+def run_native_tui(
+    data, command, connection, *, host_drop_enabled=False, host_drop_required=True
+):
+    if not host_drop_enabled:
+        return run_tui(command)
+    try:
+        profile = validate_host_drop(str(data.get("opencode_version", "")))
+    except BoxError:
+        if host_drop_required:
+            raise
+        print(
+            "oc-box: Host importing is unavailable; opening the ordinary native TUI.",
+            flush=True,
+        )
+        return run_tui(command)
+    if connection is None:
+        raise BoxError("Host file drops require an existing private V2 connection.")
+    if __package__:
+        from . import host_drop
+    else:
+        import host_drop
+    print("oc-box: " + host_drop.WARNING, flush=True)
+    client_started = False
+    try:
+        with host_drop.Relay(
+            sys.modules[__name__], data, connection, profile=profile
+        ) as drops:
+            client_started = True
+            return run_tui(command, file_drops=drops)
+    except host_drop.DropError:
+        if not client_started and not host_drop_required:
+            print(
+                "oc-box: Host importing could not start; opening the ordinary native TUI. "
+                "The workspace preference is unchanged.",
+                flush=True,
+            )
+            return run_tui(command)
+        raise BoxError(
+            "Host file-drop transfer failed; no automatic retry or workspace restart was attempted."
+        ) from None
 
 
 def state_root():
@@ -2740,6 +2851,10 @@ def launch(path, data, args, *, image_preview_snapshot=None):
         if image_preview_snapshot is not None
         else {}
     )
+    if getattr(args, "host_drop", None) is True:
+        release = getattr(args, "_opencode_release", None) or detect_opencode_release()
+        validate_host_drop(release)
+        args._opencode_release = release
     try:
         if args.command == "sync":
             if getattr(args, "no_vault", False):
@@ -2756,6 +2871,8 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
     if version is None:
         with loading_stage("Checking OpenCode version"):
             version = detect_opencode_release()
+    if getattr(args, "host_drop", None) is True:
+        validate_host_drop(version)
     if getattr(args, "image_preview", False):
         if args.command not in ("start", "reset"):
             raise BoxError(
@@ -3011,7 +3128,8 @@ def launch_client(path, data, args, version, exported, owner=None):
                 "oc-box: Opening OpenCode; plugins and MCP servers may need time to initialize.",
                 flush=True,
             )
-            code = run_tui(
+            code = run_native_tui(
+                data,
                 workspace_service.client_command(
                     sys.modules[__name__],
                     data,
@@ -3020,7 +3138,10 @@ def launch_client(path, data, args, version, exported, owner=None):
                     interactive=True,
                 )
                 if owner
-                else exec_command(data, command, interactive=True)
+                else exec_command(data, command, interactive=True),
+                owner.connection if owner else None,
+                host_drop_enabled=effective_host_drop(args),
+                host_drop_required=getattr(args, "host_drop", None) is True,
             )
     finally:
         if owner:
@@ -3251,6 +3372,8 @@ def parser():
             "completion",
             "tui",
             "share",
+            "attach",
+            "preferences",
         ),
         default="start",
     )
@@ -3337,6 +3460,22 @@ def parser():
         "--image-preview",
         action="store_true",
         help="V2 owning start/reset TUI only: enable prompt/session image previews for this owner without changing saved CLI preferences",
+    )
+    host_drop_choice = result.add_mutually_exclusive_group()
+    host_drop_choice.add_argument(
+        "--host-drop",
+        dest="host_drop",
+        action="store_const",
+        const=True,
+        default=None,
+        help="save host file importing enabled for this workspace (default on for supported native TUI clients)",
+    )
+    host_drop_choice.add_argument(
+        "--no-host-drop",
+        dest="host_drop",
+        action="store_const",
+        const=False,
+        help="save host file importing disabled for this workspace",
     )
     result.add_argument(
         "--credential-mode",
@@ -3538,6 +3677,18 @@ def completion_parser():
 
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "preferences":
+        if __package__:
+            from .workspace_preferences import cli
+        else:
+            from workspace_preferences import cli
+        return cli(sys.modules[__name__], arguments[1:])
+    if arguments and arguments[0] == "attach":
+        if __package__:
+            from .attachments import cli
+        else:
+            from attachments import cli
+        return cli(sys.modules[__name__], arguments[1:])
     if arguments and arguments[0] == "share":
         if __package__:
             from .sharing import cli
@@ -3599,6 +3750,14 @@ def main(argv=None):
         raise BoxError(
             "Use 'oc-box share PATH' first, followed by its workspace selector; see --help."
         )
+    if args.command == "attach":
+        raise BoxError(
+            "Use 'oc-box attach' first, followed by PATH or --broker and --session; see 'oc-box attach --help'."
+        )
+    if args.command == "preferences":
+        raise BoxError(
+            "Use 'oc-box preferences' first, followed by its workspace selector."
+        )
     if args.command == "web" and not hasattr(args, "port"):
         raise BoxError(
             "Use 'oc-box web' first, followed by --project/--workspace/--port/--no-open."
@@ -3615,6 +3774,18 @@ def main(argv=None):
         raise BoxError(
             "--image-preview applies only to an owning start/reset TUI launch."
         )
+    if args.host_drop is not None and (
+        args.command not in ("start", "reset")
+        or args.status
+        or args.about
+        or args.version
+        or args.json
+    ):
+        raise BoxError(
+            "--host-drop/--no-host-drop apply only to native start/reset TUI clients."
+        )
+    if args.host_drop is True:
+        validate_host_drop()
     if args.no_vault and (
         args.command not in ("start", "reset", "web")
         or args.status
@@ -3965,6 +4136,8 @@ def main(argv=None):
             raise BoxError("--no-vault requires native OpenCode 2.x.")
         if args.image_preview:
             image_preview_snapshot = validate_image_preview(version)
+        if args.host_drop is True:
+            validate_host_drop(version)
         if opencode_compat.major(version) == 2:
             check_private_output()
         args._opencode_release = version
@@ -4056,6 +4229,7 @@ def main(argv=None):
                 raise BoxError(
                     "An active V2 workspace accepts additional TUI clients with selectors/--resume only; change session/configuration after the owner exits."
                 )
+            configure_host_drop(path, data, args, data.get("opencode_version"))
             with workspace_service.attach(
                 sys.modules[__name__], path, data
             ) as connection:
@@ -4076,7 +4250,13 @@ def main(argv=None):
                     ],
                     interactive=True,
                 )
-                return run_tui(command)
+                return run_native_tui(
+                    data,
+                    command,
+                    connection,
+                    host_drop_enabled=effective_host_drop(args),
+                    host_drop_required=args.host_drop is True,
+                )
         if args.command == "web" and workspace_service.controller_running(
             sys.modules[__name__], data
         ):
@@ -4090,11 +4270,13 @@ def main(argv=None):
                 return workspace_service.web_session(
                     sys.modules[__name__], data, connection, args
                 )
-    if args.image_preview:
+    if args.image_preview or args.host_drop is True:
         version = getattr(args, "_opencode_release", None) or detect_opencode_release()
-        if image_preview_snapshot is None:
+        if args.image_preview and image_preview_snapshot is None:
             image_preview_snapshot = validate_image_preview(version)
         args._opencode_release = version
+    if args.command in ("start", "reset"):
+        configure_host_drop(path, data, args, getattr(args, "_opencode_release", None))
     with workspace_lock(path), contextlib.ExitStack() as launch_context:
         if data.get("restore_incomplete") and args.command != "purge":
             raise BoxError(

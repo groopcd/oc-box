@@ -67,16 +67,26 @@ def write_all(fd, content):
 
 
 def run_tui(
-    command, *, env=None, input_fd=None, output_fd=None, refresh=1.0, show_loading=True
+    command,
+    *,
+    env=None,
+    input_fd=None,
+    output_fd=None,
+    refresh=1.0,
+    show_loading=True,
+    file_drops=None,
 ):
     """Preserve terminal queries/input/resize; stop drawing at first UI text.
 
     No background writer ever touches a running OpenCode screen. The relay is
-    byte-transparent apart from its temporary loading line before text renders.
+    byte-transparent apart from its temporary loading line before text renders,
+    unless an explicitly opted-in host file-drop handler was supplied.
     """
     input_fd = sys.stdin.fileno() if input_fd is None else input_fd
     output_fd = sys.stdout.fileno() if output_fd is None else output_fd
     interactive = os.isatty(input_fd) and os.isatty(output_fd)
+    if file_drops is not None and not interactive:
+        raise ValueError("Host file drops require interactive terminal input/output.")
     master = slave = None
     process = None
     old_terminal = None
@@ -118,6 +128,8 @@ def run_tui(
             return process.wait()
 
         detector = VisibleOutput()
+        if file_drops is not None:
+            file_drops.start()
         loading = show_loading
         banner_drawn = False
         started = time.monotonic()
@@ -146,6 +158,10 @@ def run_tui(
 
         while True:
             now = time.monotonic()
+            if file_drops is not None:
+                private_output = file_drops.pending_output()
+                if private_output:
+                    write_all(output_fd, private_output)
             if loading and now >= next_update and detector.safe_to_draw():
                 banner()
                 next_update = now + refresh
@@ -159,7 +175,13 @@ def run_tui(
                         raise
                     output = b""
                 if not output:
+                    if file_drops is not None:
+                        trailing = file_drops.finish_output()
+                        if trailing:
+                            write_all(output_fd, trailing)
                     break
+                if file_drops is not None:
+                    output = file_drops.output_bytes(output)
                 if loading and detector.feed(output):
                     if banner_drawn:
                         banner(clear=True)
@@ -168,8 +190,14 @@ def run_tui(
             if input_fd in ready:
                 content = os.read(input_fd, 65536)
                 if content:
+                    if file_drops is not None:
+                        content = file_drops.input_bytes(content)
                     write_all(master, content)
                 else:
+                    if file_drops is not None:
+                        trailing = file_drops.finish_input()
+                        if trailing:
+                            write_all(master, trailing)
                     stdin_open = False
             if process.poll() is not None and not ready:
                 break
@@ -191,3 +219,8 @@ def run_tui(
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait()
+        if file_drops is not None:
+            try:
+                write_all(output_fd, file_drops.stop())
+            except OSError:
+                pass

@@ -110,6 +110,135 @@ disclosed, not a stable manager pass. See
 [the source-qualified evidence](docs/testing.md#reviewed-5573965-candidate-evidence)
 and [known limitations](docs/releases/1.7.md#known-acceptance-limitations).
 
+## Explicit host-image attachments
+
+Experimental `oc-box attach` is separate from continuing `share` access. It
+requires an existing ready private V2 workspace and an explicit native
+`--session` at that workspace's exact native project directory, on supported
+2.2.6/2.2.7/2.3.0 only. Observed archived or staged-revert targets refuse.
+Native prompt admission has no atomic compare-and-swap precondition: a revert
+staged after the final check can still be committed by OpenCode. Do not edit a
+staged revert concurrently with direct attachment.
+It never starts a workspace, refreshes credentials/configuration, unlocks the
+vault, installs/relocates native plugins or modifies mainline OpenCode.
+
+Direct `attach PATH` prints a disclosure warning and requires typed host
+`attach` consent, or explicit `--acknowledge-risk` for noninteractive use. It
+queues an image user message, not a draft attachment chip. Default native
+`resume: false` is not a stopped-inference fence: an already active execution
+can consume queued input. `--send` explicitly requests queueing and resume.
+
+`attach --broker` runs in a foreground host terminal using the existing native
+client-MCP transport and an explicit existing-workspace lease. Every
+`request_image` path proposal requires independent typed `attach` approval on
+the host; remote permission approval, prompt text or earlier consent is never
+authority to disclose another file. Broker mode forbids PATH, `--text`,
+`--send` and `--acknowledge-risk`. It returns an opaque expiring ID for the
+approved captured image, not a path capability. `read_attachment(id)` delivers
+that snapshot at most once to the same native caller session, checked through
+native `_meta` context. Missing context, wrong-session, expired and reused
+retrievals refuse. The exposed native tool catalog is location-visible; native
+caller-session checks, not catalog visibility or a supplied session argument,
+enforce this delivery restriction.
+
+There is no directory listing, arbitrary text read, live reread, mount, host
+listener, project staging file, persistent MCP configuration or automatic
+reconnect/regrant. The sharing source guards apply to one regular single-link
+PNG/JPEG/GIF/WebP file up to 8 MiB, including protected-path, link, special-file
+and source-change refusals. oc-box does not put the host path/image content in
+native argv, its activity journal or project files. This is not a scanner for
+sensitive screenshot content or a security boundary against host root or a
+malicious same-user process.
+
+Without the host-input bridge described below, the ordinary container
+TUI has no direct host path access. This confirmation-broker feature does not
+install a transparent drop/paste interceptor. Users start the broker
+in a second host terminal and explicitly ask OpenCode to propose a pasted
+screenshot path with `request_image`, then use `read_attachment`. A pasted path
+or tool argument can itself enter native history/logging/provider processing.
+Only the separate host confirmation authorizes the image capture.
+
+Ctrl-C, stop, disconnect or native reload ends further broker retrieval; expiry
+and one-use delivery limit future access, not retention. Native OpenCode may
+normalize/store image content, send it to providers and retain it in transcripts,
+logs, backups or agent-created copies. No operation recalls disclosed bytes.
+Treat image contents and path text as untrusted input, including prompt injection.
+Earlier sharing or dashboard host evidence does not accept this feature; its
+unit/native and external-host requirements are documented separately in
+[the test strategy](docs/testing.md#experimental-host-image-attachments).
+
+## Opt-in native TUI host drops
+
+Experimental host-drop importing is a separate, default-on per-workspace host-input authorization
+surface, not a change to `attach --broker` consent. It is limited to full native
+V2 2.2.6/2.2.7/2.3.0 TUI start/reset clients, including an additional `start`
+client on an existing owner without an owner restart or credential refresh.
+It requires a direct interactive host TTY and refuses SSH, tmux and screen.
+It is not enabled for web, the session-shell terminal, the manager/dashboard,
+sync or informational/other commands.
+
+Save `--no-host-drop` to disable it for future workspace TUI clients, or use
+`oc-box preferences --host-drop off` without opening a client. `--host-drop`
+saves enabled and strictly requires compatibility; ordinary automatic launches
+skip unsupported clients. Existing clients retain their original setting.
+Private host preferences survive stop/reset but do not grant archive-restore
+authority to a new workspace ID. Missing preferences mean enabled by default;
+unsafe/corrupt preferences refuse. This is a broader default disclosure policy
+than the earlier per-client opt-in; it does not change the independent broker.
+
+**A qualifying complete pathname paste anywhere in an importing-enabled TUI authorizes
+capture without per-file host confirmation.** The relay cannot prove a desktop
+drag gesture, composer focus or the user's intention to attach rather than
+discuss a path. Model output, MCP calls and remote path proposals are not
+authorization. Save importing disabled when that input policy is inappropriate;
+use the independent per-image confirmation broker instead.
+
+The experimental profiles are direct Konsole and Kitty, selected by exactly one
+host compatibility marker (`KONSOLE_VERSION` or `KITTY_WINDOW_ID`). Unknown or
+ambiguous inherited markers refuse. This is operator-trusted compatibility
+selection, not authentication or proof of a safe emulator. Konsole uses only
+pathname pastes, with no OSC 72 query/registration and unchanged child output.
+Its default direct URL-drop setting is required; the optional drop-menu Paste
+Location action is raw input and is not intercepted. The Kitty profile additionally
+requires actual advertised structured-drop capability. Graphics support alone is
+not that capability.
+
+The host-input parser excludes opaque OSC/DCS and other terminal responses from
+pathname authorization, including UTF-8/C1 boundaries. Only Kitty output is
+mediated for its audited C0 OSC 72 wire protocol; no generic C1-output or universal
+terminal sandbox is claimed. Unsupported output framing limits fail closed.
+Ordinary valid native graphics APC_G and keyboard CSI remain unchanged.
+
+The pathname bridge admits only one complete frame of one to four absolute
+Linux paths with supported quoting/escaping, never mixed prose, newlines,
+traversal, control characters or `file://` text expansion. The existing sharing
+descriptor-pinning, protected-path, link, special-file and source-change guards
+apply before snapshotting. PNG/JPEG/GIF/WebP/PDF extension/signature matching
+limits types, not malicious content: there is no image/PDF decoder, malware scan
+or verified DOCX reader/converter. Selected models/providers may reject a format.
+Bounds are 8 MiB per file, 16 MiB per batch, and 32 files/64 MiB per client.
+Treat captured images/PDFs as untrusted input, including prompt injection.
+
+Only captured bytes cross the private non-PTY stdin channel; host source paths
+and content are not transported through argv, environment, shell commands or
+project staging files. A pinned private container `/tmp/oc-box-drop-<token>`
+directory has mode 0700 and generated files have mode 0600. The relay pastes
+rewritten container paths into the unmodified native TUI; it never appends Enter
+or calls a native prompt-submission API. It does not prove which native UI input
+has focus or replace native attachment/model handling. The TUI, server, plugins
+and tools remain container processes.
+
+Normal exit attempts bounded cleanup of recorded file identities only, never
+recursive crawling or restart scavenging. Root replacement/ownership/mode
+changes refuse mutation and can retain data; namespace checks are not atomic
+against same-user rename/unlink races. Crashes, open descriptors, native
+references, history, copies and backups may retain disclosed bytes. Container
+root and same-user agents/tools can read staged files; no per-session isolation
+or recall is promised. Existing host evidence does not accept this feature.
+See the separate [required checks](docs/testing.md#experimental-transparent-native-tui-host-drops);
+unit/native fixtures are not new desktop/rootless-Podman acceptance or a blanket
+security certification.
+
 ## Global V2 host credential vault and policy overrides
 
 With OpenCode 2.x, workspace clients use native private

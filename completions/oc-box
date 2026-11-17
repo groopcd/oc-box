@@ -27,10 +27,10 @@ _oc_box_paths()
 _oc_box()
 {
     local cur=${COMP_WORDS[COMP_CWORD]} prev='' prefix='' option=''
-    local command='' action='' word skip=0 positional=0 ended=0 i
-    local commands='start stop sync reset repair terminal web tui share upgrade secrets credentials backup backup-info restore purge list distros status doctor completion'
+    local command='' action='' word skip=0 positional=0 ended=0 broker=0 i
+    local commands='start stop sync reset repair terminal web tui share attach preferences upgrade secrets credentials backup backup-info restore purge list distros status doctor completion'
     local selectors='--project --workspace'
-    local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview'
+    local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --host-drop --no-host-drop'
     local help='-h --help' options
     COMPREPLY=()
     (( COMP_CWORD > 0 )) && prev=${COMP_WORDS[COMP_CWORD-1]}
@@ -51,8 +51,12 @@ _oc_box()
         if (( ! ended )); then
             case $word in
                 --*=*) continue ;;
-                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--min-passphrase-length|--feature|--port)
+                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--min-passphrase-length|--feature|--port|--session|--text)
                     skip=1; continue ;;
+                --broker) broker=1; continue ;;
+                --host-drop)
+                    [[ $command == preferences ]] && skip=1
+                    continue ;;
                 --status) command=status; continue ;;
                 -*) continue ;;
             esac
@@ -91,24 +95,32 @@ _oc_box()
             --feature)
                 _oc_box_words 'launch private-output maintenance history backup backup-info restore vault github-upgrade bootstrap storage overlay manuals docs-build'; return 0 ;;
             --auto-update) _oc_box_words 'on off'; return 0 ;;
+            --host-drop)
+                if [[ $command == preferences ]]; then
+                    _oc_box_words 'on off'; return 0
+                fi ;;
             --credential-mode) _oc_box_words 'env selected vault'; return 0 ;;
-            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port)
+            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port|--session|--text)
                 return 0 ;;
         esac
     fi
 
     case $command in
         start) options="$help $selectors $launch" ;;
-        reset) options="$help $selectors --distro --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview" ;;
+        reset) options="$help $selectors --distro --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --host-drop --no-host-drop" ;;
         sync) options="$help $selectors" ;;
         stop|repair) options="$help $selectors" ;;
         terminal) options="$help $selectors --maintenance" ;;
         web) options="$help $selectors --port --no-open --no-vault" ;;
         tui) options="$help $selectors --read-only --demo" ;;
         share) options="$help $selectors --acknowledge-risk" ;;
+        attach)
+            options="$help $selectors --session --broker"
+            (( broker )) || options+=' --text --send --acknowledge-risk' ;;
         status) options="$help $selectors --json" ;;
         purge) options="$help $selectors --delete-sessions --all -y --yes" ;;
         credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;
+        preferences) options="$help $selectors --host-drop --json" ;;
         upgrade) options="$help --check --stable --devel --auto-update" ;;
         doctor) options="$help --json --feature" ;;
         backup) options="$help $selectors --output --portable --recipient --min-passphrase-length" ;;
@@ -131,7 +143,10 @@ _oc_box()
         _oc_box_words "$options"
         [[ $cur == -* ]] && return 0
     fi
-    if [[ $command == backup-info || $command == restore || $command == share ]] && (( positional == 0 )); then
+    if (( positional == 0 )) && {
+        [[ $command == backup-info || $command == restore || $command == share ]] ||
+        { [[ $command == attach ]] && (( ! broker )); }
+    }; then
         _oc_box_paths -f
     fi
     return 0

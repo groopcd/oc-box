@@ -340,6 +340,100 @@ limits and lifecycle details. Its 37-check scripted host acceptance belongs to
 the earlier exact `5573965` source and native 2.2.6, not automatically to every
 later development build; see [the evidence scope](docs/releases/1.7.md#reviewed-earlier-source-evidence).
 
+### Native TUI host image/PDF drops (experimental)
+
+Outside-host importing is enabled by default per workspace on supported native
+TUI clients. Save an override while opening a client, or change only the preference:
+
+```sh
+oc-box --project ~/devel/demo --host-drop
+oc-box --project ~/devel/demo --no-host-drop
+oc-box preferences --project ~/devel/demo --host-drop off
+```
+
+Importing requires native V2 2.2.6/2.2.7/2.3.0 and a direct
+interactive host terminal without SSH, tmux or screen. It works on owning
+start/reset and on an additional `start` TUI client without restarting the owner;
+the preference is saved for future clients, not live-toggled in running ones.
+Normal launches gracefully skip unsupported clients; explicit `--host-drop`
+refuses unsupported setups. It is not a `web`, session-shell or dashboard
+option. Exactly one host Konsole/Kitty compatibility marker must identify the
+profile; unknown or inherited ambiguous setups refuse. This is not emulator
+authentication. Konsole uses complete pathname pastes and leaves child output
+unchanged; its default direct-drop setting is needed, not the optional raw
+**Paste Location** menu action. Only the Kitty profile probes/enables structured
+OSC 72 drops after a positive capability reply. Kitty graphics alone is not DnD.
+
+**A qualifying path paste anywhere in an importing-enabled TUI authorizes copying,
+without a per-file prompt.** The bridge cannot prove a true drag gesture or
+composer focus. It accepts a whole paste of one to four absolute Linux paths
+(supported quoting/escaping for spaces), not mixed prose, newlines, traversal,
+controls or `file://` text expansion. Protected/link/special/changed sources
+refuse. PNG/JPEG/GIF/WebP/PDF require matching extension/signature, with limits
+of 8 MiB/file, 16 MiB/batch and 32 files/64 MiB per client. Selected
+models/providers may not support PDF; this bridge supplies no DOCX reader or
+document converter. For independent host confirmation of every image, use the
+broker below instead.
+
+Captured bytes travel over private non-PTY stdin into private container `/tmp`
+staging, not argv/env/shell commands or project files. All native TUI/server/
+plugin execution stays in the container. Rewritten container paths become a
+native paste: **oc-box never adds Enter or automatically submits a prompt**.
+The native UI controls composition/previews; optional owning `--image-preview`
+can enable image visuals. Exit cleanup is best-effort, with no restart scavenger.
+Crashes, open references, history, copies or backups may retain bytes, and
+same-user container agents can read staged files. This is not a content scanner,
+blanket security guarantee or a new live-host acceptance pass. See
+[`--host-drop`](docs/cli.md#--host-drop),
+[security](SECURITY.md#opt-in-native-tui-host-drops) and
+[required checks](docs/testing.md#experimental-transparent-native-tui-host-drops).
+
+### Host screenshots for one session (experimental)
+
+With host importing disabled or unavailable, an outside host screenshot path is
+not directly readable by the container TUI. This confirmation-broker feature
+does **not** transparently intercept native drop/paste. For repeated screenshots,
+start a broker once in a second **host terminal**, explicitly choosing the
+intended native session:
+
+```sh
+oc-box attach --broker --session ses_example --project ~/devel/demo
+```
+
+Keep it open. Drop/paste the screenshot **path** in that OpenCode conversation
+and explicitly ask OpenCode to use the printed server's `request_image`, then
+`read_attachment(id)`. The host terminal must independently approve **every file**
+by typing `attach`. The request returns an opaque expiring ID; image retrieval
+is single-use and bound to the same native caller session via native `_meta`
+context. This is a captured image, not live access: no folder listing, text read,
+mount, listener, saved MCP configuration or automatic regrant.
+
+For a direct image user message instead, run on the host:
+
+```sh
+oc-box attach /tmp/Spectacle.example/Screenshot.png \
+  --session ses_example --project ~/devel/demo
+```
+
+The default message text is `Please examine this host image.` Add `--text` to
+change it and `--send` to request native queueing with resume. Without `--send`,
+native resume is false, but active execution may still consume the queued
+message: this is **not a draft chip or a guarantee of stopped inference**.
+Direct mode prints a disclosure warning and needs typed `attach` confirmation
+unless explicitly authorized with `--acknowledge-risk`. Broker mode forbids
+PATH, `--text`, `--send` and `--acknowledge-risk`.
+
+Both modes require an existing ready workspace, `--session`, an exact native
+project-directory match and supported OpenCode V2 2.2.6/2.2.7/2.3.0. Observed
+archived or staged-revert targets refuse. Only single PNG/JPEG/GIF/WebP snapshots
+up to 8 MiB pass the sharing path/content guards. No starts, credential refresh
+or vault unlock occur; no native code or plugin relocation is required.
+**Native history/provider processing may retain or normalize the image;
+disconnect and grant expiry do not undo disclosure.** Paths pasted into
+OpenCode are also disclosed. See [attach](docs/cli.md#attach) for lifecycle and
+safety details and [testing](docs/testing.md#experimental-host-image-attachments)
+for its separate, not-yet-host-accepted validation scope.
+
 ### V2 conversation archives
 
 History synchronization includes paginated root, fork, archived, and child/subagent

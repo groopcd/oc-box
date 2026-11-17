@@ -13,6 +13,7 @@ import unittest
 from unittest.mock import patch
 
 from oc_box import (
+    attachments,
     backups,
     dependencies,
     installation,
@@ -91,6 +92,7 @@ fi
             ("web", workspace_service.web_parser()),
             ("completion", box.completion_parser()),
             ("share", sharing.parser()),
+            ("attach", attachments.parser()),
         ):
             with self.subTest(command=name):
                 expected = {
@@ -155,6 +157,7 @@ fi
             "web",
             "tui",
             "share",
+            "attach",
             "credentials",
             "status",
             "doctor",
@@ -183,6 +186,7 @@ fi
             "repair",
             "terminal",
             "share",
+            "attach",
             "upgrade",
             "secrets",
             "credentials",
@@ -213,6 +217,7 @@ fi
             "sync",
             "repair",
             "terminal",
+            "attach",
             "upgrade",
             "secrets",
             "credentials",
@@ -229,6 +234,50 @@ fi
         ):
             with self.subTest(command=command):
                 self.assertEqual(self.complete(command, "--image-p"), [])
+
+    def test_host_drop_is_offered_only_for_start_and_reset_tui_clients(self):
+        self.assertEqual(self.complete("--host-d"), ["--host-drop"])
+        self.assertEqual(self.complete("--no-host-d"), ["--no-host-drop"])
+        for command in ("start", "reset"):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--host-d"), ["--host-drop"])
+                self.assertEqual(
+                    self.complete(command, "--no-host-d"), ["--no-host-drop"]
+                )
+        for command in (
+            "web",
+            "stop",
+            "sync",
+            "repair",
+            "terminal",
+            "tui",
+            "share",
+            "attach",
+            "upgrade",
+            "secrets",
+            "credentials",
+            "backup",
+            "backup-info",
+            "restore",
+            "purge",
+            "list",
+            "distros",
+            "status",
+            "doctor",
+            "completion",
+            "--status",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--host-d"), [])
+                self.assertEqual(self.complete(command, "--no-host-d"), [])
+
+    def test_workspace_preferences_have_context_specific_values(self):
+        self.assertEqual(self.complete("preferences", "--host-drop", ""), ["on", "off"])
+        self.assertEqual(
+            self.complete("preferences", "--host-drop", "o"), ["on", "off"]
+        )
+        self.assertEqual(self.complete("preferences", "--no-host-d"), [])
+        self.assertEqual(self.complete("preferences", "--j"), ["--json"])
 
     def test_vault_mode_completes_with_separate_and_equals_values(self):
         self.assertEqual(
@@ -277,6 +326,61 @@ fi
         self.assertEqual(
             self.complete("--model=restore", "doctor", "--f"), ["--feature"]
         )
+
+    def test_attachment_completion_scopes_broker_options_without_guessing_values(self):
+        self.assertEqual(self.complete("attach", "--se"), ["--session", "--send"])
+        self.assertEqual(self.complete("attach", "--br"), ["--broker"])
+        self.assertEqual(self.complete("attach", "--no-v"), [])
+        self.assertEqual(self.complete("attach", "--image-p"), [])
+        self.assertEqual(
+            set(self.complete("attach", "--broker", "--")),
+            {"--help", "--project", "--workspace", "--session", "--broker"},
+        )
+        for words in (
+            ("attach", "--session", "share", "--text", "restore", "--br"),
+            ("attach", "--session=share", "--text=restore", "--br"),
+            ("attach", "--session", "=", "share", "--text", "=", "restore", "--br"),
+        ):
+            with self.subTest(words=words):
+                self.assertEqual(self.complete(*words), ["--broker"])
+        (self.root / "PRIVATE_TOKEN").touch()
+        for words in (
+            ("attach", "--session", ""),
+            ("attach", "--session", "=", ""),
+            (
+                "attach",
+                "--session=",
+            ),
+            ("attach", "--text", ""),
+            (
+                "attach",
+                "--text=",
+            ),
+            ("attach", "--broker", "--session", ""),
+        ):
+            with self.subTest(words=words):
+                self.assertEqual(self.complete(*words), [])
+
+    def test_attachment_path_completion_is_direct_only_and_skips_option_values(self):
+        image = self.root / "Screenshot with spaces.png"
+        image.touch()
+        for words in (
+            ("attach", "Screen"),
+            ("attach", "--session", "ses_example", "Screen"),
+            ("attach", "--session=ses_example", "Screen"),
+            ("attach", "--text", "Screenshot caption", "Screen"),
+            ("attach", "--", "Screen"),
+        ):
+            with self.subTest(words=words):
+                self.assertEqual(self.complete(*words), [image.name])
+        for words in (
+            ("attach", image.name, "Screen"),
+            ("attach", "--broker", "Screen"),
+            ("attach", "--session", "ses_example", "--broker", "Screen"),
+            ("attach", "--broker", "--", "Screen"),
+        ):
+            with self.subTest(words=words):
+                self.assertEqual(self.complete(*words), [])
 
     def test_directory_file_and_archive_paths_preserve_spaces_and_metacharacters(self):
         directory = self.root / "project with spaces"

@@ -173,6 +173,185 @@ while acknowledging retained tool results/history. Verify on an enforcing SELinu
 host without relabeling original sources or disabling labeling. Preserve failed
 reports and do not infer acceptance from unit/native or earlier TUI/vault passes.
 
+### Experimental host-image attachments
+
+`oc-box attach PATH --session ID` sends a host-authorized native image user
+message. `oc-box attach --broker --session ID` instead exposes foreground
+`request_image` proposals and single-use `read_attachment(id)` snapshots over
+the existing private native client-MCP transport. The host must independently
+type `attach` for every broker proposal. This feature is **not** transparent
+native drop/paste interception and adds no container-native code/plugin
+relocation. Its validation is separate from live `share` reads and the dashboard;
+no earlier exact-source host acceptance establishes an attachment pass.
+
+The following are required checks, **not a report that they have all passed**.
+Do not run host lifecycle/Podman fixtures inside oc-box or against real
+screenshots, projects or credentials.
+
+**Unit/contract and real-local-process checks.** Cover required `--session`,
+direct PATH versus pathless `--broker`, exact native directory validation and
+refusal of observed archived/staged-revert targets. Both modes must require an
+existing verified V2 owner on exactly 2.2.6/2.2.7/2.3.0, without starts,
+auth/config refresh or vault unlock. Preserve parser/completion/manual and
+installed-runtime coverage. Direct mode must use the default text
+`Please examine this host image.`, allow an explicit text override and warn
+before typed host consent or explicit noninteractive acknowledgement.
+Verify native queueing with `resume: false` by default and `resume: true` only
+with `--send`; do not test or document this as a draft chip or stopped-inference
+guarantee.
+
+Exercise independent host approval for every broker proposal, denial/cancellation,
+and refusal of broker PATH/`--text`/`--send`/`--acknowledge-risk`. Bind opaque
+expiring IDs to verified native caller-session `_meta`, reject missing/forged or
+wrong-session context, expiry and reuse, and deliver captured bytes only once
+without reopening the path. Cover parallel requests, bounded retained grants and
+close/reload/disconnect/cancellation while awaiting host consent. Verify the
+catalog contains only `request_image` and `read_attachment`, never
+`list_directory`, arbitrary text or live file reads.
+
+Reuse sharing path/content guards: protected roots/ancestors/descendants,
+symlink/magic-link/hardlink/special-file and unsafe-change refusals, one regular
+PNG/JPEG/GIF/WebP snapshot up to 8 MiB, unchanged source data, and no project
+staging, native argv content/path leakage, raw diagnostic leakage or activity-log
+retention. Native history/tool/provider retention is a separate disclosure and
+must not be represented as prevented by these checks.
+
+**Native offline integration.** Use unmodified supported V2 binaries with private
+synthetic state/configuration and a synthetic local image. Check direct native
+message submission, queue/resume values, actual native image normalization and
+stored-message retrieval without assuming encoded-byte equality after native
+processing. Exercise real client-MCP registration/catalog, request context,
+host-approval handoff, returned image content, wrong-session isolation and
+single-use/expiry. Preserve unrelated MCP/configuration and verify tool removal
+on close/reload. Record each exact binary/source identity and whether a synthetic
+provider was used; no normal host service, inherited credentials or real-provider
+inference belongs in the fixture. Native/process results are not rootless-Podman,
+desktop drag/drop or interactive host approval acceptance.
+
+The bounded `tests/smoke_attachments_v2.py` fixture exercises the production
+broker/protocol/WebSocket pump and stdin-only admission helper. Run it separately
+with the retained baseline and current development native binaries:
+
+```sh
+python3 -B tests/smoke_attachments_v2.py --opencode /path/to/opencode-2.2.6
+python3 -B tests/smoke_attachments_v2.py --opencode /path/to/opencode-2.3.0
+```
+
+Its approval callback is synthetic. The separate real-PTY approval unit cases
+do not turn that callback into an interactive desktop/Podman acceptance pass.
+
+**Focused external-host acceptance remains required.** On a clean source-pinned
+candidate and synthetic workspace/image, start a broker in a second real host
+terminal. Paste/drop only the screenshot path in the container native TUI and
+explicitly ask for `request_image` followed by `read_attachment`. Observe that
+the host separately confirms every file and that ordinary native container
+file/shell access still cannot resolve the outside path. Check direct attach
+with and without `--send`, explicit target/directory guards, archived/revert
+refusal, source preservation, no mounts/listeners/staging/config or credential
+refresh, owner waiting for the visible broker lease, Ctrl-C/client loss/native
+reload/workspace stop, and no automatic regrant after a later launch. Inspect
+native retention honestly: delivery/normalization and already disclosed copies
+persist after expiry/close. Keep failed evidence and existing UI acceptance
+limitations visible. No real screenshot, provider inference, security
+certification or transparent native autoattachment claim follows from this gate.
+
+### Experimental transparent native TUI host drops
+
+Host-drop importing is a default-on per-workspace native TUI input bridge,
+separate from the
+per-image `attach --broker` confirmation workflow, browser uploads and web
+session-routing fixes. Its supported native versions are 2.2.6/2.2.7/2.3.0.
+The experimental terminal profiles are direct Konsole and Kitty, chosen by
+unambiguous host compatibility markers, not authenticated emulator identity.
+Unknown/ambiguous, multiplexer and SSH setups skip automatic importing; explicit
+enable refuses them. A complete qualifying pathname paste anywhere in an
+importing-enabled TUI authorizes capture without per-file prompts; neither a genuine desktop drag
+gesture nor composer focus is established. Konsole is pathname-paste-only and
+leaves child output unchanged. Only the Kitty profile probes/enables structured
+OSC 72 DnD after actual capability detection; graphics support alone is not DnD.
+
+The following are required checks, **not an assertion that the feature or a
+desktop/rootless-Podman gate has passed**. Do not replay older accepted fixtures
+or use real screenshots, documents, workspaces, credentials or provider accounts.
+Freeze the integrated source before shared-checkout tests; record exact source,
+working-tree state and native binary identities.
+
+**Unit, protocol and process contracts.** Exercise the normal imports in
+`tests/test_host_drop.py`, `tests/test_host_drop_input.py` and
+`tests/test_host_drop_io.py`, `tests/test_workspace_preferences.py` and
+`tests/test_host_drop_preferences.py`. Cover default-on supported clients,
+saved opt-out/enable, read-only preference display, corrupt/unsafe policy refusal,
+unsupported-client automatic fallback versus strict explicit enable, and start/reset,
+plus an additional start TUI client that joins the existing owner without
+restart, credential/config refresh or new ownership. Never activate on V1 or
+unsupported native versions. Reject startup flags on web, terminal/maintenance,
+the dashboard, sync, informational and other commands; require an actual
+interactive TTY without TMUX/STY/SSH for importing.
+Keep parser, completion, manuals, installed-runtime and wheel/sdist membership
+contracts together.
+
+Check fragmented and complete pathname/structured-drop frames, one to four
+absolute quoted/escaped Linux paths, and rejection of prose, newlines,
+traversal, control characters, file-URI text expansion and unsupported formats.
+Opaque OSC/DCS and other terminal responses must not become host-path
+authorization; exercise UTF-8/C1 boundaries and bounded partial-input recovery.
+Konsole must emit no private OSC 72 probes/registration and preserve all child
+output. Only the Kitty profile mediates its C0 OSC 72 wire commands; include C1
+wrappers hiding C0 commands, numeric aliases, malformed escape recovery and
+nonjoining output neutralization. Verify final-emitted framing boundaries and
+pre-threshold fail-closed raw-wire limits while retaining valid graphics APC_G,
+keyboard CSI and supported clipboard traffic. Input C1 opacity remains separate;
+do not claim a generic C1-output or universal terminal sandbox.
+
+Reuse production sharing pinning/protected-path/link/special-file/change
+refusals. Verify PNG/JPEG/GIF/WebP/PDF extension/signature agreement, including
+PDF-prefix mismatches and DOCX refusal. Exercise 8 MiB/file, 16 MiB/batch and
+non-reusable 32-file/64 MiB client quotas without large unbounded fixtures.
+Check private non-PTY stdin delivery, no captured bytes/source path in argv/env/
+shell/project files, and no model/MCP path-request authority or per-file prompts.
+The isolated-source helper must create an exclusive 0700 pinned container root,
+0600 generated files, sanitized errors and one bounded close acknowledgement.
+Exercise EOF/explicit close, overwrite/symlink/root-substitution and ownership/
+mode refusals, partial writes and cleanup of recorded identities only. Preserve
+unrelated files; do not add background or restart cleanup.
+
+**Native offline regression, including PDF.** The focused
+`tests/smoke_host_drop_v2.py` fixture must use unmodified native binaries with
+private synthetic configuration, history, image and PDF bytes:
+
+```sh
+python3 -B tests/smoke_host_drop_v2.py --opencode /path/to/opencode-2.2.6
+python3 -B tests/smoke_host_drop_v2.py --opencode /path/to/opencode-2.3.0
+```
+
+Verify actual native attachment admission/serialization of PDF as
+`application/pdf`, not only a Python prefix test or a source-reading claim.
+Selected model/provider PDF support is separate; no DOCX reader/converter or
+real-provider inference is established by this fixture. Cover container-path
+rewriting fed as native paste, without an appended Enter or prompt API
+submission. Native UI composition/preview and the decision to send remain native;
+`--image-preview` is an optional existing owning-launch visual overlay, not
+host-file authorization or proof of rendering. No offline/native result alone
+is a desktop gesture, focused-composer or rootless-Podman pass.
+
+**Focused external-host observations remain outstanding.** On clean pinned
+source with disposable synthetic data, check Konsole's default direct drops
+with bare names/trailing spaces, quoting/escaping, batch handling, denied/protected inputs and
+non-composer focus. Verify that optional drop-menu Paste Location stays unframed
+and is not imported. Check genuine structured DnD only on a supported Kitty
+profile exposing that capability; record unsupported capability honestly. Observe native draft/
+attachment preview, confirm no automatic Enter/submission, and send explicitly.
+Exercise both a new owner and an additional opted-in TUI, ordinary unflagged TUI
+behavior, resize/graphics/keyboard preservation, client detach/loss, owner
+waiting and normal exit. Verify source preservation, private container staging,
+best-effort recorded-file cleanup and honest retained-data reporting after
+interruption. Container root/same-user agents can read staged data; references,
+history, copies and backups may retain bytes even after cleanup.
+
+These are not a malware/content scan, terminal-version certification, blanket
+security guarantee or acceptance of the separate web features. Keep the existing
+UI limitations and all earlier source-qualified evidence unchanged.
+
 ### Experimental workspace manager
 
 The [Textual manager](tui.md) adds a separate validation surface from the native

@@ -503,23 +503,50 @@ def transport_source(box):
     )
 
 
-def serve(process, export, *, ready=lambda: None):
+def serve(process, export, *, ready=lambda: None, protocol=None):
     """Bound input and nonblocking output, including an unresponsive receiver."""
     incoming, outgoing = bytearray(), bytearray()
-    mcp = MCP(export)
+    mcp = MCP(export) if protocol is None else protocol
     initialized, deadline, write_deadline = False, time.monotonic() + 30, None
     os.set_blocking(process.stdin.fileno(), False)
     os.set_blocking(process.stdout.fileno(), False)
     while True:
+        # Drain one complete reply before dispatching another buffered request.
+        # Combining valid image replies can exceed the queue bound and consume
+        # one-use grants whose bytes have never reached the receiver.
+        while not outgoing and b"\n" in incoming:
+            line, _, incoming = incoming.partition(b"\n")
+            if len(line) > MAX_REQUEST:
+                raise ShareError("Oversized client MCP request.")
+            response = mcp.reply(json.loads(line))
+            if response is not None:
+                outgoing.extend(
+                    json.dumps(response, ensure_ascii=True).encode() + b"\n"
+                )
+                write_deadline = time.monotonic() + 30
+            if len(outgoing) > MAX_RESPONSE:
+                raise ShareError("Temporary sharing output exceeded its bound.")
+        if len(incoming) > MAX_REQUEST and b"\n" not in incoming:
+            raise ShareError("Oversized client MCP request.")
+        if not outgoing:
+            write_deadline = None
+            if mcp.catalogued and not initialized:
+                initialized = True
+                ready()
         if (not initialized and time.monotonic() >= deadline) or (
             write_deadline is not None and time.monotonic() >= write_deadline
         ):
             raise ShareError("Temporary sharing connection timed out.")
         readable, writable, _ = select.select(
-            [process.stdout], [process.stdin] if outgoing else [], [], 0.2
+            [] if outgoing else [process.stdout],
+            [process.stdin] if outgoing else [],
+            [],
+            0.2,
         )
         if process.stdout in readable:
-            chunk = os.read(process.stdout.fileno(), 65536)
+            chunk = os.read(
+                process.stdout.fileno(), min(65536, MAX_REQUEST + 1 - len(incoming))
+            )
             if not chunk:
                 if incoming:
                     raise ShareError("Incomplete client MCP request.")
@@ -529,31 +556,12 @@ def serve(process, export, *, ready=lambda: None):
                     )
                 return
             incoming.extend(chunk)
-            while b"\n" in incoming:
-                line, _, incoming = incoming.partition(b"\n")
-                if len(line) > MAX_REQUEST:
-                    raise ShareError("Oversized client MCP request.")
-                response = mcp.reply(json.loads(line))
-                if response is not None:
-                    outgoing.extend(
-                        json.dumps(response, ensure_ascii=True).encode() + b"\n"
-                    )
-                    write_deadline = time.monotonic() + 30
-                if len(outgoing) > MAX_RESPONSE:
-                    raise ShareError("Temporary sharing output exceeded its bound.")
-            if len(incoming) > MAX_REQUEST:
-                raise ShareError("Oversized client MCP request.")
         if process.stdin in writable:
             try:
                 written = os.write(process.stdin.fileno(), outgoing[:65536])
                 del outgoing[:written]
             except BlockingIOError:
                 pass
-        if not outgoing:
-            write_deadline = None
-            if mcp.catalogued and not initialized:
-                initialized = True
-                ready()
 
 
 def parser():

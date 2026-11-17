@@ -14,6 +14,9 @@ oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS]
 oc-box repair [--project PATH | --workspace ID]
 oc-box terminal [--project PATH | --workspace ID] [--maintenance]
 oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
+oc-box attach PATH --session ID [--project PATH | --workspace ID] [--text TEXT] [--send] [--acknowledge-risk]
+oc-box attach --broker --session ID [--project PATH | --workspace ID]
+oc-box preferences [--project PATH | --workspace ID] [--host-drop on|off] [--json]
 oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
 oc-box list
 oc-box distros
@@ -182,6 +185,7 @@ mkdir -p ~/devel/demo
 oc-box --project ~/devel/demo
 oc-box start --project ~/devel/demo --new
 oc-box --project ~/devel/demo --image-preview
+oc-box --project ~/devel/demo --host-drop
 ```
 
 For V2, initialize and populate the host vault **before the first project launch**
@@ -220,6 +224,37 @@ terminal TUIs preserve that state instead of forcing a historical root. Default
 session-shell and browser attachments require a verified open root; otherwise
 they refuse with guidance to open one or explicitly start with `--new`.
 Location-scoped sharing and metadata browsing do not invent a session.
+
+Experimental outside-host image/PDF drops into the native TUI are enabled by
+default for supported clients. Save `--no-host-drop` to disable importing for
+this workspace, or `--host-drop` to enable it again. A new additional
+`start` TUI client reads the preference without restarting the existing owner;
+existing clients do not live-toggle. This is separate from
+the `attach` confirmation broker and from browser uploads; see the option below
+for the host-input authorization boundary and terminal requirements.
+
+### preferences
+
+Read or change host-only UI preferences for an **existing registered workspace**
+without opening a client, starting/stopping a container, refreshing native
+configuration or unlocking credentials:
+
+```sh
+oc-box preferences --project ~/devel/demo
+oc-box preferences --project ~/devel/demo --host-drop off
+oc-box preferences --workspace WORKSPACE_ID --host-drop on
+oc-box preferences --project ~/devel/demo --json
+```
+
+`--project` and `--workspace` are mutually exclusive. With no change option this
+is read-only. Missing preferences mean importing is enabled by default; corrupt,
+unsafe or mismatched preferences refuse rather than silently granting access.
+Changes apply to future clients only. Preferences survive ordinary stop/start
+and reset in a private host `ui-preferences.json` beside workspace metadata,
+with an independent lock so an active owning launcher need not exit.
+They are not native CLI settings, credential policy or archived authority:
+backup/restore into a fresh workspace does not reactivate this host preference.
+The new workspace uses the restoring host's default until explicitly changed.
 
 ### stop
 
@@ -305,6 +340,91 @@ This uses OpenCode's experimental client-MCP WebSocket API. An unsupported
 native version refuses sharing without editing configuration. It is not a
 promise of compatibility with every V2 version or an accepted live host pass;
 see the focused validation requirements in `docs/testing.md`.
+
+### attach
+
+**Experimental, host-only, V2 2.2.6/2.2.7/2.3.0 only:** disclose one host image
+to an explicitly selected native session in an already running workspace.
+`--session` is required in both modes. The session must belong to the workspace's
+exact native project directory; observed archived targets or staged native
+reverts are refused. This command never starts a workspace, refreshes auth/config,
+unlocks the vault, or selects a session automatically. Put `attach` first.
+The native API has no atomic precondition for this check: a revert staged between
+the final target check and prompt admission can still be committed by native
+OpenCode. Do not stage/revise a revert concurrently with direct attachment.
+
+The ordinary native TUI runs inside the container and cannot directly resolve an
+outside host path. This `attach` command is not a transparent interceptor: choose
+the broker workflow below, or issue a direct host command. The separate
+`--host-drop` TUI launch option has a different host-input authorization model;
+it does not weaken this broker's per-file confirmation. Neither workflow modifies
+mainline OpenCode or relocates its container plugins.
+
+For repeated screenshots, start a foreground broker once in a second **host
+terminal**, using the ID of the intended native conversation:
+
+```sh
+oc-box attach --broker --session ses_example --project ~/devel/demo
+```
+
+Keep that terminal open. In the OpenCode conversation, drop/paste the screenshot
+**path** and explicitly ask it to use the printed MCP server's `request_image`
+tool, followed by `read_attachment(id)`. For example, ask: “Use request_image for
+/tmp/Spectacle.example/Screenshot.png, then read_attachment with the returned ID
+and examine the screenshot.” The host terminal shows each proposed file and its
+disclosure warning. Independently type `attach` there to authorize **each file**;
+an agent's request, native permission approval, earlier approval or pasted path
+is never host consent.
+
+`request_image` captures an approved image and returns only an opaque expiring
+ID. `read_attachment(id)` returns that captured image at most once, to the same
+native caller session verified through native `_meta` context. It does not reopen
+the host path. Wrong-session, missing-context, expired and reused requests refuse.
+The broker exposes no `list_directory`, text-read, live-read or clipboard tool.
+Unlike `share`, it grants no continuing access to a folder or file. Broker mode
+forbids a positional PATH, `--text`, `--send` and `--acknowledge-risk`; it always
+requires independent typed host approval.
+
+Alternatively, append one native image **user message** directly from a host
+terminal:
+
+```sh
+oc-box attach /tmp/Spectacle.example/Screenshot.png \
+  --session ses_example --project ~/devel/demo
+oc-box attach /tmp/Spectacle.example/Screenshot.png \
+  --session ses_example --project ~/devel/demo \
+  --text 'Explain this screenshot.' --send
+```
+
+Read the warning and type `attach`, or use `--acknowledge-risk` for explicitly
+authorized noninteractive direct use. Without `--text`, the message text is
+`Please examine this host image.` This is a queued native user message, **not a
+draft attachment chip**. Without `--send`, oc-box requests native `resume: false`;
+with `--send`, it requests queueing plus `resume: true`. An already active native
+execution may consume queued input even without `--send`: neither mode promises
+that inference stays stopped. Direct mode requires PATH.
+
+Both modes capture a single regular, single-link PNG/JPEG/GIF/WebP image of at
+most 8 MiB using the sharing path/content guards. Folders, symlinks, special
+files, protected host/application/credential paths and unsafe source changes are
+refused. No project staging file, mount, host listener, saved MCP configuration
+or container recreation is introduced. oc-box does not forward the host path or
+image bytes in native argv, or record them in its activity journal or project
+files. A path you paste into OpenCode or submit as a tool argument is itself
+disclosed to native history/provider processing.
+
+The foreground broker holds an explicit existing-workspace client lease. Ctrl-C,
+workspace stop, disconnect or native reload ends that connection and further
+retrieval; no reconnect or regrant is automatic. Exit the broker when done so
+normal owner synchronization/stop can proceed. A new broker needs fresh consent.
+
+**Disclosure persists:** native OpenCode may normalize/store the image and send
+it to a model provider; transcripts, logs, backups and agent-created copies can
+retain it. Grant expiry, one-use delivery and broker shutdown cannot recall data
+already disclosed. Images and pasted paths are untrusted input, not a guarantee
+against prompt injection. These experimental workflows have separate validation
+requirements in `docs/testing.md`; earlier `share` host acceptance does not accept
+this attachment feature.
 
 ### sync
 
@@ -1602,6 +1722,42 @@ existing listener. The container service's own random loopback port stays privat
 Web-only. Print the native one-use browser pairing link instead of invoking the
 host browser. The foreground relay still runs until Ctrl-C or workspace stop.
 
+### --session ID
+
+Attach-only, required in both direct and broker modes. Select the exact native
+target session, for example `--session ses_example`, at the running workspace's
+native project directory. A workspace ID, host archive association or session at
+a different/nested directory is not sufficient. Observed archived sessions and
+staged native reverts refuse; no default session is inferred.
+
+### --broker
+
+Attach-only. Keep a foreground host-terminal client-MCP broker open for explicit
+`request_image` proposals and one-use `read_attachment(id)` image retrieval.
+Every file requires independently typing `attach` in the host terminal.
+Incompatible with positional PATH, `--text`, `--send` and `--acknowledge-risk`.
+It does not intercept native paste/drop, browse folders or grant live file access.
+
+### --text TEXT
+
+Direct attach-only. Set the text of the native image user message. The default
+is `Please examine this host image.` This is not a draft prompt or an instruction
+for the host broker. Forbidden with `--broker`.
+
+### --send
+
+Direct attach-only. Request native queueing and `resume: true` for the image user
+message; omission requests `resume: false`. Active native execution can still
+consume queued input without this flag. Neither setting guarantees stopped
+inference or creates a draft attachment chip. Forbidden with `--broker`.
+
+### --acknowledge-risk
+
+Share and direct attach-only. Replace typed host disclosure confirmation for
+explicitly authorized noninteractive use, without suppressing the warning.
+This is not blanket native permission approval. Forbidden with `attach --broker`,
+where every file always needs independent typed host approval.
+
 ### --project PATH
 
 Select an existing project directory; relative paths resolve from the host
@@ -1799,6 +1955,97 @@ registry or copied back to the host.
 oc-box --project ~/devel/demo --image-preview
 oc-box reset --project ~/devel/demo --image-preview
 ```
+
+### --host-drop
+
+Experimental and **enabled by default per workspace** for supported native
+OpenCode V2 2.2.6/2.2.7/2.3.0 clients. Plain `start` (including the default command)
+or `reset` reads the saved host preference. `--host-drop` saves enabled and
+requires a supported client; `--no-host-drop` saves disabled. The flags are
+mutually exclusive. An additional `start` client may attach to an existing owner
+without restarting it, refreshing credentials or changing native configuration.
+It reads the preference for its own relay; **existing clients keep their setting**.
+Running another `oc-box` opens another TUI, not a live toggle.
+
+Automatic/default mode skips importing on unsupported terminals, native versions
+or noninteractive clients rather than preventing ordinary startup. Explicit
+`--host-drop` remains strict and refuses V1; `--no-host-drop` may save an opt-out
+for V1 without activating any bridge. Importing never activates for `web`,
+`terminal`/maintenance, the `tui` dashboard, sync or informational commands;
+those commands reject both startup flags.
+
+Use a direct interactive host TTY, without SSH, tmux (`TMUX`) or screen (`STY`).
+The experimental profiles are direct Konsole and Kitty. Exactly one host
+compatibility marker (`KONSOLE_VERSION` or `KITTY_WINDOW_ID`) must identify the
+profile; unknown or inherited ambiguous setups refuse. These markers are an
+operator-trusted compatibility selection, not cryptographic emulator identity.
+The pathname bridge accepts a complete qualifying paste. Konsole uses that bridge
+only, with no OSC 72 probes/registration and unchanged child output. The Kitty
+profile enables structured OSC 72 drops only after an affirmative capability reply.
+Kitty graphics support, including Konsole's graphics support, is not proof of
+drag-and-drop capability. This is not a guarantee about every emulator/version.
+
+Konsole's default direct URL-drop setting produces the required bracketed paste
+while native OpenCode enables mode 2004. Keep **Disable drag & drop menu for files
+& URLs** enabled in the Konsole profile. The optional menu's **Paste Location**
+action sends raw, unframed input and is intentionally not intercepted. Bare
+absolute names, quoting for spaces and the normal trailing space are accepted.
+No timing or pathname-shaped keystroke guessing is used.
+
+**A qualifying pathname paste anywhere in an importing-enabled TUI authorizes capture,
+without a per-file confirmation prompt.** The bridge cannot prove a real desktop
+drag gesture or composer focus. Do not paste a sensitive path merely to discuss
+it. Model output, an MCP request or a proposed host path is never capture
+authority. For separate host approval of every image, use the unchanged
+`attach --broker` workflow instead.
+
+The pathname bridge accepts only a whole paste containing one to four absolute
+Linux paths, with supported quoting/escaping for spaces. Mixed prose, newlines,
+traversal components, control characters and `file://` text expansion are
+not imported; this is not shell evaluation. Only regular, single-link
+PNG/JPEG/GIF/WebP/PDF files with matching extensions and signatures qualify.
+Protected host/application/credential paths, links, special files and unsafe
+source changes refuse through the sharing descriptor-pinning guards. Limits
+are 8 MiB per file, 16 MiB per batch, and lifetime totals of 32 files/64 MiB per
+client. Signature checks are not decoding, sanitization or a malware scan.
+DOCX is unsupported; no verified reader or converter is supplied.
+
+Captured bytes cross a private non-PTY stdin channel, not argv, environment,
+shell commands or project staging files. They are staged in a private container
+`/tmp/oc-box-drop-<token>` directory (0700), with generated files (0600).
+The native TUI, server, plugins and tools still execute inside the container.
+The host bridge feeds rewritten container paths back as native paste input:
+it never appends Enter or submits a native prompt API request. Native composition,
+attachment previews and sending remain native UI behavior. Optional
+`--image-preview` can enable inline image visuals on a qualifying owning launch;
+it is not required for this bridge and does not add host-read authority. A
+selected model/provider may not support PDF or a particular attachment format.
+
+Normal client exit attempts bounded cleanup of only this client's recorded files.
+There is no background or restart cleanup scan. Crashes, interrupted cleanup,
+open references, copies, native history and backups can retain disclosed bytes.
+Container root and agents/tools using the same container user can read staged
+files; this is not per-session isolation. Host input parsing excludes opaque
+terminal responses. In the Kitty profile only, the output relay reserves its
+C0 OSC 72 wire commands and fails closed on unsupported framing limits; valid
+native graphics APC_G and keyboard CSI remain unchanged. This is not generic
+C1-output reservation or a blanket terminal/security guarantee, nor a
+new live-host acceptance result. See `SECURITY.md` and `docs/testing.md`.
+
+```sh
+oc-box --project ~/devel/demo --host-drop
+oc-box start --project ~/devel/demo --host-drop
+oc-box reset --project ~/devel/demo --host-drop
+oc-box --project ~/devel/demo --no-host-drop
+oc-box preferences --project ~/devel/demo --host-drop off
+```
+
+### --no-host-drop
+
+Save host importing disabled for future workspace TUI clients and open this
+client without the bridge. Mutually exclusive with `--host-drop`; neither flag
+live-toggles existing clients. To change only the preference without opening a
+TUI, use `oc-box preferences --host-drop off`.
 
 ### --credential-mode env|selected|vault
 
@@ -2018,6 +2265,8 @@ sync                   kept      kept; archive sync     kept; stopped
 terminal (V1/maintenance) kept     kept; no archive sync  kept; prior run state
 terminal (V2 attach)    kept      shared current session kept; owner controls stop
 web (V2)               kept      shared current session kept; sync/stop on last client
+attach (V2 direct)     kept      image message retained kept; existing owner only
+attach (V2 broker)     kept      disclosed data retained kept; lease until broker exits
 reset                  kept      kept, same session ID  rebuilt
 purge                  kept      deleted                deleted
 purge --delete-sessions kept      deleted                deleted
@@ -2950,6 +3199,11 @@ Credential modes include `env`, `selected`, and `vault`; `--no-vault` is offered
 for start/reset/web only (including the default start context). Completion does
 not inspect the OpenCode major version or whether a service is already active;
 the command itself rejects V1 or attached-client use of `--no-vault`.
+`--host-drop` and `--no-host-drop` startup flags are offered only for
+default/start/reset TUI clients, not web, terminal or the separate dashboard.
+The separate `preferences --host-drop` setting completes `on`/`off`.
+Direct-TTY, native-version and
+host-input requirements are checked by the command, not during completion.
 `--project` completes directories; backup archive inputs, `--output`, and
 `--identity` complete paths, including spaces. Both `--option VALUE` and
 `--option=VALUE` are supported. Press Tab after `oc-box ` or `oc-box backup --`
