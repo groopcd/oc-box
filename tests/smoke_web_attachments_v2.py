@@ -6,7 +6,7 @@ Only fresh private synthetic state is used. Standard native pairing cookies,
 bundled app assets and API media admission remain unmodified. Outer Podman exec
 is replaced with a local pipe relay. A synthetic chooser catalog contains real
 native API sessions; actual TUI membership belongs to smoke_web_sessions_v2.py.
-The HTTP client does not test normal browser keep-alive or rendering.
+The HTTP client checks response-close policy, not browser rendering/file drops.
 Deliberate resume=false fixture admissions
 below test native PNG/PDF handling; the production adapter has no prompt call.
 """
@@ -14,7 +14,9 @@ below test native PNG/PDF handling; the production adapter has no prompt call.
 import argparse
 import base64
 import contextlib
+from http.client import HTTPConnection
 from http.cookiejar import CookieJar
+from http.cookies import SimpleCookie
 import json
 import os
 from pathlib import Path
@@ -198,6 +200,68 @@ def exercise(binary, root):
                 else:
                     raise AssertionError("Foreign-origin wrapper was accepted.")
 
+                # This client requests persistent connections, unlike urllib.
+                # Native final-response headers must force a fresh transaction
+                # before each host-dispatched chooser/wrapper resource.
+                client = HTTPConnection(
+                    "127.0.0.1", gateway.listener.getsockname()[1], timeout=15
+                )
+                try:
+                    pair = native("POST", "/api/pair")
+                    headers = {"Accept": "text/html", "Connection": "keep-alive"}
+                    client.request(
+                        "GET", "/auth/connect/" + pair["code"], headers=headers
+                    )
+                    reply = client.getresponse()
+                    require(
+                        reply.status == 302
+                        and reply.getheader("Location") == web_sessions.INDEX,
+                        "Keep-alive pairing did not select the chooser.",
+                    )
+                    cookies = SimpleCookie()
+                    for name, value in reply.getheaders():
+                        if name.lower() == "set-cookie":
+                            cookies.load(value)
+                    headers["Cookie"] = "; ".join(
+                        item.OutputString(attrs=[]) for item in cookies.values()
+                    )
+                    require(
+                        bool(headers["Cookie"]) and reply.will_close,
+                        "Keep-alive pairing lost cookies or allowed socket reuse.",
+                    )
+                    reply.read()
+                    for route in (
+                        web_sessions.INDEX,
+                        gateway.native_session_route(ident),
+                        web_attachments.session_link(ident),
+                        gateway.native_session_route(other),
+                        web_attachments.session_link(other),
+                        web_attachments.SCRIPT,
+                        web_sessions.INDEX,
+                    ):
+                        client.request("GET", route, headers=headers)
+                        reply = client.getresponse()
+                        body = reply.read()
+                        require(
+                            reply.status == 200
+                            and reply.will_close
+                            and reply.getheader("Connection", "").lower() == "close",
+                            "Native-to-first-party keep-alive navigation lost dispatch.",
+                        )
+                        if route.startswith(web_attachments.PATH + "?"):
+                            selected = web_attachments.selection(route)
+                            require(
+                                (
+                                    'data-route="'
+                                    + gateway.native_session_route(selected)
+                                    + '"'
+                                ).encode()
+                                in body,
+                                "Keep-alive wrapper iframe selected the wrong session.",
+                            )
+                finally:
+                    client.close()
+
             require(
                 all(
                     native("GET", "/api/experimental/session/" + selected + "/export")
@@ -217,7 +281,7 @@ def exercise(binary, root):
             print(
                 "PASS native "
                 + release
-                + ": synthetic two-row chooser, selected wrappers/native iframe routes, authenticated assets, foreign-origin refusal, unchanged history/inboxes."
+                + ": synthetic two-row chooser, selected wrappers/native iframe routes, authenticated assets, native/host keep-alive close-policy navigation, foreign-origin refusal, unchanged history/inboxes."
             )
 
             # Explicit, separate fixture mutation, never a production drop action.

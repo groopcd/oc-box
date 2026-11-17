@@ -431,6 +431,15 @@ service. Links grant access to the workspace service; do not share or log them.
 relay. Browser commands use a sanitized host environment without provider/vault
 values; the server retains the owning launch's credential snapshot.
 
+Native HTTP replies force `Connection: close` after each final non-upgrade
+response, so compliant browsers use a fresh connection when returning to oc-box
+routes after pairing or a native page. Response bodies, including streaming
+events and downloads, remain streamed unchanged; WebSocket `101` upgrades stay
+bidirectional tunnels. The relay is not a general per-request HTTP dispatcher:
+pipelining and clients that ignore the close policy are unsupported. Subsequent
+requests on such a socket remain native tunnel traffic, not host-route dispatch;
+reserved oc-box routes then reach native handling rather than gaining host access.
+
 The owner keeps the lifecycle lock and waits for attached terminal/web/TUI
 clients before final history sync and container stop. Closing one attached
 client does not stop the others. `oc-box stop` from another host terminal stops

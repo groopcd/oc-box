@@ -1101,6 +1101,79 @@ def relay_command(box, data, port):
     )
 
 
+class NativeResponseHeaders:
+    """Bounded initial HTTP headers, then opaque streaming bytes.
+
+    Gateway classifies only the first request on a socket. Final non-upgrade
+    replies therefore forbid browser connection reuse, including after pairing.
+    This is not body framing, pipelining support or a per-request dispatcher.
+    """
+
+    LIMIT = 65536
+
+    def __init__(self, pairing_route=None):
+        self.pending = bytearray()
+        self.header_bytes = 0
+        self.complete = False
+        self.pairing_route = pairing_route
+
+    def feed(self, data):
+        if self.complete:
+            return data
+        # Production feeds at most one 64-KiB pipe read. Body bytes sharing the
+        # final header read are immediately emitted, never accumulated further.
+        self.pending.extend(data)
+        output = bytearray()
+        while not self.complete:
+            boundary = self.pending.find(b"\r\n\r\n")
+            if boundary < 0:
+                if self.header_bytes + len(self.pending) > self.LIMIT:
+                    raise ValueError("Native HTTP response headers exceed the limit.")
+                break
+            boundary += 4
+            self.header_bytes += boundary
+            if self.header_bytes > self.LIMIT:
+                raise ValueError("Native HTTP response headers exceed the limit.")
+            head = bytes(self.pending[:boundary])
+            del self.pending[:boundary]
+            fields = head[:-4].split(b"\r\n")
+            status = re.fullmatch(
+                rb"HTTP/1\.[01] ([1-9][0-9]{2})(?: [^\r\n]*)?", fields[0]
+            )
+            if status is None:
+                raise ValueError("Invalid native HTTP response status.")
+            status = int(status[1])
+            if 100 <= status < 200:
+                output.extend(head)
+                self.complete = status == 101
+            else:
+                rewritten = [fields[0]]
+                paired = False
+                for field in fields[1:]:
+                    name, separator, value = field.partition(b":")
+                    if not separator:
+                        raise ValueError("Invalid native HTTP response header.")
+                    name = name.lower()
+                    if name in (b"connection", b"keep-alive"):
+                        continue
+                    if (
+                        self.pairing_route is not None
+                        and not paired
+                        and name == b"location"
+                        and value.strip() == b"/"
+                    ):
+                        field = b"Location: " + self.pairing_route().encode()
+                        paired = True
+                    rewritten.append(field)
+                rewritten.append(b"Connection: close")
+                output.extend(b"\r\n".join(rewritten) + b"\r\n\r\n")
+                self.complete = True
+            if self.complete:
+                output.extend(self.pending)
+                self.pending.clear()
+        return bytes(output)
+
+
 class Gateway:
     def __init__(self, box, data, connection, port=0, *, attachments=False):
         self.box, self.data, self.connection, self.port = box, data, connection, port
@@ -1179,12 +1252,15 @@ class Gateway:
                     import web_sessions
                 if web_sessions.respond(self, stream, child, bytes(headers)):
                     return
-                pairing = bytes(headers).startswith(b"GET /auth/connect/")
+                response = NativeResponseHeaders(
+                    self.session_route
+                    if bytes(headers).startswith(b"GET /auth/connect/")
+                    else None
+                )
                 child.stdin.write(headers)
                 child.stdin.flush()
                 stream.settimeout(None)
                 readers = [stream, child.stdout]
-                response = bytearray()
                 while not self.closed.is_set():
                     ready, _, _ = select.select(readers, [], [], 0.2)
                     for item in ready:
@@ -1198,21 +1274,7 @@ class Gateway:
                             data = os.read(child.stdout.fileno(), 65536)
                             if not data:
                                 return
-                            if pairing:
-                                response.extend(data)
-                                if b"\r\n\r\n" not in response:
-                                    if len(response) > 65536:
-                                        return
-                                    continue
-                                route = self.entry_route()
-                                data = re.sub(
-                                    rb"(?im)^location: /\r$",
-                                    b"location: " + route.encode() + b"\r",
-                                    bytes(response),
-                                    count=1,
-                                )
-                                pairing = False
-                            stream.sendall(data)
+                            stream.sendall(response.feed(data))
             except (OSError, ValueError):
                 pass
             finally:

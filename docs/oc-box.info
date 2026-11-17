@@ -524,6 +524,17 @@ Ctrl-C closes that relay.  Browser commands use a sanitized host
 environment without provider/vault values; the server retains the owning
 launch's credential snapshot.
 
+Native HTTP replies force ‘Connection: close’ after each final
+non-upgrade response, so compliant browsers use a fresh connection when
+returning to oc-box routes after pairing or a native page.  Response
+bodies, including streaming events and downloads, remain streamed
+unchanged; WebSocket ‘101’ upgrades stay bidirectional tunnels.  The
+relay is not a general per-request HTTP dispatcher: pipelining and
+clients that ignore the close policy are unsupported.  Subsequent
+requests on such a socket remain native tunnel traffic, not host-route
+dispatch; reserved oc-box routes then reach native handling rather than
+gaining host access.
+
 The owner keeps the lifecycle lock and waits for attached
 terminal/web/TUI clients before final history sync and container stop.
 Closing one attached client does not stop the others.  ‘oc-box stop’
@@ -3553,20 +3564,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2746
 Node: Commands6344
-Node: Options98606
-Node: Lifecycle and persistence122672
-Node: Distribution images124792
-Node: Sessions and recovery129667
-Node: Devices and host permissions136252
-Node: Resource reports138598
-Node: Configuration and environment140709
-Node: Files152090
-Node: Exit status158034
-Node: Examples158887
-Node: Troubleshooting160973
-Node: Installation and manuals172325
-Node: Authors and license181577
-Node: See also182184
+Node: Options99251
+Node: Lifecycle and persistence123317
+Node: Distribution images125437
+Node: Sessions and recovery130312
+Node: Devices and host permissions136897
+Node: Resource reports139243
+Node: Configuration and environment141354
+Node: Files152735
+Node: Exit status158679
+Node: Examples159532
+Node: Troubleshooting161618
+Node: Installation and manuals172970
+Node: Authors and license182222
+Node: See also182829
 
 End Tag Table
 

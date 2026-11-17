@@ -60,16 +60,19 @@ Strict missing/duplicate/unknown selection parameters refuse; wrapper iframes
 use native session routes, never the chooser. The native attachment fixture uses
 a synthetic catalog of real native API sessions to isolate this HTTP composition;
 the separate four-tab fixture below owns actual TUI membership verification.
-Pinned baseline 2.2.6 CI invokes both fixtures. Neither HTTP fixture is proof of
-normal browser connection reuse or real browser file-drop admission.
+Pinned baseline 2.2.6 CI invokes both fixtures. A keep-alive-capable HTTP client
+also checks native-to-chooser/wrapper/script navigation and preserved pairing
+cookies under the response-close policy. Neither HTTP fixture is proof of
+normal browser rendering or real browser file-drop admission.
 
 **Pending integration gate:** normal Chromium pairing on the original
 `5c9fd883ded5d83c09a5d5e2842c739afd65647f` failed with a redirected wrapper 404:
 the Gateway classified only the first request of a persistent connection.
 That failure is retained, and a fresh-cookie diagnostic is not a normal-flow
-pass. The separately developed Gateway response/connection repair and subsequent
-normal-browser checks remain required; this integration does not implement a
-duplicate transport fix or claim the issue accepted.
+pass. The separately reviewed Gateway response/connection repair
+`0f1a366996833c65f56fbe5077159daf452790f2` is now merged without a duplicate
+transport implementation. Subsequent normal-browser checks on the final composed
+source remain required; this integration does not claim that browser acceptance.
 
 ### Open TUI sessions in the web interface
 
@@ -100,6 +103,17 @@ without a TUI or session create/open/prompt mutations. Native Home web-shell
 availability is not rendered Home chat or installed-service-worker acceptance.
 The existing V2 CI job runs the default combined script against pinned 2.2.6;
 both source/package and distro workflows also trigger on `fix/**` branches.
+
+`tests/test_workspace_service.py` additionally checks bounded native response
+headers, retained interim replies, response-close-driven redirect/cookie and
+return navigation, HTTP 204/HEAD, binary uploads/downloads, streaming chunked SSE
+and byte-exact bidirectional 101 upgrades. Only headers are mediated, never full
+response bodies. The native `--home-only` mode uses a keep-alive-capable client
+for pairing and repeated native/host navigation; request-side close alone is not
+its oracle. These fixtures do not establish the composed attachment feature's
+real-browser pairing pass. Retain the earlier Chromium native-404 evidence until
+the final composed source is separately tested; a fresh-cookie workaround was
+diagnostic, not acceptance of the original flow.
 
 ### Reviewed 5573965 candidate evidence
 

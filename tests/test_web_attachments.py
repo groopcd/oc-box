@@ -350,7 +350,7 @@ class GatewayTests(unittest.TestCase):
                 ).encode()
             )
             reply = stream.recv(8192)
-        self.assertIn(b"location: " + web_sessions.INDEX.encode(), reply)
+        self.assertIn(b"location: " + web_sessions.INDEX.encode(), reply.lower())
         self.assertIn(b"native=synthetic", reply)
 
 
