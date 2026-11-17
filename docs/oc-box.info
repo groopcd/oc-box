@@ -2106,8 +2106,15 @@ or workspace stop.
 5.9 -session ID
 ===============
 
-Attach-only, required in both direct and broker modes.  Select the exact
-native target session, for example ‘--session ses_example’, at the
+With ‘web’, explicitly display an existing native session from this same
+private workspace service.  It overrides URL-selected and reported TUI
+initial selection, never creates a session or adds a fake open tab, and
+is not itself proof of TUI focus.  A selected child retains its exact
+conversation route; its verified root is highlighted separately.  See
+‘web’ for membership and unavailable-report rules.
+
+With ‘attach’, required in both direct and broker modes.  Select the
+exact native target session, for example ‘--session ses_example’, at the
 running workspace's native project directory.  A workspace ID, host
 archive association or session at a different/nested directory is not
 sufficient.  Observed archived sessions and staged native reverts
@@ -2490,16 +2497,7 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.33 -session SESSION_ID
-========================
-
-Web only: explicitly display an existing native session from this same
-private workspace service in the common shell.  This overrides
-URL/declared initial selection, never creates a session or adds a fake
-TUI-open tab, and is not proof of current native TUI focus.  See ‘web’
-for membership and selection semantics.
-
-5.34 -attachments
+5.33 -attachments
 =================
 
 Web only: explicitly select the visible, source-version-bounded browser
@@ -2507,7 +2505,7 @@ File-drop adapter described under ‘web’.  Keeps the native app and its
 draft/Send controls unchanged.  No automatic prompt admission or
 host-path/URL reading.
 
-5.35 -no-vault
+5.34 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -2526,7 +2524,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.36 -env-secret NAME
+5.35 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -2539,7 +2537,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.37 -vault-secret NAME
+5.36 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -2551,7 +2549,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.38 -clear-credentials
+5.37 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -2563,7 +2561,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.39 -output FILE
+5.38 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -2573,7 +2571,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.40 -portable
+5.39 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -2583,7 +2581,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.41 -recipient AGE_KEY
+5.40 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -2594,7 +2592,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.42 -identity FILE
+5.41 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -2605,7 +2603,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.43 -cpus NUMBER
+5.42 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -2616,7 +2614,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.44 -memory SIZE
+5.43 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -2628,7 +2626,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.45 -pids-limit NUMBER
+5.44 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -2636,7 +2634,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.46 -device MAPPING
+5.45 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -2650,7 +2648,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.47 -podman-arg=-OPTION[=VALUE]
+5.46 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -2677,7 +2675,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.48 -clear-devices
+5.47 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -2688,7 +2686,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.49 -clear-podman-args
+5.48 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -2698,7 +2696,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.50 -delete-sessions
+5.49 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -2707,7 +2705,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.51 -all
+5.50 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -2715,7 +2713,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.52 -y, -yes
+5.51 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -3948,19 +3946,19 @@ Node: Synopsis930
 Node: Description3039
 Node: Commands6637
 Node: Options111990
-Node: Lifecycle and persistence144040
-Node: Distribution images146340
-Node: Sessions and recovery151215
-Node: Devices and host permissions157800
-Node: Resource reports160146
-Node: Configuration and environment162257
-Node: Files173638
-Node: Exit status179582
-Node: Examples180435
-Node: Troubleshooting182521
-Node: Installation and manuals193873
-Node: Authors and license203469
-Node: See also204076
+Node: Lifecycle and persistence144090
+Node: Distribution images146390
+Node: Sessions and recovery151265
+Node: Devices and host permissions157850
+Node: Resource reports160196
+Node: Configuration and environment162307
+Node: Files173688
+Node: Exit status179632
+Node: Examples180485
+Node: Troubleshooting182571
+Node: Installation and manuals193923
+Node: Authors and license203519
+Node: See also204126
 
 End Tag Table
 

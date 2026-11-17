@@ -1871,7 +1871,13 @@ host browser. The foreground relay still runs until Ctrl-C or workspace stop.
 
 ### --session ID
 
-Attach-only, required in both direct and broker modes. Select the exact native
+With `web`, explicitly display an existing native session from this same private
+workspace service. It overrides URL-selected and reported TUI initial selection,
+never creates a session or adds a fake open tab, and is not itself proof of TUI
+focus. A selected child retains its exact conversation route; its verified root
+is highlighted separately. See `web` for membership and unavailable-report rules.
+
+With `attach`, required in both direct and broker modes. Select the exact native
 target session, for example `--session ses_example`, at the running workspace's
 native project directory. A workspace ID, host archive association or session at
 a different/nested directory is not sufficient. Observed archived sessions and
@@ -2209,13 +2215,6 @@ owner, not to an active client. To replace an existing selection:
 ```sh
 oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 ```
-
-### --session SESSION_ID
-
-Web only: explicitly display an existing native session from this same private
-workspace service in the common shell. This overrides URL/declared initial
-selection, never creates a session or adds a fake TUI-open tab, and is not proof
-of current native TUI focus. See `web` for membership and selection semantics.
 
 ### --attachments
 

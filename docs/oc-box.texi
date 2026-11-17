@@ -722,7 +722,9 @@ Web-only. Print the native one-use browser pairing link instead of invoking the 
 
 @section --session ID
 
-Attach-only, required in both direct and broker modes. Select the exact native target session, for example @code{--session ses_example}, at the running workspace's native project directory. A workspace ID, host archive association or session at a different/nested directory is not sufficient. Observed archived sessions and staged native reverts refuse; no default session is inferred.
+With @code{web}, explicitly display an existing native session from this same private workspace service. It overrides URL-selected and reported TUI initial selection, never creates a session or adds a fake open tab, and is not itself proof of TUI focus. A selected child retains its exact conversation route; its verified root is highlighted separately. See @code{web} for membership and unavailable-report rules.
+
+With @code{attach}, required in both direct and broker modes. Select the exact native target session, for example @code{--session ses_example}, at the running workspace's native project directory. A workspace ID, host archive association or session at a different/nested directory is not sufficient. Observed archived sessions and staged native reverts refuse; no default session is inferred.
 
 @section --broker
 
@@ -875,10 +877,6 @@ With @code{credentials}, save an explicit forwarding mode for that workspace. @c
 @example
 oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 @end example
-
-@section --session SESSION_ID
-
-Web only: explicitly display an existing native session from this same private workspace service in the common shell. This overrides URL/declared initial selection, never creates a session or adds a fake TUI-open tab, and is not proof of current native TUI focus. See @code{web} for membership and selection semantics.
 
 @section --attachments
 

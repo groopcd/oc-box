@@ -713,7 +713,9 @@ Web\-only. Select the host\-loopback relay port: 0 (default) chooses a free port
 Web\-only. Print the native one\-use browser pairing link instead of invoking the host browser. The foreground relay still runs until Ctrl\-C or workspace stop.
 .SS \-\-session ID
 .PP
-Attach\-only, required in both direct and broker modes. Select the exact native target session, for example \fB\-\-session ses_example\fR, at the running workspace's native project directory. A workspace ID, host archive association or session at a different/nested directory is not sufficient. Observed archived sessions and staged native reverts refuse; no default session is inferred.
+With \fBweb\fR, explicitly display an existing native session from this same private workspace service. It overrides URL\-selected and reported TUI initial selection, never creates a session or adds a fake open tab, and is not itself proof of TUI focus. A selected child retains its exact conversation route; its verified root is highlighted separately. See \fBweb\fR for membership and unavailable\-report rules.
+.PP
+With \fBattach\fR, required in both direct and broker modes. Select the exact native target session, for example \fB\-\-session ses_example\fR, at the running workspace's native project directory. A workspace ID, host archive association or session at a different/nested directory is not sufficient. Observed archived sessions and staged native reverts refuse; no default session is inferred.
 .SS \-\-broker
 .PP
 Attach\-only. Keep a foreground host\-terminal client\-MCP broker open for explicit \fBrequest_image\fR proposals and one\-use \fBread_attachment(id)\fR image retrieval. Every file requires independently typing \fBattach\fR in the host terminal. Incompatible with positional PATH, \fB\-\-text\fR, \fB\-\-send\fR and \fB\-\-acknowledge\-risk\fR\&. It does not intercept native paste/drop, browse folders or grant live file access.
@@ -859,9 +861,6 @@ With \fBcredentials\fR, save an explicit forwarding mode for that workspace. \fB
 oc\-box credentials \-\-project ~/devel/demo \-\-credential\-mode vault \-\-clear\-credentials
 .fam T
 .fi
-.SS \-\-session SESSION_ID
-.PP
-Web only: explicitly display an existing native session from this same private workspace service in the common shell. This overrides URL/declared initial selection, never creates a session or adds a fake TUI\-open tab, and is not proof of current native TUI focus. See \fBweb\fR for membership and selection semantics.
 .SS \-\-attachments
 .PP
 Web only: explicitly select the visible, source\-version\-bounded browser File\-drop adapter described under \fBweb\fR\&. Keeps the native app and its draft/Send controls unchanged. No automatic prompt admission or host\-path/URL reading.

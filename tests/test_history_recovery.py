@@ -515,7 +515,8 @@ class HistoryRecoveryTests(unittest.TestCase):
                 )
 
                 @contextlib.contextmanager
-                def service(*_args):
+                def service(*_args, ui_bridge=False):
+                    self.assertIs(ui_bridge, True)
                     events.append("owner-open")
                     try:
                         yield owner
@@ -785,7 +786,8 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
             should_retry = eligible and clients == 0 and wrapper_exit == 0 and captured
 
             @contextlib.contextmanager
-            def service(*_args, events=events, owner=owner):
+            def service(*_args, ui_bridge=False, events=events, owner=owner):
+                self.assertIs(ui_bridge, True)
                 events.append("owner-open")
                 try:
                     yield owner
@@ -863,7 +865,8 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
         source = recovery.Source("a" * 64, "synthetic-stop-token", ())
 
         @contextlib.contextmanager
-        def service(*_args):
+        def service(*_args, ui_bridge=False):
+            self.assertIs(ui_bridge, True)
             yield owner
 
         def client(*_args):
