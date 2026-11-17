@@ -1,0 +1,12 @@
+:root { color-scheme: light dark; font: 14px system-ui, sans-serif; }
+body { margin: 0; }
+#web-shell { height: 100dvh; display: flex; flex-direction: column; }
+header { padding: .5rem 1rem; border-bottom: 1px solid GrayText; }
+h1 { font-size: 1.1rem; margin: .2rem 0; }
+header p { margin: .35rem 0; }
+#session-tabs { display: flex; overflow-x: auto; gap: .35rem; padding: .3rem 0; }
+[role="tab"] { white-space: nowrap; padding: .5rem .75rem; cursor: pointer; }
+[role="tab"][aria-selected="true"] { outline: 2px solid Highlight; font-weight: bold; }
+#native { flex: 1; min-height: 0; width: 100%; border: 0; }
+#no-selection { padding: 1rem; }
+[hidden] { display: none !important; }

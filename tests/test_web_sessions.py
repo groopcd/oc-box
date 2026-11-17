@@ -4,11 +4,15 @@ import base64
 import contextlib
 from copy import deepcopy
 from http.cookiejar import CookieJar
+from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
 import re
 import socket
+from pathlib import Path
+import shutil
+import subprocess
 import sys
 import threading
 from types import SimpleNamespace
@@ -19,6 +23,24 @@ from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_ope
 
 from oc_box import native_tabs, oc_box as box, opencode_v2_io as bridge
 from oc_box import web_sessions as web, workspace_service as service
+
+
+class ShellHTML(HTMLParser):
+    def __init__(self, body):
+        super().__init__()
+        self.frames = []
+        self.state = None
+        self.scripts = []
+        self.feed(body.decode())
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "iframe":
+            self.frames.append(attrs)
+        if attrs.get("id") == "web-shell":
+            self.state = json.loads(attrs["data-bootstrap"])
+        if tag == "script":
+            self.scripts.append(attrs.get("src"))
 
 
 class WebSessionsTests(unittest.TestCase):
@@ -277,12 +299,209 @@ class WebSessionsTests(unittest.TestCase):
         self.assertIn(web.INDEX, text)
         self.assertNotIn("ses_closed", text)
         self.assertNotIn(self.connection["password"], text)
+        parsed = ShellHTML(text.encode())
+        self.assertEqual(len(parsed.frames), 1)
+        self.assertEqual(parsed.frames[0]["id"], "native")
+        self.assertEqual(parsed.scripts, [web.SCRIPT])
+        self.assertEqual(len(parsed.state["sessions"]), 4)
         self.assertEqual(
             base64.urlsafe_b64decode(
                 web.native_session_route(url, "ses_one").split("/")[2] + "=="
             ).decode(),
             url,
         )
+
+    def test_selection_resolver_never_uses_order_time_or_activity_as_focus(self):
+        members = ["ses_two", "ses_one"]
+        self.assertIsNone(web.resolve_initial_selection(members)[0])
+        self.assertIsNone(
+            web.resolve_initial_selection(members, declared="ses_closed")[0]
+        )
+        ident, origin = web.resolve_initial_selection(members, declared="ses_one")
+        self.assertEqual(ident, "ses_one")
+        self.assertIn("not verified native focus", origin)
+        self.assertEqual(
+            web.resolve_initial_selection(
+                members, requested="ses_two", override="ses_one", declared="ses_two"
+            )[0],
+            "ses_one",
+        )
+        self.assertIsNone(
+            web.resolve_initial_selection(
+                members,
+                declared="ses_one",
+                report_requested=True,
+                report={"status": "unavailable", "selectedSessionID": "ses_one"},
+            )[0]
+        )
+        self.assertEqual(
+            web.resolve_initial_selection(
+                members,
+                report_requested=True,
+                report={
+                    "status": "verified",
+                    "selectedSessionID": "ses_two",
+                    "source": "synthetic native report",
+                },
+            )[0],
+            "ses_two",
+        )
+        self.assertEqual(
+            web.resolve_initial_selection(
+                members,
+                override="ses_one",
+                report_requested=True,
+                report={
+                    "status": "verified",
+                    "selectedSessionID": "ses_two",
+                    "source": "synthetic",
+                },
+            )[0],
+            "ses_one",
+        )
+
+    def test_initial_selection_reader_seam_is_private_read_only_and_explicit_wins(self):
+        reader = Mock(
+            return_value={
+                "status": "verified",
+                "selectedSessionID": "ses_three",
+                "source": "synthetic report",
+                "orderedtabs": ["ses_one", "ses_three"],
+                "activeRoot": "ses_three",
+            }
+        )
+        gateway = service.Gateway(
+            box,
+            self.data,
+            self.connection,
+            selection_snapshot_reader=reader,
+            shell_addon_scripts=(),
+        )
+        gateway.url = "http://127.0.0.1:23456"
+        state = web.initial_state(gateway, self.inventory[:4], "valid")
+        reader.assert_called_once_with(box, self.data, self.connection)
+        self.assertEqual(state["selection"]["id"], "ses_three")
+        gateway.connection = {**self.connection, "web_session_override": "ses_two"}
+        reader.reset_mock()
+        state = web.initial_state(gateway, self.inventory[:4], "valid")
+        reader.assert_not_called()
+        self.assertEqual(state["selection"]["id"], "ses_two")
+
+    def test_common_shell_declared_and_explicit_private_selection_are_distinct(self):
+        gateway = SimpleNamespace(
+            box=box,
+            data=self.data,
+            connection=self.connection,
+            url="http://127.0.0.1:23456",
+        )
+        sessions = self.inventory[:4]
+        state = web.initial_state(gateway, sessions, "valid")
+        self.assertEqual(state["selection"]["id"], "ses_one")
+        self.assertIn("Launcher-declared", state["selection"]["origin"])
+        parsed = ShellHTML(web.document(gateway.url, sessions, "valid", state))
+        self.assertEqual(
+            parsed.frames[0]["src"], web.native_session_route(gateway.url, "ses_one")
+        )
+        with patch.object(
+            service, "web_session_catalog", return_value=[self.inventory[4]]
+        ):
+            state = web.initial_state(
+                gateway, sessions, "valid", requested="ses_closed"
+            )
+        self.assertEqual(state["selection"]["id"], "ses_closed")
+        self.assertFalse(state["selection"]["member"])
+        self.assertEqual(len(state["sessions"]), 4)
+        with self.assertRaises(ValueError):
+            web.document(
+                gateway.url,
+                sessions,
+                "valid",
+                state,
+                addon_scripts=("https://evil.invalid/x.js",),
+            )
+        self.assertIn(
+            "/auth/oc-box-attachments.js",
+            ShellHTML(
+                web.document(
+                    gateway.url,
+                    sessions,
+                    "valid",
+                    state,
+                    addon_scripts=("/auth/oc-box-attachments.js",),
+                )
+            ).scripts,
+        )
+
+    @unittest.skipUnless(
+        shutil.which("node"), "Node is required for common-shell DOM checks"
+    )
+    def test_common_shell_dom_navigation_and_draft_preservation(self):
+        result = subprocess.run(
+            ["node", str(Path(__file__).with_name("web_sessions_dom.mjs"))],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("PASS common shell DOM", result.stdout)
+
+    def test_explicit_web_override_preserves_attach_and_owner_selection_without_creation(
+        self,
+    ):
+        args = SimpleNamespace(
+            new=False, model=None, resume=False, command="web", web_session="ses_two"
+        )
+        owner = SimpleNamespace(
+            connection=self.connection, publish=Mock(), wait_clients=Mock()
+        )
+        with (
+            patch.object(box, "refresh_sessions", return_value={"last": "ses_one"}),
+            patch.object(
+                web, "explicit_session", return_value=self.inventory[1]
+            ) as verify,
+            patch.object(service, "api") as native,
+            patch.object(service, "web_session", return_value=0) as browser,
+            patch.object(service, "wait_history"),
+            patch.object(box, "sync_sessions"),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            self.assertEqual(
+                box.launch_client(
+                    None,
+                    {**self.data, "distro": "synthetic"},
+                    args,
+                    "2.3.0",
+                    None,
+                    owner,
+                ),
+                0,
+            )
+        verify.assert_called_once_with(
+            box, {**self.data, "distro": "synthetic"}, self.connection, "ses_two"
+        )
+        owner.publish.assert_called_once_with("ses_two")
+        native.assert_not_called()
+        self.assertEqual(browser.call_args.args[2]["session"], "ses_two")
+        gateway = SimpleNamespace(url="http://127.0.0.1:23456")
+        with (
+            patch.object(
+                web, "explicit_session", return_value=self.inventory[1]
+            ) as verify,
+            patch.object(
+                service, "Gateway", return_value=contextlib.nullcontext(gateway)
+            ) as factory,
+            patch.object(service, "api", return_value={"code": "synthetic"}),
+            patch.object(service.time, "sleep", side_effect=KeyboardInterrupt),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            service.web_session(
+                box,
+                self.data,
+                self.connection,
+                SimpleNamespace(web_session="ses_two", port=0, no_open=True),
+            )
+        verify.assert_called_once_with(box, self.data, self.connection, "ses_two")
+        self.assertEqual(factory.call_args.args[2]["web_session_override"], "ses_two")
 
     def test_empty_missing_and_authorized_error_pages_offer_home_without_session_rows(
         self,
@@ -297,6 +516,22 @@ class WebSessionsTests(unittest.TestCase):
                 self.assertIn(b'href="/"', page)
                 self.assertIn(b"Open native OpenCode Home", page)
                 self.assertNotIn(b'href="/server/', page)
+
+    def test_explicit_web_invalid_id_refuses_before_native_discovery_or_credentials(
+        self,
+    ):
+        with (
+            patch.dict("os.environ", {"OC_BOX_CONTAINER": "0"}),
+            patch.object(box, "detect_opencode_release") as native,
+            patch.object(box, "prepare_runtime") as prepare,
+            self.assertRaisesRegex(box.BoxError, "--session"),
+        ):
+            box.main(["web", "--session", "../wrong"])
+        native.assert_not_called()
+        prepare.assert_not_called()
+        with patch.object(service, "web_session_catalog", return_value=[]):
+            with self.assertRaisesRegex(box.BoxError, "unavailable"):
+                web.explicit_session(box, self.data, self.connection, "ses_unknown")
 
     def test_native_service_worker_navigation_boundary_and_selected_row_routes(self):
         # Native v2.2.6 and v2.3.0 packages/app/vite.pwa.ts navigation denylist:
@@ -487,6 +722,53 @@ class WebSessionsTests(unittest.TestCase):
                 self.assertEqual(body.count(b'href="/server/'), 4)
                 self.assertIn(b'href="/"', body)
                 self.assertEqual(response.headers["Cache-Control"], "no-store")
+            for route, mime in ((web.SCRIPT, "javascript"), (web.STYLE, "text/css")):
+                with opener.open(gateway.url + route, timeout=5) as response:
+                    self.assertIn(mime, response.headers["Content-Type"])
+                    self.assertTrue(response.read())
+            with opener.open(gateway.url + web.CATALOG, timeout=5) as response:
+                data = json.loads(response.read())
+                self.assertEqual(
+                    [row["id"] for row in data["sessions"]],
+                    ["ses_four", "ses_one", "ses_two", "ses_three"],
+                )
+            with opener.open(
+                gateway.url + web.INDEX + "?session=ses_two", timeout=5
+            ) as response:
+                parsed = ShellHTML(response.read())
+                self.assertEqual(parsed.state["selection"]["id"], "ses_two")
+                self.assertEqual(len(parsed.frames), 1)
+            with (
+                patch.object(
+                    web, "open_sessions", side_effect=box.BoxError("unavailable")
+                ),
+                patch.object(
+                    service, "web_session_catalog", return_value=[self.inventory[1]]
+                ),
+                opener.open(
+                    gateway.url + web.INDEX + "?session=ses_two", timeout=5
+                ) as response,
+            ):
+                parsed = ShellHTML(response.read())
+                self.assertEqual(parsed.state["status"], "unavailable")
+                self.assertEqual(parsed.state["sessions"], [])
+                self.assertEqual(parsed.state["selection"]["id"], "ses_two")
+                self.assertFalse(parsed.state["selection"]["member"])
+            for route in (
+                web.SCRIPT,
+                web.STYLE,
+                web.CATALOG,
+                web.SELECTION + "?session=ses_one",
+            ):
+                with self.assertRaises(HTTPError) as refusal:
+                    opener.open(
+                        Request(
+                            gateway.url + route,
+                            headers={"Sec-Fetch-Site": "cross-site"},
+                        ),
+                        timeout=5,
+                    )
+                self.assertEqual(refusal.exception.code, 401)
             self.assertTrue(
                 all(
                     headers["host"] == gateway.url.removeprefix("http://")

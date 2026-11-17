@@ -388,17 +388,21 @@ OpenCode 2.x; 1.x has no web command through this launcher.
 oc-box --project ~/devel/demo
 # While it runs, use another host terminal:
 oc-box web --project ~/devel/demo
+oc-box web --project ~/devel/demo --session SESSION_ID
 oc-box terminal --project ~/devel/demo
 ```
 
 The browser uses upstream's short-lived one-use pairing link and opens an
-authenticated oc-box session index at `/auth/oc-box-sessions`. This first-party
+authenticated common web shell at `/auth/oc-box-sessions`. This first-party
 `/auth/` path bypasses native's service-worker navigation fallback without
 changing or disabling that worker. The index lists all verified
 open native TUI tabs in this private service, including idle sessions, in native
-tab order. Select a link to open that session in the unmodified native web app
-in a separate browser tab; keep the index open or return to its URL and refresh
-to see later TUI membership changes. Native browser tabs are client-local and
+tab order in one outer tabstrip. Click a tab to show that conversation in the
+single unmodified native app iframe and update the selected highlight/URL.
+Refresh TUI tabs updates membership without reloading the iframe or discarding
+a loaded draft. A selected conversation closed in the TUI is retained visibly
+as a browser selection outside the TUI-open count; it is not silently replaced.
+Native browser tabs and controls inside the iframe remain client-local and
 are **not** automatically seeded or synchronized with TUI tabs. Already-open
 archived sessions, moved/worktree locations and saved child IDs are not silently
 filtered: each listed ID must belong to native's saved tab membership and pass
@@ -417,6 +421,18 @@ fails. This explicit link opens the unmodified native Home at `/`, where you can
 create or open a browser session without first running a TUI. It does not choose
 historical sessions, add fake TUI rows, or create a session by itself. Browser-only
 tabs remain native-client local and do not populate this TUI membership list.
+`--session ID` explicitly selects an existing ID in this same private DB, even
+when it is not a TUI-open member, and does not add a fake open tab or create a
+session. It wins initial selection. Without it, a URL-selected ID is verified;
+otherwise the existing launcher-declared ID is retained only if it is an actual
+verified member. That declaration is **not proof of native TUI focus**. No
+first-tab, timestamp or foreground-activity guess is used; without a reliable
+target the shell offers all tabs for explicit selection. Multiple TUI clients
+remain ambiguous. Standard same-origin iframe URL observation tracks native SPA
+navigation only after identity verification; Home/drafts/foreign server views
+assert no selected TUI session. Whole-page reloads and explicit conversation
+changes can navigate native content; draft persistence across those actions is
+the native client's responsibility. See [the common-shell contract](web-shell.md).
 These explicit browsing rules do not broaden automatic owner resume or history
 synchronization. Owner resume keeps its existing eligible-root policy; history
 sync keeps its existing discovery and archive semantics, including children and

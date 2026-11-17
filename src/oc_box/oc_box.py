@@ -2935,8 +2935,19 @@ def launch_client(path, data, args, version, exported, owner=None):
             sessions = refresh_sessions(path, data)
     selected_session = sessions.get("last") if not args.new else None
     allow_creation, created_session = True, False
+    explicit_web = getattr(args, "web_session", None) if args.command == "web" else None
+    if owner and explicit_web is not None:
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        web_sessions.explicit_session(
+            sys.modules[__name__], data, owner.connection, explicit_web
+        )
+        selected_session, allow_creation = explicit_web, False
     if (
         owner
+        and explicit_web is None
         and version in native_tabs.SUPPORTED
         and not any(
             (args.new, exported is not None, getattr(args, "resume", False), args.model)
@@ -3574,6 +3585,8 @@ def main(argv=None):
             )
         if not 0 <= web.port <= 65535:
             raise BoxError("--port must be 0 (automatic) or 1..65535.")
+        if web.session is not None and not valid_session_id(web.session):
+            raise BoxError("--session must be a valid native session ID.")
         selectors = (
             ["--workspace", web.workspace]
             if web.workspace
@@ -3581,6 +3594,7 @@ def main(argv=None):
         )
         args = parser().parse_args(["start", *selectors])
         args.command, args.port, args.no_open = "web", web.port, web.no_open
+        args.web_session = web.session
         args.no_vault = web.no_vault
         args._opencode_release = detect_opencode_release()
         if opencode_compat.major(args._opencode_release) != 2:

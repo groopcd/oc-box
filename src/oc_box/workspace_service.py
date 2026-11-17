@@ -1175,8 +1175,23 @@ class NativeResponseHeaders:
 
 
 class Gateway:
-    def __init__(self, box, data, connection, port=0):
+    # Trusted first-party extension hook; never populated by browser input.
+    shell_addon_scripts = ()
+
+    def __init__(
+        self,
+        box,
+        data,
+        connection,
+        port=0,
+        *,
+        shell_addon_scripts=None,
+        selection_snapshot_reader=None,
+    ):
         self.box, self.data, self.connection, self.port = box, data, connection, port
+        if shell_addon_scripts is not None:
+            self.shell_addon_scripts = shell_addon_scripts
+        self.selection_snapshot_reader = selection_snapshot_reader
         self.closed = threading.Event()
         self.children = set()
         self.lock = threading.Lock()
@@ -1317,6 +1332,14 @@ class Gateway:
 
 
 def web_session(box, data, connection, args):
+    override = getattr(args, "web_session", None)
+    if override is not None:
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        web_sessions.explicit_session(box, data, connection, override)
+        connection = {**connection, "web_session_override": override}
     with Gateway(box, data, connection, args.port) as gateway:
         pair = api(box, data, connection, "POST", "/api/pair")
         if not isinstance(pair.get("code"), str) or not re.fullmatch(
@@ -1397,6 +1420,10 @@ def web_parser():
         help="host project directory (default: current directory)",
     )
     group.add_argument("--workspace", help="existing workspace ID")
+    result.add_argument(
+        "--session",
+        help="explicit existing private-service conversation ID; overrides the launcher selection",
+    )
     result.add_argument(
         "--port",
         type=int,

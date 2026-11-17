@@ -916,10 +916,21 @@ class WorkspaceServiceTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(
-                box.main(["web", "--workspace", self.data["id"], "--no-open"]), 0
+                box.main(
+                    [
+                        "web",
+                        "--workspace",
+                        self.data["id"],
+                        "--no-open",
+                        "--session",
+                        "ses_explicit",
+                    ]
+                ),
+                0,
             )
             self.assertEqual(box.main(["start", "--workspace", self.data["id"]]), 0)
         self.assertEqual(web.call_args.args[2]["session"], "ses_shared")
+        self.assertEqual(web.call_args.args[3].web_session, "ses_explicit")
         self.assertIn("ses_shared", tui.call_args.args[0])
         prepare.assert_not_called()
 

@@ -69,6 +69,17 @@ real-browser pairing pass. Retain the earlier Chromium native-404 evidence until
 the final composed source is separately tested; a fresh-cookie workaround was
 diagnostic, not acceptance of the original flow.
 
+The common-shell successor requires new-source checks; earlier chooser/transport
+passes are not promoted into UI acceptance. `tests/web_sessions_dom.mjs` executes
+the editable browser JS in a bounded DOM fixture: four actual membership buttons,
+selection/ARIA/query changes, one retained iframe/draft on refresh, same-private-
+prefix SPA navigation verified by GET, foreign/Home/draft unbinding, safe text
+rendering and non-overlapping metadata requests. This does not inspect native
+DOM/stores or establish rendered native composer/focus acceptance.
+The native web script checks the new shell bootstrap, single iframe, authenticated
+assets/catalog/selection endpoints and explicit selection against both pinned
+native versions, retaining cross-directory/archive and unchanged-history checks.
+
 ### Reviewed 5573965 candidate evidence
 
 The following is a review of retained evidence for clean
