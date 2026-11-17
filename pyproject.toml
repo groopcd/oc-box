@@ -47,6 +47,10 @@ include-package-data = false
 [tool.setuptools.package-data]
 oc_box = [
   "plugin_bridge.js",
+  "ui_state_server.js",
+  "ui_state_tui.js",
+  "ui_state_rpc.js",
+  "ui_state_memory.js",
 ]
 
 [tool.setuptools.data-files]
