@@ -290,14 +290,51 @@ def loading_stage(label, *, interval=0.1, stream=None):
                     emit(f"oc-box: {label}{suffix}\n")
 
 
-def run_tui(command):
+def run_tui(command, *, file_drops=None):
     # Lazy import also keeps noninteractive CLI/library consumers lightweight.
     if __package__:
         from .terminal_ui import run_tui as relay
     else:
         from terminal_ui import run_tui as relay
 
-    return relay(command, env=getattr(command, "environment", None))
+    return relay(
+        command,
+        env=getattr(command, "environment", None),
+        **({"file_drops": file_drops} if file_drops is not None else {}),
+    )
+
+
+def validate_host_drop(version=None):
+    if __package__:
+        from . import host_drop
+    else:
+        import host_drop
+    try:
+        return host_drop.preflight(version)
+    except host_drop.DropError as error:
+        raise BoxError(str(error)) from None
+
+
+def run_native_tui(data, command, connection, *, host_drop_enabled=False):
+    if not host_drop_enabled:
+        return run_tui(command)
+    profile = validate_host_drop(str(data.get("opencode_version", "")))
+    if connection is None:
+        raise BoxError("Host file drops require an existing private V2 connection.")
+    if __package__:
+        from . import host_drop
+    else:
+        import host_drop
+    print("oc-box: " + host_drop.WARNING, flush=True)
+    try:
+        with host_drop.Relay(
+            sys.modules[__name__], data, connection, profile=profile
+        ) as drops:
+            return run_tui(command, file_drops=drops)
+    except host_drop.DropError:
+        raise BoxError(
+            "Host file-drop transfer failed; no automatic retry or workspace restart was attempted."
+        ) from None
 
 
 def state_root():
@@ -2740,6 +2777,10 @@ def launch(path, data, args, *, image_preview_snapshot=None):
         if image_preview_snapshot is not None
         else {}
     )
+    if getattr(args, "host_drop", False):
+        release = getattr(args, "_opencode_release", None) or detect_opencode_release()
+        validate_host_drop(release)
+        args._opencode_release = release
     try:
         if args.command == "sync":
             if getattr(args, "no_vault", False):
@@ -2756,6 +2797,8 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
     if version is None:
         with loading_stage("Checking OpenCode version"):
             version = detect_opencode_release()
+    if getattr(args, "host_drop", False):
+        validate_host_drop(version)
     if getattr(args, "image_preview", False):
         if args.command not in ("start", "reset"):
             raise BoxError(
@@ -3011,7 +3054,8 @@ def launch_client(path, data, args, version, exported, owner=None):
                 "oc-box: Opening OpenCode; plugins and MCP servers may need time to initialize.",
                 flush=True,
             )
-            code = run_tui(
+            code = run_native_tui(
+                data,
                 workspace_service.client_command(
                     sys.modules[__name__],
                     data,
@@ -3020,7 +3064,9 @@ def launch_client(path, data, args, version, exported, owner=None):
                     interactive=True,
                 )
                 if owner
-                else exec_command(data, command, interactive=True)
+                else exec_command(data, command, interactive=True),
+                owner.connection if owner else None,
+                host_drop_enabled=getattr(args, "host_drop", False),
             )
     finally:
         if owner:
@@ -3340,6 +3386,11 @@ def parser():
         help="V2 owning start/reset TUI only: enable prompt/session image previews for this owner without changing saved CLI preferences",
     )
     result.add_argument(
+        "--host-drop",
+        action="store_true",
+        help="V2 native TUI only: opt in to temporary imports of dropped/pasted image or PDF paths",
+    )
+    result.add_argument(
         "--credential-mode",
         choices=("env", "selected", "vault"),
         help="with credentials, select env forwarding, explicit names, or the V2 global vault",
@@ -3626,6 +3677,16 @@ def main(argv=None):
         raise BoxError(
             "--image-preview applies only to an owning start/reset TUI launch."
         )
+    if args.host_drop and (
+        args.command not in ("start", "reset")
+        or args.status
+        or args.about
+        or args.version
+        or args.json
+    ):
+        raise BoxError("--host-drop applies only to native start/reset TUI clients.")
+    if args.host_drop:
+        validate_host_drop()
     if args.no_vault and (
         args.command not in ("start", "reset", "web")
         or args.status
@@ -3976,6 +4037,8 @@ def main(argv=None):
             raise BoxError("--no-vault requires native OpenCode 2.x.")
         if args.image_preview:
             image_preview_snapshot = validate_image_preview(version)
+        if args.host_drop:
+            validate_host_drop(version)
         if opencode_compat.major(version) == 2:
             check_private_output()
         args._opencode_release = version
@@ -4067,6 +4130,8 @@ def main(argv=None):
                 raise BoxError(
                     "An active V2 workspace accepts additional TUI clients with selectors/--resume only; change session/configuration after the owner exits."
                 )
+            if args.host_drop:
+                validate_host_drop(data.get("opencode_version"))
             with workspace_service.attach(
                 sys.modules[__name__], path, data
             ) as connection:
@@ -4087,7 +4152,12 @@ def main(argv=None):
                     ],
                     interactive=True,
                 )
-                return run_tui(command)
+                return run_native_tui(
+                    data,
+                    command,
+                    connection,
+                    host_drop_enabled=args.host_drop,
+                )
         if args.command == "web" and workspace_service.controller_running(
             sys.modules[__name__], data
         ):
@@ -4101,10 +4171,12 @@ def main(argv=None):
                 return workspace_service.web_session(
                     sys.modules[__name__], data, connection, args
                 )
-    if args.image_preview:
+    if args.image_preview or args.host_drop:
         version = getattr(args, "_opencode_release", None) or detect_opencode_release()
-        if image_preview_snapshot is None:
+        if args.image_preview and image_preview_snapshot is None:
             image_preview_snapshot = validate_image_preview(version)
+        if args.host_drop:
+            validate_host_drop(version)
         args._opencode_release = version
     with workspace_lock(path), contextlib.ExitStack() as launch_context:
         if data.get("restore_incomplete") and args.command != "purge":

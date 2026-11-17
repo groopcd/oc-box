@@ -150,8 +150,9 @@ native argv, its activity journal or project files. This is not a scanner for
 sensitive screenshot content or a security boundary against host root or a
 malicious same-user process.
 
-The ordinary container TUI has no direct host path access, and this feature
-does not install a transparent drop/paste interceptor. Users start the broker
+Without the separate `--host-drop` opt-in described below, the ordinary container
+TUI has no direct host path access. This confirmation-broker feature does not
+install a transparent drop/paste interceptor. Users start the broker
 in a second host terminal and explicitly ask OpenCode to propose a pasted
 screenshot path with `request_image`, then use `read_attachment`. A pasted path
 or tool argument can itself enter native history/logging/provider processing.
@@ -165,6 +166,69 @@ Treat image contents and path text as untrusted input, including prompt injectio
 Earlier sharing or dashboard host evidence does not accept this feature; its
 unit/native and external-host requirements are documented separately in
 [the test strategy](docs/testing.md#experimental-host-image-attachments).
+
+## Opt-in native TUI host drops
+
+Experimental `--host-drop` is a separate, default-off host-input authorization
+surface, not a change to `attach --broker` consent. It is limited to full native
+V2 2.2.6/2.2.7/2.3.0 TUI start/reset clients, including an additional `start`
+client on an existing owner without an owner restart or credential refresh.
+It requires a direct interactive host TTY and refuses SSH, tmux and screen.
+It is not enabled for web, the session-shell terminal, the manager/dashboard,
+sync or informational/other commands.
+
+**A qualifying complete pathname paste anywhere in the opted-in TUI authorizes
+capture without per-file host confirmation.** The relay cannot prove a desktop
+drag gesture, composer focus or the user's intention to attach rather than
+discuss a path. Model output, MCP calls and remote path proposals are not
+authorization. Keep the flag off when that input policy is inappropriate;
+use the independent per-image confirmation broker instead.
+
+The experimental profiles are direct Konsole and Kitty, selected by exactly one
+host compatibility marker (`KONSOLE_VERSION` or `KITTY_WINDOW_ID`). Unknown or
+ambiguous inherited markers refuse. This is operator-trusted compatibility
+selection, not authentication or proof of a safe emulator. Konsole uses only
+pathname pastes, with no OSC 72 query/registration and unchanged child output.
+Its default direct URL-drop setting is required; the optional drop-menu Paste
+Location action is raw input and is not intercepted. The Kitty profile additionally
+requires actual advertised structured-drop capability. Graphics support alone is
+not that capability.
+
+The host-input parser excludes opaque OSC/DCS and other terminal responses from
+pathname authorization, including UTF-8/C1 boundaries. Only Kitty output is
+mediated for its audited C0 OSC 72 wire protocol; no generic C1-output or universal
+terminal sandbox is claimed. Unsupported output framing limits fail closed.
+Ordinary valid native graphics APC_G and keyboard CSI remain unchanged.
+
+The pathname bridge admits only one complete frame of one to four absolute
+Linux paths with supported quoting/escaping, never mixed prose, newlines,
+traversal, control characters or `file://` text expansion. The existing sharing
+descriptor-pinning, protected-path, link, special-file and source-change guards
+apply before snapshotting. PNG/JPEG/GIF/WebP/PDF extension/signature matching
+limits types, not malicious content: there is no image/PDF decoder, malware scan
+or verified DOCX reader/converter. Selected models/providers may reject a format.
+Bounds are 8 MiB per file, 16 MiB per batch, and 32 files/64 MiB per client.
+Treat captured images/PDFs as untrusted input, including prompt injection.
+
+Only captured bytes cross the private non-PTY stdin channel; host source paths
+and content are not transported through argv, environment, shell commands or
+project staging files. A pinned private container `/tmp/oc-box-drop-<token>`
+directory has mode 0700 and generated files have mode 0600. The relay pastes
+rewritten container paths into the unmodified native TUI; it never appends Enter
+or calls a native prompt-submission API. It does not prove which native UI input
+has focus or replace native attachment/model handling. The TUI, server, plugins
+and tools remain container processes.
+
+Normal exit attempts bounded cleanup of recorded file identities only, never
+recursive crawling or restart scavenging. Root replacement/ownership/mode
+changes refuse mutation and can retain data; namespace checks are not atomic
+against same-user rename/unlink races. Crashes, open descriptors, native
+references, history, copies and backups may retain disclosed bytes. Container
+root and same-user agents/tools can read staged files; no per-session isolation
+or recall is promised. Existing host evidence does not accept this feature.
+See the separate [required checks](docs/testing.md#experimental-transparent-native-tui-host-drops);
+unit/native fixtures are not new desktop/rootless-Podman acceptance or a blanket
+security certification.
 
 ## Global V2 host credential vault and policy overrides
 

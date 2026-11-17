@@ -255,6 +255,97 @@ persist after expiry/close. Keep failed evidence and existing UI acceptance
 limitations visible. No real screenshot, provider inference, security
 certification or transparent native autoattachment claim follows from this gate.
 
+### Experimental transparent native TUI host drops
+
+`--host-drop` is a new, default-off native TUI input bridge, separate from the
+per-image `attach --broker` confirmation workflow, browser uploads and web
+session-routing fixes. Its supported native versions are 2.2.6/2.2.7/2.3.0.
+The experimental terminal profiles are direct Konsole and Kitty, chosen by
+unambiguous host compatibility markers, not authenticated emulator identity.
+Unknown/ambiguous, multiplexer and SSH setups refuse. A complete qualifying pathname paste anywhere in the opted-in
+TUI authorizes capture without per-file prompts; neither a genuine desktop drag
+gesture nor composer focus is established. Konsole is pathname-paste-only and
+leaves child output unchanged. Only the Kitty profile probes/enables structured
+OSC 72 DnD after actual capability detection; graphics support alone is not DnD.
+
+The following are required checks, **not an assertion that the feature or a
+desktop/rootless-Podman gate has passed**. Do not replay older accepted fixtures
+or use real screenshots, documents, workspaces, credentials or provider accounts.
+Freeze the integrated source before shared-checkout tests; record exact source,
+working-tree state and native binary identities.
+
+**Unit, protocol and process contracts.** Exercise the normal imports in
+`tests/test_host_drop.py`, `tests/test_host_drop_input.py` and
+`tests/test_host_drop_io.py`. Cover default-off behavior and opt-in start/reset,
+plus an additional start TUI client that joins the existing owner without
+restart, credential/config refresh or new ownership. Refuse V1/unsupported
+native versions, web, terminal/maintenance, the dashboard, sync, informational
+and other commands; require an actual interactive TTY without TMUX/STY/SSH.
+Keep parser, completion, manuals, installed-runtime and wheel/sdist membership
+contracts together.
+
+Check fragmented and complete pathname/structured-drop frames, one to four
+absolute quoted/escaped Linux paths, and rejection of prose, newlines,
+traversal, control characters, file-URI text expansion and unsupported formats.
+Opaque OSC/DCS and other terminal responses must not become host-path
+authorization; exercise UTF-8/C1 boundaries and bounded partial-input recovery.
+Konsole must emit no private OSC 72 probes/registration and preserve all child
+output. Only the Kitty profile mediates its C0 OSC 72 wire commands; include C1
+wrappers hiding C0 commands, numeric aliases, malformed escape recovery and
+nonjoining output neutralization. Verify final-emitted framing boundaries and
+pre-threshold fail-closed raw-wire limits while retaining valid graphics APC_G,
+keyboard CSI and supported clipboard traffic. Input C1 opacity remains separate;
+do not claim a generic C1-output or universal terminal sandbox.
+
+Reuse production sharing pinning/protected-path/link/special-file/change
+refusals. Verify PNG/JPEG/GIF/WebP/PDF extension/signature agreement, including
+PDF-prefix mismatches and DOCX refusal. Exercise 8 MiB/file, 16 MiB/batch and
+non-reusable 32-file/64 MiB client quotas without large unbounded fixtures.
+Check private non-PTY stdin delivery, no captured bytes/source path in argv/env/
+shell/project files, and no model/MCP path-request authority or per-file prompts.
+The isolated-source helper must create an exclusive 0700 pinned container root,
+0600 generated files, sanitized errors and one bounded close acknowledgement.
+Exercise EOF/explicit close, overwrite/symlink/root-substitution and ownership/
+mode refusals, partial writes and cleanup of recorded identities only. Preserve
+unrelated files; do not add background or restart cleanup.
+
+**Native offline regression, including PDF.** The focused
+`tests/smoke_host_drop_v2.py` fixture must use unmodified native binaries with
+private synthetic configuration, history, image and PDF bytes:
+
+```sh
+python3 -B tests/smoke_host_drop_v2.py --opencode /path/to/opencode-2.2.6
+python3 -B tests/smoke_host_drop_v2.py --opencode /path/to/opencode-2.3.0
+```
+
+Verify actual native attachment admission/serialization of PDF as
+`application/pdf`, not only a Python prefix test or a source-reading claim.
+Selected model/provider PDF support is separate; no DOCX reader/converter or
+real-provider inference is established by this fixture. Cover container-path
+rewriting fed as native paste, without an appended Enter or prompt API
+submission. Native UI composition/preview and the decision to send remain native;
+`--image-preview` is an optional existing owning-launch visual overlay, not
+host-file authorization or proof of rendering. No offline/native result alone
+is a desktop gesture, focused-composer or rootless-Podman pass.
+
+**Focused external-host observations remain outstanding.** On clean pinned
+source with disposable synthetic data, check Konsole's default direct drops
+with bare names/trailing spaces, quoting/escaping, batch handling, denied/protected inputs and
+non-composer focus. Verify that optional drop-menu Paste Location stays unframed
+and is not imported. Check genuine structured DnD only on a supported Kitty
+profile exposing that capability; record unsupported capability honestly. Observe native draft/
+attachment preview, confirm no automatic Enter/submission, and send explicitly.
+Exercise both a new owner and an additional opted-in TUI, ordinary unflagged TUI
+behavior, resize/graphics/keyboard preservation, client detach/loss, owner
+waiting and normal exit. Verify source preservation, private container staging,
+best-effort recorded-file cleanup and honest retained-data reporting after
+interruption. Container root/same-user agents can read staged data; references,
+history, copies and backups may retain bytes even after cleanup.
+
+These are not a malware/content scan, terminal-version certification, blanket
+security guarantee or acceptance of the separate web features. Keep the existing
+UI limitations and all earlier source-qualified evidence unchanged.
+
 ### Experimental workspace manager
 
 The [Textual manager](tui.md) adds a separate validation surface from the native

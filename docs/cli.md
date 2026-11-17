@@ -184,6 +184,7 @@ mkdir -p ~/devel/demo
 oc-box --project ~/devel/demo
 oc-box start --project ~/devel/demo --new
 oc-box --project ~/devel/demo --image-preview
+oc-box --project ~/devel/demo --host-drop
 ```
 
 For V2, initialize and populate the host vault **before the first project launch**
@@ -222,6 +223,12 @@ terminal TUIs preserve that state instead of forcing a historical root. Default
 session-shell and browser attachments require a verified open root; otherwise
 they refuse with guidance to open one or explicitly start with `--new`.
 Location-scoped sharing and metadata browsing do not invent a session.
+
+For experimental outside-host image/PDF drops into the native TUI, explicitly
+add `--host-drop`. It is off by default and can also be selected for an additional
+`start` TUI client without restarting the existing owner. This is separate from
+the `attach` confirmation broker and from browser uploads; see the option below
+for the host-input authorization boundary and terminal requirements.
 
 ### stop
 
@@ -321,10 +328,11 @@ the final target check and prompt admission can still be committed by native
 OpenCode. Do not stage/revise a revert concurrently with direct attachment.
 
 The ordinary native TUI runs inside the container and cannot directly resolve an
-outside host path. Mainline OpenCode has no public host drop/paste interceptor
-used by this feature: pasting or dropping a screenshot path is **not transparent
-autoattachment**. Choose the broker workflow below, or issue a direct host command.
-This feature uses no mainline OpenCode modification or container plugin relocation.
+outside host path. This `attach` command is not a transparent interceptor: choose
+the broker workflow below, or issue a direct host command. The separate
+`--host-drop` TUI launch option has a different host-input authorization model;
+it does not weaken this broker's per-file confirmation. Neither workflow modifies
+mainline OpenCode or relocates its container plugins.
 
 For repeated screenshots, start a foreground broker once in a second **host
 terminal**, using the ID of the intended native conversation:
@@ -1878,6 +1886,81 @@ oc-box --project ~/devel/demo --image-preview
 oc-box reset --project ~/devel/demo --image-preview
 ```
 
+### --host-drop
+
+Experimental and **off by default**, on native OpenCode V2 2.2.6/2.2.7/2.3.0
+only. Enable a host-input bridge for this full native TUI client on `start`
+(including the default command) or `reset`. An additional `start --host-drop`
+client may attach to an existing owner without restarting it, refreshing its
+credentials or changing the owner's configuration. Repeat the flag for each
+client that needs it; it is not saved as a workspace preference. V1, `web`,
+`terminal`/maintenance, the `tui` dashboard, sync, informational commands and all
+other commands refuse the flag.
+
+Use a direct interactive host TTY, without SSH, tmux (`TMUX`) or screen (`STY`).
+The experimental profiles are direct Konsole and Kitty. Exactly one host
+compatibility marker (`KONSOLE_VERSION` or `KITTY_WINDOW_ID`) must identify the
+profile; unknown or inherited ambiguous setups refuse. These markers are an
+operator-trusted compatibility selection, not cryptographic emulator identity.
+The pathname bridge accepts a complete qualifying paste. Konsole uses that bridge
+only, with no OSC 72 probes/registration and unchanged child output. The Kitty
+profile enables structured OSC 72 drops only after an affirmative capability reply.
+Kitty graphics support, including Konsole's graphics support, is not proof of
+drag-and-drop capability. This is not a guarantee about every emulator/version.
+
+Konsole's default direct URL-drop setting produces the required bracketed paste
+while native OpenCode enables mode 2004. Keep **Disable drag & drop menu for files
+& URLs** enabled in the Konsole profile. The optional menu's **Paste Location**
+action sends raw, unframed input and is intentionally not intercepted. Bare
+absolute names, quoting for spaces and the normal trailing space are accepted.
+No timing or pathname-shaped keystroke guessing is used.
+
+**A qualifying pathname paste anywhere in this opted-in TUI authorizes capture,
+without a per-file confirmation prompt.** The bridge cannot prove a real desktop
+drag gesture or composer focus. Do not paste a sensitive path merely to discuss
+it. Model output, an MCP request or a proposed host path is never capture
+authority. For separate host approval of every image, use the unchanged
+`attach --broker` workflow instead.
+
+The pathname bridge accepts only a whole paste containing one to four absolute
+Linux paths, with supported quoting/escaping for spaces. Mixed prose, newlines,
+traversal components, control characters and `file://` text expansion are
+not imported; this is not shell evaluation. Only regular, single-link
+PNG/JPEG/GIF/WebP/PDF files with matching extensions and signatures qualify.
+Protected host/application/credential paths, links, special files and unsafe
+source changes refuse through the sharing descriptor-pinning guards. Limits
+are 8 MiB per file, 16 MiB per batch, and lifetime totals of 32 files/64 MiB per
+client. Signature checks are not decoding, sanitization or a malware scan.
+DOCX is unsupported; no verified reader or converter is supplied.
+
+Captured bytes cross a private non-PTY stdin channel, not argv, environment,
+shell commands or project staging files. They are staged in a private container
+`/tmp/oc-box-drop-<token>` directory (0700), with generated files (0600).
+The native TUI, server, plugins and tools still execute inside the container.
+The host bridge feeds rewritten container paths back as native paste input:
+it never appends Enter or submits a native prompt API request. Native composition,
+attachment previews and sending remain native UI behavior. Optional
+`--image-preview` can enable inline image visuals on a qualifying owning launch;
+it is not required for this bridge and does not add host-read authority. A
+selected model/provider may not support PDF or a particular attachment format.
+
+Normal client exit attempts bounded cleanup of only this client's recorded files.
+There is no background or restart cleanup scan. Crashes, interrupted cleanup,
+open references, copies, native history and backups can retain disclosed bytes.
+Container root and agents/tools using the same container user can read staged
+files; this is not per-session isolation. Host input parsing excludes opaque
+terminal responses. In the Kitty profile only, the output relay reserves its
+C0 OSC 72 wire commands and fails closed on unsupported framing limits; valid
+native graphics APC_G and keyboard CSI remain unchanged. This is not generic
+C1-output reservation or a blanket terminal/security guarantee, nor a
+new live-host acceptance result. See `SECURITY.md` and `docs/testing.md`.
+
+```sh
+oc-box --project ~/devel/demo --host-drop
+oc-box start --project ~/devel/demo --host-drop
+oc-box reset --project ~/devel/demo --host-drop
+```
+
 ### --credential-mode env|selected|vault
 
 With `credentials`, save an explicit forwarding mode for that workspace. `env`
@@ -3030,6 +3113,9 @@ Credential modes include `env`, `selected`, and `vault`; `--no-vault` is offered
 for start/reset/web only (including the default start context). Completion does
 not inspect the OpenCode major version or whether a service is already active;
 the command itself rejects V1 or attached-client use of `--no-vault`.
+`--host-drop` is offered only for default/start/reset TUI clients, not web,
+terminal or the separate dashboard. Its direct-TTY, native-version and
+host-input requirements are checked by the command, not during completion.
 `--project` completes directories; backup archive inputs, `--output`, and
 `--identity` complete paths, including spaces. Both `--option VALUE` and
 `--option=VALUE` are supported. Press Tab after `oc-box ` or `oc-box backup --`

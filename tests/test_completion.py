@@ -235,6 +235,37 @@ fi
             with self.subTest(command=command):
                 self.assertEqual(self.complete(command, "--image-p"), [])
 
+    def test_host_drop_is_offered_only_for_start_and_reset_tui_clients(self):
+        self.assertEqual(self.complete("--host-d"), ["--host-drop"])
+        for command in ("start", "reset"):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--host-d"), ["--host-drop"])
+        for command in (
+            "web",
+            "stop",
+            "sync",
+            "repair",
+            "terminal",
+            "tui",
+            "share",
+            "attach",
+            "upgrade",
+            "secrets",
+            "credentials",
+            "backup",
+            "backup-info",
+            "restore",
+            "purge",
+            "list",
+            "distros",
+            "status",
+            "doctor",
+            "completion",
+            "--status",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--host-d"), [])
+
     def test_vault_mode_completes_with_separate_and_equals_values(self):
         self.assertEqual(
             self.complete("credentials", "--credential-mode", ""),

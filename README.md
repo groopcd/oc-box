@@ -332,12 +332,56 @@ limits and lifecycle details. Its 37-check scripted host acceptance belongs to
 the earlier exact `5573965` source and native 2.2.6, not automatically to every
 later development build; see [the evidence scope](docs/releases/1.7.md#reviewed-earlier-source-evidence).
 
+### Native TUI host image/PDF drops (experimental, opt-in)
+
+For outside-host attachments in the full native TUI, explicitly opt in:
+
+```sh
+oc-box --project ~/devel/demo --host-drop
+```
+
+This is **off by default**, requires native V2 2.2.6/2.2.7/2.3.0 and a direct
+interactive host terminal without SSH, tmux or screen. It works on owning
+start/reset and on an additional `start` TUI client without restarting the owner;
+repeat the flag for each client. It is not a `web`, session-shell or dashboard
+option. Exactly one host Konsole/Kitty compatibility marker must identify the
+profile; unknown or inherited ambiguous setups refuse. This is not emulator
+authentication. Konsole uses complete pathname pastes and leaves child output
+unchanged; its default direct-drop setting is needed, not the optional raw
+**Paste Location** menu action. Only the Kitty profile probes/enables structured
+OSC 72 drops after a positive capability reply. Kitty graphics alone is not DnD.
+
+**A qualifying path paste anywhere in this opted-in TUI authorizes copying,
+without a per-file prompt.** The bridge cannot prove a true drag gesture or
+composer focus. It accepts a whole paste of one to four absolute Linux paths
+(supported quoting/escaping for spaces), not mixed prose, newlines, traversal,
+controls or `file://` text expansion. Protected/link/special/changed sources
+refuse. PNG/JPEG/GIF/WebP/PDF require matching extension/signature, with limits
+of 8 MiB/file, 16 MiB/batch and 32 files/64 MiB per client. Selected
+models/providers may not support PDF; this bridge supplies no DOCX reader or
+document converter. For independent host confirmation of every image, use the
+broker below instead.
+
+Captured bytes travel over private non-PTY stdin into private container `/tmp`
+staging, not argv/env/shell commands or project files. All native TUI/server/
+plugin execution stays in the container. Rewritten container paths become a
+native paste: **oc-box never adds Enter or automatically submits a prompt**.
+The native UI controls composition/previews; optional owning `--image-preview`
+can enable image visuals. Exit cleanup is best-effort, with no restart scavenger.
+Crashes, open references, history, copies or backups may retain bytes, and
+same-user container agents can read staged files. This is not a content scanner,
+blanket security guarantee or a new live-host acceptance pass. See
+[`--host-drop`](docs/cli.md#--host-drop),
+[security](SECURITY.md#opt-in-native-tui-host-drops) and
+[required checks](docs/testing.md#experimental-transparent-native-tui-host-drops).
+
 ### Host screenshots for one session (experimental)
 
-The native TUI runs inside the container, so an outside host screenshot path is
-not directly readable there. This feature does **not** transparently intercept
-native drop/paste. For repeated screenshots, start a broker once in a second
-**host terminal**, explicitly choosing the intended native session:
+Without the separate `--host-drop` opt-in, an outside host screenshot path is
+not directly readable by the container TUI. This confirmation-broker feature
+does **not** transparently intercept native drop/paste. For repeated screenshots,
+start a broker once in a second **host terminal**, explicitly choosing the
+intended native session:
 
 ```sh
 oc-box attach --broker --session ses_example --project ~/devel/demo

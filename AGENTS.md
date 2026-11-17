@@ -176,6 +176,24 @@ their checkout ownership distinct from unrelated source and flat installations.
   host-drop interceptor. Native queued input is not a composer draft or an
   inactivity guarantee. Refuse observed staged reverts and document the residual
   native check/admission race; no host acceptance follows from offline probes.
+- `host_drop.py` / `host_drop_input.py` / `host_drop_io.py`: separately opted-in
+  `--host-drop` native TUI input bridge. Qualifying pathname pastes authorize
+  imports anywhere in that connection, not proof of a physical drag/composer
+  focus. Only host stdin or terminal-offered structured drops select sources;
+  never add model/MCP/prompt-text triggers. Keep opaque terminal replies,
+  UTF-8/C1 boundaries and fail-closed framing. Konsole is pathname-paste-only,
+  with no OSC 72 probes/registration and unchanged child output. Only the known
+  Kitty profile reserves its audited C0 OSC 72 wire traffic; do not claim a
+  generic C1-output sandbox. Unknown/ambiguous host compatibility markers refuse,
+  but markers are not authentication. Preserve valid graphics/keyboard traffic;
+  unsupported output framing limits fail closed. Graphics support is not DnD
+  support. Stream only bounded whitelisted snapshots into a
+  pinned private container temp root; never synthesize Enter or native prompt
+  admission. Native TUI/server/plugins stay container-side. Cleanup is bounded
+  best-effort, not recall or isolation from other workspace tools, and crashes
+  can retain staging/history/provider/backup copies. Default relay behavior and
+  the independent-confirmation broker remain unchanged. No host acceptance is
+  established by synthetic parser/process/native checks.
 - `tools/test_sharing_podman.py` and its provider/archive helpers are a separate
   source-pinned host harness, not a change to an already frozen release candidate.
   Keep host guards, verified fresh private stores, controlling-PTY consent,

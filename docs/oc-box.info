@@ -250,6 +250,7 @@ Archived roots remain synchronized but are never chosen automatically.
      oc-box --project ~/devel/demo
      oc-box start --project ~/devel/demo --new
      oc-box --project ~/devel/demo --image-preview
+     oc-box --project ~/devel/demo --host-drop
 
 For V2, initialize and populate the host vault **before the first
 project launch** to use the global default immediately; see secrets
@@ -292,6 +293,13 @@ historical root.  Default session-shell and browser attachments require
 a verified open root; otherwise they refuse with guidance to open one or
 explicitly start with ‘--new’.  Location-scoped sharing and metadata
 browsing do not invent a session.
+
+For experimental outside-host image/PDF drops into the native TUI,
+explicitly add ‘--host-drop’.  It is off by default and can also be
+selected for an additional ‘start’ TUI client without restarting the
+existing owner.  This is separate from the ‘attach’ confirmation broker
+and from browser uploads; see the option below for the host-input
+authorization boundary and terminal requirements.
 
 4.4 stop
 ========
@@ -402,11 +410,12 @@ OpenCode.  Do not stage/revise a revert concurrently with direct
 attachment.
 
 The ordinary native TUI runs inside the container and cannot directly
-resolve an outside host path.  Mainline OpenCode has no public host
-drop/paste interceptor used by this feature: pasting or dropping a
-screenshot path is **not transparent autoattachment**.  Choose the
-broker workflow below, or issue a direct host command.  This feature
-uses no mainline OpenCode modification or container plugin relocation.
+resolve an outside host path.  This ‘attach’ command is not a
+transparent interceptor: choose the broker workflow below, or issue a
+direct host command.  The separate ‘--host-drop’ TUI launch option has a
+different host-input authorization model; it does not weaken this
+broker's per-file confirmation.  Neither workflow modifies mainline
+OpenCode or relocates its container plugins.
 
 For repeated screenshots, start a foreground broker once in a second
 **host terminal**, using the ID of the intended native conversation:
@@ -2125,7 +2134,92 @@ host.
      oc-box --project ~/devel/demo --image-preview
      oc-box reset --project ~/devel/demo --image-preview
 
-5.30 -credential-mode env|selected|vault
+5.30 -host-drop
+===============
+
+Experimental and **off by default**, on native OpenCode V2
+2.2.6/2.2.7/2.3.0 only.  Enable a host-input bridge for this full native
+TUI client on ‘start’ (including the default command) or ‘reset’.  An
+additional ‘start --host-drop’ client may attach to an existing owner
+without restarting it, refreshing its credentials or changing the
+owner's configuration.  Repeat the flag for each client that needs it;
+it is not saved as a workspace preference.  V1, ‘web’,
+‘terminal’/maintenance, the ‘tui’ dashboard, sync, informational
+commands and all other commands refuse the flag.
+
+Use a direct interactive host TTY, without SSH, tmux (‘TMUX’) or screen
+(‘STY’).  The experimental profiles are direct Konsole and Kitty.
+Exactly one host compatibility marker (‘KONSOLE_VERSION’ or
+‘KITTY_WINDOW_ID’) must identify the profile; unknown or inherited
+ambiguous setups refuse.  These markers are an operator-trusted
+compatibility selection, not cryptographic emulator identity.  The
+pathname bridge accepts a complete qualifying paste.  Konsole uses that
+bridge only, with no OSC 72 probes/registration and unchanged child
+output.  The Kitty profile enables structured OSC 72 drops only after an
+affirmative capability reply.  Kitty graphics support, including
+Konsole's graphics support, is not proof of drag-and-drop capability.
+This is not a guarantee about every emulator/version.
+
+Konsole's default direct URL-drop setting produces the required
+bracketed paste while native OpenCode enables mode 2004.  Keep **Disable
+drag & drop menu for files & URLs** enabled in the Konsole profile.  The
+optional menu's **Paste Location** action sends raw, unframed input and
+is intentionally not intercepted.  Bare absolute names, quoting for
+spaces and the normal trailing space are accepted.  No timing or
+pathname-shaped keystroke guessing is used.
+
+**A qualifying pathname paste anywhere in this opted-in TUI authorizes
+capture, without a per-file confirmation prompt.** The bridge cannot
+prove a real desktop drag gesture or composer focus.  Do not paste a
+sensitive path merely to discuss it.  Model output, an MCP request or a
+proposed host path is never capture authority.  For separate host
+approval of every image, use the unchanged ‘attach --broker’ workflow
+instead.
+
+The pathname bridge accepts only a whole paste containing one to four
+absolute Linux paths, with supported quoting/escaping for spaces.  Mixed
+prose, newlines, traversal components, control characters and ‘file://’
+text expansion are not imported; this is not shell evaluation.  Only
+regular, single-link PNG/JPEG/GIF/WebP/PDF files with matching
+extensions and signatures qualify.  Protected
+host/application/credential paths, links, special files and unsafe
+source changes refuse through the sharing descriptor-pinning guards.
+Limits are 8 MiB per file, 16 MiB per batch, and lifetime totals of 32
+files/64 MiB per client.  Signature checks are not decoding,
+sanitization or a malware scan.  DOCX is unsupported; no verified reader
+or converter is supplied.
+
+Captured bytes cross a private non-PTY stdin channel, not argv,
+environment, shell commands or project staging files.  They are staged
+in a private container ‘/tmp/oc-box-drop-<token>’ directory (0700), with
+generated files (0600).  The native TUI, server, plugins and tools still
+execute inside the container.  The host bridge feeds rewritten container
+paths back as native paste input: it never appends Enter or submits a
+native prompt API request.  Native composition, attachment previews and
+sending remain native UI behavior.  Optional ‘--image-preview’ can
+enable inline image visuals on a qualifying owning launch; it is not
+required for this bridge and does not add host-read authority.  A
+selected model/provider may not support PDF or a particular attachment
+format.
+
+Normal client exit attempts bounded cleanup of only this client's
+recorded files.  There is no background or restart cleanup scan.
+Crashes, interrupted cleanup, open references, copies, native history
+and backups can retain disclosed bytes.  Container root and agents/tools
+using the same container user can read staged files; this is not
+per-session isolation.  Host input parsing excludes opaque terminal
+responses.  In the Kitty profile only, the output relay reserves its C0
+OSC 72 wire commands and fails closed on unsupported framing limits;
+valid native graphics APC_G and keyboard CSI remain unchanged.  This is
+not generic C1-output reservation or a blanket terminal/security
+guarantee, nor a new live-host acceptance result.  See ‘SECURITY.md’ and
+‘docs/testing.md’.
+
+     oc-box --project ~/devel/demo --host-drop
+     oc-box start --project ~/devel/demo --host-drop
+     oc-box reset --project ~/devel/demo --host-drop
+
+5.31 -credential-mode env|selected|vault
 ========================================
 
 With ‘credentials’, save an explicit forwarding mode for that workspace.
@@ -2141,7 +2235,7 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.31 -no-vault
+5.32 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -2160,7 +2254,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.32 -env-secret NAME
+5.33 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -2173,7 +2267,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.33 -vault-secret NAME
+5.34 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -2185,7 +2279,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.34 -clear-credentials
+5.35 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -2197,7 +2291,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.35 -output FILE
+5.36 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -2207,7 +2301,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.36 -portable
+5.37 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -2217,7 +2311,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.37 -recipient AGE_KEY
+5.38 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -2228,7 +2322,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.38 -identity FILE
+5.39 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -2239,7 +2333,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.39 -cpus NUMBER
+5.40 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -2250,7 +2344,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.40 -memory SIZE
+5.41 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -2262,7 +2356,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.41 -pids-limit NUMBER
+5.42 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -2270,7 +2364,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.42 -device MAPPING
+5.43 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -2284,7 +2378,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.43 -podman-arg=-OPTION[=VALUE]
+5.44 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -2311,7 +2405,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.44 -clear-devices
+5.45 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -2322,7 +2416,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.45 -clear-podman-args
+5.46 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -2332,7 +2426,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.46 -delete-sessions
+5.47 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -2341,7 +2435,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.47 -all
+5.48 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -2349,7 +2443,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.48 -y, -yes
+5.49 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -3399,10 +3493,13 @@ credential-mode choices.  Credential modes include ‘env’, ‘selected’,
 and ‘vault’; ‘--no-vault’ is offered for start/reset/web only (including
 the default start context).  Completion does not inspect the OpenCode
 major version or whether a service is already active; the command itself
-rejects V1 or attached-client use of ‘--no-vault’.  ‘--project’
-completes directories; backup archive inputs, ‘--output’, and
-‘--identity’ complete paths, including spaces.  Both ‘--option VALUE’
-and ‘--option=VALUE’ are supported.  Press Tab after ‘oc-box ’ or
+rejects V1 or attached-client use of ‘--no-vault’.  ‘--host-drop’ is
+offered only for default/start/reset TUI clients, not web, terminal or
+the separate dashboard.  Its direct-TTY, native-version and host-input
+requirements are checked by the command, not during completion.
+‘--project’ completes directories; backup archive inputs, ‘--output’,
+and ‘--identity’ complete paths, including spaces.  Both ‘--option
+VALUE’ and ‘--option=VALUE’ are supported.  Press Tab after ‘oc-box ’ or
 ‘oc-box backup --’ to see candidates.  Completion uses only Bash
 builtins and local pathname expansion: it does not run oc-box on each
 Tab, query Podman, contact providers, read vault contents, or guess
@@ -3577,20 +3674,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2920
 Node: Commands6518
-Node: Options97213
-Node: Lifecycle and persistence122832
-Node: Distribution images125132
-Node: Sessions and recovery130007
-Node: Devices and host permissions136592
-Node: Resource reports138938
-Node: Configuration and environment141049
-Node: Files152430
-Node: Exit status158374
-Node: Examples159227
-Node: Troubleshooting161313
-Node: Installation and manuals172665
-Node: Authors and license181917
-Node: See also182524
+Node: Options97715
+Node: Lifecycle and persistence128167
+Node: Distribution images130467
+Node: Sessions and recovery135342
+Node: Devices and host permissions141927
+Node: Resource reports144273
+Node: Configuration and environment146384
+Node: Files157765
+Node: Exit status163709
+Node: Examples164562
+Node: Troubleshooting166648
+Node: Installation and manuals178000
+Node: Authors and license187479
+Node: See also188086
 
 End Tag Table
 
