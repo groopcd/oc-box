@@ -23,6 +23,15 @@ or promote the manager to stable. The narrowly backported native OpenCode
 coverage, not new integrated external-host or dashboard acceptance. Other
 unaudited native versions remain refused by this recovery path.
 
+The combined development update also includes the card dashboard, saved
+per-workspace native host importing (enabled by default on supported clients),
+the shared web tabstrip/current-conversation reports and optional browser File
+attachments. Existing clients do not live-toggle; save `--no-host-drop` or use
+`oc-box preferences --host-drop off` to disable importing for future clients.
+The [final combined-browser validation gap](releases/1.7.md#attachment-and-web-validation-limitations)
+is explicit; development publication is not a browser/desktop or stable acceptance
+claim.
+
 ## Select or preview a channel
 
 Run on the host, as your regular user:

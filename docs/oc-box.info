@@ -650,6 +650,9 @@ Without it, a URL-selected ID is verified; otherwise a fresh report from
 the container-native TUI supplies the exact current conversation and
 ordered open roots.  A routed child stays the exact iframe conversation
 while its separately verified root is highlighted in the tabstrip.
+Native read-only child views remain read-only: return to an editable
+root conversation to compose or add attachments; oc-box does not add a
+child composer.
 
 The normal supported V2 owning preparation installs a small public-SDK
 helper inside the container.  A fresh report from the owning TUI is
@@ -3945,20 +3948,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description3039
 Node: Commands6637
-Node: Options111990
-Node: Lifecycle and persistence144090
-Node: Distribution images146390
-Node: Sessions and recovery151265
-Node: Devices and host permissions157850
-Node: Resource reports160196
-Node: Configuration and environment162307
-Node: Files173688
-Node: Exit status179632
-Node: Examples180485
-Node: Troubleshooting182571
-Node: Installation and manuals193923
-Node: Authors and license203519
-Node: See also204126
+Node: Options112146
+Node: Lifecycle and persistence144246
+Node: Distribution images146546
+Node: Sessions and recovery151421
+Node: Devices and host permissions158006
+Node: Resource reports160352
+Node: Configuration and environment162463
+Node: Files173844
+Node: Exit status179788
+Node: Examples180641
+Node: Troubleshooting182727
+Node: Installation and manuals194079
+Node: Authors and license203675
+Node: See also204282
 
 End Tag Table
 

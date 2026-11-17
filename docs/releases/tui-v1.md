@@ -14,11 +14,11 @@ actual frozen successor, not reuse the earlier `1.7.110+g5573965` identity. Thes
 are the detailed manager notes for the combined
 [1.7 development release](1.7.md), including source-qualified sharing evidence.
 
-## Unreleased interaction follow-ups
+## Development-channel interaction follow-ups
 
 The follow-up work branches from published `v1.7.117.dev0` (`2f113ff`) and is
-integrated into `devel` for the next development release. It is not available
-merely by upgrading to that already-published version:
+included in the combined development successor. It is not available merely by
+upgrading to that already-published version:
 
 - Sessions Disconnect beside Connect, plus in-field clear controls.
 - Debounced filtering and unchanged-view/incremental rendering, preserving
@@ -36,17 +36,18 @@ or failed evidence relabeled by this follow-up.
 
 ## Card redesign integrated into development
 
-The approved `feature/tui-card-redesign` work is integrated into `devel` for
-later publication. It follows the navy/cyan card concept:
+The approved `feature/tui-card-redesign` work is included in the combined
+development publication. It follows the navy/cyan card concept:
 responsive section navigation, a globally available workspace picker,
 host-summary cards/compact strip, a scoped workspace table and inspector,
 retained fixed-category activity, and card-based Storage/Backup presentation.
 Built-in theme choices and all existing explicit/native/private-input controls
 remain. This design adds no GPU, model, token, billing or agent-call telemetry.
 
-The source integration is not a new published development release or an accepted
-host UI/backup/security gate. Preserve every historical source identity and
-unfinished UI qualification below; headless redesign tests do not relabel them.
+Check the combined release's tag/source identity for availability. Publication
+is not an accepted host UI/backup/security gate. Preserve every historical source
+identity and unfinished UI qualification below; headless redesign tests do not
+relabel them.
 
 ## Manager highlights
 
@@ -188,11 +189,13 @@ unperformed or unaccepted. Do not infer shutdown/lease cleanup. The owner
 approved experimental publication with these limitations, not a pass or further
 fixture continuation. Preserve original failures, stores and encrypted evidence.
 
-The channel successor changes install/update/version/publication handling, not
-dashboard/core workspace behavior. Its new source still needs relevant
-source/package/native and guarded build-only validation; prior evidence is not a
-new-source full-map pass. Stable 1.6.94 and newer native-version evidence do not
-accept the manager or experimental sharing.
+The original channel-only port changed install/update/version/publication
+handling, not dashboard/core workspace behavior. The later combined successor
+also includes the dashboard, recovery and attachment runtime updates described
+in the [combined notes](1.7.md). Each new source still needs relevant
+source/package/native and guarded build-only validation; prior evidence is not
+a new-source full-map pass. Stable 1.6.94 and newer native-version evidence do
+not accept the manager or experimental sharing.
 
 ## Evidence required before stable publication
 

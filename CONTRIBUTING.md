@@ -428,6 +428,12 @@ The owner approved a channel-integrated successor of the separately tested
 `master`, its tag and its PyPI files remain unchanged. Preserve unrelated source
 worktrees, private evidence and prior unfinished integrations.
 
+The channel-only boundary in step 1 records the original port. The owner later
+approved the combined card-dashboard, retained-subagent recovery and native/web
+attachment updates documented in `docs/releases/1.7.md`. Keep those runtime
+changes explicit and source-qualified; this does not authorize unrelated stable
+changes or remove any validation, disclosure or publication safeguards below.
+
 1. Keep the successor limited to channel/install/update/version/publication
    paths and documentation, without importing unrelated stable workspace,
    credential, history, sharing or dashboard changes. Review unchanged core

@@ -72,14 +72,25 @@ also checks native-to-shell/addon-script navigation and preserved pairing
 cookies under the response-close policy. Neither HTTP fixture is proof of
 normal browser rendering or real browser file-drop admission.
 
-**Pending integration gate:** normal Chromium pairing on the original
+**Retained failed attempt:** normal Chromium pairing on the original
 `5c9fd883ded5d83c09a5d5e2842c739afd65647f` failed with a redirected wrapper 404:
 the Gateway classified only the first request of a persistent connection.
 That failure is retained, and a fresh-cookie diagnostic is not a normal-flow
 pass. The separately reviewed Gateway response/connection repair
 `0f1a366996833c65f56fbe5077159daf452790f2` is now merged without a duplicate
 transport implementation. Subsequent normal-browser checks on the final composed
-source remain required; this integration does not claim that browser acceptance.
+source are source-qualified below; this integration does not claim a completed
+final combined-browser gate.
+
+The later explicit-selection Chromium composition on `eff0c60` passed 69 checks
+per native version, including real File PNG/PDF drafts and activated stock
+service workers on 2.2.6/2.3.0. Integrated real-helper attempts on `871202a`
+established automatic non-first owner selection and all four actual ordered
+roots, but remained partial. The subsequent `d3b6fe9` private-controller timeout
+persisted no phase results. No result from those sources is promoted to a final
+combined-browser pass. Further private harness repair was stopped;
+experimental development publication retains this explicit gap. See the
+[release validation limitations](releases/1.7.md#attachment-and-web-validation-limitations).
 
 ### Open TUI sessions in the web interface
 

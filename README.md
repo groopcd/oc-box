@@ -12,11 +12,14 @@ Licensed [GPL-3.0-or-later](LICENSE); see [NOTICE](NOTICE) for attribution and
 the acknowledgment of OpenAI coding-assistant contributions through OpenCode.
 
 **1.7 development channel (explicit opt-in):** the series adds the optional
-Textual manager, temporary live host-file tools and guarded exit-history recovery,
+Textual card manager, native TUI image/PDF drops, shared web tabs with optional
+browser attachments, temporary live host-file tools and guarded exit-history recovery,
 and retains the private-memory and Ubuntu CI fixes from 1.6.60. Stable 1.6.94
 remains the default and does not include the manager. Development releases use
 `1.7.N.dev0`; their publication does **not** declare unfinished dashboard
-restore/storage acceptance passed. See the [channel guide](docs/update-channels.md)
+restore/storage or final combined-browser acceptance passed. Supported native TUI
+host importing is now enabled by default per workspace; save `--no-host-drop` to
+disable it. See the [channel guide](docs/update-channels.md)
 and [1.7 release notes and known limitations](docs/releases/1.7.md).
 
 ## Why oc-box?

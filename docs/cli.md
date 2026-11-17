@@ -549,6 +549,8 @@ session. It wins initial selection. Without it, a URL-selected ID is verified;
 otherwise a fresh report from the container-native TUI supplies the exact current
 conversation and ordered open roots. A routed child stays the exact iframe
 conversation while its separately verified root is highlighted in the tabstrip.
+Native read-only child views remain read-only: return to an editable root
+conversation to compose or add attachments; oc-box does not add a child composer.
 
 The normal supported V2 owning preparation installs a small public-SDK helper
 inside the container. A fresh report from the owning TUI is preferred, even when
