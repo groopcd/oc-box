@@ -62,12 +62,15 @@ class SettingsPanel(Vertical):
     """
 
     class ApplyRequested(Message):
-        def __init__(self, values):
+        def __init__(self, panel, values):
             super().__init__()
+            self.panel = panel
             self.values = values
 
     class RevertRequested(Message):
-        pass
+        def __init__(self, panel):
+            super().__init__()
+            self.panel = panel
 
     def __init__(self, values, themes, *, read_only=False, resources="", **kwargs):
         super().__init__(**kwargs)
@@ -237,7 +240,7 @@ class SettingsPanel(Vertical):
         self.query_one("#pref-interval-error", Static).update("")
 
     def action_revert(self):
-        self.post_message(self.RevertRequested())
+        self.post_message(self.RevertRequested(self))
 
     def reset_defaults(self):
         # Stage changes just like ordinary edits: Revert still discards them.
@@ -296,5 +299,7 @@ class SettingsPanel(Vertical):
                 interval_input.scroll_visible(animate=False)
                 return
             self.post_message(
-                self.ApplyRequested({**self._draft_values(), "interval": interval})
+                self.ApplyRequested(
+                    self, {**self._draft_values(), "interval": interval}
+                )
             )

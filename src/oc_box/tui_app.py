@@ -799,15 +799,33 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
 
     def on_settings_panel_apply_requested(self, event):
         event.stop()
-        if self._clipboard_private():
+        if not self._admit_settings_request(event) or self._clipboard_private():
             return
         self.apply_settings(event.values)
 
     def on_settings_panel_revert_requested(self, event):
         event.stop()
-        if self._clipboard_private():
+        if not self._admit_settings_request(event) or self._clipboard_private():
             return
-        self.query_one(SettingsPanel).load_values(self._settings_snapshot())
+        event.panel.load_values(self._settings_snapshot())
+
+    def _admit_settings_request(self, event):
+        panel = event.panel
+        if (
+            not self.is_running
+            or not isinstance(panel, SettingsPanel)
+            or not panel.is_attached
+            or not self.is_mounted(panel)
+        ):
+            return False
+        panels = self.query("#settings-panel")
+        content = self.query("#content")
+        return (
+            len(panels) == 1
+            and panels[0] is panel
+            and len(content) == 1
+            and self.is_mounted(content[0])
+        )
 
     def apply_settings(self, values):
         if values is None:

@@ -4,13 +4,14 @@ import copy
 import importlib.util
 import threading
 import unittest
+from contextlib import ExitStack
 from unittest.mock import Mock, patch
 
 from oc_box.tui import DemoBackend
 
 AVAILABLE = all(importlib.util.find_spec(name) for name in ("textual", "pyte"))
 if AVAILABLE:
-    from textual.screen import ModalScreen
+    from textual.screen import ModalScreen, Screen
     from textual.widgets import (
         Button,
         Input,
@@ -383,9 +384,11 @@ class InlineSettingsTests(unittest.IsolatedAsyncioTestCase):
                 app.action_settings()
                 await pilot.press("f2")
                 app.on_settings_panel_apply_requested(
-                    SettingsPanel.ApplyRequested({**baseline, "interval": 17})
+                    SettingsPanel.ApplyRequested(panel, {**baseline, "interval": 17})
                 )
-                app.on_settings_panel_revert_requested(SettingsPanel.RevertRequested())
+                app.on_settings_panel_revert_requested(
+                    SettingsPanel.RevertRequested(panel)
+                )
                 await pilot.pause()
                 self.assertEqual(
                     app.query_one("#content", TabbedContent).active, "status"
@@ -394,6 +397,103 @@ class InlineSettingsTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(panel.query_one("#pref-interval", Input).value, "17")
                 self.assertTrue(panel.dirty)
             self.assertTrue(app.read_only)
+
+    def settings_requests(self, panel, baseline):
+        return (
+            (
+                "on_settings_panel_apply_requested",
+                SettingsPanel.ApplyRequested(
+                    panel, {**baseline, "auto_refresh": False, "interval": 17}
+                ),
+            ),
+            (
+                "on_settings_panel_revert_requested",
+                SettingsPanel.RevertRequested(panel),
+            ),
+        )
+
+    def assert_settings_requests_ignored(self, app, requests, *, no_queries=False):
+        monitoring = dict(app._monitoring_settings)
+        generation, theme = app._catalog_generation, app.theme
+        with ExitStack() as stack:
+            guarded = [
+                stack.enter_context(patch.object(app, name))
+                for name in (
+                    "_clipboard_private",
+                    "apply_settings",
+                    "_settings_snapshot",
+                    "connect_sessions",
+                )
+            ]
+            stack.enter_context(
+                patch.object(app, "query_one", side_effect=AssertionError("late query"))
+            )
+            if no_queries:
+                stack.enter_context(
+                    patch.object(app, "query", side_effect=AssertionError("late query"))
+                )
+            for name, event in requests:
+                with self.subTest(request=name):
+                    getattr(app, name)(event)
+            for call in guarded:
+                call.assert_not_called()
+        self.assertEqual(app._monitoring_settings, monitoring)
+        self.assertEqual(app._catalog_generation, generation)
+        self.assertEqual(app.theme, theme)
+        self.assertTrue(app.read_only)
+
+    async def test_retained_settings_requests_are_ignored_after_detach_and_shutdown(
+        self,
+    ):
+        app = DashboardApp(SettingsDemo(), read_only=True, demo=True)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.ready(app, pilot)
+            panel = app.query_one(SettingsPanel)
+            requests = self.settings_requests(panel, app._settings_snapshot())
+            await panel.remove()
+            self.assertFalse(panel.is_attached)
+            for private in (False, True):
+                with self.subTest(private_shield=private):
+                    app._private_interaction = private
+                    self.assert_settings_requests_ignored(
+                        app, requests, no_queries=True
+                    )
+            app._private_interaction = False
+        self.assertFalse(app.is_running)
+        self.assert_settings_requests_ignored(app, requests, no_queries=True)
+
+    async def test_settings_requests_require_the_current_mounted_dashboard_panel(self):
+        for state in ("foreign same id", "unmounted source", "missing root"):
+            with self.subTest(state=state):
+                app = DashboardApp(SettingsDemo(), read_only=True, demo=True)
+                async with app.run_test(size=(80, 24)) as pilot:
+                    await self.ready(app, pilot)
+                    baseline = app._settings_snapshot()
+                    panel = app.query_one(SettingsPanel)
+                    if state in ("foreign same id", "missing root"):
+                        if state == "missing root":
+                            await app.query_one("#content").remove()
+                        foreign_screen = Screen()
+                        await app.push_screen(foreign_screen)
+                        panel = SettingsPanel(
+                            baseline,
+                            sorted(app.available_themes),
+                            read_only=True,
+                            id="settings-panel",
+                        )
+                        await foreign_screen.mount(panel)
+                        await pilot.pause()
+                        self.assertTrue(panel.is_attached)
+                        self.assertTrue(app.is_mounted(panel))
+                    requests = self.settings_requests(panel, baseline)
+                    with ExitStack() as stack:
+                        if state == "unmounted source":
+                            stack.enter_context(
+                                patch.object(app, "is_mounted", return_value=False)
+                            )
+                        self.assert_settings_requests_ignored(
+                            app, requests, no_queries=state == "unmounted source"
+                        )
 
 
 if __name__ == "__main__":
