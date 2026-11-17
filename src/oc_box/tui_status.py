@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
+from rich.style import Style
 from rich.text import Text
 from textual.widgets import Static
 
@@ -282,3 +283,318 @@ class MonitorPanel(Static):
 
     def on_resize(self):
         self._render_snapshot()
+
+
+def _card_percentage(used, total):
+    """Finite, capped gauge value; zero capacity is not a measured zero."""
+    used, total = numeric(used), numeric(total)
+    if used is None or total is None or total == 0:
+        return None
+    return min(1.0, used / total) * 100
+
+
+def _card_memory(used, total, *, unlimited=False):
+    used, total = numeric(used), numeric(total)
+    if used is None:
+        return "n/a"
+    capacity = "unlimited" if total == 0 and unlimited else byte_size(total or None)
+    return f"{byte_size(used)} / {capacity}"
+
+
+def _card_count(value):
+    return str(value) if type(value) is int and numeric(value) is not None else "n/a"
+
+
+def _card_bar(value, width, color, muted, caption=""):
+    """A compact fixed-scale bar with an optional, unscaled numeric caption."""
+    value = numeric(value)
+    reserved = Text(caption).cell_len + 1 if caption else 0
+    bar_width = max(0, min(32, width - reserved))
+    result = Text(no_wrap=True)
+    if bar_width >= 4:
+        if value is None:
+            result.append("·" * bar_width, style=muted)
+        else:
+            filled = round(min(value, 100) / 100 * bar_width)
+            result.append("█" * filled, style=color)
+            result.append("░" * (bar_width - filled), style=muted)
+        if caption:
+            result.append(" ")
+    result.append(caption, style=muted)
+    return _line(result, width)
+
+
+class _CardPanel(MonitorPanel):
+    """One selectable Static, using theme components rather than palette literals."""
+
+    COMPONENT_CLASSES = MonitorPanel.COMPONENT_CLASSES | {
+        "card--title",
+        "card--muted",
+        "card--cpu",
+        "card--memory",
+        "card--storage",
+        "card--border",
+    }
+    DEFAULT_CSS = """
+    _CardPanel { height: auto; border: none; }
+    _CardPanel .card--title { color: $accent; text-style: bold; }
+    _CardPanel .card--muted { color: $text-muted; }
+    _CardPanel .card--cpu { color: $success; }
+    _CardPanel .card--memory { color: $accent; }
+    _CardPanel .card--storage { color: $warning; }
+    _CardPanel .card--border { color: $primary; }
+    """
+
+    def _card_styles(self):
+        return {
+            name: self.get_component_rich_style(
+                f"card--{name}", default=Style.parse(fallback)
+            )
+            for name, fallback in (
+                ("title", "bold cyan"),
+                ("muted", "dim"),
+                ("cpu", "green"),
+                ("memory", "cyan"),
+                ("storage", "yellow"),
+                ("border", "blue"),
+            )
+        }
+
+    def _card_box(self, rows, title, width, styles):
+        inner = max(1, width - 4)
+        padded = [Text(" ") + _line(row, inner) + Text(" ") for row in rows]
+        result = boxed_report(
+            _lines(padded, max(1, width - 2)), title, width, styles["border"]
+        )
+        return _lines(result.split("\n"), width)
+
+
+class HostResourceCards(_CardPanel):
+    """Host readings plus copied registration counts; never queries a backend.
+
+    ``workspace_counts`` is optional internal presentation metadata on the host
+    snapshot, with exact nonnegative integer ``running``/``registered`` values.
+    """
+
+    def __init__(self, kind="system", **kwargs):
+        kwargs.setdefault("id", "system-report")
+        super().__init__(kind, **kwargs)
+        self.caption = "Host resources"
+
+    def _render_snapshot(self):
+        width = max(1, self.content_size.width)
+        styles = self._card_styles()
+        host = self.snapshot or {}
+        cpu = numeric(host.get("cpu_percent"))
+        memory = (host.get("memory_bytes"), host.get("memory_total_bytes"))
+        filesystem = host.get("filesystem") or {}
+        storage = (filesystem.get("used_bytes"), filesystem.get("total_bytes"))
+        counts = host.get("workspace_counts") or {}
+        running = _card_count(counts.get("running"))
+        registered = _card_count(counts.get("registered"))
+        readings = (
+            ("HOST CPU", cpu, "n/a" if cpu is None else f"{cpu:.1f}%", "cpu"),
+            ("HOST RAM", _card_percentage(*memory), _card_memory(*memory), "memory"),
+            (
+                "HOST HOME FS",
+                _card_percentage(*storage),
+                _card_memory(*storage),
+                "storage",
+            ),
+        )
+        if width >= 104:
+            card_width, remainder = divmod(width - 3, 4)
+            widths = [card_width + (index < remainder) for index in range(4)]
+            cards = []
+            for index, (title, value, caption, color) in enumerate(readings):
+                inner = widths[index] - 4
+                history = self.cpu_history if index == 0 else self.ram_history
+                history_row = Text(
+                    "CPU " if index == 0 else "RAM ", style=styles["muted"]
+                )
+                history_row.append(
+                    spark(history, max(0, inner - 4)), style=styles[color]
+                )
+                rows = [
+                    Text(caption, style=styles["title"]),
+                    _card_bar(
+                        value,
+                        inner,
+                        styles[color],
+                        styles["muted"],
+                        ""
+                        if index == 0
+                        else ("n/a" if value is None else f"{value:.0f}%"),
+                    ),
+                    history_row
+                    if index < 2
+                    else Text("OS-reported capacity", style=styles["muted"]),
+                    Text(
+                        "whole host · 0–100%"
+                        if index == 0
+                        else "0–100% · gaps = n/a"
+                        if index == 1
+                        else "not oc-box allocation",
+                        style=styles["muted"],
+                    ),
+                ]
+                cards.append(self._card_box(rows, title, widths[index], styles))
+            cards.append(
+                self._card_box(
+                    [
+                        Text(f"{running} / {registered}", style=styles["title"]),
+                        Text("running / registered", style=styles["muted"]),
+                        Text("registration metadata", style=styles["muted"]),
+                        Text(""),
+                    ],
+                    "WORKSPACES",
+                    widths[3],
+                    styles,
+                )
+            )
+            rows = []
+            columns = [card.split("\n") for card in cards]
+            for line_index in range(len(columns[0])):
+                row = Text()
+                for index, column in enumerate(columns):
+                    if index:
+                        row.append(" ")
+                    row.append_text(column[line_index])
+                rows.append(row)
+            self.update(_lines(rows, width))
+            return
+
+        inner = max(1, width - 4)
+        rows = []
+        captions = [
+            readings[0][2] + " · whole host",
+            readings[1][2],
+            readings[2][2] + " · OS capacity",
+        ]
+        bar_width = min(
+            16, inner - 12 - max(Text(caption).cell_len for caption in captions)
+        )
+        for label, (_, value, _, color), caption in zip(
+            ("CPU", "RAM", "Home FS"), readings, captions
+        ):
+            prefix = Text(f"{label:<10} ", style=styles[color])
+            if bar_width >= 4:
+                prefix.append_text(
+                    _card_bar(value, bar_width, styles[color], styles["muted"])
+                )
+                prefix.append(" ")
+            prefix.append(caption)
+            rows.append(prefix)
+        rows.append(
+            Text(
+                f"Workspaces {running} running / {registered} registered",
+                style=styles["title"],
+            )
+        )
+        history_width = max(0, min(24, (inner - 10) // 2))
+        history = Text("CPU ", style=styles["muted"])
+        history.append(
+            spark(self.cpu_history, history_width).ljust(history_width),
+            style=styles["cpu"],
+        )
+        history.append("  RAM ", style=styles["muted"])
+        history.append(spark(self.ram_history, history_width), style=styles["memory"])
+        rows.extend(
+            [
+                history,
+                Text("History 0–100% · gaps = unavailable", style=styles["muted"]),
+            ]
+        )
+        self.update(self._card_box(rows, self.caption, width, styles))
+
+
+class WorkspaceInspector(_CardPanel):
+    """Selected metadata and observed resource use, with no readiness inference."""
+
+    def __init__(self, kind="workspace", **kwargs):
+        kwargs.setdefault("id", "full-diagnostics")
+        super().__init__(kind, **kwargs)
+        self.caption = "Selected workspace"
+
+    def _render_snapshot(self):
+        width = max(1, self.content_size.width)
+        inner = max(1, width - 4)
+        styles = self._card_styles()
+        item = self.snapshot
+        if not item:
+            rows = [Text("No workspace selected.", style=styles["muted"])]
+        else:
+            metrics = item.get("metrics") or {}
+            limits = item.get("effective_limits") or {}
+            cpu, quota = (
+                numeric(metrics.get("cpu_percent")),
+                numeric(limits.get("cpu_cores")),
+            )
+            # Raw CPU 100% is one core; only the gauge uses observed capacity.
+            cpu_gauge = _card_percentage(None if cpu is None else cpu / 100, quota)
+            quota_caption = (
+                f"{quota:g} CPUs quota"
+                if quota
+                else ("unlimited" if quota == 0 else "quota n/a")
+            )
+            memory = (metrics.get("memory_bytes"), limits.get("memory_bytes"))
+            ram_gauge = _card_percentage(*memory)
+            project = Path(plain(item.get("project") or "n/a")).name or "n/a"
+            os_caption = "OS " + plain(item.get("distro") or "n/a")
+            version = item.get("opencode_version") or metrics.get("opencode_version")
+            if version:
+                os_caption += " · OpenCode " + plain(version)
+            rows = [
+                Text(
+                    f"{project} · {plain(item.get('state') or 'n/a')}",
+                    style=styles["title"],
+                ),
+                Text(os_caption, style=styles["muted"]),
+                Text(
+                    f"CPU {'n/a' if cpu is None else f'{cpu:.1f}%'} · {quota_caption}",
+                    style=styles["cpu"],
+                ),
+                _card_bar(
+                    cpu_gauge,
+                    inner,
+                    styles["cpu"],
+                    styles["muted"],
+                    "quota n/a" if cpu_gauge is None else f"{cpu_gauge:.0f}% of quota",
+                ),
+                Text(
+                    "CPU 100% = 1 core; gauge uses observed quota",
+                    style=styles["muted"],
+                ),
+                Text(
+                    "RAM " + _card_memory(*memory, unlimited=True),
+                    style=styles["memory"],
+                ),
+                _card_bar(
+                    ram_gauge,
+                    inner,
+                    styles["memory"],
+                    styles["muted"],
+                    "limit n/a" if ram_gauge is None else f"{ram_gauge:.0f}% of limit",
+                ),
+                Text(
+                    "Processes " + _card_count(metrics.get("pids")),
+                    style=styles["muted"],
+                ),
+                Text(
+                    "Recorded sessions " + _card_count(item.get("recorded_sessions")),
+                    style=styles["muted"],
+                ),
+            ]
+            home = numeric((item.get("storage") or {}).get("private_home_bytes"))
+            rows.append(
+                Text(
+                    "Private home "
+                    + (
+                        "n/a · scan required"
+                        if home is None
+                        else byte_size(home) + " · scanned"
+                    ),
+                    style=styles["storage"],
+                )
+            )
+        self.update(self._card_box(rows, self.caption, width, styles))
