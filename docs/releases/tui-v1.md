@@ -34,16 +34,17 @@ UI/host acceptance described below. Relevant clean-source host backup/UI and
 cleanup observations remain a separate gate; no old retained fixture is replayed
 or failed evidence relabeled by this follow-up.
 
-## Card redesign feature branch
+## Card redesign integrated into development
 
-`feature/tui-card-redesign` follows the approved navy/cyan card concept:
+The approved `feature/tui-card-redesign` work is integrated into `devel` for
+later publication. It follows the navy/cyan card concept:
 responsive section navigation, a globally available workspace picker,
 host-summary cards/compact strip, a scoped workspace table and inspector,
 retained fixed-category activity, and card-based Storage/Backup presentation.
 Built-in theme choices and all existing explicit/native/private-input controls
 remain. This design adds no GPU, model, token, billing or agent-call telemetry.
 
-This separate branch is not a new published development release or an accepted
+The source integration is not a new published development release or an accepted
 host UI/backup/security gate. Preserve every historical source identity and
 unfinished UI qualification below; headless redesign tests do not relabel them.
 

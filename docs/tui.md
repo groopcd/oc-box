@@ -111,11 +111,11 @@ for host Podman or OpenCode.
 
 ## Card redesign availability
 
-The card layout is feature-branch work on `feature/tui-card-redesign`, based on
-the later `devel` source that includes the history-sync integration. It is not
-automatically included in an already-published development package, and this
-branch does not itself constitute a `devel` merge, release or new interactive
-host acceptance. Channel upgrades select published releases, not branch HEAD.
+The card layout and follow-up input/settings polish are integrated into `devel`
+from `feature/tui-card-redesign` for a later publication. They are not automatically
+included in an already-published development package. A source merge is not a
+release or new interactive host acceptance; channel upgrades select published
+releases, not branch HEAD.
 
 ## Launch and navigation
 
