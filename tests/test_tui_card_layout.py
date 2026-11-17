@@ -1,6 +1,7 @@
 """Synthetic layout and explicit-action contracts for the card dashboard."""
 
 import copy
+from contextlib import ExitStack
 import importlib.util
 import unittest
 from unittest.mock import patch
@@ -9,6 +10,7 @@ AVAILABLE = all(importlib.util.find_spec(name) for name in ("textual", "pyte"))
 if AVAILABLE:
     from oc_box.tui import DemoBackend
     from oc_box.tui_app import DashboardApp
+    from textual.screen import Screen
     from textual.widgets import (
         Button,
         Collapsible,
@@ -182,6 +184,147 @@ class CardLayoutTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(app.check_action("tab", ("logs",)))
                 connect.assert_not_called()
                 app._private_interaction = False
+
+    def assert_picker_events_ignored(self, app, events, *, no_queries=False):
+        selected, catalog = app.selected, app.catalog
+        samples = (app.backend.samples, app.backend.log_samples)
+        with ExitStack() as stack:
+            calls = [
+                stack.enter_context(patch.object(app, name))
+                for name in (
+                    "_clipboard_private",
+                    "_sync_workspace_picker",
+                    "_sync_navigation",
+                    "_choose_workspace",
+                    "_session_source_changed",
+                    "action_tab",
+                    "connect_sessions",
+                    "pop_screen",
+                )
+            ]
+            stack.enter_context(
+                patch.object(app, "query_one", side_effect=AssertionError("late query"))
+            )
+            if no_queries:
+                stack.enter_context(
+                    patch.object(app, "query", side_effect=AssertionError("late query"))
+                )
+            for event in events:
+                with self.subTest(picker=event.select.id):
+                    app.on_select_changed(event)
+            for call in calls:
+                call.assert_not_called()
+        self.assertEqual(app.selected, selected)
+        self.assertIs(app.catalog, catalog)
+        self.assertEqual((app.backend.samples, app.backend.log_samples), samples)
+
+    async def test_picker_event_lifetime_matrix_ignores_detach_and_shutdown(self):
+        app = DashboardApp(TwoWorkspaces(), demo=True, read_only=True)
+        retained = []
+        with patch.object(app, "_tick"):
+            async with app.run_test(size=(140, 44)) as pilot:
+                await self.ready(app, pilot)
+                for picker_id in ("workspace-picker", "section-picker"):
+                    picker = app.query_one(f"#{picker_id}", Select)
+                    self.assertTrue(picker.is_attached)
+                    retained.append(Select.Changed(picker, picker.value))
+                    await picker.remove()
+                    self.assertFalse(picker.is_attached)
+                app._private_interaction = True
+                self.assertTrue(app.is_running)
+                self.assert_picker_events_ignored(app, retained, no_queries=True)
+            self.assertFalse(app.is_running)
+            self.assert_picker_events_ignored(app, retained, no_queries=True)
+
+    async def test_picker_event_admission_matrix_ignores_stale_unmounted_missing_root(
+        self,
+    ):
+        for state in ("stale value", "unmounted source", "missing root"):
+            with self.subTest(state=state):
+                app = DashboardApp(TwoWorkspaces(), demo=True, read_only=True)
+                with patch.object(app, "_tick"):
+                    async with app.run_test(size=(140, 44)) as pilot:
+                        await self.ready(app, pilot)
+                        events = []
+                        for picker_id, stale in (
+                            ("workspace-picker", "b" * 32),
+                            ("section-picker", "logs"),
+                        ):
+                            picker = app.query_one(f"#{picker_id}", Select)
+                            events.append(
+                                Select.Changed(
+                                    picker,
+                                    stale if state == "stale value" else picker.value,
+                                )
+                            )
+                        if state == "missing root":
+                            await app.query_one("#content").remove()
+                        app._private_interaction = True
+                        with ExitStack() as stack:
+                            if state == "unmounted source":
+                                stack.enter_context(
+                                    patch.object(app, "is_mounted", return_value=False)
+                                )
+                            self.assert_picker_events_ignored(
+                                app, events, no_queries=state != "missing root"
+                            )
+
+    async def test_picker_event_source_matrix_ignores_attached_foreign_same_ids(self):
+        app = DashboardApp(TwoWorkspaces(), demo=True, read_only=True)
+        with patch.object(app, "_tick"):
+            async with app.run_test(size=(140, 44)) as pilot:
+                await self.ready(app, pilot)
+                app._private_interaction = True
+                foreign_screen = Screen()
+                await app.push_screen(foreign_screen)
+                events = []
+                for picker_id, value in (
+                    ("workspace-picker", "b" * 32),
+                    ("section-picker", "logs"),
+                ):
+                    foreign = Select([(value, value)], value=value, id=picker_id)
+                    with foreign.prevent(Select.Changed):
+                        await foreign_screen.mount(foreign)
+                        await pilot.pause()
+                    self.assertTrue(foreign.is_attached)
+                    self.assertTrue(app.is_mounted(foreign))
+                    self.assertIsNot(app.query_one(f"#{picker_id}"), foreign)
+                    events.append(Select.Changed(foreign, value))
+                self.assert_picker_events_ignored(app, events)
+
+    async def test_current_picker_private_event_matrix_restores_below_modal(self):
+        app = DashboardApp(TwoWorkspaces(), demo=True, read_only=True)
+        with patch.object(app, "_tick"):
+            async with app.run_test(size=(140, 44)) as pilot:
+                await self.ready(app, pilot)
+                selected = app.selected
+                private_screen = Screen()
+                private_screen.PRIVATE_INPUT = True
+                await app.push_screen(private_screen)
+                for picker_id, value, original, restore in (
+                    ("workspace-picker", "b" * 32, selected, "_sync_workspace_picker"),
+                    ("section-picker", "logs", "status", "_sync_navigation"),
+                ):
+                    with self.subTest(picker=picker_id):
+                        picker = app.query_one(f"#{picker_id}", Select)
+                        self.assertIsNot(picker.screen, app.screen)
+                        with picker.prevent(Select.Changed):
+                            picker.value = value
+                        with (
+                            patch.object(
+                                app, restore, wraps=getattr(app, restore)
+                            ) as reset,
+                            patch.object(app, "_session_source_changed") as source,
+                            patch.object(app, "connect_sessions") as connect,
+                        ):
+                            app.on_select_changed(Select.Changed(picker, value))
+                        reset.assert_called_once()
+                        source.assert_not_called()
+                        connect.assert_not_called()
+                        self.assertEqual(picker.value, original)
+                        self.assertEqual(app.selected, selected)
+                        self.assertEqual(app.query_one("#content").active, "status")
+                        self.assertIsNone(app.catalog)
 
     async def test_empty_inventory_keeps_host_controls_and_navigation_available(self):
         class Empty(DemoBackend):

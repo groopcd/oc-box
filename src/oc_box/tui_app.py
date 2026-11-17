@@ -1300,27 +1300,38 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             self._render_sessions()
 
     def on_select_changed(self, event):
+        if event.select.id in {"workspace-picker", "section-picker"}:
+            # Queued picker events must still belong to the mounted dashboard,
+            # even when a private modal covers its root screen.
+            if (
+                not self.is_running
+                or not event.select.is_attached
+                or not self.is_mounted(event.select)
+                or event.value != event.select.value
+            ):
+                return
+            pickers = self.query(f"#{event.select.id}")
+            content = self.query("#content")
+            if (
+                len(pickers) != 1
+                or pickers[0] is not event.select
+                or not content
+                or not self.is_mounted(content[0])
+            ):
+                return
         if self._management_select(event):
             return
         if event.select.id == "workspace-picker":
             if self._clipboard_private():
                 self._sync_workspace_picker()
                 return
-            if (
-                event.select.is_attached
-                and event.value == event.select.value
-                and isinstance(event.value, str)
-            ):
+            if isinstance(event.value, str):
                 self._choose_workspace(event.value)
         elif event.select.id == "section-picker":
             if self._clipboard_private():
                 self._sync_navigation(self.query_one("#content", TabbedContent).active)
                 return
-            if (
-                event.select.is_attached
-                and event.value == event.select.value
-                and event.value != self.query_one("#content", TabbedContent).active
-            ):
+            if event.value != self.query_one("#content", TabbedContent).active:
                 self.action_tab(event.value)
         elif event.select.id == "refresh-interval":
             self._render_monitoring_state()
