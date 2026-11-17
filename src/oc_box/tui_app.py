@@ -55,7 +55,7 @@ if __package__:
         numeric,
         percentage,
     )
-    from .tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
+    from .tui_settings import SettingsPanel, REFRESH_INTERVALS, DEFAULT_SETTINGS
     from .tui_management import ManagementActions, StoragePanel, BackupPanel
 else:
     import status_report
@@ -79,7 +79,7 @@ else:
         numeric,
         percentage,
     )
-    from tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
+    from tui_settings import SettingsPanel, REFRESH_INTERVALS, DEFAULT_SETTINGS
     from tui_management import ManagementActions, StoragePanel, BackupPanel
 
 
@@ -216,6 +216,13 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     .toolbar Label { width: auto; padding: 1; }
     .toolbar .setting-label { width: 28; padding: 1; }
     .toolbar SelectCurrent > #label { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
+    Switch { width: 8; height: 1; padding: 0 1; margin: 1 0; border: none;
+      border-left: solid $primary 35%; border-right: solid $primary 35%; }
+    Switch .switch--slider { color: $text-muted; }
+    Switch.-on .switch--slider { color: $success; }
+    Switch:focus { border: none; border-left: solid $accent;
+      border-right: solid $accent; background: $primary 20%; }
+    SettingsPanel .settings-toggle-row Switch { margin: 0; }
     NativeTerminal { height: 1fr; min-height: 5; border: round $secondary; }
     TabPane { padding: 0 1; overflow-y: auto; }
     Screen.compact #sidebar, Screen.compact #view-title,
@@ -328,6 +335,9 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._pending_generation = None
         self._session_source = ""
         self._poll_timer = None
+        self._monitoring_settings = {
+            key: DEFAULT_SETTINGS[key] for key in ("auto_refresh", "interval")
+        }
         self._management_init()
 
     def compose(self) -> ComposeResult:
@@ -430,34 +440,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                                 markup=False,
                             )
                 with TabPane("Settings", id="settings"):
-                    with VerticalScroll():
-                        yield Button("All settings… (s / F2)", id="show-settings")
-                        yield Static(id="settings-info", markup=False)
-                        with Horizontal(classes="toolbar"):
-                            yield Label(
-                                "Automatic status refresh", classes="setting-label"
-                            )
-                            yield Switch(
-                                value=DEFAULT_SETTINGS["auto_refresh"],
-                                id="auto-refresh",
-                            )
-                        with Horizontal(classes="toolbar"):
-                            yield Label("Refresh interval", classes="setting-label")
-                            yield Select(
-                                [
-                                    (f"{n} second{'s' if n != 1 else ''}", n)
-                                    for n in REFRESH_INTERVALS
-                                ],
-                                value=DEFAULT_SETTINGS["interval"],
-                                allow_blank=False,
-                                id="refresh-interval",
-                            )
-                        yield Static(
-                            "Resource changes are intentionally deferred. Existing limits are shown above; "
-                            "this dashboard never runs podman update or resets a container.\n"
-                            "UI controls apply to this dashboard instance only.",
-                            markup=False,
-                        )
+                    yield SettingsPanel(
+                        DEFAULT_SETTINGS,
+                        sorted(self.available_themes),
+                        read_only=self.read_only,
+                        id="settings-panel",
+                    )
                 with TabPane("Sessions", id="sessions"):
                     with Horizontal(id="session-source-tools", classes="toolbar"):
                         yield Select(
@@ -685,6 +673,10 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._update_text(
             "#view-title", "Status / Overview" if tab == "status" else labels[tab]
         )
+        if tab == "settings":
+            panel = self.query_one(SettingsPanel)
+            if not panel.dirty:
+                panel.load_values(self._settings_snapshot())
 
     def on_tabbed_content_tab_activated(self, event):
         if event.tabbed_content.id == "content" and event.tabbed_content.is_attached:
@@ -752,15 +744,11 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._render_monitoring_state()
 
     def _render_monitoring_state(self):
-        interval = self.query_one("#refresh-interval", Select).value
-        auto = self.query_one("#auto-refresh", Switch).value
+        interval = self._monitoring_settings["interval"]
+        auto = self._monitoring_settings["auto_refresh"]
         self._update_text(
             "#monitoring-state", f"{'Auto' if auto else 'Paused'} · {interval}s"
         )
-
-    def on_switch_changed(self, event):
-        if event.switch.id == "auto-refresh" and self.is_mounted:
-            self._render_monitoring_state()
 
     def _choose_workspace(self, target):
         if target == self.selected:
@@ -790,11 +778,16 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             self.push_screen(ClipboardHelp())
 
     def action_settings(self):
-        if isinstance(self.screen, ModalScreen):
+        if self._clipboard_private() or isinstance(self.screen, ModalScreen):
             return
-        values = {
-            "auto_refresh": self.query_one("#auto-refresh", Switch).value,
-            "interval": self.query_one("#refresh-interval", Select).value,
+        self.action_tab("settings")
+        panel = self.query_one(SettingsPanel)
+        if self.focused not in panel.walk_children():
+            panel.query_one("#pref-auto-refresh", Switch).focus()
+
+    def _settings_snapshot(self):
+        return {
+            **self._monitoring_settings,
             "theme": self.theme,
             "details": not self.query_one("#workspace-details", Collapsible).collapsed,
             "session_scope": self.query_one("#session-scope", Select).value,
@@ -803,27 +796,18 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             "log_source": self.query_one("#log-source", Select).value,
             "log_query": self.query_one("#log-search", Input).value,
         }
-        item = self._workspace()
-        resources = "No workspace selected."
-        if item:
-            saved, observed = (
-                item.get("configured_limits") or {},
-                item.get("effective_limits") or {},
-            )
-            resources = (
-                f"Project: {plain(item['project'])}\n"
-                f"Saved CPU {saved.get('cpu_cores')} · RAM {status_report.byte_size(saved.get('memory_bytes'))} · PID {saved.get('pids')}\n"
-                f"Observed CPU {observed.get('cpu_cores')} · RAM {status_report.byte_size(observed.get('memory_bytes'))} · PID {observed.get('pids')}"
-            )
-        self.push_screen(
-            SettingsScreen(
-                values,
-                sorted(self.available_themes),
-                read_only=self.read_only,
-                resources=resources,
-            ),
-            self.apply_settings,
-        )
+
+    def on_settings_panel_apply_requested(self, event):
+        event.stop()
+        if self._clipboard_private():
+            return
+        self.apply_settings(event.values)
+
+    def on_settings_panel_revert_requested(self, event):
+        event.stop()
+        if self._clipboard_private():
+            return
+        self.query_one(SettingsPanel).load_values(self._settings_snapshot())
 
     def apply_settings(self, values):
         if values is None:
@@ -832,6 +816,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             isinstance(values, dict)
             and type(values.get("interval")) is int
             and values["interval"] in REFRESH_INTERVALS
+            and isinstance(values.get("theme"), str)
             and values.get("theme") in self.available_themes
             and values.get("session_scope") in ("global", "project", "workspace")
             and values.get("log_source") in ("all", "oc-box", "podman")
@@ -848,8 +833,9 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             self._message("Unsupported dashboard setting; no changes applied.")
             return
         self.theme = values["theme"]
-        self.query_one("#auto-refresh", Switch).value = values["auto_refresh"]
-        self.query_one("#refresh-interval", Select).value = values["interval"]
+        self._monitoring_settings.update(
+            auto_refresh=values["auto_refresh"], interval=values["interval"]
+        )
         self.query_one("#workspace-details", Collapsible).collapsed = not values[
             "details"
         ]
@@ -860,6 +846,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self.query_one("#log-follow", Switch).value = values["log_follow"]
         self.query_one("#log-source", Select).value = values["log_source"]
         self.query_one("#log-search", Input).value = values["log_query"]
+        self.query_one(SettingsPanel).load_values(self._settings_snapshot())
         self._render_monitoring_state()
         self._message(
             "Dashboard settings applied for this session. Workspace limits and OpenCode configuration are unchanged."
@@ -869,8 +856,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         if not self.is_running or not self.is_mounted or self._maintenance_busy:
             return
         try:
-            interval = self.query_one("#refresh-interval", Select).value
-            auto = self.query_one("#auto-refresh", Switch).value
+            interval = self._monitoring_settings["interval"]
+            auto = self._monitoring_settings["auto_refresh"]
             follow = self.query_one("#log-follow", Switch).value
         except NoMatches:
             # A timer callback can already be queued while child widgets are
@@ -1241,7 +1228,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             )
         self._update_text(
             "#settings-info",
-            f"Workspace {item['workspace_id']}\n"
+            f"Project: {plain(item['project'])}\nWorkspace {item['workspace_id']}\n"
             f"Saved: CPU {configured.get('cpu_cores')} · RAM {size(configured.get('memory_bytes'))} · PID {configured.get('pids')}\n"
             f"Effective: {effective_label}\n"
             "A CPU quota is not CPU affinity; a memory ceiling does not reserve RAM.\n"
@@ -1342,8 +1329,6 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                 return
             if event.value != self.query_one("#content", TabbedContent).active:
                 self.action_tab(event.value)
-        elif event.select.id == "refresh-interval":
-            self._render_monitoring_state()
         elif event.select.id == "log-source":
             self._render_logs()
         elif event.select.id == "session-scope":
@@ -1361,8 +1346,6 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             self.action_refresh()
         elif action == "show-logs":
             self.action_logs()
-        elif action == "show-settings":
-            self.action_settings()
         elif action == "scan-storage":
             self.scan_storage(self.selected)
         elif action == "connect-sessions":

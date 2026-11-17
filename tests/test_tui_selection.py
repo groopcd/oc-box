@@ -23,7 +23,8 @@ if AVAILABLE:
     from textual.widgets import Collapsible, Input, Select, Switch, TabbedContent
 
     from oc_box.tui_app import Confirm, DashboardApp
-    from oc_box.tui_settings import SettingsScreen
+    from oc_box.tui_settings import SettingsPanel
+    from oc_box.tui_clipboard import ClipboardHelp
 
 
 class SelectionDemo(DemoBackend):
@@ -448,31 +449,28 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                 async with self.dashboard() as (app, pilot, copies, _):
                     app.action_settings()
                     await pilot.pause()
-                    modal = app.screen
-                    self.assertIsInstance(modal, SettingsScreen)
-                    modal.query_one("#pref-interval", Input).value = "7"
+                    screen = app.screen
+                    panel = app.query_one(SettingsPanel)
+                    panel.query_one("#pref-interval", Input).value = "7"
                     await pilot.pause()
                     self.assertEqual(copies, [])
-                    widget = modal.query_one("#" + action)
+                    widget = panel.query_one("#" + action)
                     span = self.visible_span(app, widget, text)
                     before = await self.drag(app, pilot, copies, span)
-                    self.assertIs(app.screen, modal, "drag must not Apply/dismiss")
+                    self.assertIs(app.screen, screen, "drag must not open a window")
                     self.assertEqual(
-                        modal.query_one("#pref-interval", Input).value, "7"
+                        panel.query_one("#pref-interval", Input).value, "7"
                     )
-                    self.assertEqual(
-                        app.query_one("#refresh-interval", Select).value, 1
-                    )
+                    self.assertEqual(app._settings_snapshot()["interval"], 1)
                     self.assertTrue(app.read_only)
                     self.assert_highlight(app, span)
                     self.assert_copied(app, copies, before, text)
                     await self.click(
-                        app, pilot, modal.query_one("#preferences-cancel"), "Cancel"
+                        app, pilot, panel.query_one("#preferences-cancel"), "Revert"
                     )
-                    self.assertNotIsInstance(app.screen, SettingsScreen)
-                    self.assertEqual(
-                        app.query_one("#refresh-interval", Select).value, 1
-                    )
+                    self.assertIs(app.screen, screen)
+                    self.assertFalse(panel.dirty)
+                    self.assertEqual(app._settings_snapshot()["interval"], 1)
 
     async def test_dropdown_option_text_drag_copies_without_selecting_option(self):
         async with self.dashboard() as (app, pilot, copies, _):
@@ -640,7 +638,7 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
             )
 
     async def test_modal_roundtrip_before_mouse_up_disarms_the_original_action(self):
-        for route in ("push/pop", "F2/Escape"):
+        for route in ("push/pop", "F1/Escape"):
             with self.subTest(route=route):
                 async with self.dashboard() as (app, pilot, copies, _):
                     span = self.visible_span(app, app.query_one("#show-logs"), "Logs")
@@ -653,9 +651,9 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                         app.pop_screen()
                         await pilot.pause()
                     else:
-                        await pilot.press("f2")
+                        await pilot.press("f1")
                         await pilot.pause()
-                        self.assertIsInstance(app.screen, SettingsScreen)
+                        self.assertIsInstance(app.screen, ClipboardHelp)
                         await pilot.press("escape")
                         await pilot.pause()
                     await self.mouse(app, pilot, events.MouseUp, span[1])

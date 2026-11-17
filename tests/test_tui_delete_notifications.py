@@ -108,7 +108,7 @@ class DeleteNotificationTests(unittest.IsolatedAsyncioTestCase):
         app = DashboardApp(DemoBackend(), read_only=read_only, demo=demo)
         async with app.run_test(size=(120, 40)) as pilot:
             await self.settle(app, pilot)
-            app.query_one("#auto-refresh", Switch).value = False
+            app.apply_settings({**app._settings_snapshot(), "auto_refresh": False})
             app.query_one("#log-follow", Switch).value = False
             app.action_tab("sessions")
             app._apply_sessions(catalog, catalog.list())

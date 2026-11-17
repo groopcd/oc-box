@@ -688,7 +688,7 @@ class DisplayPerformanceTests(unittest.IsolatedAsyncioTestCase):
         app = DashboardApp(backend, read_only=True, demo=True)
         async with app.run_test(size=(120, 35)) as pilot:
             await self.ready(app, pilot)
-            self.assertEqual(app.query_one("#refresh-interval", Select).value, 1)
+            self.assertEqual(app._settings_snapshot()["interval"], 1)
             backend.hold = True
             app.refresh_report()
             app.refresh_logs()

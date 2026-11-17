@@ -3,7 +3,7 @@
 from types import MappingProxyType
 
 from textual.containers import Horizontal, Vertical, VerticalScroll
-from textual.screen import ModalScreen
+from textual.message import Message
 from textual.validation import Integer
 from textual.widgets import Button, Input, Label, Select, Static, Switch
 
@@ -38,32 +38,44 @@ DEFAULT_SETTINGS = MappingProxyType(
 )
 
 
-class SettingsScreen(ModalScreen):
-    BINDINGS = [("escape", "cancel", "Cancel")]
-    CSS = """
-    SettingsScreen { align: center middle; }
-    #preferences-window { width: 100; max-width: 95%; height: 85%;
-      border: round $accent; background: $surface; padding: 0 1; }
-    #preferences-title { height: 2; text-style: bold; }
-    #preferences-topics { height: 1fr; min-height: 0; }
-    .settings-topic { height: auto; border: round $primary; padding: 0 1; margin-bottom: 1; }
-    .settings-topic-title { height: 1; text-style: bold; }
-    .settings-row { height: auto; min-height: 3; }
-    .settings-row Label { width: 24; padding: 1 0; }
-    .settings-row Select, .settings-row Input { width: 1fr; }
-    .settings-row SelectCurrent > #label { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
-    #pref-interval-error { height: auto; color: $error; }
-    #preferences-actions { height: 3; }
-    #preferences-actions Button { margin-right: 1; }
+class SettingsPanel(Vertical):
+    """One inline draft; only Apply changes the dashboard's active preferences."""
+
+    BINDINGS = [("escape", "revert", "Revert edits")]
+    DEFAULT_CSS = """
+    SettingsPanel { height: 1fr; min-height: 0; }
+    SettingsPanel #preferences-title { height: auto; text-style: bold; }
+    SettingsPanel #preferences-topics { height: 1fr; min-height: 0; }
+    SettingsPanel .settings-topic { height: auto; border: round $primary;
+      padding: 0 1; margin-bottom: 1; }
+    SettingsPanel .settings-topic-title { height: auto; text-style: bold; }
+    SettingsPanel .settings-row { height: auto; min-height: 3; }
+    SettingsPanel .settings-row Label { width: 24; padding: 1 0; }
+    SettingsPanel .settings-toggle-row { min-height: 1; height: 1; }
+    SettingsPanel .settings-toggle-row Label { padding: 0; }
+    SettingsPanel .settings-row Select, SettingsPanel .settings-row Input { width: 1fr; }
+    SettingsPanel .settings-row SelectCurrent > #label {
+      height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
+    SettingsPanel #pref-interval-error { height: auto; color: $error; }
+    SettingsPanel #preferences-actions { height: 3; }
+    SettingsPanel #preferences-actions Button { width: auto; min-width: 8; margin-right: 1; }
     """
 
-    def __init__(self, values, themes, *, read_only=False, resources=""):
-        super().__init__()
+    class ApplyRequested(Message):
+        def __init__(self, values):
+            super().__init__()
+            self.values = values
+
+    class RevertRequested(Message):
+        pass
+
+    def __init__(self, values, themes, *, read_only=False, resources="", **kwargs):
+        super().__init__(**kwargs)
         self.values, self.themes = dict(values), tuple(themes)
         self.read_only, self.resources = read_only, resources
 
     def compose(self):
-        with Vertical(id="preferences-window"):
+        with Vertical():
             yield Static(
                 "Dashboard settings · session only · Reset fills defaults; Apply activates them",
                 id="preferences-title",
@@ -72,7 +84,7 @@ class SettingsScreen(ModalScreen):
             with VerticalScroll(id="preferences-topics"):
                 with Vertical(classes="settings-topic"):
                     yield Label("Monitoring", classes="settings-topic-title")
-                    with Horizontal(classes="settings-row"):
+                    with Horizontal(classes="settings-row settings-toggle-row"):
                         yield Label("Automatic refresh")
                         yield Switch(
                             self.values["auto_refresh"], id="pref-auto-refresh"
@@ -101,7 +113,7 @@ class SettingsScreen(ModalScreen):
                             allow_blank=False,
                             id="pref-theme",
                         )
-                    with Horizontal(classes="settings-row"):
+                    with Horizontal(classes="settings-row settings-toggle-row"):
                         yield Label("Workspace details")
                         yield Switch(self.values["details"], id="pref-details")
                     yield Static(
@@ -129,7 +141,7 @@ class SettingsScreen(ModalScreen):
                     )
                 with Vertical(classes="settings-topic"):
                     yield Label("Logs", classes="settings-topic-title")
-                    with Horizontal(classes="settings-row"):
+                    with Horizontal(classes="settings-row settings-toggle-row"):
                         yield Label("Follow new entries")
                         yield Switch(self.values["log_follow"], id="pref-log-follow")
                     with Horizontal(classes="settings-row"):
@@ -155,10 +167,12 @@ class SettingsScreen(ModalScreen):
                         "Resources · information only", classes="settings-topic-title"
                     )
                     yield Static(
-                        self.resources or "No workspace selected.", markup=False
+                        self.resources or "No workspace selected.",
+                        id="settings-info",
+                        markup=False,
                     )
                     yield Static(
-                        "CPU/RAM/storage editing is deferred. This window never resets a container or applies resource limits.",
+                        "CPU/RAM/storage editing is deferred. These preferences never reset a container or apply resource limits.",
                         markup=False,
                     )
                 with Vertical(classes="settings-topic"):
@@ -177,13 +191,56 @@ class SettingsScreen(ModalScreen):
             with Horizontal(id="preferences-actions"):
                 yield Button("Apply", id="preferences-apply", variant="primary")
                 yield Button("Reset to defaults", id="preferences-reset")
-                yield Button("Cancel", id="preferences-cancel")
+                yield Button("Revert", id="preferences-cancel")
 
-    def action_cancel(self):
-        self.dismiss(None)
+    def _draft_values(self):
+        return {
+            "auto_refresh": self.query_one("#pref-auto-refresh", Switch).value,
+            "interval": self.query_one("#pref-interval", Input).value,
+            "theme": self.query_one("#pref-theme", Select).value,
+            "details": self.query_one("#pref-details", Switch).value,
+            "session_scope": self.query_one("#pref-session-scope", Select).value,
+            "session_filter": self.query_one("#pref-session-filter", Input).value,
+            "log_follow": self.query_one("#pref-log-follow", Switch).value,
+            "log_source": self.query_one("#pref-log-source", Select).value,
+            "log_query": self.query_one("#pref-log-query", Input).value,
+        }
+
+    @property
+    def dirty(self):
+        return self._draft_values() != {
+            **self.values,
+            "interval": str(self.values["interval"]),
+        }
+
+    def load_values(self, values):
+        """Replace a clean or explicitly reverted/applied draft, never on a poll."""
+        self.values = dict(values)
+        for key, selector in (
+            ("auto_refresh", "#pref-auto-refresh"),
+            ("details", "#pref-details"),
+            ("log_follow", "#pref-log-follow"),
+        ):
+            self.query_one(selector, Switch).value = values[key]
+        for key, selector in (
+            ("theme", "#pref-theme"),
+            ("session_scope", "#pref-session-scope"),
+            ("log_source", "#pref-log-source"),
+        ):
+            self.query_one(selector, Select).value = values[key]
+        for key, selector in (
+            ("interval", "#pref-interval"),
+            ("session_filter", "#pref-session-filter"),
+            ("log_query", "#pref-log-query"),
+        ):
+            self.query_one(selector, Input).value = str(values[key])
+        self.query_one("#pref-interval-error", Static).update("")
+
+    def action_revert(self):
+        self.post_message(self.RevertRequested())
 
     def reset_defaults(self):
-        # Stage changes just like ordinary edits: Cancel still discards them.
+        # Stage changes just like ordinary edits: Revert still discards them.
         # Read-only mode, resources, connections, favorites and log buffers are
         # deliberately outside this preference schema.
         for key, selector in (
@@ -212,10 +269,13 @@ class SettingsScreen(ModalScreen):
 
     def on_button_pressed(self, event):
         if event.button.id == "preferences-cancel":
-            self.action_cancel()
+            event.stop()
+            self.action_revert()
         elif event.button.id == "preferences-reset":
+            event.stop()
             self.reset_defaults()
         elif event.button.id == "preferences-apply":
+            event.stop()
             interval_input = self.query_one("#pref-interval", Input)
             raw_interval = interval_input.value
             try:
@@ -235,20 +295,6 @@ class SettingsScreen(ModalScreen):
                 interval_input.focus()
                 interval_input.scroll_visible(animate=False)
                 return
-            self.dismiss(
-                {
-                    "auto_refresh": self.query_one("#pref-auto-refresh", Switch).value,
-                    "interval": interval,
-                    "theme": self.query_one("#pref-theme", Select).value,
-                    "details": self.query_one("#pref-details", Switch).value,
-                    "session_scope": self.query_one(
-                        "#pref-session-scope", Select
-                    ).value,
-                    "session_filter": self.query_one(
-                        "#pref-session-filter", Input
-                    ).value,
-                    "log_follow": self.query_one("#pref-log-follow", Switch).value,
-                    "log_source": self.query_one("#pref-log-source", Select).value,
-                    "log_query": self.query_one("#pref-log-query", Input).value,
-                }
+            self.post_message(
+                self.ApplyRequested({**self._draft_values(), "interval": interval})
             )

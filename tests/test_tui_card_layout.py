@@ -363,5 +363,6 @@ class CardLayoutTests(unittest.IsolatedAsyncioTestCase):
                 app.query_one("#section-picker", Select).value = "settings"
                 await pilot.pause()
                 self.assertEqual(app.query_one("#content").active, "settings")
-                self.assertTrue(app.query_one("#auto-refresh").value)
+                self.assertTrue(app.query_one("#pref-auto-refresh").value)
+                self.assertTrue(app._settings_snapshot()["auto_refresh"])
                 self.assertIsNone(app.catalog)

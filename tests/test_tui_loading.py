@@ -96,7 +96,7 @@ class SessionLoadingTests(unittest.IsolatedAsyncioTestCase):
 
     async def prepare(self, app, pilot):
         await self.settle(app, pilot)
-        app.query_one("#auto-refresh", Switch).value = False
+        app.apply_settings({**app._settings_snapshot(), "auto_refresh": False})
         app.query_one("#log-follow", Switch).value = False
         app.action_tab("sessions")
         await pilot.pause()
@@ -307,9 +307,14 @@ class SessionLoadingTests(unittest.IsolatedAsyncioTestCase):
                         if via_settings:
                             app.action_settings()
                             await pilot.pause()
-                            values = dict(app.screen.values)
-                            await pilot.press("escape")
-                            app.apply_settings({**values, "session_scope": "project"})
+                            app.query_one(
+                                "#pref-session-scope", Select
+                            ).value = "project"
+                            await pilot.pause()
+                            self.assertFalse(cancel.is_set())
+                            await pilot.click("#preferences-apply")
+                            await pilot.pause()
+                            app.action_tab("sessions")
                         else:
                             app.query_one("#session-scope", Select).value = "project"
                         await pilot.pause()

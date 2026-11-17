@@ -18,6 +18,7 @@ AVAILABLE = all(importlib.util.find_spec(name) for name in ("textual", "pyte"))
 if AVAILABLE:
     from oc_box.tui_app import DashboardApp, Confirm
     from textual.geometry import Offset
+    from textual.screen import ModalScreen
     from textual.selection import Selection
     from textual.widgets import (
         Button,
@@ -29,7 +30,7 @@ if AVAILABLE:
         Switch,
         TabbedContent,
     )
-    from oc_box.tui_settings import SettingsScreen, DEFAULT_SETTINGS
+    from oc_box.tui_settings import SettingsPanel, DEFAULT_SETTINGS
     from oc_box.tui_clipboard import ClipboardInput
     from oc_box.tui_status import MonitorPanel
 
@@ -491,16 +492,20 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             widget.disconnect()
             callback.assert_called_once()
 
-    async def test_settings_shortcuts_open_topics_and_apply_without_backend_actions(
+    async def test_settings_shortcuts_navigate_inline_topics_and_apply_without_backend_actions(
         self,
     ):
         backend = SessionDemo()
         app = DashboardApp(backend, read_only=True, demo=True)
         async with app.run_test(size=(120, 40)) as pilot:
             await self.settle(app, pilot)
-            self.assertEqual(app.query_one("#refresh-interval", Select).value, 1)
+            self.assertEqual(app._settings_snapshot()["interval"], 1)
             await pilot.press("s")
-            self.assertIsInstance(app.screen, SettingsScreen)
+            self.assertNotIsInstance(app.screen, ModalScreen)
+            self.assertEqual(
+                app.query_one("#content", TabbedContent).active, "settings"
+            )
+            panel = app.query_one(SettingsPanel)
             self.assertEqual(len(app.screen.query(".settings-topic")), 6)
             self.assertEqual(app.screen.query_one("#pref-interval", Input).value, "1")
             app.screen.query_one("#pref-interval", Input).value = "17"
@@ -511,9 +516,10 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             app.screen.query_one("#pref-session-filter", Input).value = "example"
             await pilot.click("#preferences-apply")
             await pilot.pause()
-            self.assertNotIsInstance(app.screen, SettingsScreen)
-            self.assertEqual(app.query_one("#refresh-interval", Select).value, 17)
-            self.assertFalse(app.query_one("#auto-refresh", Switch).value)
+            self.assertNotIsInstance(app.screen, ModalScreen)
+            self.assertEqual(app._settings_snapshot()["interval"], 17)
+            self.assertFalse(app._settings_snapshot()["auto_refresh"])
+            self.assertFalse(panel.dirty)
             self.assertFalse(app.query_one("#log-follow", Switch).value)
             self.assertFalse(app.query_one("#workspace-details", Collapsible).collapsed)
             self.assertEqual(app.log_query, "ready")
@@ -521,10 +527,15 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(app.read_only)
             self.assertEqual(backend.calls, [])
             await pilot.press("f2")
-            self.assertIsInstance(app.screen, SettingsScreen)
+            self.assertNotIsInstance(app.screen, ModalScreen)
+            self.assertEqual(
+                app.query_one("#content", TabbedContent).active, "settings"
+            )
             app.screen.query_one("#pref-interval", Input).value = "59"
+            app.screen.query_one("#pref-interval", Input).focus()
             await pilot.press("escape")
-            self.assertEqual(app.query_one("#refresh-interval", Select).value, 17)
+            self.assertEqual(app._settings_snapshot()["interval"], 17)
+            self.assertEqual(panel.query_one("#pref-interval", Input).value, "17")
 
     async def test_refresh_interval_apply_accepts_all_integers_and_rejects_bad_types_atomically(
         self,
@@ -534,14 +545,12 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(app, pilot)
             app.action_settings()
             await pilot.pause()
-            values = dict(app.screen.values)
+            values = dict(app.query_one(SettingsPanel).values)
             await pilot.press("escape")
             for interval in range(1, 61):
                 with self.subTest(valid_interval=interval):
                     app.apply_settings({**values, "interval": interval})
-                    self.assertEqual(
-                        app.query_one("#refresh-interval", Select).value, interval
-                    )
+                    self.assertEqual(app._settings_snapshot()["interval"], interval)
             for name, interval in (
                 ("zero", 0),
                 ("negative", -1),
@@ -570,10 +579,8 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                                 "log_query": "must not apply",
                             }
                         )
-                    self.assertEqual(
-                        app.query_one("#refresh-interval", Select).value, 60
-                    )
-                    self.assertTrue(app.query_one("#auto-refresh", Switch).value)
+                    self.assertEqual(app._settings_snapshot()["interval"], 60)
+                    self.assertTrue(app._settings_snapshot()["auto_refresh"])
                     self.assertEqual(app.query_one("#session-search", Input).value, "")
                     self.assertEqual(app.query_one("#log-search", Input).value, "")
                     message.assert_called_once_with(
@@ -624,43 +631,44 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(app, pilot)
             app.action_settings()
             await pilot.pause()
-            modal = app.screen
+            panel = app.query_one(SettingsPanel)
             # This matrix tests validation, not Textual's timer-based suppression
             # of repeated mouse clicks while the button has its -active effect.
-            modal.query_one("#preferences-apply", Button).active_effect_duration = 0
-            interval = modal.query_one("#pref-interval", Input)
-            # A successful Apply may reach the app's message hook only after
-            # its modal was dismissed; retain the synthetic input by button.
-            apply_inputs[modal.query_one("#preferences-apply", Button)] = interval
+            panel.query_one("#preferences-apply", Button).active_effect_duration = 0
+            interval = panel.query_one("#pref-interval", Input)
+            apply_inputs[panel.query_one("#preferences-apply", Button)] = interval
             self.assertIsInstance(interval, ClipboardInput)
             self.assertEqual(interval.type, "integer")
-            modal.query_one("#pref-session-filter", Input).value = "retained draft"
+            panel.query_one("#pref-session-filter", Input).value = "retained draft"
+            panel.query_one("#pref-auto-refresh", Switch).value = False
+            panel.query_one("#pref-details", Switch).value = True
+            panel.query_one("#pref-log-follow", Switch).value = False
+            panel.query_one("#pref-log-query", Input).value = "retained log draft"
+            applied = app._settings_snapshot()
             for name, raw in invalid_intervals:
                 with self.subTest(invalid_interval=name):
                     interval.value = raw
-                    with patch.object(modal, "dismiss") as dismiss:
+                    with patch.object(app, "apply_settings") as apply:
                         await pilot.click("#preferences-apply")
                         await pilot.pause()
-                    dismiss.assert_not_called()
-                    self.assertIs(app.screen, modal)
-                    self.assertEqual(
-                        app.query_one("#refresh-interval", Select).value, 1
-                    )
+                    apply.assert_not_called()
+                    self.assertNotIsInstance(app.screen, ModalScreen)
+                    self.assertEqual(app._settings_snapshot(), applied)
                     self.assertEqual(app.query_one("#session-search", Input).value, "")
                     self.assertEqual(
-                        modal.query_one("#pref-session-filter", Input).value,
+                        panel.query_one("#pref-session-filter", Input).value,
                         "retained draft",
                     )
                     self.assertIn(
                         "1 to 60 seconds",
-                        str(modal.query_one("#pref-interval-error", Static).render()),
+                        str(panel.query_one("#pref-interval-error", Static).render()),
                     )
                     self.assertTrue(interval.has_focus)
             interval.value = "7"
             await pilot.click("#preferences-apply")
             await pilot.pause()
-            self.assertNotIsInstance(app.screen, SettingsScreen)
-            self.assertEqual(app.query_one("#refresh-interval", Select).value, 7)
+            self.assertNotIsInstance(app.screen, ModalScreen)
+            self.assertEqual(app._settings_snapshot()["interval"], 7)
             self.assertEqual(
                 app.query_one("#session-search", Input).value, "retained draft"
             )
@@ -675,10 +683,8 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     interval.value = value
                     await pilot.click("#preferences-apply")
                     await pilot.pause()
-                    self.assertNotIsInstance(app.screen, SettingsScreen)
-                    self.assertEqual(
-                        app.query_one("#refresh-interval", Select).value, int(value)
-                    )
+                    self.assertNotIsInstance(app.screen, ModalScreen)
+                    self.assertEqual(app._settings_snapshot()["interval"], int(value))
                     self.assertEqual(
                         app.query_one("#session-search", Input).value, "retained draft"
                     )
@@ -736,7 +742,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
         app = DashboardApp(DemoBackend(), read_only=True, demo=True)
         async with app.run_test(size=(140, 45)) as pilot:
             await self.settle(app, pilot)
-            app.query_one("#auto-refresh", Switch).value = False
+            app.apply_settings({**app._settings_snapshot(), "auto_refresh": False})
             for dimensions in ((80, 24), (100, 30), (140, 45), (220, 70)):
                 with self.subTest(dimensions=dimensions):
                     was_compact = app._compact_layout
@@ -778,8 +784,8 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     app.action_tab("settings")
                     await pilot.pause()
                     self.assertEqual(
-                        app.query_one("#auto-refresh").region.x,
-                        app.query_one("#refresh-interval").region.x,
+                        app.query_one("#pref-auto-refresh").region.x,
+                        app.query_one("#pref-interval").region.x,
                     )
                     app.action_tab("sessions")
                     await pilot.pause()
@@ -836,7 +842,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                 await pilot.pause()
                 await pilot.click("#preferences-reset")
                 await pilot.pause()
-                self.assertIsInstance(app.screen, SettingsScreen)
+                self.assertNotIsInstance(app.screen, ModalScreen)
                 self.assertTrue(
                     app.screen.query_one("#pref-auto-refresh", Switch).value
                 )
@@ -861,19 +867,21 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(
                     app.screen.query_one("#pref-log-query", Input).value, ""
                 )
-                self.assertEqual(app.query_one("#refresh-interval", Select).value, 59)
+                self.assertEqual(app._settings_snapshot()["interval"], 59)
                 self.assertTrue(app.read_only)
                 if apply:
                     await pilot.click("#preferences-apply")
                 else:
-                    await pilot.press("escape")
+                    await pilot.click("#preferences-cancel")
                 await pilot.pause()
                 self.assertEqual(
-                    app.query_one("#refresh-interval", Select).value, 1 if apply else 59
+                    app._settings_snapshot()["interval"], 1 if apply else 59
                 )
             app.action_settings()
             await pilot.pause()
-            self.assertEqual(app.screen.values, dict(DEFAULT_SETTINGS))
+            self.assertEqual(
+                app.query_one(SettingsPanel).values, dict(DEFAULT_SETTINGS)
+            )
             await pilot.press("escape")
             self.assertEqual(app.logs.search(), retained)
             self.assertEqual(backend.calls, [])
@@ -898,7 +906,8 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                 )
             await pilot.click("#preferences-reset")
             await pilot.click("#preferences-cancel")
-            self.assertNotIsInstance(app.screen, SettingsScreen)
+            self.assertNotIsInstance(app.screen, ModalScreen)
+            self.assertFalse(app.query_one(SettingsPanel).dirty)
 
     async def test_background_refresh_keeps_session_rows_scroll_and_cursor_static(self):
         backend = SessionDemo()
@@ -1036,7 +1045,9 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(app.read_only)
             self.assertFalse(backend.calls)
 
-    async def test_copy_view_and_modal_clipboard_do_not_apply_or_delete(self):
+    async def test_copy_view_inline_settings_and_modal_clipboard_do_not_apply_or_delete(
+        self,
+    ):
         backend = SessionDemo()
         app = DashboardApp(backend, read_only=True)
         async with app.run_test(size=(80, 24)) as pilot:
@@ -1056,7 +1067,10 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertIn("Dashboard settings", app.clipboard)
             self.assertIn("Reset to defaults", app.clipboard)
-            self.assertIsInstance(app.screen, SettingsScreen)
+            self.assertNotIsInstance(app.screen, ModalScreen)
+            self.assertEqual(
+                app.query_one("#content", TabbedContent).active, "settings"
+            )
             await pilot.press("escape")
 
             app.push_screen(Confirm("Synthetic deletion review", destructive=True))
