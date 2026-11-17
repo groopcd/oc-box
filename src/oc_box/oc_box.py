@@ -1595,6 +1595,18 @@ def config_archive(data, *, image_preview=False, image_preview_snapshot=None):
     replacements = {}
     sandbox_version = None
     config_home = data["home"] + "/.config/opencode"
+    if v2:
+        if __package__:
+            from . import ui_state
+        else:
+            import ui_state
+        if release in ui_state.SUPPORTED and (
+            (source / "plugins/oc-box-ui-state").exists()
+            or (source / "plugins/oc-box-ui-state").is_symlink()
+        ):
+            raise BoxError(
+                "Generated UI-state helper conflicts with an existing host plugin."
+            )
     if v2 and source.is_dir():
         candidates = set()
         configured = {}
@@ -1805,6 +1817,12 @@ def config_archive(data, *, image_preview=False, image_preview_snapshot=None):
                 "plugins/oc-box-build-permissions/package.json",
                 b'{"type":"module","main":"index.js"}',
             )
+            if release in ui_state.SUPPORTED:
+                # Only normal owning configuration preparation installs this.
+                # Native/project/managed plugin policy remains authoritative:
+                # unlike the Build helper it gets no final mandatory overlay.
+                for name, content in ui_state.package_sources(PACKAGE).items():
+                    add_bytes("plugins/oc-box-ui-state/" + name, content)
     return buffer.getvalue()
 
 
@@ -2832,6 +2850,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                         sys.modules[__name__],
                         path,
                         data,
+                        ui_bridge=version in native_tabs.SUPPORTED,
                         **(
                             {"image_preview": args.image_preview}
                             if getattr(args, "image_preview", False)
@@ -3028,6 +3047,7 @@ def launch_client(path, data, args, version, exported, owner=None):
                     owner.connection,
                     command,
                     interactive=True,
+                    ui_owner=True,
                 )
                 if owner
                 else exec_command(data, command, interactive=True)

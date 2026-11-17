@@ -20,6 +20,8 @@ unavailable; the open count is then unknown, not a fabricated zero/open row.
 trusted-code-only initial-selection seam. It calls
 `read_snapshot(box, data, connection)` for an authenticated document/catalog
 request. The default is `None` and performs no focus/report lookup.
+Production `web_session()` always supplies `ui_state.read_snapshot`; the `None`
+default is for direct Gateway consumers, not a stale-owner selection fallback.
 The native reader returns a frozen `Snapshot` with `status`, exact `selected`
 conversation, ordered root `tabs`, separately verified `activeRoot`, and `source`.
 A valid snapshot supplies the full tab membership, not merely a selection guess
@@ -32,9 +34,9 @@ The original trusted dictionary seam
 `{"status": "verified", "selectedSessionID": ID, "source": LABEL}` remains supported
 for direct catalog members only. Unavailable/malformed/error reports leave
 selection explicit, without falling back to an old owner's declaration. Saved
-membership may still be displayed when no report is available. Production helper
-installation, client binding and runtime acceptance are separate integration
-gates; this adapter alone does not establish them.
+membership may still be displayed when no report is available. Helper installation
+and client binding are described in [ui-state.md](ui-state.md). Their native-only
+checks do not by themselves establish composed-browser or host acceptance.
 
 An explicit TUI-tab click selects the native ID route, updates the shell query
 and ARIA highlight, and does not send prompts or change permissions/location.

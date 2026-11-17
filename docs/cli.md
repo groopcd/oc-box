@@ -405,15 +405,17 @@ as a browser selection outside the TUI-open count; it is not silently replaced.
 Native browser tabs and controls inside the iframe remain client-local and
 are **not** automatically seeded or synchronized with TUI tabs. Already-open
 archived sessions, moved/worktree locations and saved child IDs are not silently
-filtered: each listed ID must belong to native's saved tab membership and pass
-an identity-matching GET from this same private service. Unopened history and
+filtered: each listed ID must belong to a fresh native TUI report, or the
+verified saved-membership fallback, and pass an identity-matching GET from this
+same private service. Unopened history and
 missing/deleted IDs are not listed. Native normally groups child navigation
 under its root tab; the index does not invent a family tab.
 Global TUI tab scope does not combine private workspace services or host history.
 For restored workspaces, the saved scope uses the retained internal launch path;
 sessions within that scope may legitimately have other directories.
-If saved TUI membership is unavailable, the index labels that limitation and
-does not guess a current session or list historical sessions.
+Without a fresh report, the shell may use verified saved TUI membership. If that
+fallback is also unavailable, it labels the limitation and does not invent tabs
+or list historical sessions.
 An empty saved scope stays empty; unverifiable state shows a retry message.
 The chooser always offers **Open native OpenCode Home**, including when there
 are no TUI tabs, saved membership is missing, or an authenticated index query
@@ -424,11 +426,26 @@ tabs remain native-client local and do not populate this TUI membership list.
 `--session ID` explicitly selects an existing ID in this same private DB, even
 when it is not a TUI-open member, and does not add a fake open tab or create a
 session. It wins initial selection. Without it, a URL-selected ID is verified;
-otherwise the existing launcher-declared ID is retained only if it is an actual
-verified member. That declaration is **not proof of native TUI focus**. No
-first-tab, timestamp or foreground-activity guess is used; without a reliable
-target the shell offers all tabs for explicit selection. Multiple TUI clients
-remain ambiguous. Standard same-origin iframe URL observation tracks native SPA
+otherwise a fresh report from the container-native TUI supplies the exact current
+conversation and ordered open roots. A routed child stays the exact iframe
+conversation while its separately verified root is highlighted in the tabstrip.
+
+The normal supported V2 owning preparation installs a small public-SDK helper
+inside the container. A fresh report from the owning TUI is preferred, even when
+blurred; opening a browser naturally blurs its terminal. If it is gone, exactly
+one fresh alternate TUI may supply the selection. Multiple alternates, expired,
+missing or invalid reports require explicit selection: no first-tab, timestamp,
+foreground-activity or old owner-declaration guess is used. Reports are bounded
+cooperative UI metadata, not client attestation or host-file authorization.
+Selection is verified at snapshot time, not continuously followed.
+
+Older running owners cannot acquire the helper on attach. Use `--session ID` or
+choose a displayed tab; a subsequent normal owning startup can enable reporting.
+Attach never installs the helper, refreshes configuration/credentials or unlocks
+the vault. Project/managed plugin policy may disable reporting without preventing
+explicit browsing. See [the reporting lifetime and limits](ui-state.md).
+
+Standard same-origin iframe URL observation tracks native SPA
 navigation only after identity verification; Home/drafts/foreign server views
 assert no selected TUI session. Whole-page reloads and explicit conversation
 changes can navigate native content; draft persistence across those actions is

@@ -22,7 +22,7 @@ from urllib.error import HTTPError
 from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
 
 from oc_box import native_tabs, oc_box as box, opencode_v2_io as bridge
-from oc_box import web_sessions as web, workspace_service as service
+from oc_box import ui_state, web_sessions as web, workspace_service as service
 
 
 class ShellHTML(HTMLParser):
@@ -671,6 +671,10 @@ class WebSessionsTests(unittest.TestCase):
             )
         verify.assert_called_once_with(box, self.data, self.connection, "ses_two")
         self.assertEqual(factory.call_args.args[2]["web_session_override"], "ses_two")
+        self.assertIs(
+            factory.call_args.kwargs["selection_snapshot_reader"],
+            ui_state.read_snapshot,
+        )
 
     def test_empty_missing_and_authorized_error_pages_offer_home_without_session_rows(
         self,
