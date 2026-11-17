@@ -28,6 +28,23 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
+### Open TUI sessions in the web interface
+
+`tests/test_web_sessions.py` checks four-session membership, complete paginated
+catalogs, native tab order, idle versus active semantics, exact restored container
+paths, global/cwd scope, closed/archived/child/foreign exclusions, empty/missing/
+invalid state, owning-web selection, HTML escaping and authenticated relay
+behavior. Native port-scoped cookies and Origin checks remain authoritative.
+
+Run `python3 -B tests/smoke_web_sessions_v2.py --opencode /path/to/opencode`
+separately with native 2.2.6 and 2.3.0. It opens four tabs using native PTYs in
+fresh synthetic stores, then exercises the production index with real native
+HTTP pairing, session GETs and public web-shell routes. Only the outer Podman
+exec boundary is replaced with local processes. Fixture state is retained under
+a fresh temporary directory, including on failure. This does not render a
+browser, certify browser-local tab seeding (which is not implemented), or
+establish external-host/rootless-Podman acceptance.
+
 ### Reviewed 5573965 candidate evidence
 
 The following is a review of retained evidence for clean

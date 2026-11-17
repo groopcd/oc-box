@@ -1120,6 +1120,12 @@ class Gateway:
                     headers.extend(data)
                 if b"\r\n\r\n" not in headers:
                     return
+                if __package__:
+                    from . import web_sessions
+                else:
+                    import web_sessions
+                if web_sessions.respond(self, stream, child, bytes(headers)):
+                    return
                 pairing = bytes(headers).startswith(b"GET /auth/connect/")
                 child.stdin.write(headers)
                 child.stdin.flush()
@@ -1173,13 +1179,8 @@ class Gateway:
                 self.capacity.release()
 
     def session_route(self):
-        encoded = base64.urlsafe_b64encode(self.url.encode()).decode().rstrip("=")
-        return (
-            "/server/"
-            + encoded
-            + "/session/"
-            + require_session(self.box, self.connection)
-        )
+        # Native browser tabs are client-local, not the native TUI's open tabs.
+        return "/oc-box/sessions"
 
     def __exit__(self, *_):
         self.closed.set()
@@ -1198,7 +1199,6 @@ class Gateway:
 
 
 def web_session(box, data, connection, args):
-    selected_session = require_session(box, connection)
     with Gateway(box, data, connection, args.port) as gateway:
         pair = api(box, data, connection, "POST", "/api/pair")
         if not isinstance(pair.get("code"), str) or not re.fullmatch(
@@ -1207,9 +1207,7 @@ def web_session(box, data, connection, args):
             raise box.BoxError("Invalid native OpenCode browser pairing response.")
         link = gateway.url + "/auth/connect/" + pair["code"]
         print(
-            "oc-box: OpenCode web session "
-            + selected_session
-            + "\n"
+            "oc-box: OpenCode web workspace session index\n"
             + link
             + "\nThis one-use link grants access to this workspace service. Keep this command open; Ctrl-C closes web access.",
             flush=True,

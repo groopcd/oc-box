@@ -1,0 +1,267 @@
+"""Provider-free native TUI membership -> authenticated web index regression.
+
+Run once per binary with --opencode PATH (2.2.6 or 2.3.0). Uses fresh synthetic
+HOME/XDG stores, native PTYs, native cookie pairing and actual paginated HTTP.
+Only the outer Podman exec boundary is replaced with local processes. No
+browser rendering, shared host service, Podman or host-acceptance claim.
+"""
+
+import argparse
+from http.cookiejar import CookieJar
+from html.parser import HTMLParser
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+from unittest.mock import patch
+from urllib.error import HTTPError
+from urllib.request import HTTPCookieProcessor, ProxyHandler, Request, build_opener
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from smoke_native_tabs_v2 import Client
+from smoke_session_sync_v2 import bounded, private_environment, require, seed
+
+from oc_box import native_tabs, oc_box as box, opencode_compat
+from oc_box import opencode_v2_io as bridge, web_sessions, workspace_service as service
+
+
+class Links(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.sessions = []
+
+    def handle_starttag(self, tag, attrs):
+        values = dict(attrs)
+        if tag == "a" and values.get("href", "").startswith("/server/"):
+            self.sessions.append(values["href"])
+
+
+def exercise(binary, root):
+    project = root / "project"
+    project.mkdir()
+    foreign = root / "other-project"
+    foreign.mkdir()
+    env = private_environment(root / "native")
+    home = Path(env["HOME"])
+    for name, relative in (
+        ("CONFIG", ".config"),
+        ("STATE", ".local/state"),
+        ("DATA", ".local/share"),
+        ("CACHE", ".cache"),
+    ):
+        env["XDG_" + name + "_HOME"] = str(home / relative)
+    env.update({"TERM": "xterm-256color", "COLORTERM": "truecolor"})
+    config = home / ".config/opencode"
+    config.mkdir(parents=True)
+    (config / "cli.json").write_text(
+        json.dumps(
+            {
+                "tabs": {"mode": "on", "scope": "cwd", "layout": "horizontal"},
+                "animations": False,
+                "highlights": False,
+            }
+        )
+    )
+    release = opencode_compat.version(bounded([binary, "--version"], env, project))
+    require(release in ("2.2.6", "2.3.0"), "Web fixture requires 2.2.6 or 2.3.0.")
+    data = {
+        "id": "a" * 32,
+        "project": str(root / "host-restored-location"),
+        "container_project": str(project),
+        "home": str(home),
+        "container": "synthetic-no-podman",
+        "opencode_version": release,
+    }
+    original_run = box.run
+
+    def local_exec(command, **settings):
+        marker = command.index(data["container"])
+        require(
+            command[:3] == ["podman", "exec", "-i"]
+            and command[marker + 1 : marker + 5] == ["python3", "-I", "-S", "-c"],
+            "Web fixture lost the providerless production environment bridge.",
+        )
+        if "input" not in settings:
+            settings["stdin"] = subprocess.DEVNULL
+        return original_run(
+            command[marker + 1 :],
+            cwd=project,
+            env=command.environment,
+            **settings,
+        )
+
+    def local_relay(_box, _data, port):
+        return box.ContainerCommand(
+            [sys.executable, "-B", "-c", service.PROXY, str(port)],
+            box.maintenance_host_env(),
+        )
+
+    previous = Path.cwd()
+    os.chdir(project)
+    try:
+        with patch.dict(os.environ, env, clear=True), bridge.server(binary) as native:
+            require(
+                native("GET", "/api/credential")["data"] == [],
+                "Web fixture inherited credentials.",
+            )
+            opened = [
+                seed(
+                    native,
+                    "ses_web_" + str(index),
+                    project,
+                    title="Synthetic " + str(index),
+                )
+                for index in range(4)
+            ]
+            closed = seed(native, "ses_web_closed", project)
+            seed(native, "ses_web_child", project, parent=opened[0])
+            seed(native, "ses_web_foreign", foreign)
+            for index, ident in enumerate(opened):
+                client = Client(binary, env, project, native.endpoint, ident)
+                try:
+                    client.wait(
+                        lambda: (
+                            native_tabs.read_snapshot(
+                                str(home), str(project), release
+                            ).tabs
+                            == tuple(opened[: index + 1])
+                        ),
+                        "web fixture native tab membership",
+                    )
+                    # Membership can persist before native startup/hydration
+                    # finishes; retain the established PTY fixture's settle.
+                    client.drain(1.3)
+                finally:
+                    client.close()
+                print("Native TUI tabs opened: " + str(index + 1), flush=True)
+            require(
+                native("GET", "/api/session/active")["data"] == {},
+                "Idle web fixture unexpectedly had an active foreground drain.",
+            )
+            before_tabs = native_tabs.read_snapshot(str(home), str(project), release)
+            before_ids = {
+                info["id"] for info in bridge.session_inventory(native, str(project))
+            }
+            before = {
+                ident: native("GET", "/api/experimental/session/" + ident + "/export")[
+                    "data"
+                ]
+                for ident in [*opened, closed]
+            }
+            connection = {
+                **native.endpoint,
+                "workspace": data["id"],
+                "session": opened[0],
+            }
+            opener = build_opener(ProxyHandler({}), HTTPCookieProcessor(CookieJar()))
+            with (
+                patch.object(box, "run", side_effect=local_exec),
+                patch.object(service, "relay_command", side_effect=local_relay),
+                service.Gateway(box, data, connection) as gateway,
+            ):
+                try:
+                    opener.open(gateway.url + web_sessions.INDEX, timeout=10)
+                except HTTPError as error:
+                    require(
+                        error.code == 401, "Native index anonymous refusal changed."
+                    )
+                else:
+                    require(False, "Native index exposed session metadata anonymously.")
+                pair = native("POST", "/api/pair")
+                request = Request(
+                    gateway.url + "/auth/connect/" + pair["code"],
+                    headers={"Accept": "text/html"},
+                )
+                with opener.open(request, timeout=15) as response:
+                    require(
+                        response.geturl() == gateway.url + web_sessions.INDEX,
+                        "Native pairing did not land on the session index.",
+                    )
+                    parser = Links()
+                    parser.feed(response.read().decode())
+                require(
+                    parser.sessions
+                    == [
+                        web_sessions.session_route(gateway.url, ident)
+                        for ident in opened
+                    ],
+                    "Native paired index did not list exactly four ordered open tabs.",
+                )
+                for route, ident in zip(parser.sessions, opened):
+                    with opener.open(gateway.url + route, timeout=10) as response:
+                        require(
+                            response.status == 200
+                            and "text/html" in response.headers["Content-Type"],
+                            "Public native session route did not serve its web shell.",
+                        )
+                        response.read()
+                    with opener.open(
+                        gateway.url + "/api/session/" + ident, timeout=10
+                    ) as response:
+                        require(
+                            json.loads(response.read())["data"]["id"] == ident,
+                            "Paired native browser could not retrieve a listed session.",
+                        )
+                try:
+                    opener.open(
+                        Request(
+                            gateway.url + web_sessions.INDEX,
+                            headers={"Origin": "http://foreign.invalid"},
+                        ),
+                        timeout=10,
+                    )
+                except HTTPError as error:
+                    require(
+                        error.code == 401, "Native same-origin cookie fence changed."
+                    )
+                else:
+                    require(False, "Index weakened native same-origin cookie checks.")
+            require(
+                native_tabs.read_snapshot(str(home), str(project), release)
+                == before_tabs,
+                "Web navigation changed native TUI membership.",
+            )
+            require(
+                {info["id"] for info in bridge.session_inventory(native, str(project))}
+                == before_ids,
+                "Web index created or deleted native history.",
+            )
+            require(
+                all(
+                    native("GET", "/api/experimental/session/" + ident + "/export")[
+                        "data"
+                    ]
+                    == value
+                    for ident, value in before.items()
+                ),
+                "Web index changed retained synthetic transcripts.",
+            )
+    finally:
+        os.chdir(previous)
+    print(
+        "PASS native " + release + ": four idle native TUI tabs, authenticated "
+        "pairing/index, four public native web routes and session GETs, foreign "
+        "origin refusal, unchanged membership and transcripts.",
+        flush=True,
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--opencode", required=True, type=Path)
+    args = parser.parse_args()
+    # Retain this fresh synthetic fixture on failure; never overwrite old evidence.
+    root = Path(tempfile.mkdtemp(prefix="oc-box-web-sessions-v2-"))
+    print("Synthetic fixture: " + str(root), flush=True)
+    exercise(str(args.opencode.resolve()), root)
+    print(
+        "Native HTTP/PTY regression only; NOT rendered-browser or host/Podman "
+        "acceptance.",
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    main()

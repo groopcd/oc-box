@@ -391,8 +391,21 @@ oc-box web --project ~/devel/demo
 oc-box terminal --project ~/devel/demo
 ```
 
-The browser uses upstream's short-lived one-use pairing link and opens the same
-session through the native web app. A host relay binds only `127.0.0.1`, forwards
+The browser uses upstream's short-lived one-use pairing link and opens an
+authenticated oc-box session index at `/oc-box/sessions`. It lists all verified
+open native TUI root tabs in this workspace, including idle sessions, in native
+tab order. Select a link to open that session in the unmodified native web app
+in a separate browser tab; keep the index open or return to its URL and refresh
+to see later TUI membership changes. Native browser tabs are client-local and
+are **not** automatically seeded or synchronized with TUI tabs. Closed historical
+roots, archived sessions, children and tabs from other workspaces are not
+automatically opened. Global TUI tab scope does not combine private workspace
+services. Restored workspaces use their retained internal project path.
+If saved TUI membership is unavailable, the index labels that limitation and
+lists only a verified current session, not every unarchived historical session.
+An empty saved scope stays empty; unverifiable state shows a retry message.
+
+A host relay binds only `127.0.0.1`, forwards
 HTTP/streaming/WebSocket bytes through Podman exec to container loopback, and
 does not publish a container port, allow LAN access, or join the host OpenCode
 service. Links grant access to the workspace service; do not share or log them.

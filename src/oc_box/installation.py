@@ -24,6 +24,7 @@ RUNTIME_FILES = (
     "opencode_compat.py",
     "opencode_v2_io.py",
     "workspace_service.py",
+    "web_sessions.py",
     "workspace_control.py",
     "history_reader.py",
     "history_recovery.py",

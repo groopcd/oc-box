@@ -481,15 +481,30 @@ created using the host's default distro.  Requires host OpenCode 2.x;
      oc-box terminal --project ~/devel/demo
 
 The browser uses upstream's short-lived one-use pairing link and opens
-the same session through the native web app.  A host relay binds only
-‘127.0.0.1’, forwards HTTP/streaming/WebSocket bytes through Podman exec
-to container loopback, and does not publish a container port, allow LAN
-access, or join the host OpenCode service.  Links grant access to the
-workspace service; do not share or log them.  ‘--no-open’ prints the
-link without launching a browser.  ‘--port’ defaults to 0 (choose a free
-loopback port).  Keep the web command open; Ctrl-C closes that relay.
-Browser commands use a sanitized host environment without provider/vault
-values; the server retains the owning launch's credential snapshot.
+an authenticated oc-box session index at ‘/oc-box/sessions’.  It lists
+all verified open native TUI root tabs in this workspace, including idle
+sessions, in native tab order.  Select a link to open that session in
+the unmodified native web app in a separate browser tab; keep the index
+open or return to its URL and refresh to see later TUI membership
+changes.  Native browser tabs are client-local and are **not**
+automatically seeded or synchronized with TUI tabs.  Closed historical
+roots, archived sessions, children and tabs from other workspaces are
+not automatically opened.  Global TUI tab scope does not combine private
+workspace services.  Restored workspaces use their retained internal
+project path.  If saved TUI membership is unavailable, the index labels
+that limitation and lists only a verified current session, not every
+unarchived historical session.  An empty saved scope stays empty;
+unverifiable state shows a retry message.
+
+A host relay binds only ‘127.0.0.1’, forwards HTTP/streaming/WebSocket
+bytes through Podman exec to container loopback, and does not publish a
+container port, allow LAN access, or join the host OpenCode service.
+Links grant access to the workspace service; do not share or log them.
+‘--no-open’ prints the link without launching a browser.  ‘--port’
+defaults to 0 (choose a free loopback port).  Keep the web command open;
+Ctrl-C closes that relay.  Browser commands use a sanitized host
+environment without provider/vault values; the server retains the owning
+launch's credential snapshot.
 
 The owner keeps the lifecycle lock and waits for attached
 terminal/web/TUI clients before final history sync and container stop.
@@ -3437,20 +3452,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2730
 Node: Commands6328
-Node: Options92015
-Node: Lifecycle and persistence115808
-Node: Distribution images117928
-Node: Sessions and recovery122803
-Node: Devices and host permissions129388
-Node: Resource reports131734
-Node: Configuration and environment133845
-Node: Files145226
-Node: Exit status151170
-Node: Examples152023
-Node: Troubleshooting154109
-Node: Installation and manuals165461
-Node: Authors and license174713
-Node: See also175320
+Node: Options92920
+Node: Lifecycle and persistence116713
+Node: Distribution images118833
+Node: Sessions and recovery123708
+Node: Devices and host permissions130293
+Node: Resource reports132639
+Node: Configuration and environment134750
+Node: Files146131
+Node: Exit status152075
+Node: Examples152928
+Node: Troubleshooting155014
+Node: Installation and manuals166366
+Node: Authors and license175618
+Node: See also176225
 
 End Tag Table
 
