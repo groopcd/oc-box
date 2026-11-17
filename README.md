@@ -3,7 +3,7 @@
 **Persistent rootless Podman development environments for unmodified OpenCode.**
 
 Run OpenCode, MCP servers, formatters, plugins, and development tools together
-inside a container, with native language servers on OpenCode 1.x. Give the agent
+inside a container, with native language servers on OpenCode. Give the agent
 control of that environment while exposing only your selected project directory
 by default.
 
