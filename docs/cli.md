@@ -548,7 +548,7 @@ use normal host mode (optionally `--read-only`) for live measurements.
 The seven sections are Status, Settings, Sessions, Terminals, Logs, Storage and
 Backup/restore. `1`–`7` select
 them; `r` refreshes and `q` quits outside a focused embedded terminal. A left
-navigation rail is used on wide terminals; below 118 columns it becomes a header
+navigation rail is used on wide terminals; below 118 columns or 32 rows it becomes a header
 section picker. The header keeps case-insensitive literal
 log search available from every section, including while follow is paused; `Ctrl+L`
 opens Logs and focuses search. `s` or `F2` opens all dashboard settings outside

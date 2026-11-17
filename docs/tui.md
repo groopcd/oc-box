@@ -269,7 +269,7 @@ actions write to the host clipboard.
 ## Seven sections
 
 Shortcuts `1`–`7` keep their existing order. Wide terminals use a left navigation
-rail. Below 118 columns the rail becomes a section picker in the header, leaving
+rail. Below 118 columns or 32 rows the rail becomes a section picker in the header, leaving
 more cells for the working view. The workspace picker and literal log search stay
 available across sections; the compact header occupies two rows.
 

@@ -116,12 +116,33 @@ class CardLayoutTests(unittest.IsolatedAsyncioTestCase):
                     app.query_one("#workspace-picker", Select).value = "b" * 32
                     await pilot.pause()
                 self.assertEqual(app.selected, "b" * 32)
+                self.assertEqual(app.query_one("#content").active, "sessions")
                 self.assertEqual(app.query_one("#workspaces", DataTable).cursor_row, 1)
                 self.assertIn("second", str(app.query_one("#nav-context").render()))
                 self.assertEqual((backend.samples, backend.log_samples), initial)
                 connect.assert_not_called()
                 self.assertTrue(app.query_one("#delete", Button).disabled)
                 self.assertTrue(app.query_one("#terminal-owner", Button).disabled)
+
+    async def test_short_wide_terminal_keeps_every_section_reachable(self):
+        app = DashboardApp(TwoWorkspaces(), demo=True, read_only=True)
+        with patch.object(app, "_tick"):
+            async with app.run_test(size=(140, 24)) as pilot:
+                await self.ready(app, pilot)
+                self.assertTrue(app._compact_layout)
+                self.assertFalse(app.query_one("#sidebar").display)
+                picker = app.query_one("#section-picker", Select)
+                self.fully_visible(app, picker)
+                for _, key in app.SECTIONS:
+                    picker.value = key
+                    await pilot.pause()
+                    self.assertEqual(app.query_one("#content").active, key)
+                await pilot.resize_terminal(140, 44)
+                await pilot.pause()
+                last = app.query_one("#nav-backups", Button)
+                self.fully_visible(app, last)
+                hit, _ = app.screen.get_widget_at(last.region.x + 3, last.region.y)
+                self.assertIs(hit, last, "Context card must not cover navigation")
 
     async def test_unchanged_reports_preserve_picker_options_and_selected_identity(
         self,

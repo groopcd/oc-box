@@ -655,10 +655,10 @@ does not animate those sample values; use normal host mode (optionally
 The seven sections are Status, Settings, Sessions, Terminals, Logs,
 Storage and Backup/restore.  ‘1’–‘7’ select them; ‘r’ refreshes and ‘q’
 quits outside a focused embedded terminal.  A left navigation rail is
-used on wide terminals; below 118 columns it becomes a header section
-picker.  The header keeps case-insensitive literal log search available
-from every section, including while follow is paused; ‘Ctrl+L’ opens
-Logs and focuses search.  ‘s’ or ‘F2’ opens all dashboard settings
+used on wide terminals; below 118 columns or 32 rows it becomes a header
+section picker.  The header keeps case-insensitive literal log search
+available from every section, including while follow is paused; ‘Ctrl+L’
+opens Logs and focuses search.  ‘s’ or ‘F2’ opens all dashboard settings
 outside focused text inputs or the native shell.  A focused terminal
 keeps its keys, including ‘s’, ‘F2’ and ‘Ctrl+L’; use ‘Ctrl-]’ to detach
 its client without ending the native shell before using dashboard
@@ -3451,20 +3451,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2730
 Node: Commands6328
-Node: Options92831
-Node: Lifecycle and persistence116624
-Node: Distribution images118744
-Node: Sessions and recovery123619
-Node: Devices and host permissions130204
-Node: Resource reports132550
-Node: Configuration and environment134661
-Node: Files146042
-Node: Exit status151986
-Node: Examples152839
-Node: Troubleshooting154925
-Node: Installation and manuals166277
-Node: Authors and license175529
-Node: See also176136
+Node: Options92842
+Node: Lifecycle and persistence116635
+Node: Distribution images118755
+Node: Sessions and recovery123630
+Node: Devices and host permissions130215
+Node: Resource reports132561
+Node: Configuration and environment134672
+Node: Files146053
+Node: Exit status151997
+Node: Examples152850
+Node: Troubleshooting154936
+Node: Installation and manuals166288
+Node: Authors and license175540
+Node: See also176147
 
 End Tag Table
 

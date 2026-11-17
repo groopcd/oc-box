@@ -579,7 +579,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._management_mount()
         self._refresh_favorites()
         self._sync_navigation("status")
-        self._responsive_layout(self.size.width)
+        self._responsive_layout(self.size.width, self.size.height)
         self.action_refresh()
 
     def _message(self, value):
@@ -683,10 +683,10 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
 
     def on_resize(self, event):
         if self.is_mounted and self.query("#body"):
-            self._responsive_layout(event.size.width)
+            self._responsive_layout(event.size.width, event.size.height)
 
-    def _responsive_layout(self, width):
-        compact = width < 118
+    def _responsive_layout(self, width, height):
+        compact = width < 118 or height < 32
         if compact == self._compact_layout:
             return
         self._compact_layout = compact
