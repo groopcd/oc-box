@@ -62,6 +62,16 @@ def open_sessions(box, data, connection):
     ], snapshot.status
 
 
+def home_navigation():
+    """Explicit native UI navigation, never an inferred TUI/session target."""
+    return (
+        '<p><a href="/" target="_blank" rel="noopener noreferrer">'
+        "Open native OpenCode Home</a> to explicitly create or open a browser "
+        "session. Browser-only tabs remain native-client local; they do not "
+        "populate this TUI list.</p>"
+    )
+
+
 def document(url, sessions, status):
     items = []
     for info in sessions:
@@ -94,7 +104,9 @@ def document(url, sessions, status):
         + "</p><p>This index is for this private workspace only. Links open the "
         "unmodified native web app in separate browser tabs. Native web tabs are "
         "independent of TUI tabs; this page does not synchronize their membership."
-        '</p><p><a href="'
+        "</p>"
+        + home_navigation()
+        + '<p><a href="'
         + INDEX
         + '">Refresh session list</a></p>'
         + (
@@ -104,6 +116,20 @@ def document(url, sessions, status):
         )
         + "</main></body></html>"
     ).encode("utf-8", errors="replace")
+
+
+def error_document():
+    return (
+        '<!doctype html><html lang="en"><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>oc-box — workspace sessions unavailable</title><body><main>"
+        "<h1>Open TUI sessions unavailable</h1><p>Open sessions could not be "
+        'verified. <a href="'
+        + INDEX
+        + '">Refresh session list</a> to retry.</p>'
+        + home_navigation()
+        + "</main></body></html>"
+    ).encode()
 
 
 def _reply(stream, status, body, content_type="text/plain; charset=utf-8"):
@@ -198,7 +224,8 @@ def respond(gateway, stream, child, request):
         _reply(
             stream,
             "503 Service Unavailable",
-            b"Open sessions could not be verified. Refresh this page to retry.",
+            error_document(),
+            "text/html; charset=utf-8",
         )
         return True
     _reply(

@@ -36,7 +36,9 @@ global/cwd scope, already-open archived/moved/worktree/child IDs, unopened-histo
 and foreign-service exclusions, identity-matching native GETs, empty/missing/
 invalid state, owning-web selection, HTML escaping, native service-worker routing
 boundaries and authenticated relay behavior. Native port-scoped cookies and
-Origin checks remain authoritative. Automatic resume/history policy is separate.
+Origin checks remain authoritative. Empty/missing and authenticated error pages
+retain explicit native Home navigation without invented session rows. Automatic
+resume/history policy is separate.
 
 Run `python3 -B tests/smoke_web_sessions_v2.py --opencode /path/to/opencode`
 separately with native 2.2.6 and 2.3.0. It opens four tabs using native PTYs in
@@ -47,6 +49,14 @@ exec boundary is replaced with local processes. Fixture state is retained under
 a fresh temporary directory, including on failure. This does not render a
 browser, certify browser-local tab seeding (which is not implemented), or
 establish external-host/rootless-Podman acceptance.
+
+The script first checks fresh, unbound HTTP pairing into an empty chooser and
+its explicit native Home link, with unchanged missing TUI state and empty session
+inventory. Use `--home-only` to run just this bounded read-only navigation check
+without a TUI or session create/open/prompt mutations. Native Home web-shell
+availability is not rendered Home chat or installed-service-worker acceptance.
+The existing V2 CI job runs the default combined script against pinned 2.2.6;
+both source/package and distro workflows also trigger on `fix/**` branches.
 
 ### Reviewed 5573965 candidate evidence
 

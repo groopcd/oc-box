@@ -411,6 +411,12 @@ sessions within that scope may legitimately have other directories.
 If saved TUI membership is unavailable, the index labels that limitation and
 does not guess a current session or list historical sessions.
 An empty saved scope stays empty; unverifiable state shows a retry message.
+The chooser always offers **Open native OpenCode Home**, including when there
+are no TUI tabs, saved membership is missing, or an authenticated index query
+fails. This explicit link opens the unmodified native Home at `/`, where you can
+create or open a browser session without first running a TUI. It does not choose
+historical sessions, add fake TUI rows, or create a session by itself. Browser-only
+tabs remain native-client local and do not populate this TUI membership list.
 These explicit browsing rules do not broaden automatic owner resume or history
 synchronization. Owner resume keeps its existing eligible-root policy; history
 sync keeps its existing discovery and archive semantics, including children and

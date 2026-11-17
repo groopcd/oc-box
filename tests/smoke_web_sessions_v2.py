@@ -31,14 +31,69 @@ class Links(HTMLParser):
     def __init__(self):
         super().__init__()
         self.sessions = []
+        self.home = []
 
     def handle_starttag(self, tag, attrs):
         values = dict(attrs)
         if tag == "a" and values.get("href", "").startswith("/server/"):
             self.sessions.append(values["href"])
+        if tag == "a" and values.get("href") == "/":
+            self.home.append(values["href"])
 
 
-def exercise(binary, root):
+def fresh_home(native, data, release, home, project, local_exec, local_relay):
+    """Unbound HTTP-only navigation; no session create/open/prompt mutations."""
+    snapshot = native_tabs.read_snapshot(str(home), str(project), release)
+    require(snapshot.status == "missing", "Fresh Home fixture had TUI membership.")
+    before = bridge.service_session_catalog(native)
+    require(before == [], "Fresh Home fixture had existing sessions.")
+    connection = {**native.endpoint, "workspace": data["id"], "session": None}
+    opener = build_opener(ProxyHandler({}), HTTPCookieProcessor(CookieJar()))
+    with (
+        patch.object(box, "run", side_effect=local_exec),
+        patch.object(service, "relay_command", side_effect=local_relay),
+        service.Gateway(box, data, connection) as gateway,
+    ):
+        pair = native("POST", "/api/pair")
+        request = Request(
+            gateway.url + "/auth/connect/" + pair["code"],
+            headers={"Accept": "text/html"},
+        )
+        with opener.open(request, timeout=15) as response:
+            require(
+                response.geturl() == gateway.url + web_sessions.INDEX,
+                "Fresh pairing did not land on the session index.",
+            )
+            links = Links()
+            links.feed(response.read().decode())
+        require(
+            links.sessions == [] and links.home == ["/"],
+            "Empty index did not offer native Home without fabricated rows.",
+        )
+        with opener.open(gateway.url + links.home[0], timeout=10) as response:
+            require(
+                response.status == 200
+                and "text/html" in response.headers["Content-Type"]
+                and response.read(),
+                "Native Home did not serve its public web shell.",
+            )
+    require(
+        native_tabs.read_snapshot(str(home), str(project), release) == snapshot,
+        "Fresh Home navigation changed TUI membership.",
+    )
+    require(
+        bridge.service_session_catalog(native) == before,
+        "Fresh Home navigation created or changed native sessions.",
+    )
+    print(
+        "PASS native " + release + ": fresh unbound pairing, empty chooser "
+        "with explicit native Home, public Home shell, unchanged missing TUI "
+        "state and empty private session inventory; no session mutations.",
+        flush=True,
+    )
+
+
+def exercise(binary, root, *, home_only=False):
     project = root / "project"
     project.mkdir()
     foreign = root / "other-project"
@@ -47,36 +102,31 @@ def exercise(binary, root):
     moved = root / "moved-project"
     moved.mkdir()
     env = private_environment(root / "native")
-    bounded(["git", "init", "-q"], env, project)
-    (project / "fixture.txt").write_text("Synthetic web session worktree fixture.\n")
-    bounded(["git", "add", "fixture.txt"], env, project)
-    bounded(
-        [
-            "git",
-            "-c",
-            "user.name=Synthetic Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "-qm",
-            "Synthetic",
-        ],
-        env,
-        project,
-    )
-    bounded(
-        [
-            "git",
-            "worktree",
-            "add",
-            "--quiet",
-            "-b",
-            "synthetic-web",
-            str(worktree),
-        ],
-        env,
-        project,
-    )
+    if not home_only:
+        bounded(["git", "init", "-q"], env, project)
+        (project / "fixture.txt").write_text(
+            "Synthetic web session worktree fixture.\n"
+        )
+        bounded(["git", "add", "fixture.txt"], env, project)
+        bounded(
+            [
+                "git",
+                "-c",
+                "user.name=Synthetic Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "Synthetic",
+            ],
+            env,
+            project,
+        )
+        bounded(
+            ["git", "worktree", "add", "--quiet", "-b", "synthetic-web", str(worktree)],
+            env,
+            project,
+        )
     home = Path(env["HOME"])
     for name, relative in (
         ("CONFIG", ".config"),
@@ -139,6 +189,9 @@ def exercise(binary, root):
                 native("GET", "/api/credential")["data"] == [],
                 "Web fixture inherited credentials.",
             )
+            fresh_home(native, data, release, home, project, local_exec, local_relay)
+            if home_only:
+                return
             opened = [
                 seed(
                     native,
@@ -301,14 +354,20 @@ def exercise(binary, root):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--opencode", required=True, type=Path)
+    parser.add_argument(
+        "--home-only",
+        action="store_true",
+        help="fresh/unbound HTTP-only navigation check; do not start a TUI",
+    )
     args = parser.parse_args()
     # Retain this fresh synthetic fixture on failure; never overwrite old evidence.
     root = Path(tempfile.mkdtemp(prefix="oc-box-web-sessions-v2-"))
     print("Synthetic fixture: " + str(root), flush=True)
-    exercise(str(args.opencode.resolve()), root)
+    exercise(str(args.opencode.resolve()), root, home_only=args.home_only)
     print(
-        "Native HTTP/PTY regression only; NOT rendered-browser or host/Podman "
-        "acceptance.",
+        ("Home-only HTTP mode did not start a TUI. " if args.home_only else "")
+        + "Native synthetic regression only; NOT rendered-browser chat, installed "
+        "service-worker or host/Podman acceptance.",
         flush=True,
     )
 

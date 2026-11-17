@@ -269,7 +269,8 @@ class WebSessionsTests(unittest.TestCase):
         sessions[3]["title"] = "\ud800"  # Native JSON can contain a lone surrogate.
         url = "http://127.0.0.1:23456"
         text = web.document(url, sessions, status).decode()
-        self.assertEqual(text.count('target="_blank"'), 4)
+        self.assertEqual(text.count('href="/server/'), 4)
+        self.assertIn('href="/"', text)
         self.assertIn("&lt;img", text)
         self.assertNotIn("<img", text)
         self.assertIn("independent of TUI tabs", text)
@@ -282,6 +283,20 @@ class WebSessionsTests(unittest.TestCase):
             ).decode(),
             url,
         )
+
+    def test_empty_missing_and_authorized_error_pages_offer_home_without_session_rows(
+        self,
+    ):
+        pages = [
+            web.document("http://127.0.0.1:23456", [], status)
+            for status in ("valid", "missing")
+        ]
+        pages.append(web.error_document())
+        for page in pages:
+            with self.subTest(page=page[:32]):
+                self.assertIn(b'href="/"', page)
+                self.assertIn(b"Open native OpenCode Home", page)
+                self.assertNotIn(b'href="/server/', page)
 
     def test_native_service_worker_navigation_boundary_and_selected_row_routes(self):
         # Native v2.2.6 and v2.3.0 packages/app/vite.pwa.ts navigation denylist:
@@ -434,6 +449,7 @@ class WebSessionsTests(unittest.TestCase):
             with self.assertRaises(HTTPError) as refusal:
                 opener.open(gateway.url + web.INDEX, timeout=5)
             self.assertEqual(refusal.exception.code, 401)
+            self.assertNotIn(b'href="/"', refusal.exception.read())
             inventory.assert_not_called()
             authority = gateway.url.removeprefix("http://")
             for headers, method, code in (
@@ -467,7 +483,9 @@ class WebSessionsTests(unittest.TestCase):
                 gateway.url + "/auth/connect/fixture", timeout=5
             ) as response:
                 self.assertEqual(response.geturl(), gateway.url + web.INDEX)
-                self.assertEqual(response.read().count(b'target="_blank"'), 4)
+                body = response.read()
+                self.assertEqual(body.count(b'href="/server/'), 4)
+                self.assertIn(b'href="/"', body)
                 self.assertEqual(response.headers["Cache-Control"], "no-store")
             self.assertTrue(
                 all(
@@ -500,7 +518,11 @@ class WebSessionsTests(unittest.TestCase):
                 with self.assertRaises(HTTPError) as refusal:
                     opener.open(gateway.url + web.INDEX, timeout=5)
                 self.assertEqual(refusal.exception.code, 503)
-                self.assertNotIn(b"private", refusal.exception.read())
+                body = refusal.exception.read()
+                self.assertIn("text/html", refusal.exception.headers["Content-Type"])
+                self.assertIn(b'href="/"', body)
+                self.assertNotIn(b'href="/server/', body)
+                self.assertNotIn(b"private", body)
 
 
 if __name__ == "__main__":

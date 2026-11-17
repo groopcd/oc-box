@@ -501,7 +501,14 @@ the saved scope uses the retained internal launch path; sessions within
 that scope may legitimately have other directories.  If saved TUI
 membership is unavailable, the index labels that limitation and does not
 guess a current session or list historical sessions.  An empty saved
-scope stays empty; unverifiable state shows a retry message.  These
+scope stays empty; unverifiable state shows a retry message.  The
+chooser always offers **Open native OpenCode Home**, including when
+there are no TUI tabs, saved membership is missing, or an authenticated
+index query fails.  This explicit link opens the unmodified native Home
+at ‘/’, where you can create or open a browser session without first
+running a TUI. It does not choose historical sessions, add fake TUI
+rows, or create a session by itself.  Browser-only tabs remain
+native-client local and do not populate this TUI membership list.  These
 explicit browsing rules do not broaden automatic owner resume or history
 synchronization.  Owner resume keeps its existing eligible-root policy;
 history sync keeps its existing discovery and archive semantics,
@@ -3463,20 +3470,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2730
 Node: Commands6328
-Node: Options93682
-Node: Lifecycle and persistence117475
-Node: Distribution images119595
-Node: Sessions and recovery124470
-Node: Devices and host permissions131055
-Node: Resource reports133401
-Node: Configuration and environment135512
-Node: Files146893
-Node: Exit status152837
-Node: Examples153690
-Node: Troubleshooting155776
-Node: Installation and manuals167128
-Node: Authors and license176380
-Node: See also176987
+Node: Options94169
+Node: Lifecycle and persistence117962
+Node: Distribution images120082
+Node: Sessions and recovery124957
+Node: Devices and host permissions131542
+Node: Resource reports133888
+Node: Configuration and environment135999
+Node: Files147380
+Node: Exit status153324
+Node: Examples154177
+Node: Troubleshooting156263
+Node: Installation and manuals167615
+Node: Authors and license176867
+Node: See also177474
 
 End Tag Table
 
