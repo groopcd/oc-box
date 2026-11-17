@@ -556,13 +556,19 @@ focused text inputs or the native shell. A focused terminal keeps its keys,
 including `s`, `F2` and `Ctrl+L`; use `Ctrl-]` to detach its client without ending
 the native shell before using dashboard shortcuts.
 
-Nonempty editable search and form inputs have a right-edge `×` inside the field.
+Nonempty editable search and form inputs have a bold red `✖` inside the field.
 Click it to clear that field and retain editing focus, without submitting,
 connecting or accessing the clipboard. Password and disabled fields are excluded.
 Session/log filtering waits for a 120 ms typing pause rather than rebuilding
 tables on every key. Input editing remains immediate. Unchanged views skip
 rebuilds, and favorites I/O is asynchronous; native discovery remains explicit
 and monitoring keeps the selected refresh interval.
+
+The header count says **N log entries** with no search and **N log matches** with
+a search, scoped to the selected Logs source. Clearing the search restores the
+unfiltered count; it does not delete retained logs. Hover the count for details.
+The count follows the current filter even while selected log output is frozen
+for copying.
 
 Drag-select visible text throughout the dashboard, including logs, graphs,
 terminal output and control labels. Releasing the mouse copies immediately;

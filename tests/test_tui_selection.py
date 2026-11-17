@@ -321,14 +321,16 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
             field.value = "previous input selection"
             field.focus()
             field.selection = (0, 8)
-            await self.wait_for_log_hits(app, pilot, "0 matches")
+            await self.wait_for_log_hits(app, pilot, "0 log matches")
             self.assertEqual(copies, [], "programmatic Input selection must not copy")
 
             with self.subTest(gesture="fresh static selection"):
-                span = self.visible_span(app, app.query_one("#log-hits"), "0 matches")
+                span = self.visible_span(
+                    app, app.query_one("#log-hits"), "0 log matches"
+                )
                 before = await self.drag(app, pilot, copies, span)
-                self.assertEqual(app.screen.get_selected_text(), "0 matches")
-                self.assert_copied(app, copies, before, "0 matches")
+                self.assertEqual(app.screen.get_selected_text(), "0 log matches")
+                self.assert_copied(app, copies, before, "0 log matches")
 
             with self.subTest(gesture="real select-all key"):
                 app.screen.clear_selection()
@@ -705,12 +707,12 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
             field.value = "already selected input"
             field.focus()
             field.action_select_all()
-            await self.wait_for_log_hits(app, pilot, "0 matches")
+            await self.wait_for_log_hits(app, pilot, "0 log matches")
             self.assertEqual(copies, [])
-            span = self.visible_span(app, app.query_one("#log-hits"), "0 matches")
+            span = self.visible_span(app, app.query_one("#log-hits"), "0 log matches")
             await self.drag(app, pilot, copies, span)
             self.assertEqual(field.selected_text, field.value)
-            self.assertEqual(app.clipboard, "0 matches")
+            self.assertEqual(app.clipboard, "0 log matches")
             before = list(copies)
             await pilot.press("ctrl+a")
             self.assert_copied(app, copies, before, field.value)

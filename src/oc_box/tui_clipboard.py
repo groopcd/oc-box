@@ -523,13 +523,17 @@ class ClipboardActions:
 class ClipboardInput(SelectableViewport, Input):
     """Native Input editing plus a click-only clear action in its right padding.
 
-    The line-API Input isn't a container. Composite a single cell after its
+    The line-API Input isn't a container. Composite a bold clear glyph after its
     normal border/padding rendering instead of wrapping/replacing the Input or
     stealing text/cursor columns. The action is not selectable field content.
     Passwords, disabled fields and paddingless/empty fields have no clear action.
     """
 
     BINDINGS = [Binding("ctrl+a,super+a", "select_all", show=False)]
+    COMPONENT_CLASSES = Input.COMPONENT_CLASSES | {"input--clear"}
+    DEFAULT_CSS = """
+    ClipboardInput .input--clear { color: $error; text-style: bold; }
+    """
 
     @property
     def _clear_offset(self):
@@ -553,10 +557,10 @@ class ClipboardInput(SelectableViewport, Input):
         if offset is not None and crop.contains(*offset):
             x, y = offset - crop.offset
             line = lines[y]
-            style = self.get_component_rich_style("input--placeholder")
+            style = self.get_component_rich_style("input--clear")
             lines = list(lines)
             lines[y] = Strip.join(
-                (line.crop(0, x), Strip([Segment("×", style)]), line.crop(x + 1))
+                (line.crop(0, x), Strip([Segment("✖", style)]), line.crop(x + 1))
             )
         return lines
 
@@ -565,7 +569,7 @@ class ClipboardInput(SelectableViewport, Input):
         if self._clear_offset is not None and event.offset == self._clear_offset:
             if event.button == 1:
                 self._clear_pointer = event.screen_offset
-            # Do not let native Input start a text-selection gesture on ×.
+            # Do not let native Input start a text-selection gesture on ✖.
             event.stop()
             event.prevent_default()
 

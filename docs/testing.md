@@ -213,6 +213,13 @@ tools. Check the wide rail and compact header section picker without hiding log
 search. Search must stay visible and case-insensitive/literal across tabs, source
 changes, follow and pause. Check global retention of at most 2000 entries and
 the 1000-generated-entry display bound per refresh.
+Verify that input-clear controls are bold/error-colored heavy crosses without
+taking text columns or entering copied field contents. Clearing log search in
+wide and one-row compact headers restores the source-scoped entry count, never
+deletes entries or triggers backend/native work. Distinguish unfiltered entries
+from filtered matches, including zero and singular counts. A selected log
+viewport stays frozen while its fixed-size count updates without relayout or
+extra searches for unchanged snapshots.
 
 Verify bounded host resource cards and the selected-workspace inspector,
 compact resource-strip rendering and short fixed 0–100% CPU/RAM

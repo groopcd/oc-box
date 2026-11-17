@@ -159,7 +159,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     #monitoring-state { width: 15; height: 1; margin: 1 1; color: $success; }
     #log-tools { height: 3; }
     #log-search { width: 1fr; border: round $primary 25%; background: $surface; }
-    #log-hits { width: 13; padding: 1 1; }
+    #log-hits { width: 18; height: 3; padding: 1 1; }
     #log-tools Button { width: auto; min-width: 6; padding: 0 1;
       border: round $primary 25%; background: $surface; color: $primary; }
     #body { height: 1fr; }
@@ -300,6 +300,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._log_snapshot = None
         self._log_revision = 0
         self._log_render_key = None
+        self._log_search_snapshot = None
         self._filter_timers = {}
         self._filter_generations = {}
         self._table_snapshots = {}
@@ -355,7 +356,15 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                 placeholder="Search retained logs at any time · Ctrl+L opens Logs",
                 id="log-search",
             )
-            yield Static("0 matches", id="log-hits", markup=False)
+            log_hits = Static("0 log entries", id="log-hits", markup=False)
+            log_hits.tooltip = (
+                "Retained log entries in the selected Logs source, not sessions "
+                "or workspaces. Searching shows matching entries; clearing the "
+                "search shows all retained entries, without deleting logs. "
+                "The count follows the current filter even while selected "
+                "output is held still for copying."
+            )
+            yield log_hits
             yield Button("Logs", id="show-logs")
             yield Button("Refresh", id="refresh")
         with Horizontal(id="body"):
@@ -1004,9 +1013,9 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             )
         return cell
 
-    def _update_text(self, selector, value):
+    def _update_text(self, selector, value, *, layout=True):
         if self._text_snapshots.get(selector) != value:
-            self.query_one(selector, Static).update(value)
+            self.query_one(selector, Static).update(value, layout=layout)
             self._text_snapshots[selector] = value
 
     def _update_monitor(self, selector, snapshot, cpu_history=(), ram_history=()):
@@ -1497,19 +1506,33 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         if source == "podman" and self.podman_workspace:
             source = "podman:" + self.podman_workspace
         output = self.query_one("#log-output", RichLog)
+        key = (self._log_revision, source, self.log_query.casefold())
+        if self._log_search_snapshot is None or self._log_search_snapshot[0] != key:
+            entries = tuple(
+                self.logs.search(
+                    self.log_query, source=None if source == "all" else source
+                )
+            )
+            self._log_search_snapshot = (key, entries)
+        else:
+            entries = self._log_search_snapshot[1]
+        count = len(entries)
+        noun = (
+            ("match" if count == 1 else "matches")
+            if self.log_query
+            else ("entry" if count == 1 else "entries")
+        )
+        # This fixed-size label must not request layout and invalidate the
+        # separate log viewport's selection while its contents remain frozen.
+        self._update_text("#log-hits", f"{count} log {noun}", layout=False)
         # Keep a highlighted log snapshot in place while it is being copied.
-        # Collection still updates the bounded in-memory source buffers.
+        # Search feedback still follows the current query/source while copying.
         if output.text_selection is not None:
             return
-        key = (self._log_revision, source, self.log_query.casefold())
         if key == self._log_render_key:
             return
-        entries = self.logs.search(
-            self.log_query, source=None if source == "all" else source
-        )
         self._log_render_key = key
-        self._update_text("#log-hits", f"{len(entries)} matches")
-        rendered = tuple(entries)
+        rendered = entries
         if rendered == self._rendered_logs:
             return
         # Follow snapshots commonly append a few entries. Do not clear the
