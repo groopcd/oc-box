@@ -135,7 +135,8 @@ class PrivateSecretScreen(ModalScreen):
     CSS = """
     PrivateSecretScreen { align: center middle; }
     PrivateSecretScreen > Vertical { width: 72; max-width: 95%; height: auto;
-      padding: 1 2; border: thick $accent; background: $surface; }
+      padding: 1 2; border: solid $accent; background: $surface; }
+    PrivateSecretScreen SecretEditor { border: solid $accent; background: $background; }
     PrivateSecretScreen Static { height: auto; margin-bottom: 1; }
     PrivateSecretScreen Horizontal { height: 3; margin-top: 1; }
     """
@@ -261,7 +262,7 @@ class MetadataReview(ModalScreen):
     CSS = """
     MetadataReview { align: center middle; }
     MetadataReview > Vertical { width: 86; max-width: 95%; height: 85%;
-      padding: 1 2; border: thick $warning; background: $surface; }
+      padding: 1 2; border: solid $warning; background: $surface; }
     MetadataReview VerticalScroll { height: 1fr; }
     MetadataReview Horizontal { height: 3; }
     """
@@ -332,10 +333,19 @@ class BackupWorkflow(ModalScreen):
     CSS = """
     BackupWorkflow { align: center middle; }
     BackupWorkflow > Vertical { width: 88; max-width: 95%; height: 85%;
-      padding: 1 2; border: thick $accent; background: $surface; }
-    #backup-operation-results { height: 1fr; }
-    #backup-operation-stage, #backup-operation-elapsed { height: auto; }
-    BackupWorkflow Horizontal { height: 3; }
+      padding: 1 2; border: solid $warning; background: $surface; }
+    BackupWorkflow #backup-operation-stage { height: auto;
+      color: $warning; text-style: bold; margin-bottom: 1; }
+    BackupWorkflow #backup-operation-elapsed { height: auto; color: $text-muted; }
+    BackupWorkflow #backup-operation-progress { width: 1fr; margin: 1 0; }
+    BackupWorkflow #backup-operation-progress Bar { width: 1fr; }
+    BackupWorkflow #backup-operation-progress .bar--indeterminate { color: $warning; }
+    BackupWorkflow #backup-operation-results { height: 1fr; min-height: 3;
+      border-top: solid $primary; padding-top: 1; }
+    BackupWorkflow #backup-operation-summary { height: auto; }
+    BackupWorkflow Horizontal { height: 3; margin-top: 1; }
+    BackupWorkflow Horizontal Button { width: auto; min-width: 12; margin-right: 1; }
+    BackupWorkflow #backup-operation-cancel { color: $warning; }
     """
 
     def __init__(self, runtime, request):

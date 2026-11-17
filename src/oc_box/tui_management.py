@@ -92,9 +92,20 @@ class ActionReview(ModalScreen):
 
 class StoragePanel(Vertical):
     DEFAULT_CSS = """
-    StoragePanel { height: auto; min-height: 12; }
-    #storage-table { height: 12; min-height: 5; }
-    #storage-details { height: auto; padding: 1 0; }
+    StoragePanel { height: auto; min-height: 12; padding: 0 0 1 0; }
+    StoragePanel .storage-card { height: auto; padding: 0 1;
+      border: solid $primary; background: $surface; margin-bottom: 1; }
+    StoragePanel .card-heading { height: auto; color: $accent; text-style: bold; }
+    StoragePanel .card-hint { height: auto; color: $text-muted; }
+    StoragePanel .management-tools { height: 3; min-height: 3; overflow-x: auto; }
+    StoragePanel .management-tools Select { width: 1fr; min-width: 24; }
+    StoragePanel SelectCurrent > #label { height: 1; text-wrap: nowrap;
+      text-overflow: ellipsis; }
+    StoragePanel .management-tools Button { width: auto; min-width: 10;
+      padding: 0 1; margin-right: 1; }
+    StoragePanel #storage-table { height: 10; min-height: 5; margin-top: 1; }
+    StoragePanel #storage-details { height: auto; padding: 0; margin-bottom: 1; }
+    StoragePanel #storage-session-delete { margin-left: 3; }
     """
 
     def __init__(self, *, read_only=False, demo=False):
@@ -102,42 +113,80 @@ class StoragePanel(Vertical):
         self.read_only, self.demo = read_only, demo
 
     def compose(self) -> ComposeResult:
-        yield Static(
-            "Storage scopes are independent. Listing never starts a workspace or deletes data.",
-            markup=False,
-        )
-        with Horizontal(classes="toolbar"):
-            yield Select(
-                SCOPES, value="workspace", allow_blank=False, id="storage-scope"
+        with Vertical(classes="storage-card"):
+            yield Static("STORAGE / INVENTORY", classes="card-heading", markup=False)
+            yield Static(
+                "Source scope · independent of the workspace context",
+                classes="card-hint",
+                markup=False,
             )
-            yield Button("Refresh storage list", id="storage-refresh")
-        yield SelectableDataTable(
-            id="storage-table", cursor_type="row", zebra_stripes=True
-        )
-        yield Static(
-            "Loading registered workspace metadata…", id="storage-details", markup=False
-        )
-        with Horizontal(classes="toolbar"):
-            yield Button("Scan sizes", id="storage-scan")
-            yield Button(
-                "Delete selected session…",
-                id="storage-session-delete",
-                disabled=self.read_only or self.demo,
+            with Horizontal(classes="management-tools"):
+                yield Select(
+                    SCOPES, value="workspace", allow_blank=False, id="storage-scope"
+                )
+                yield Button("Refresh list", id="storage-refresh")
+            yield SelectableDataTable(
+                id="storage-table", cursor_type="row", zebra_stripes=True
             )
-            yield Button(
-                "Remove workspace storage…",
-                id="storage-purge",
-                variant="error",
-                disabled=self.read_only or self.demo,
+            yield Static(
+                "Choose one row for workspace actions. Session deletion uses the connected Sessions source.",
+                classes="card-hint",
+                markup=False,
+            )
+        with Vertical(classes="storage-card"):
+            yield Static(
+                "SELECTED TARGET / ACTIONS", classes="card-heading", markup=False
+            )
+            yield Static(
+                "Loading registered workspace metadata…",
+                id="storage-details",
+                markup=False,
+            )
+            with Horizontal(classes="management-tools"):
+                yield Button("Scan sizes", id="storage-scan")
+                yield Button(
+                    "Delete selected session…",
+                    id="storage-session-delete",
+                    variant="error",
+                    disabled=self.read_only or self.demo,
+                )
+                yield Button(
+                    "Remove workspace storage…",
+                    id="storage-purge",
+                    variant="error",
+                    disabled=self.read_only or self.demo,
+                )
+            yield Static(
+                "Listing never starts a workspace or deletes data.",
+                classes="card-hint",
+                markup=False,
             )
 
 
 class BackupPanel(Vertical):
     DEFAULT_CSS = """
-    BackupPanel { height: auto; min-height: 18; }
-    #backup-table { height: 9; min-height: 4; }
-    #backup-details { height: auto; padding: 1 0; }
-    BackupPanel Input { margin-bottom: 1; }
+    BackupPanel { height: auto; min-height: 18; padding: 0 0 1 0; }
+    BackupPanel .backup-card { height: auto; padding: 0 1;
+      border: solid $primary; background: $surface; margin-bottom: 1; }
+    BackupPanel .card-heading { height: auto; color: $accent; text-style: bold; }
+    BackupPanel .card-hint { height: auto; color: $text-muted; }
+    BackupPanel .backup-field { height: 3; }
+    BackupPanel .backup-field > Static { width: 13; padding: 1 0; }
+    BackupPanel .backup-field > Input,
+    BackupPanel .backup-field > Select { width: 1fr; min-width: 14; }
+    BackupPanel Input { margin-bottom: 0; }
+    BackupPanel Collapsible { padding: 0; margin: 0; border: none; }
+    BackupPanel Collapsible > Contents { padding: 0 0 0 1; }
+    BackupPanel .advanced-label { height: auto; color: $text-muted; }
+    BackupPanel .management-tools { height: 3; min-height: 3; overflow-x: auto; }
+    BackupPanel .management-tools Select { width: 1fr; min-width: 24; }
+    BackupPanel SelectCurrent > #label { height: 1; text-wrap: nowrap;
+      text-overflow: ellipsis; }
+    BackupPanel .management-tools Button { width: auto; min-width: 10;
+      padding: 0 1; margin-right: 1; }
+    BackupPanel #backup-table { height: 6; min-height: 4; }
+    BackupPanel #backup-details { height: auto; padding: 0; margin-bottom: 1; }
+    BackupPanel #backup-delete { margin-left: 3; }
     """
 
     def __init__(self, *, read_only=False, demo=False):
@@ -145,56 +194,89 @@ class BackupPanel(Vertical):
         self.read_only, self.demo = read_only, demo
 
     def compose(self) -> ComposeResult:
-        yield Static(
-            "Choose an archive path. Password protection is the default: no key file needs copying. "
-            "Inspect and restore detect the archive format automatically.",
-            markup=False,
-        )
-        with Horizontal(classes="toolbar"):
-            yield Select(
-                SCOPES, value="workspace", allow_blank=False, id="backup-scope"
+        with Vertical(classes="backup-card"):
+            yield Static("BACKUP / RESTORE", classes="card-heading", markup=False)
+            with Horizontal(classes="backup-field"):
+                yield Static("Archive file", markup=False)
+                yield ClipboardInput(
+                    placeholder="New output or existing encrypted input",
+                    id="backup-file",
+                )
+            with Horizontal(classes="backup-field"):
+                yield Static("Destination", markup=False)
+                yield ClipboardInput(
+                    placeholder="NEW project or native session directory",
+                    id="backup-destination",
+                )
+            with Collapsible(
+                title="Advanced · age recipients / identity files", collapsed=True
+            ):
+                yield Static(
+                    "Public recipients · creation only; blank uses a password",
+                    classes="advanced-label",
+                    markup=False,
+                )
+                yield ClipboardInput(
+                    placeholder="Existing age public recipients",
+                    id="backup-recipients",
+                )
+                yield Static(
+                    "Private identity · existing file path or JSON array of paths",
+                    classes="advanced-label",
+                    markup=False,
+                )
+                yield ClipboardInput(
+                    placeholder="Existing age identity file(s)",
+                    id="backup-identities",
+                )
+            yield Static(
+                "Password requested privately by default · no key file needs copying",
+                classes="card-hint",
+                markup=False,
             )
-            yield Button("Refresh backup targets", id="backup-refresh")
-        yield SelectableDataTable(
-            id="backup-table", cursor_type="row", zebra_stripes=True
-        )
-        with Horizontal(classes="toolbar"):
-            yield Static("Creation type · inspect/restore auto-detect", markup=False)
-            yield Select(
-                [
-                    ("Workspace · full (.ocbox)", "full"),
-                    ("Workspace · portable (.ocbox)", "portable"),
-                    ("Session tree · history (.ocsession)", "session"),
-                ],
-                value="full",
-                allow_blank=False,
-                id="backup-kind",
+        with Vertical(classes="backup-card"):
+            yield Static("SOURCE / TARGET", classes="card-heading", markup=False)
+            yield Static(
+                "Source scope · independent of the workspace context",
+                classes="card-hint",
+                markup=False,
             )
-        yield ClipboardInput(
-            placeholder="Encrypted backup file: new output, or existing input",
-            id="backup-file",
-        )
-        yield ClipboardInput(
-            placeholder="Restore destination: NEW project directory, or native session directory",
-            id="backup-destination",
-        )
-        with Collapsible(
-            title="Advanced · existing age recipients / identity files", collapsed=True
-        ):
-            yield ClipboardInput(
-                placeholder="Public recipients for creation; blank uses a private masked password prompt",
-                id="backup-recipients",
+            with Horizontal(classes="management-tools"):
+                yield Select(
+                    SCOPES, value="workspace", allow_blank=False, id="backup-scope"
+                )
+                yield Button("Refresh targets", id="backup-refresh")
+            yield SelectableDataTable(
+                id="backup-table", cursor_type="row", zebra_stripes=True
             )
-            yield ClipboardInput(
-                placeholder="Existing private age identity file path, or JSON array of paths",
-                id="backup-identities",
+            yield Static(
+                "Choose one row. Session trees use the connected Sessions source.",
+                classes="card-hint",
+                markup=False,
+            )
+            with Horizontal(classes="backup-field"):
+                yield Static("Create type", markup=False)
+                yield Select(
+                    [
+                        ("Workspace · full (.ocbox)", "full"),
+                        ("Workspace · portable (.ocbox)", "portable"),
+                        ("Session tree · history (.ocsession)", "session"),
+                    ],
+                    value="full",
+                    allow_blank=False,
+                    id="backup-kind",
+                )
+            yield Static(
+                "Inspect / restore auto-detect format; host scope is session-only.",
+                classes="card-hint",
+                markup=False,
             )
         yield Static(
             "No global host database replacement. Restores use fresh workspace/session IDs and never auto-start a workspace.",
             id="backup-details",
             markup=False,
         )
-        with Horizontal(classes="toolbar"):
+        with Horizontal(classes="management-tools"):
             yield Button(
                 "Create backup…",
                 id="backup-create",
