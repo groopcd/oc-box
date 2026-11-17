@@ -145,6 +145,14 @@ assert.equal(api.selection().sessionID, "ses_2");
 assert.equal(f.frame.writes, 1);
 assert.equal(f.window.location.searchParams.get("session"), "ses_2");
 assert.equal(f.elements["session-tabs"].children[1].getAttribute("aria-selected"), "true");
+// The src attribute still names the previous shell navigation. Clicking the
+// already-selected live SPA route must not reload that conversation's draft.
+assert.notEqual(f.frame.getAttribute("src"), rows[1].route);
+f.frame.draft = "native SPA draft must remain";
+f.elements["session-tabs"].children[1].click();
+assert.equal(f.frame.writes, 1);
+assert.equal(f.frame.draft, "native SPA draft must remain");
+assert.equal(api.selection().sessionID, "ses_2");
 f.frame.contentWindow.location = new URL(item(6).route, origin);
 f.tick(); await settle();
 assert.equal(api.selection().sessionID, "ses_6");
