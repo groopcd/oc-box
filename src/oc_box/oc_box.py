@@ -3032,7 +3032,7 @@ def launch_client(path, data, args, version, exported, owner=None):
             code = workspace_service.web_session(
                 sys.modules[__name__],
                 data,
-                {**owner.connection, "session": selected_session},
+                {**owner.connection, "session": selected_session, "version": version},
                 args,
             )
         else:
