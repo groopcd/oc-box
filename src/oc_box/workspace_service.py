@@ -1060,8 +1060,9 @@ def relay_command(box, data, port):
 
 
 class Gateway:
-    def __init__(self, box, data, connection, port=0):
+    def __init__(self, box, data, connection, port=0, *, attachments=False):
         self.box, self.data, self.connection, self.port = box, data, connection, port
+        self.attachments = attachments
         self.closed = threading.Event()
         self.children = set()
         self.lock = threading.Lock()
@@ -1120,6 +1121,16 @@ class Gateway:
                     headers.extend(data)
                 if b"\r\n\r\n" not in headers:
                     return
+                if self.attachments:
+                    if __package__:
+                        from . import web_attachments
+                    else:
+                        import web_attachments
+                    if web_attachments.matches(headers):
+                        web_attachments.serve(
+                            stream, headers, child, self.url, self.session_route()
+                        )
+                        return
                 pairing = bytes(headers).startswith(b"GET /auth/connect/")
                 child.stdin.write(headers)
                 child.stdin.flush()
@@ -1145,7 +1156,7 @@ class Gateway:
                                     if len(response) > 65536:
                                         return
                                     continue
-                                route = self.session_route()
+                                route = self.entry_route()
                                 data = re.sub(
                                     rb"(?im)^location: /\r$",
                                     b"location: " + route.encode() + b"\r",
@@ -1171,6 +1182,15 @@ class Gateway:
                     with self.lock:
                         self.children.discard(child)
                 self.capacity.release()
+
+    def entry_route(self):
+        if self.attachments:
+            if __package__:
+                from . import web_attachments
+            else:
+                import web_attachments
+            return web_attachments.PATH
+        return self.session_route()
 
     def session_route(self):
         encoded = base64.urlsafe_b64encode(self.url.encode()).decode().rstrip("=")
@@ -1199,7 +1219,24 @@ class Gateway:
 
 def web_session(box, data, connection, args):
     selected_session = require_session(box, connection)
-    with Gateway(box, data, connection, args.port) as gateway:
+    options = {}
+    if getattr(args, "attachments", False):
+        if __package__:
+            from . import web_attachments
+        else:
+            import web_attachments
+        version = connection.get("version")
+        if version not in web_attachments.SUPPORTED:
+            raise box.BoxError(
+                "The browser attachment adapter requires native OpenCode 2.2.6 or 2.3.0."
+            )
+        info = api(box, data, connection, "GET", "/api/info")
+        if not isinstance(info, dict) or info.get("version") != version:
+            raise box.BoxError(
+                "Browser attachment adapter native version verification failed."
+            )
+        options["attachments"] = True
+    with Gateway(box, data, connection, args.port, **options) as gateway:
         pair = api(box, data, connection, "POST", "/api/pair")
         if not isinstance(pair.get("code"), str) or not re.fullmatch(
             r"[A-Za-z0-9_-]+", pair["code"]
@@ -1291,6 +1328,11 @@ def web_parser():
         "--no-open",
         action="store_true",
         help="print the pairing link without opening a browser",
+    )
+    result.add_argument(
+        "--attachments",
+        action="store_true",
+        help="opt in to the visible browser File-drop adapter (native 2.2.6/2.3.0 only; no automatic Send)",
     )
     result.add_argument(
         "--no-vault",

@@ -19,7 +19,7 @@ oc-box list
 oc-box distros
 oc-box doctor [--json] [--feature FEATURE ...]
 oc-box completion bash
-oc-box web [--project PATH | --workspace ID] [--port N] [--no-open] [--no-vault]
+oc-box web [--project PATH | --workspace ID] [--port N] [--no-open] [--no-vault] [--attachments]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
@@ -410,6 +410,60 @@ running web-owned session with the full TUI. Additional clients accept selectors
 (and start's `--resume`) only; change model/session/configuration when no owner
 is active. The owning foreground command is needed for web access; closing the
 browser tab alone does not close its relay or terminate the owner.
+
+For browser-provided screenshot/image/PDF attachments, opt in explicitly:
+
+```sh
+oc-box web --project ~/devel/demo --attachments
+```
+
+This opens a visibly labeled oc-box wrapper around the **unmodified native web
+app**, not a host-side OpenCode TUI. It uses only the existing loopback relay and
+native pairing/authentication. Native OpenCode **2.2.6 and 2.3.0 only** are
+source-checked; other versions refuse the adapter rather than assuming
+compatibility. Omit the option for the unchanged native web interface.
+
+Wait for the native composer to load, then drag the screenshot from Spectacle
+into it (or use the wrapper's drop area/file chooser). Actual browser `File`
+objects are copied and forwarded as a file-only standard DOM drop. This avoids
+native's competing `text/plain` `file:` flavor turning an actual file drop into
+a path mention. There is no model tool request, per-image host approval, private
+widget lookup or native source/binary patch. **Nothing is sent automatically**:
+check native thumbnails, edit the native prompt and press native Send yourself.
+The adapter cannot acknowledge native draft admission through a public API, so
+its forwarding notice is not proof of a thumbnail or successful model input.
+Do not drop while changing the native session; an observed route/document change
+during file reads, or a detached original drop target, refuses forwarding without
+automatic retry. The wrapper uses native's existing `/auth/` service-worker
+navigation exclusion; native assets and its service worker remain unchanged.
+
+The adapter accepts signature-recognizable **PNG, JPEG, GIF, WebP and PDF** only:
+20 MiB per file, eight files and 40 MiB per drop. Signature checks are not a full
+document decoder, malware scan or guarantee of provider support. The selected
+native model must advertise image/PDF input for inline model delivery; native
+otherwise uses its normal container temporary-file/path route. No DOCX support,
+document conversion or arbitrary-file ingestion is promised by this adapter.
+The direct native link retains upstream's other attachment behaviors.
+
+Spectacle/browser/Wayland/X11/portal combinations can expose a temporary file as
+an actual browser file, URL-only text, or another MIME payload. **Only actual
+browser files work here**; the wrapper does not resolve host paths, dereference
+`file:`/web URLs or offer a host file server. Its own drop area rejects URL/text-
+only input. Non-file drops inside the native iframe retain native defaults
+(including workspace path mentions), not host-file access. Native paste of a
+clipboard image remains available when the browser exposes a file item; copying
+an image's path is not copying image bytes. No clipboard polling is added.
+
+Native browser draft storage, including **IndexedDB**, still stores attachment
+data. Sending can retain it in container history and disclose it to the selected
+provider; ordinary history synchronization still applies. Removal/detach is not
+guaranteed erasure or recall. Pairing/session cookies remain governed by native
+authentication; the adapter does not put the controller password into a URL,
+HTML, JavaScript, files or browser storage. Standard browser file authorization
+or desktop portal UI may still be required by the browser/desktop itself.
+Synthetic DOM/API checks are not an interactive Spectacle/browser or live
+rootless-Podman acceptance claim.
+
 After the last client exits, V2 final sync waits up to 30 seconds for the same
 private server's foreground sessions and unconsumed background jobs to settle.
 An idle persistent shell terminal does not block this wait. Timeout or an invalid
@@ -1771,6 +1825,12 @@ owner, not to an active client. To replace an existing selection:
 ```sh
 oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 ```
+
+### --attachments
+
+Web only: explicitly select the visible, source-version-bounded browser File-drop
+adapter described under `web`. Keeps the native app and its draft/Send controls
+unchanged. No automatic prompt admission or host-path/URL reading.
 
 ### --no-vault
 

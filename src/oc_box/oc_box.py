@@ -3583,11 +3583,21 @@ def main(argv=None):
         args = parser().parse_args(["start", *selectors])
         args.command, args.port, args.no_open = "web", web.port, web.no_open
         args.no_vault = web.no_vault
+        args.attachments = web.attachments
         args._opencode_release = detect_opencode_release()
         if opencode_compat.major(args._opencode_release) != 2:
             raise BoxError(
                 "'oc-box web' requires OpenCode 2.x; use the native TUI with 1.x."
             )
+        if web.attachments:
+            if __package__:
+                from .web_attachments import SUPPORTED
+            else:
+                from web_attachments import SUPPORTED
+            if args._opencode_release not in SUPPORTED:
+                raise BoxError(
+                    "The browser attachment adapter requires native OpenCode 2.2.6 or 2.3.0."
+                )
         workspace_service.preflight_port(web.port)
     else:
         args = parser().parse_args(argv)

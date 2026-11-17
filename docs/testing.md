@@ -28,6 +28,32 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
+### Experimental browser attachment adapter
+
+`tests/test_web_attachments.py` and `tests/web_attachments_browser.mjs` cover
+bodyless authenticated local resource routes, Host/Origin/Fetch Metadata/CSRF
+refusals, source-version preflight, file-only standard DOM forwarding, native
+path-mention defaults, media signatures, byte/count bounds, route changes and
+no automatic prompt admission. The JavaScript fixture uses synthetic browser
+objects; it is not a real browser compositor/drag protocol test.
+
+Run the separate provider-free native API contract on each supported release:
+
+```sh
+python3 -B tests/smoke_web_attachments_v2.py --opencode /path/to/opencode-v2
+```
+
+Its source-bound versions are 2.2.6
+(`dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06`) and 2.3.0
+(`a6b15d33daf6ab7d35569f6d711fdb630b9f04e7`). The fixture verifies real
+native pairing/cookie authentication, bundled app assets, unchanged history/inbox
+after wrapper reads, and separate **explicit fixture-only** PNG/PDF byte
+admissions with `resume=false`. The production adapter never calls that prompt
+API. These checks do not prove browser/Spectacle/Wayland/X11/portal behavior,
+native composer thumbnail admission, provider interpretation, live rootless
+Podman isolation or new host acceptance. No native source/binary modifications
+or private widget selector hooks are used by the adapter.
+
 ### Reviewed 5573965 candidate evidence
 
 The following is a review of retained evidence for clean

@@ -79,6 +79,8 @@ class PackagingTests(unittest.TestCase):
                     "opencode_compat.py",
                     "opencode_v2_io.py",
                     "workspace_service.py",
+                    "web_attachments.py",
+                    "web_attachments.js",
                     "version_info.py",
                     "build-info.json",
                     "distribution.json",
@@ -111,6 +113,9 @@ class PackagingTests(unittest.TestCase):
                 ("sdist", name)
                 for name in (
                     "tests/test_session_sync.py",
+                    "tests/test_web_attachments.py",
+                    "tests/web_attachments_browser.mjs",
+                    "tests/smoke_web_attachments_v2.py",
                     "tests/test_native_tabs.py",
                     "tests/test_native_tab_routing.py",
                     "tests/smoke_native_tabs_v2.py",
