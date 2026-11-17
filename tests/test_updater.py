@@ -309,6 +309,9 @@ class UpdateTests(unittest.TestCase):
             path, data = box.create_workspace(project, "tumbleweed")
             with (
                 patch.dict(os.environ, {"OC_BOX_CONTAINER": ""}),
+                # The updater's class-wide UID simulation must not impersonate
+                # a different owner for these real workspace preference files.
+                patch.object(box.os, "geteuid", return_value=path.stat().st_uid),
                 patch.object(
                     updater,
                     "automatic_upgrade",
