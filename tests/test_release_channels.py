@@ -294,6 +294,9 @@ class ReleaseChannelTests(unittest.TestCase):
         attachments = 'python3 -B tests/smoke_web_attachments_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"'
         self.assertEqual(native.count(attachments), 1)
         self.assertLess(native.index(command), native.index(attachments))
+        ui_state = 'python3 -B tests/smoke_ui_state_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"'
+        self.assertEqual(native.count(ui_state), 1)
+        self.assertLess(native.index(attachments), native.index(ui_state))
         self.assertIn("@opencode/cli@2.2.6", native)
 
 

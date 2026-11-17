@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import select
+import secrets
 import signal
 import socket
 import stat
@@ -398,6 +399,12 @@ def validate_endpoint(value):
         raise ValueError("Invalid private workspace service response.")
     if type(value.get("image_preview", False)) is not bool:
         raise ValueError("Invalid private workspace image-preview setting.")
+    if "ui_state" in value:
+        if __package__:
+            from . import ui_state
+        else:
+            import ui_state
+        ui_state._metadata(value)
     parsed = urlparse(value.get("url", ""))
     if (
         parsed.scheme != "http"
@@ -467,7 +474,14 @@ def validate_workspace(box, path, data):
 
 
 def client_command(
-    box, data, connection, arguments, *, interactive=False, force_tty=False
+    box,
+    data,
+    connection,
+    arguments,
+    *,
+    interactive=False,
+    force_tty=False,
+    ui_owner=False,
 ):
     """No host pass_env, auth refresh, profiles, or vault unlock on attach."""
     image_preview = connection.get("image_preview", False)
@@ -502,6 +516,29 @@ def client_command(
         "XDG_CACHE_HOME": data["home"] + "/.cache",
         "OPENCODE_DB": "oc-box-v2.db",
     }
+    if (
+        interactive
+        and len(arguments) >= 2
+        and arguments[:2] == [box.CONTAINER_OPENCODE, box.container_project(data)]
+        and "--server" in arguments
+        and arguments[arguments.index("--server") + 1 :]
+        and arguments[arguments.index("--server") + 1] == connection["url"]
+    ):
+        if __package__:
+            from . import ui_state
+        else:
+            import ui_state
+        try:
+            binding = ui_state._metadata(connection)
+        except ui_state.StateError:
+            raise box.BoxError("Invalid private workspace UI-state setting.") from None
+        if binding is not None:
+            # NONSECRET labels, not native identity or caller attestation. Do
+            # not overwrite cli.json plugins to supply per-client options.
+            names["OC_BOX_UI_STATE_CLIENT"] = (
+                binding["ownerClient"] if ui_owner else secrets.token_hex(16)
+            )
+            names["OC_BOX_UI_STATE_GENERATION"] = binding["generation"]
     if (
         image_preview
         and interactive
@@ -798,11 +835,12 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
 
 
 class Owner:
-    def __init__(self, box, path, data, *, image_preview=False):
+    def __init__(self, box, path, data, *, image_preview=False, ui_bridge=False):
         if type(image_preview) is not bool:
             raise box.BoxError("Invalid private workspace image-preview setting.")
         self.box, self.path, self.data = box, path, data
         self.image_preview = image_preview
+        self.ui_bridge = ui_bridge is True
         self.address = socket_path(box, data)
         self.clients = 0
         self.condition = threading.Condition()
@@ -865,6 +903,20 @@ class Owner:
             self.connection = validate_endpoint(json.loads(output.split(b"\n", 1)[0]))
             self.connection["workspace"] = self.data["id"]
             self.connection["image_preview"] = self.image_preview
+            if __package__:
+                from . import ui_state
+            else:
+                import ui_state
+            self.connection["ui_state"] = (
+                {
+                    "available": True,
+                    "generation": secrets.token_hex(16),
+                    "ownerClient": secrets.token_hex(16),
+                }
+                if self.ui_bridge
+                and ui_state.available(box, self.data, self.connection)
+                else {"available": False}
+            )
             self.token = CONNECTION.set(self.connection)
             self.listener = socket.socket(socket.AF_UNIX)
             self.listener.bind(str(self.address))
@@ -1342,7 +1394,11 @@ class Gateway:
 
 
 def web_session(box, data, connection, args):
-    options = {}
+    if __package__:
+        from . import ui_state
+    else:
+        import ui_state
+    options = {"selection_snapshot_reader": ui_state.read_snapshot}
     if getattr(args, "attachments", False):
         if __package__:
             from . import web_attachments

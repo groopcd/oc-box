@@ -18,6 +18,7 @@ from urllib.request import build_opener, ProxyHandler, Request
 
 from oc_box import (
     oc_box as box,
+    ui_state,
     web_attachments as adapter,
     web_sessions,
     workspace_service as service,
@@ -189,6 +190,46 @@ class RequestTests(unittest.TestCase):
                 self.assertEqual(
                     [call.args[3] for call in native.call_args_list], ["GET", "POST"]
                 )
+
+    def test_production_gateway_factory_composes_real_reader_and_attachment_addon(self):
+        connection = {
+            "version": "2.3.0",
+            "password": "synthetic",
+            "session": None,
+            "ui_state": {"available": False},
+        }
+        data = {"id": "a" * 32}
+        args = SimpleNamespace(attachments=True, port=0, no_open=True)
+        with (
+            patch.object(
+                service,
+                "api",
+                side_effect=[{"version": "2.3.0"}, {"code": "synthetic"}],
+            ),
+            patch.object(service, "Gateway") as factory,
+            patch.object(service.time, "sleep", side_effect=KeyboardInterrupt),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            factory.return_value.__enter__.return_value.url = self.origin
+            self.assertEqual(service.web_session(box, data, connection, args), 0)
+        factory.assert_called_once_with(
+            box,
+            data,
+            connection,
+            0,
+            selection_snapshot_reader=ui_state.read_snapshot,
+            attachments=True,
+            shell_addon_scripts=(adapter.SCRIPT,),
+        )
+        self.assertIs(
+            factory.call_args.kwargs["selection_snapshot_reader"],
+            ui_state.read_snapshot,
+        )
+        # A plain Gateway stays opt-in; production web_session, not a global
+        # class default or a fabricated reader, supplies the real callback.
+        self.assertIsNone(
+            service.Gateway(box, data, connection).selection_snapshot_reader
+        )
 
     @unittest.skipUnless(
         shutil.which("node"), "Node is needed for synthetic browser events"
