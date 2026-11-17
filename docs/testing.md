@@ -243,7 +243,7 @@ fences are not a cosmetic implementation detail to replace.
 Check cheap batched Status and followed-log refresh at every whole-number
 interval from 1 through 60 seconds, default 1 second, and auto-refresh on/off.
 The custom Monitoring field must reject blank, fractional, nonnumeric and
-out-of-range drafts without applying other edits; Reset stages 1 and Cancel
+out-of-range drafts without applying other edits; Reset stages 1 and Revert
 discards it. Include custom values such as 7, 17 and 59. Use controlled
 slow queries to verify no overlapping or queued refreshes; cadence is best-effort,
 not an exact wall-clock guarantee. Native session inventories remain manual
@@ -251,15 +251,19 @@ Connect/refresh, and expensive allocated storage scans remain manual and bound
 to the selected workspace. Settings may change dashboard refresh, never workspace
 limits.
 
-Exercise quick monitoring controls, Open all settings and `s`/`F2`, categorized
+Exercise the inline Settings section and `s`/`F2` navigation, categorized
 Monitoring, Display, Sessions, Logs, Resources and Safety/terminals topics, built-in
-Textual themes and details visibility. Esc/Cancel must discard pending edits;
+Textual themes and details visibility. Revert/Escape must discard pending edits;
 Apply must accept only allowlisted session-only preferences without persistence
 or journal writes. Reset to defaults must stage the full factory preference set
-without changing active values until Apply; Cancel/Esc must discard that staged
+without changing active values until Apply; Revert/Escape must discard that staged
 reset without altering history, favorites or retained logs. Session scope/filter
 changes must not connect or refresh native inventories; log source changes must
 preserve explicit opt-in guards.
+Dirty drafts must survive repeated entry, background status updates and context
+selection without changing the applied polling cadence. Do not retain duplicate
+or hidden monitoring controls. Compact switches must remain clickable and
+Space-operable with visible focus and spatial on/off state at 80×24 and 140×44.
 Log search must never persist or enter the journal. Resources and CLI-mode safety
 information stay read-only, and no preference may weaken `--read-only` or change
 OpenCode `cli.json`/host settings. Settings shortcuts must not steal focused text
@@ -371,14 +375,16 @@ store outside containers/sandboxes. Do not run these probes inside oc-box, use
 real workspaces, or change the candidate while its tests run. Required manual
 observations include:
 
-- Seven-tab navigation (retaining `1`–`5`, adding Storage/Backup at `6`/`7`), compact header and bounded diagnostics/System panels on
+- Seven-section navigation (`1`–`7`), responsive rail/header and bounded
+  host resource cards/compact strip and selected-workspace inspector on
   small terminals, readable fixed-scale histories and expandable full details/
   mounts. Log search remains available while following/paused on every tab.
   Observe default one-second and selectable shared Status/followed-log refresh,
   best-effort slow-query behavior, and explicit bounded storage/log reads.
-- Quick monitoring controls and categorized settings via the button and `s`/`F2`,
-  including with no workspace selected. Check Esc/Cancel discard, session-only
-  Apply, staged Reset to defaults followed by both Cancel and Apply,
+- All categorized preferences directly in Settings via `2` and `s`/`F2`,
+  including with no workspace selected and no extra settings window. Check
+  Revert/Escape discard, session-only Apply, staged Reset to defaults followed by
+  both Revert and Apply, compact on/off switch click/keyboard behavior,
   theme/details display, no automatic session connection, unchanged host/
   OpenCode settings and no settings/search journal entries. Read-only mode cannot
   be weakened; there is no resource mutation path.

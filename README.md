@@ -224,8 +224,11 @@ Delayed session queries show animated, source-specific progress and explicit
 cancellation; failed actions show fixed, actionable notifications rather than raw
 native errors. Lost acknowledgements leave the outcome unverified, not falsely
 reported as unchanged.
-`s` or `F2` opens grouped, **session-only** dashboard settings with Apply, Cancel
-and Reset to defaults; these preferences cannot weaken CLI `--read-only` mode.
+All grouped, **session-only** preferences live directly in the Settings tab;
+`s` or `F2` navigates there without opening another window. Apply activates edits,
+Reset stages defaults and Revert/Escape discards drafts. Compact single-row
+switches retain normal mouse/keyboard behavior. Preferences cannot weaken CLI
+`--read-only` mode.
 Visible text is drag-selectable throughout the dashboard, including logs,
 graphs and control labels; releasing the mouse copies the selection immediately
 without activating the control. Graph bars use copyable text glyphs. There are no

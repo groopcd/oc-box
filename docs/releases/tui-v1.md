@@ -61,10 +61,11 @@ replace it or add another chat client.
   whole-number 1–60-second choices, auto-refresh toggle and no overlapping/queued
   queries. Expensive storage scans remain explicit. Demo uses fixed synthetic
   readings, not live host metrics.
-- **Grouped settings:** `s`, `F2` or Open all settings opens Monitoring, Display,
-  Sessions, Logs, Resources and Safety/terminals. Apply is dashboard-session-only;
-  Cancel/Esc discards edits. Reset to defaults stages preferences for Apply or
-  Cancel, without changing history, favorites or retained logs. No setting is
+- **Inline settings:** `2`, `s` or `F2` navigates to the Settings tab containing
+  Monitoring, Display, Sessions, Logs, Resources and Safety/terminals, without an
+  extra window. Switches use compact single-row controls. Apply is dashboard-session-only;
+  Revert/Escape discards edits. Reset to defaults stages preferences for Apply or
+  Revert, without changing history, favorites or retained logs. No setting is
   persisted or journaled, and none can weaken CLI `--read-only` mode.
 - **On-demand sessions:** explicit native V2 host-global, host-project or existing
   private workspace connections. Global inventories include children and

@@ -658,8 +658,8 @@ quits outside a focused embedded terminal.  A left navigation rail is
 used on wide terminals; below 118 columns or 32 rows it becomes a header
 section picker.  The header keeps case-insensitive literal log search
 available from every section, including while follow is paused; ‘Ctrl+L’
-opens Logs and focuses search.  ‘s’ or ‘F2’ opens all dashboard settings
-outside focused text inputs or the native shell.  A focused terminal
+opens Logs and focuses search.  ‘s’ or ‘F2’ navigates to the Settings
+tab outside focused text inputs or the native shell.  A focused terminal
 keeps its keys, including ‘s’, ‘F2’ and ‘Ctrl+L’; use ‘Ctrl-]’ to detach
 its client without ending the native shell before using dashboard
 shortcuts.
@@ -742,21 +742,21 @@ already-connected Sessions tab) to fetch a new snapshot.  Explicit
 filters/project selection and session actions can update the displayed
 rows.
 
-The Settings tab keeps quick monitoring controls and an Open all
-settings button.  The categorized modal window covers Monitoring
-(auto-refresh/interval), Display (built-in Textual theme/details),
-Sessions (scope/text filter only, no automatic connection), Logs
-(follow/source/search), read-only Resources (saved/observed), and
-read-only Safety/terminals (CLI-selected mode).  **Reset to defaults**
-fills the form with factory dashboard preferences; click Apply to
-activate them, or Esc/Cancel to discard the reset.  Defaults include
-one-second automatic refresh, the ‘oc-box-navy’ theme, collapsed
-details, global session scope, followed logs from all loaded sources,
-and empty search filters.  It never resets containers, history,
-favorites, retained logs or the CLI-selected safety mode.  Esc/Cancel
+All preferences appear directly in the Settings tab, without an extra
+window or duplicate monitoring controls.  The categorized inline form
+covers Monitoring (auto-refresh/interval), Display (built-in Textual
+theme/details), Sessions (scope/text filter only, no automatic
+connection), Logs (follow/source/search), read-only Resources
+(saved/observed), and read-only Safety/terminals (CLI-selected mode).
+**Reset to defaults** fills the form with factory dashboard preferences;
+click Apply to activate them, or Revert/Escape to discard the reset.
+Defaults include one-second automatic refresh, the ‘oc-box-navy’ theme,
+collapsed details, global session scope, followed logs from all loaded
+sources, and empty search filters.  It never resets containers, history,
+favorites, retained logs or the CLI-selected safety mode.  Revert/Escape
 discards edits; Apply changes only allowlisted dashboard preferences
 **for this session**, with no persistence or logging.  Search text is
-never persisted.  The window cannot weaken ‘--read-only’, modify
+never persisted.  These preferences cannot weaken ‘--read-only’, modify
 OpenCode ‘cli.json’ or host settings, or change workspace resources or
 credentials.  Live CPU/RAM limit edits, storage quotas, resizes and
 graphroot/runroot moves are deferred to a separate project.  Existing
@@ -765,10 +765,13 @@ update’ action, resource-control RPC or resource-editing service
 extension.
 
 The Monitoring refresh field accepts any whole number from 1 to 60
-seconds, default 1.  Invalid or blank entries leave the window open with
-feedback and apply none of the pending edits.  Reset fills 1; Apply
-activates it, and Cancel discards the draft.  The quick Settings-tab
-selector supports the same range.
+seconds, default 1.  Invalid or blank entries show inline feedback and
+apply none of the pending edits.  Reset fills 1; Apply activates it, and
+Revert discards the draft.  Unapplied monitoring edits do not change the
+running refresh cadence.  Drafts survive tab switches and background
+refreshes; resource context updates without overwriting them.  On/off
+switches use compact single-row controls with visible keyboard focus,
+including Logs Follow.
 
 The Sessions tab uses manual Connect/refresh.  Host global discovery
 consumes the complete paginated native V2 API across projects, children
@@ -3457,20 +3460,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2730
 Node: Commands6328
-Node: Options93178
-Node: Lifecycle and persistence116971
-Node: Distribution images119091
-Node: Sessions and recovery123966
-Node: Devices and host permissions130551
-Node: Resource reports132897
-Node: Configuration and environment135008
-Node: Files146389
-Node: Exit status152333
-Node: Examples153186
-Node: Troubleshooting155272
-Node: Installation and manuals166624
-Node: Authors and license175876
-Node: See also176483
+Node: Options93423
+Node: Lifecycle and persistence117216
+Node: Distribution images119336
+Node: Sessions and recovery124211
+Node: Devices and host permissions130796
+Node: Resource reports133142
+Node: Configuration and environment135253
+Node: Files146634
+Node: Exit status152578
+Node: Examples153431
+Node: Troubleshooting155517
+Node: Installation and manuals166869
+Node: Authors and license176121
+Node: See also176728
 
 End Tag Table
 

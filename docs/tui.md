@@ -324,13 +324,10 @@ filesystem capacity does not authorize changing it. See the
 
 ### 2. Settings
 
-The Settings tab retains quick monitoring controls and an **Open all settings**
-button. It compares saved workspace limits with observed effective values;
-resource settings are informational, not editable limits.
-
-Use the button, `s` or `F2` to open a categorized modal settings window. Keyboard
-shortcuts apply only outside focused text inputs and the native shell. The
-window is also usable without a current workspace:
+All dashboard preferences appear directly in the Settings tab, not a separate
+window. `2`, `s` or `F2` navigates there using the normal section navigation;
+shortcuts apply only outside focused text inputs and the native shell.
+The categorized inline form is also usable without a current workspace:
 
 | Topic | Controls and boundaries |
 | --- | --- |
@@ -341,15 +338,15 @@ window is also usable without a current workspace:
 | Resources | Read-only saved limits and observed values. |
 | Safety/terminals | Read-only information about the CLI-selected mode and terminal safety; the `--read-only` fence cannot be weakened here. |
 
-**Reset to defaults** stages factory dashboard preferences without closing the
-window or immediately changing the active dashboard. Defaults are automatic
+**Reset to defaults** stages factory dashboard preferences without immediately
+changing the active dashboard. Defaults are automatic
 one-second refresh, `oc-box-navy`, collapsed details, global session scope,
 following all loaded log sources, and empty session/log filters. **Apply** makes
-them active; **Esc** or **Cancel** discards the reset. No reset touches containers,
+them active; **Escape** or **Revert** discards the reset. No reset touches containers,
 resource limits, history, favorites or retained log entries, and it cannot weaken
 the CLI-selected read-only mode.
 
-**Esc** or **Cancel** discards pending window edits. **Apply** accepts only the
+**Escape** or **Revert** discards pending form edits. **Apply** accepts only the
 allowlisted dashboard preferences, for **this dashboard session only**. Changes
 are neither persisted nor logged; they do not modify OpenCode `cli.json`, host
 settings, workspace resources or credential snapshots. There are no CPU/RAM/
@@ -357,9 +354,12 @@ storage edit controls, resource-control RPCs, implicit resets or storage
 migrations. A settings Apply is not a resource Apply or native service reload.
 
 Enter refresh seconds directly in the Monitoring field. Blank, fractional or
-out-of-range values keep the dialog open with feedback and do not apply any of
-the other draft preferences. The quick Settings-tab selector supports the same
-1–60 range.
+out-of-range values show inline feedback and do not apply any other draft
+preferences. Unapplied changes do not alter monitoring cadence. Drafts survive
+tab changes, background refreshes and workspace selection; resource information
+updates separately. There is only one monitoring form, not duplicate quick
+controls. Settings and Logs Follow use compact single-row native switches,
+retaining click/Space operation, spatial on/off state and visible keyboard focus.
 
 If you deliberately need different create-time limits, exit the relevant
 clients/owner and use the existing CLI workflow outside the manager:
