@@ -16,6 +16,7 @@ from textual.css.query import NoMatches
 from textual.errors import NoWidget
 from textual.screen import ModalScreen
 from textual.scrollbar import ScrollBar
+from textual.theme import Theme
 from textual.worker import get_current_worker
 from textual.widgets import (
     Button,
@@ -47,7 +48,7 @@ if __package__:
         SelectableDataTable,
         SelectableRichLog,
     )
-    from .tui_status import MonitorPanel, percentage
+    from .tui_status import MonitorPanel, numeric, percentage
     from .tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
     from .tui_management import ManagementActions, StoragePanel, BackupPanel
 else:
@@ -65,7 +66,7 @@ else:
         SelectableDataTable,
         SelectableRichLog,
     )
-    from tui_status import MonitorPanel, percentage
+    from tui_status import MonitorPanel, numeric, percentage
     from tui_settings import SettingsScreen, REFRESH_INTERVALS, DEFAULT_SETTINGS
     from tui_management import ManagementActions, StoragePanel, BackupPanel
 
@@ -124,19 +125,61 @@ class Confirm(ModalScreen):
 class DashboardApp(ManagementActions, ClipboardActions, App):
     TITLE = "oc-box control center"
     AUTO_FOCUS = "#workspaces"
+    SECTIONS = (
+        ("Status", "status"),
+        ("Settings", "settings"),
+        ("Sessions", "sessions"),
+        ("Terminals", "terminals"),
+        ("Logs", "logs"),
+        ("Storage", "storage"),
+        ("Backups", "backups"),
+    )
     CSS = """
     Screen { layout: vertical; }
-    #host-summary { height: 1; padding: 0 1; text-style: bold;
+    #dashboard-header { height: 3; background: $surface; }
+    #host-summary { width: 24; height: 1; margin: 1 1; text-style: bold;
       text-wrap: nowrap; text-overflow: ellipsis; }
+    #view-title { width: 1fr; height: 1; margin: 1 1; color: $primary; }
+    #workspace-picker { width: 38; margin-right: 1; }
+    #section-picker { display: none; width: 19; margin-right: 1; }
+    #dashboard-header Select > SelectCurrent { border: round $primary 25%;
+      background: $surface; }
+    #monitoring-state { width: 15; height: 1; margin: 1 1; color: $success; }
     #log-tools { height: 3; }
-    #log-search { width: 1fr; }
+    #log-search { width: 1fr; border: round $primary 25%; background: $surface; }
     #log-hits { width: 13; padding: 1 1; }
-    #log-tools Button { width: auto; min-width: 6; padding: 0 1; }
+    #log-tools Button { width: auto; min-width: 6; padding: 0 1;
+      border: round $primary 25%; background: $surface; color: $primary; }
     #body { height: 1fr; }
-    #sidebar { width: 24; border: round $primary; }
+    #sidebar { width: 18; padding: 0 1; background: $surface; }
+    #section-heading { height: 2; padding-top: 1; color: $text-muted; }
+    .nav-choice { width: 1fr; min-width: 0; height: 1; margin: 1 0 0 0;
+      border: none; padding: 0 1; text-align: left; background: transparent;
+      content-align: left middle; color: $text-muted; }
+    .nav-choice.-selected { color: $primary; background: $primary 20%; text-style: bold; }
+    .nav-choice:focus { color: $text; background: $primary 30%; }
+    #nav-context { dock: bottom; height: auto; max-height: 7; margin-top: 1;
+      border: round $primary 25%; padding: 0 1; color: $text-muted; }
     #workspaces { height: 1fr; }
     #content { width: 1fr; }
     #content, #content > ContentSwitcher, TabPane { height: 1fr; min-height: 0; }
+    #content > Tabs { display: none; }
+    #status-dashboard { padding: 0; }
+    #system-report { margin-bottom: 1; }
+    #overview-body { height: auto; }
+    .card { border: round $primary 25%; background: $surface; padding: 0 1; }
+    .card-title { height: 1; color: $primary; text-style: bold; }
+    .card-caption { height: 1; color: $text-muted; text-wrap: nowrap; text-overflow: ellipsis; }
+    #workspace-card { width: 1fr; height: 17; margin-right: 1; }
+    #workspace-inspector { width: 40%; height: auto; padding: 0;
+      border: none; background: $surface; }
+    #workspace-inspector > CollapsibleTitle { display: none; }
+    #workspace-inspector > Contents { padding: 0; }
+    #workspace-source-context { height: auto; color: $text-muted; padding: 0 1; }
+    #workspace-details { padding: 0; border: none; margin: 0; }
+    #scan-storage { width: auto; min-width: 12; margin: 0 1; }
+    #activity-card { height: 8; margin-top: 1; }
+    #overview-activity { height: 4; text-wrap: nowrap; text-overflow: ellipsis; }
     #status-summary, #settings-info, #terminal-info { height: auto; padding: 1; }
     MonitorPanel { height: auto; width: 1fr; padding: 0 1;
       text-wrap: nowrap; text-overflow: clip; }
@@ -150,7 +193,9 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     #log-output { height: 1fr; }
     #notice { height: auto; max-height: 3; color: $warning; }
     .toolbar { height: auto; min-height: 3; overflow-x: auto; }
-    .toolbar Button { min-width: 10; margin-right: 1; }
+    .toolbar Button { min-width: 10; margin-right: 1;
+      border: round $primary 25%; background: $surface; color: $primary; }
+    .toolbar Button.-error { border: round $error 50%; color: $error; }
     .toolbar Button:last-child { margin-right: 0; }
     .toolbar Select { width: 24; }
     #session-source-tools Select { width: 1fr; min-width: 12; }
@@ -160,6 +205,16 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     .toolbar SelectCurrent > #label { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
     NativeTerminal { height: 1fr; min-height: 5; border: round $secondary; }
     TabPane { padding: 0 1; overflow-y: auto; }
+    Screen.compact #sidebar, Screen.compact #view-title,
+    Screen.compact #monitoring-state { display: none; }
+    Screen.compact #section-picker { display: block; }
+    Screen.compact #host-summary { width: 17; min-width: 17; }
+    Screen.compact #workspace-picker { width: 1fr; }
+    Screen.compact #overview-body { layout: vertical; }
+    Screen.compact #workspace-card { width: 1fr; height: 11; margin-right: 0; }
+    Screen.compact #workspace-inspector { width: 1fr; }
+    Screen.compact #workspace-inspector > CollapsibleTitle { display: block; }
+    Screen.compact #activity-card { display: none; }
     """
     BINDINGS = [
         Binding("f1", "clipboard_help", "Clipboard help", priority=True),
@@ -182,6 +237,23 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
 
     def __init__(self, backend, *, read_only=False, selected=None, demo=False):
         super().__init__()
+        self.register_theme(
+            Theme(
+                name="oc-box-navy",
+                primary="#57d6e5",
+                secondary="#65d996",
+                accent="#57d6e5",
+                foreground="#d9e7ee",
+                background="#060d14",
+                surface="#0b1720",
+                panel="#0b1720",
+                warning="#edb94e",
+                error="#e57480",
+                success="#65d996",
+                dark=True,
+            )
+        )
+        self.theme = DEFAULT_SETTINGS["theme"]
         self.backend, self.read_only, self.selected, self.demo = (
             backend,
             read_only,
@@ -216,6 +288,9 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._monitor_snapshots = {}
         self._session_favorites = set()
         self._favorites_busy = False
+        self._picker_options = None
+        self._activity_revision = -1
+        self._compact_layout = None
         self._catalog_generation = 0
         self.cpu_history = []
         self.ram_history = []
@@ -234,9 +309,26 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._management_init()
 
     def compose(self) -> ComposeResult:
-        yield Static(
-            "Sampling host and workspace resources…", id="host-summary", markup=False
-        )
+        with Horizontal(id="dashboard-header"):
+            yield Static("oc-box", id="host-summary", markup=False)
+            yield Static("Status / Overview", id="view-title", markup=False)
+            yield Select(
+                [
+                    (f"{i} {label}", key)
+                    for i, (label, key) in enumerate(self.SECTIONS, 1)
+                ],
+                value="status",
+                allow_blank=False,
+                id="section-picker",
+            )
+            yield Select(
+                [("Loading workspaces…", "__none__")],
+                value="__none__",
+                allow_blank=False,
+                id="workspace-picker",
+                disabled=True,
+            )
+            yield Static("Auto · 1s", id="monitoring-state", markup=False)
         with Horizontal(id="log-tools"):
             yield ClipboardInput(
                 placeholder="Search retained logs at any time · Ctrl+L opens Logs",
@@ -244,27 +336,67 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             )
             yield Static("0 matches", id="log-hits", markup=False)
             yield Button("Logs", id="show-logs")
+            yield Button("Refresh", id="refresh")
         with Horizontal(id="body"):
             with Vertical(id="sidebar"):
-                yield Label("Registered workspaces")
-                yield SelectableDataTable(
-                    id="workspaces", cursor_type="row", zebra_stripes=True
-                )
-                yield Button("Refresh", id="refresh")
+                yield Static("SECTIONS", id="section-heading", markup=False)
+                for i, (label, key) in enumerate(self.SECTIONS, 1):
+                    yield Button(f"{i} {label}", id=f"nav-{key}", classes="nav-choice")
+                yield Static("No workspace selected.", id="nav-context", markup=False)
             with TabbedContent(id="content", initial="status"):
                 with TabPane("Status", id="status"):
                     with VerticalScroll(id="status-dashboard"):
-                        yield MonitorPanel("workspace", id="full-diagnostics")
                         yield MonitorPanel("system", id="system-report")
-                        with Collapsible(
-                            title="Workspace details and mounts",
-                            collapsed=not DEFAULT_SETTINGS["details"],
-                            id="workspace-details",
-                        ):
+                        with Horizontal(id="overview-body"):
+                            with Vertical(id="workspace-card", classes="card"):
+                                yield Static(
+                                    "WORKSPACES · context only", classes="card-title"
+                                )
+                                yield SelectableDataTable(
+                                    id="workspaces",
+                                    cursor_type="row",
+                                    zebra_stripes=True,
+                                )
+                                yield Static(
+                                    "CPU: 100%=1 core · storage sizes require a scan",
+                                    id="inventory-notice",
+                                    classes="card-caption",
+                                    markup=False,
+                                )
+                            with Collapsible(
+                                title="Selected workspace",
+                                collapsed=False,
+                                id="workspace-inspector",
+                            ):
+                                yield MonitorPanel("workspace", id="full-diagnostics")
+                                yield Static(
+                                    "Native sessions: not connected.",
+                                    id="workspace-source-context",
+                                    markup=False,
+                                )
+                                with Collapsible(
+                                    title="Workspace details and mounts",
+                                    collapsed=not DEFAULT_SETTINGS["details"],
+                                    id="workspace-details",
+                                ):
+                                    yield Static(
+                                        "Select a workspace",
+                                        id="status-summary",
+                                        markup=False,
+                                    )
+                                yield Button("Scan sizes", id="scan-storage")
+                        with Vertical(id="activity-card", classes="card"):
+                            yield Static("RETAINED ACTIVITY", classes="card-title")
                             yield Static(
-                                "Select a workspace", id="status-summary", markup=False
+                                "No retained oc-box activity.",
+                                id="overview-activity",
+                                markup=False,
                             )
-                        yield Button("Scan storage sizes", id="scan-storage")
+                            yield Static(
+                                "Fixed categories only · external logs require explicit Load",
+                                classes="card-caption",
+                                markup=False,
+                            )
                 with TabPane("Settings", id="settings"):
                     with VerticalScroll():
                         yield Button("All settings… (s / F2)", id="show-settings")
@@ -408,13 +540,23 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         yield ClipboardFooter()
 
     def on_mount(self):
-        self.query_one("#workspaces", DataTable).add_columns("Project", "State")
+        table = self.query_one("#workspaces", DataTable)
+        for label, width in (
+            ("Project", 18),
+            ("State", 8),
+            ("CPU", 7),
+            ("RAM", 10),
+            ("Home size", 10),
+        ):
+            table.add_column(label, width=width)
         self.query_one("#session-table", DataTable).add_columns(
             "★", "ID", "Title", "Kind", "Native directory"
         )
         self._poll_timer = self.set_interval(0.25, self._tick)
         self._management_mount()
         self._refresh_favorites()
+        self._sync_navigation("status")
+        self._responsive_layout(self.size.width)
         self.action_refresh()
 
     def _message(self, value):
@@ -495,6 +637,113 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
 
     def action_tab(self, tab):
         self.query_one("#content", TabbedContent).active = tab
+        self._sync_navigation(tab)
+
+    def _sync_navigation(self, tab):
+        labels = dict((key, label) for label, key in self.SECTIONS)
+        if tab not in labels:
+            return
+        for _, key in self.SECTIONS:
+            # "-active" belongs to Button's transient press-feedback timer.
+            self.query_one(f"#nav-{key}", Button).set_class(key == tab, "-selected")
+        picker = self.query_one("#section-picker", Select)
+        if picker.value != tab:
+            with picker.prevent(Select.Changed):
+                picker.value = tab
+        self._update_text(
+            "#view-title", "Status / Overview" if tab == "status" else labels[tab]
+        )
+
+    def on_tabbed_content_tab_activated(self, event):
+        if event.tabbed_content.id == "content" and event.tabbed_content.is_attached:
+            self._sync_navigation(event.tabbed_content.active)
+
+    def on_resize(self, event):
+        if self.is_mounted and self.query("#body"):
+            self._responsive_layout(event.size.width)
+
+    def _responsive_layout(self, width):
+        compact = width < 118
+        if compact == self._compact_layout:
+            return
+        self._compact_layout = compact
+        self.query_one("#body").screen.set_class(compact, "compact")
+        self.query_one("#workspace-inspector", Collapsible).collapsed = compact
+
+    def _sync_workspace_picker(self):
+        choices = tuple(
+            (
+                item["workspace_id"],
+                Path(item["project"]).name or item["project"],
+            )
+            for item in self.report["workspaces"]
+        )
+        picker = self.query_one("#workspace-picker", Select)
+        with picker.prevent(Select.Changed):
+            if choices != self._picker_options:
+                picker.set_options(
+                    [(text(label), ident) for ident, label in choices]
+                    or [("No workspaces", "__none__")]
+                )
+                self._picker_options = choices
+            picker.disabled = not choices
+            selected = self.selected if choices else "__none__"
+            if picker.value != selected:
+                picker.value = selected
+
+    def _render_context(self):
+        item = self._workspace()
+        context = "No workspace selected."
+        if item:
+            context = (
+                f"{plain(Path(item['project']).name)}\n"
+                f"{plain(item.get('state', 'n/a'))}\n"
+                f"{plain(item.get('distro', 'n/a'))}"
+            )
+        self._update_text("#nav-context", context)
+        source = "Native sessions: not connected."
+        if self.catalog:
+            source = f"Sessions source: {plain(self.catalog.origin)}" + (
+                f" · {plain(self.catalog.store, 64)} · client lease held"
+                if self.catalog.origin == "workspace"
+                else " · process-local checks"
+            )
+        self._update_text("#workspace-source-context", source)
+        self._update_text(
+            "#host-summary",
+            "oc-box READ ONLY"
+            if self.read_only
+            else "oc-box DEMO"
+            if self.demo
+            else "oc-box",
+        )
+        self._render_monitoring_state()
+
+    def _render_monitoring_state(self):
+        interval = self.query_one("#refresh-interval", Select).value
+        auto = self.query_one("#auto-refresh", Switch).value
+        self._update_text(
+            "#monitoring-state", f"{'Auto' if auto else 'Paused'} · {interval}s"
+        )
+
+    def on_switch_changed(self, event):
+        if event.switch.id == "auto-refresh" and self.is_mounted:
+            self._render_monitoring_state()
+
+    def _choose_workspace(self, target):
+        if target == self.selected:
+            return
+        rows = self.report["workspaces"]
+        if target not in {row["workspace_id"] for row in rows}:
+            return
+        self.selected = target
+        self._session_source_changed()
+        table = self.query_one("#workspaces", DataTable)
+        index = next(i for i, row in enumerate(rows) if row["workspace_id"] == target)
+        table.move_cursor(row=index, scroll=True)
+        self._sync_workspace_picker()
+        self._render_workspace()
+        self._render_sessions()
 
     def action_logs(self):
         self.action_tab("logs")
@@ -572,11 +821,14 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self.query_one("#workspace-details", Collapsible).collapsed = not values[
             "details"
         ]
+        if values["details"]:
+            self.query_one("#workspace-inspector", Collapsible).collapsed = False
         self.query_one("#session-scope", Select).value = values["session_scope"]
         self.query_one("#session-search", Input).value = values["session_filter"]
         self.query_one("#log-follow", Switch).value = values["log_follow"]
         self.query_one("#log-source", Select).value = values["log_source"]
         self.query_one("#log-search", Input).value = values["log_query"]
+        self._render_monitoring_state()
         self._message(
             "Dashboard settings applied for this session. Workspace limits and OpenCode configuration are unchanged."
         )
@@ -653,17 +905,37 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                     item["storage_sampled_at"] = old.get("storage_sampled_at")
         self.report = report
         workspaces = report["workspaces"]
+        skipped = report.get("inventory_skipped")
+        self._update_text(
+            "#inventory-notice",
+            f"{skipped} invalid registrations skipped · sizes are manual"
+            if skipped
+            else "CPU: 100%=1 core · storage sizes require a scan",
+        )
         if self.selected not in {w["workspace_id"] for w in workspaces}:
             selected = workspaces[0]["workspace_id"] if workspaces else None
             if selected != self.selected:
                 self._session_source_changed()
             self.selected = selected
+        self._sync_workspace_picker()
         self._update_table(
             "#workspaces",
             tuple(
                 (
                     item["workspace_id"],
-                    (Path(item["project"]).name or item["project"], item["state"]),
+                    (
+                        Path(item["project"]).name or item["project"],
+                        item["state"],
+                        self._workspace_cpu(item),
+                        self._display_bytes(
+                            (item.get("metrics") or {}).get("memory_bytes")
+                            if item.get("state") == "running"
+                            else None
+                        ),
+                        self._display_bytes(
+                            (item.get("storage") or {}).get("private_home_bytes")
+                        ),
+                    ),
                 )
                 for item in workspaces
             ),
@@ -671,26 +943,43 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         )
         host = report.get("host", {})
         cpu = host.get("cpu_percent")
-        cpu_label = "n/a" if cpu is None else f"{cpu:.1f}%"
-        size = status_report.byte_size
-        self._update_text(
-            "#host-summary",
-            f"oc-box {'DEMO · ' if self.demo else ''}{'READ ONLY · ' if self.read_only else ''}"
-            f"CPU {cpu_label}  RAM {size(host.get('memory_bytes'))}/{size(host.get('memory_total_bytes'))}  "
-            f"Workspaces {len(workspaces)}"
-            + (
-                f" · {report['inventory_skipped']} invalid registrations skipped"
-                if report.get("inventory_skipped")
-                else ""
-            ),
-        )
         self.cpu_history = (self.cpu_history + [cpu])[-60:]
         self.ram_history = (
             self.ram_history
             + [percentage(host.get("memory_bytes"), host.get("memory_total_bytes"))]
         )[-60:]
-        self._update_monitor("#system-report", host, self.cpu_history, self.ram_history)
+        overview = {
+            **host,
+            "workspace_counts": {
+                "running": sum(item.get("state") == "running" for item in workspaces),
+                "registered": len(workspaces),
+            },
+        }
+        self._update_monitor(
+            "#system-report", overview, self.cpu_history, self.ram_history
+        )
         self._render_workspace()
+
+    @staticmethod
+    def _workspace_cpu(item):
+        value = numeric((item.get("metrics") or {}).get("cpu_percent"))
+        if value is None or item.get("state") != "running":
+            return "n/a"
+        return f"{value:.1f}%"
+
+    @staticmethod
+    def _display_bytes(value):
+        return status_report.byte_size(value) if numeric(value) is not None else "n/a"
+
+    def _table_text(self, selector, index, value):
+        cell = text(value)
+        if selector == "#workspaces" and index == 1:
+            cell.stylize(
+                (self.current_theme.success or "#65d996")
+                if value == "running"
+                else "dim"
+            )
+        return cell
 
     def _update_text(self, selector, value):
         if self._text_snapshots.get(selector) != value:
@@ -725,9 +1014,11 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         if same_source and old_ids == new_ids:
             columns = tuple(table.columns)
             for (key, old), (_, new) in zip(previous, rows):
-                for column, before, after in zip(columns, old, new):
+                for index, (column, before, after) in enumerate(zip(columns, old, new)):
                     if before != after:
-                        table.update_cell(key, column, text(after), update_width=True)
+                        table.update_cell(
+                            key, column, self._table_text(selector, index, after)
+                        )
         else:
             scroll = table.scroll_offset
             cursor = table.cursor_row
@@ -735,7 +1026,13 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                 selected = previous[cursor][0]
             table.clear()
             for key, cells in rows:
-                table.add_row(*(text(cell) for cell in cells), key=key)
+                table.add_row(
+                    *(
+                        self._table_text(selector, i, cell)
+                        for i, cell in enumerate(cells)
+                    ),
+                    key=key,
+                )
             if new_ids:
                 row = (
                     new_ids.index(selected)
@@ -850,6 +1147,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     def _render_workspace(self):
         self._render_management()
         item = self._workspace()
+        self._render_context()
         self._update_monitor("#full-diagnostics", item)
         if not item:
             self._update_text(
@@ -920,11 +1218,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             return
         if event.data_table.id == "workspaces":
             target = str(event.row_key.value)
-            if target != self.selected:
-                self._session_source_changed()
-            self.selected = target
-            self._render_workspace()
-            self._render_sessions()
+            self._choose_workspace(target)
         elif event.data_table.id == "session-table":
             self._session_details()
 
@@ -942,10 +1236,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             if rows[event.cursor_row]["workspace_id"] != target:
                 return
             if target != self.selected:
-                self.selected = target
-                self._session_source_changed()
-                self._render_workspace()
-                self._render_sessions()
+                self._choose_workspace(target)
         elif event.data_table.id == "session-table":
             self._session_details()
 
@@ -985,7 +1276,29 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     def on_select_changed(self, event):
         if self._management_select(event):
             return
-        if event.select.id == "log-source":
+        if event.select.id == "workspace-picker":
+            if self._clipboard_private():
+                self._sync_workspace_picker()
+                return
+            if (
+                event.select.is_attached
+                and event.value == event.select.value
+                and isinstance(event.value, str)
+            ):
+                self._choose_workspace(event.value)
+        elif event.select.id == "section-picker":
+            if self._clipboard_private():
+                self._sync_navigation(self.query_one("#content", TabbedContent).active)
+                return
+            if (
+                event.select.is_attached
+                and event.value == event.select.value
+                and event.value != self.query_one("#content", TabbedContent).active
+            ):
+                self.action_tab(event.value)
+        elif event.select.id == "refresh-interval":
+            self._render_monitoring_state()
+        elif event.select.id == "log-source":
             self._render_logs()
         elif event.select.id == "session-scope":
             self._session_source_changed()
@@ -995,7 +1308,10 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         if self._management_button(event):
             return
         action = event.button.id
-        if action == "refresh":
+        if action and action.startswith("nav-"):
+            if self.check_action("tab", (action[4:],)):
+                self.action_tab(action[4:])
+        elif action == "refresh":
             self.action_refresh()
         elif action == "show-logs":
             self.action_logs()
@@ -1122,6 +1438,22 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             self._log_snapshot = snapshot
             self._log_revision += 1
         self._render_logs()
+        if self._activity_revision != self._log_revision:
+            self._render_overview_activity()
+
+    def _render_overview_activity(self):
+        output = self.query_one("#overview-activity", Static)
+        if output.text_selection is not None:
+            return
+        entries = self.logs.search("", source="oc-box")[-4:]
+        rows = [
+            f"{entry.timestamp[11:19] if len(entry.timestamp) >= 19 else entry.timestamp}  {entry.message}"
+            for entry in entries
+        ]
+        self._update_text(
+            "#overview-activity", "\n".join(rows) or "No retained oc-box activity."
+        )
+        self._activity_revision = self._log_revision
 
     def _render_logs(self):
         source = self.query_one("#log-source", Select).value
@@ -1411,6 +1743,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     def _render_sessions(self):
         if not self.is_mounted:
             return
+        self._render_context()
         query = self.query_one("#session-search", Input).value.casefold()
         scope = self.query_one("#session-scope", Select).value
         workspace = self._workspace()

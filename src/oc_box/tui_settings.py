@@ -27,7 +27,7 @@ DEFAULT_SETTINGS = MappingProxyType(
     {
         "auto_refresh": True,
         "interval": 1,
-        "theme": "textual-dark",
+        "theme": "oc-box-navy",
         "details": False,
         "session_scope": "global",
         "session_filter": "",
