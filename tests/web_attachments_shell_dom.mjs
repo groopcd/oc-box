@@ -195,6 +195,16 @@ for (const mode of ["same-id-event", "metadata", "spa-away-back", "document-load
 }
 {
   const g = await fixture();
+  g.realm.location = new URL(rows[2].route, origin); await g.tick();
+  const release = await pending(g);
+  g.elements["session-tabs"].children[2].click();
+  assert.equal(g.frame.writes, 0, "clicking the selected live SPA route must not reload");
+  await release();
+  assert.equal(g.received.length, 0, "same-ID explicit click still invalidates pending bytes");
+  assert.match(g.elements["addon-status"].textContent, /session changed/);
+}
+{
+  const g = await fixture();
   g.elements["session-tabs"].children[3].click(); g.load(); await settle();
   g.elements["session-tabs"].children[1].click(); g.load(); await settle();
   g.fileDrop(image()); await settle();

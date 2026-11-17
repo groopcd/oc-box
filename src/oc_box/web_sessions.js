@@ -89,6 +89,7 @@
       const url = new URL(frame.contentWindow.location.href);
       if (url.href !== "about:blank" &&
           (url.origin !== window.location.origin || url.pathname !== next.route)) differs = true;
+      else if (!awaitingLoad && url.href !== "about:blank") differs = false;
     } catch { differs = true; }
     if (differs) {
       awaitingLoad = true;
