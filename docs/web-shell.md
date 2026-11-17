@@ -7,26 +7,34 @@ internal tabs are separate client-local state, not synchronized TUI membership.
 
 Initial selection is resolved by `web_sessions.resolve_initial_selection`:
 explicit `oc-box web --session ID` wins, then a URL-selected existing private
-session, then the launcher-declared ID only if it is an actual verified TUI
-member. None is claimed to be current native TUI focus. No first-tab, timestamp,
-activity-map or history guess is used. Multiple TUI clients are not resolved
-magically. An unknown initial target leaves the frame unselected with explicit
-tab choices and native Home navigation.
+session, then a configured reader's verified native report. Without a configured
+reader, a launcher-declared ID may be used only if it is an actual verified TUI
+member, labeled as a declaration rather than current focus. No first-tab,
+timestamp, activity-map or history guess is used. Multiple TUI clients are not
+resolved magically. An unknown initial target leaves the frame unselected with
+explicit tab choices and native Home navigation.
 An explicit existing private ID can still be shown if TUI membership is
 unavailable; the open count is then unknown, not a fabricated zero/open row.
 
 `Gateway(..., selection_snapshot_reader=read_snapshot)` is an injectable,
 trusted-code-only initial-selection seam. It calls
-`read_snapshot(box, data, connection)` only for initial HTML with no explicit
-CLI/URL selection. The default is `None` and performs no focus/report lookup.
-The eventual helper adapter must normalize its verified evidence into
-`{"status": "verified", "selectedSessionID": ID, "source": LABEL}`; only a verified
-private catalog member is currently admitted by this normalized seam. Other
-fields (`orderedtabs`, `activeRoot`, etc.) are not guessed into focus.
-Unavailable/malformed/error reports leave selection explicit, without falling
-back to an old owner's declaration. The helper's actual schema, client binding,
-child/root interpretation and multi-client guarantees remain integration work,
-not an accepted focus implementation in this branch.
+`read_snapshot(box, data, connection)` for an authenticated document/catalog
+request. The default is `None` and performs no focus/report lookup.
+The native reader returns a frozen `Snapshot` with `status`, exact `selected`
+conversation, ordered root `tabs`, separately verified `activeRoot`, and `source`.
+A valid snapshot supplies the full tab membership, not merely a selection guess
+against older persisted membership. Titles are fetched through that same private
+service. When the exact route is a child, the iframe opens that child while the
+outer strip highlights its root; the child is not fabricated as another open tab.
+Explicit CLI/URL selections still win without discarding reported membership.
+
+The original trusted dictionary seam
+`{"status": "verified", "selectedSessionID": ID, "source": LABEL}` remains supported
+for direct catalog members only. Unavailable/malformed/error reports leave
+selection explicit, without falling back to an old owner's declaration. Saved
+membership may still be displayed when no report is available. Production helper
+installation, client binding and runtime acceptance are separate integration
+gates; this adapter alone does not establish them.
 
 An explicit TUI-tab click selects the native ID route, updates the shell query
 and ARIA highlight, and does not send prompts or change permissions/location.
@@ -60,10 +68,12 @@ After common script initialization:
 - `.frame` is the sole `#native` iframe.
 - `.controls` is the optional `#session-controls` container.
 - `.status` is the separate `#addon-status` status area.
-- `.selection()` returns a frozen `{sessionID, nativeRoute, member, origin}` or
+- `.selection()` returns a frozen `{sessionID, nativeRoute, activeRoot, member, origin}` or
   `null`. It returns null during pending frame loads or when current public frame
   URL does not match the verified selection. This is not native composer
   readiness, TUI focus, execution inactivity or grant authorization.
+  `sessionID` remains the exact routed child when applicable; nullable
+  `activeRoot` is a separately verified member, never a replacement route.
 - `.refresh()` requests an explicit membership refresh without changing frame
   content.
 - Window `oc-box:selection-changed` and `oc-box:frame-ready` CustomEvents carry

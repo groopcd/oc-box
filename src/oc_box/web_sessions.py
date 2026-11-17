@@ -80,16 +80,123 @@ def home_navigation():
     )
 
 
-def explicit_session(box, data, connection, ident):
+def explicit_session(box, data, connection, ident, *, timeout=None):
     """Explicit selection only; existing identity in this private DB, not history guessing."""
     if not box.valid_session_id(ident):
         raise box.BoxError("Invalid explicit web session ID.")
-    found = box.workspace_service.web_session_catalog(box, data, connection, [ident])
+    found = box.workspace_service.web_session_catalog(
+        box,
+        data,
+        connection,
+        [ident],
+        **({"timeout": timeout} if timeout is not None else {}),
+    )
     if len(found) != 1 or opencode_v2_io.web_session_info(found[0])["id"] != ident:
         raise box.BoxError(
             "Explicit web session is unavailable in this private service."
         )
     return found[0]
+
+
+def selection_report(gateway):
+    """Adapt the verified native reader without treating IDs as authorization."""
+    reader = getattr(gateway, "selection_snapshot_reader", None)
+    if reader is None:
+        return None
+    try:
+        value = reader(gateway.box, gateway.data, gateway.connection)
+        if isinstance(value, dict):
+            # Retain the original trusted normalized-reader extension contract.
+            return {
+                key: value.get(key) for key in ("status", "selectedSessionID", "source")
+            }
+        if getattr(value, "status", None) != "valid":
+            return {"status": "unavailable"}
+        tabs = value.tabs
+        if (
+            not isinstance(tabs, tuple)
+            or len(tabs) > native_tabs.MAX_TABS
+            or any(not gateway.box.valid_session_id(ident) for ident in tabs)
+            or len(set(tabs)) != len(tabs)
+            or (
+                value.selected is not None
+                and not gateway.box.valid_session_id(value.selected)
+            )
+            or (value.activeRoot is not None and value.activeRoot not in tabs)
+            or value.source not in ("owner-tui", "single-tui")
+        ):
+            return {"status": "unavailable"}
+        return {
+            "status": "verified",
+            "selectedSessionID": value.selected,
+            "activeRoot": value.activeRoot,
+            "tabs": tabs,
+            "source": value.source,
+            "_native_snapshot": True,
+        }
+    except Exception:
+        # Never render private RPC/native errors or fall back to stale focus.
+        return {"status": "unavailable"}
+
+
+def reported_open_sessions(gateway, report):
+    """Fresh verified reports supply membership as well as exact selection."""
+    if not report or not report.get("_native_snapshot"):
+        return open_sessions(gateway.box, gateway.data, gateway.connection)
+    ids = report["tabs"]
+    if not ids:
+        return [], "valid"
+    found = gateway.box.workspace_service.web_session_catalog(
+        gateway.box, gateway.data, gateway.connection, ids
+    )
+    verified = {}
+    for info in found:
+        opencode_v2_io.web_session_info(info)
+        if info["id"] in verified:
+            raise gateway.box.BoxError("Open web sessions could not be verified.")
+        verified[info["id"]] = info
+    if set(verified) != set(ids):
+        raise gateway.box.BoxError(
+            "Open web sessions changed; refresh the session index."
+        )
+    return [verified[ident] for ident in ids], "valid"
+
+
+def root_member(gateway, info, members):
+    """Resolve native ancestry for display only, never replace the exact route."""
+    if not members:
+        return None
+    seen = set()
+    deadline = time.monotonic() + 4
+    for _ in range(32):
+        ident = info["id"]
+        if ident in seen:
+            return None
+        seen.add(ident)
+        if ident in members:
+            return ident
+        parent = info.get("parentID")
+        if parent is None or not gateway.box.valid_session_id(parent):
+            return None
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        try:
+            info = explicit_session(
+                gateway.box, gateway.data, gateway.connection, parent, timeout=remaining
+            )
+        except (
+            gateway.box.BoxError,
+            OSError,
+            ValueError,
+            KeyError,
+            TypeError,
+            subprocess.SubprocessError,
+        ):
+            # Relationship display is optional; an explicit existing child
+            # remains usable even when its parent cannot be verified.
+            return None
+    return None
 
 
 def resolve_initial_selection(
@@ -101,19 +208,22 @@ def resolve_initial_selection(
     report=None,
     report_requested=False,
 ):
-    """Selection seam: no claim of native focus, order/time/activity are not evidence."""
+    """Explicit selection wins; only a verified native snapshot supplies TUI focus."""
     if override is not None:
         return override, "Explicit --session selection; not verified native focus"
     if requested is not None:
         return requested, "URL-selected conversation; not verified native focus"
     if report_requested:
-        # A future helper adapter must explicitly normalize verified evidence.
-        # Do not infer proof from timestamps, ordered tabs, or a stale owner.
+        # Native snapshots already verify exact child/root identity through this
+        # private service. Legacy normalized readers admit direct members only.
         if (
             isinstance(report, dict)
             and report.get("status") == "verified"
             and isinstance(report.get("selectedSessionID"), str)
-            and report.get("selectedSessionID") in members
+            and (
+                report.get("selectedSessionID") in members
+                or report.get("_native_snapshot") is True
+            )
             and isinstance(report.get("source"), str)
         ):
             return report[
@@ -143,19 +253,20 @@ def catalog(url, sessions, status):
     }
 
 
-def initial_state(gateway, sessions, status, requested=None):
+_UNREAD_REPORT = object()
+
+
+def initial_state(gateway, sessions, status, requested=None, *, report=_UNREAD_REPORT):
     state = catalog(gateway.url, sessions, status)
     members = {info["id"]: info for info in state["sessions"]}
     reader = getattr(gateway, "selection_snapshot_reader", None)
-    report = None
     override = gateway.connection.get("web_session_override")
-    if reader is not None and override is None and requested is None:
-        try:
-            report = reader(gateway.box, gateway.data, gateway.connection)
-        except Exception:
-            # Fixed unavailable state, never private helper errors or old-owner
-            # fallback. Explicit user selection remains independent.
-            report = None
+    if report is _UNREAD_REPORT:
+        report = (
+            selection_report(gateway)
+            if reader is not None and override is None and requested is None
+            else None
+        )
     ident, origin = resolve_initial_selection(
         members,
         requested=requested,
@@ -173,6 +284,17 @@ def initial_state(gateway, sessions, status, requested=None):
             )
             selected = catalog(gateway.url, [info], status)["sessions"][0]
         selected = {**selected, "origin": origin, "member": ident in members}
+        if ident in members:
+            selected["activeRoot"] = ident
+        elif (
+            report
+            and report.get("_native_snapshot")
+            and report.get("selectedSessionID") == ident
+            and report.get("activeRoot") in members
+        ):
+            selected["activeRoot"] = report["activeRoot"]
+        else:
+            selected["activeRoot"] = root_member(gateway, info, members)
     return {**state, "selection": selected, "selectionNotice": origin}
 
 
@@ -394,7 +516,12 @@ def respond(gateway, stream, child, request):
         )
         return True
     try:
-        query = parse_qs(target.query, keep_blank_values=True, strict_parsing=True)
+        # Python 3.10 treats an empty query as a bad field in strict mode.
+        query = (
+            parse_qs(target.query, keep_blank_values=True, strict_parsing=True)
+            if target.query
+            else {}
+        )
         if set(query) - {"session"} or (
             "session" in query and len(query["session"]) != 1
         ):
@@ -414,26 +541,9 @@ def respond(gateway, stream, child, request):
                 content_type,
             )
             return True
-        if target.path == SELECTION:
-            if set(query) != {"session"}:
-                raise ValueError("Missing selected session.")
-            info = explicit_session(
-                gateway.box, gateway.data, gateway.connection, query["session"][0]
-            )
-            _reply(
-                stream,
-                "200 OK",
-                json.dumps(
-                    catalog(gateway.url, [info], "explicit")["sessions"][0],
-                    ensure_ascii=True,
-                ).encode(),
-                "application/json",
-            )
-            return True
+        report = selection_report(gateway)
         try:
-            sessions, status = open_sessions(
-                gateway.box, gateway.data, gateway.connection
-            )
+            sessions, status = reported_open_sessions(gateway, report)
         except (
             gateway.box.BoxError,
             native_tabs.TabError,
@@ -445,12 +555,29 @@ def respond(gateway, stream, child, request):
         ):
             # Explicit existing private IDs do not depend on readable TUI state.
             # No automatic/default target is admitted on this fallback path.
-            if target.path != INDEX or (
+            if target.path not in (INDEX, SELECTION) or (
                 gateway.connection.get("web_session_override") is None
                 and "session" not in query
             ):
                 raise
             sessions, status = [], "unavailable"
+        if target.path == SELECTION:
+            if set(query) != {"session"}:
+                raise ValueError("Missing selected session.")
+            info = explicit_session(
+                gateway.box, gateway.data, gateway.connection, query["session"][0]
+            )
+            selected = catalog(gateway.url, [info], "explicit")["sessions"][0]
+            selected["activeRoot"] = root_member(
+                gateway, info, {item["id"] for item in sessions}
+            )
+            _reply(
+                stream,
+                "200 OK",
+                json.dumps(selected, ensure_ascii=True).encode(),
+                "application/json",
+            )
+            return True
         if target.path == CATALOG:
             _reply(
                 stream,
@@ -462,7 +589,7 @@ def respond(gateway, stream, child, request):
             )
             return True
         state = initial_state(
-            gateway, sessions, status, query.get("session", [None])[0]
+            gateway, sessions, status, query.get("session", [None])[0], report=report
         )
         body = document(
             gateway.url,

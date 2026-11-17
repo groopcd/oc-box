@@ -9,6 +9,7 @@ const source = fs.readFileSync(new URL("../src/oc_box/web_sessions.js", import.m
 const origin = "http://127.0.0.1:23456";
 const prefix = "/server/c3ludGhldGlj/session/";
 const rows = [1, 2, 3, 4].map(i => ({ id: `ses_${i}`, title: `Synthetic ${i}`, route: `${prefix}ses_${i}` }));
+const child = { id: "ses_child", title: "Synthetic exact child", route: `${prefix}ses_child`, activeRoot: "ses_2" };
 const png = Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 0);
 const image = () => new File([png], "screenshot.png", { type: "image/png" });
 class Event {
@@ -115,7 +116,7 @@ async function fixture(version = "2.2.6") {
     if (url === "/api/info") return { ok: true, json: async () => ({ version }) };
     if (url.includes("/selection?")) {
       const id = new URL(url, origin).searchParams.get("session");
-      const item = rows.find(row => row.id === id);
+      const item = [...rows, child].find(row => row.id === id);
       return { ok: !!item, json: async () => item };
     }
     assert.equal(url, "/auth/oc-box-sessions/catalog");
@@ -220,5 +221,24 @@ const refused = await fixture("2.2.7");
 refused.fileDrop(image()); await settle();
 assert.equal(refused.received.length, 0);
 assert.equal(refused.input.disabled, true);
+{
+  const g = await fixture();
+  g.realm.location = new URL(child.route, origin); await g.tick();
+  const selected = g.window.ocBoxWebShell.selection();
+  assert.equal(selected.sessionID, child.id);
+  assert.equal(selected.nativeRoute, child.route);
+  assert.equal(selected.activeRoot, "ses_2");
+  assert.equal(selected.member, false, "an exact child is not fabricated as an open root");
+  assert.equal(g.elements["session-tabs"].children.length, 4);
+  assert.equal(g.elements["session-tabs"].children[1].getAttribute("aria-selected"), "true");
+  const original = {
+    ownerDocument: g.realm.document, isConnected: true,
+    dispatchEvent(event) { event.target = original; return g.realm.document.dispatchEvent(event); },
+  };
+  g.fileDrop(image(), original); await settle();
+  assert.equal(g.received.length, 1, "verified child accepts files despite root-only membership");
+  assert.equal(g.realm.location.pathname, child.route, "activeRoot must never replace the exact attachment route");
+  assert.equal(g.frame.writes, 0, "addon must not navigate from child to its highlighted root");
+}
 assert(f.calls.every(url => url === "/api/info" || url.startsWith("/auth/oc-box-sessions/")));
-console.log("PASS shared-shell addon DOM: one iframe/four tabs, trusted files, exact selection, ABA/generation/load/SPA refusal, no stores or prompt requests");
+console.log("PASS shared-shell addon DOM: one iframe/four tabs, trusted exact child/root selection, ABA/generation/load/SPA refusal, no stores or prompt requests");

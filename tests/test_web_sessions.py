@@ -432,6 +432,175 @@ class WebSessionsTests(unittest.TestCase):
             ).scripts,
         )
 
+    def test_native_snapshot_supplies_exact_child_and_full_ordered_membership(self):
+        snapshot = SimpleNamespace(
+            status="valid",
+            tabs=("ses_four", "ses_one"),
+            selected="ses_child",
+            activeRoot="ses_one",
+            source="owner-tui",
+        )
+        reader = Mock(return_value=snapshot)
+        gateway = service.Gateway(
+            box, self.data, self.connection, selection_snapshot_reader=reader
+        )
+        gateway.url = "http://127.0.0.1:23456"
+        by_id = {info["id"]: info for info in self.inventory}
+
+        def lookup(_box, _data, connection, ids):
+            self.assertEqual(connection, self.connection)
+            return [by_id[ident] for ident in reversed(ids)]
+
+        with (
+            patch.object(
+                native_tabs, "inspect", side_effect=AssertionError("not saved tabs")
+            ),
+            patch.object(service, "web_session_catalog", side_effect=lookup),
+        ):
+            report = web.selection_report(gateway)
+            sessions, status = web.reported_open_sessions(gateway, report)
+            state = web.initial_state(gateway, sessions, status, report=report)
+        reader.assert_called_once_with(box, self.data, self.connection)
+        self.assertEqual([info["id"] for info in sessions], list(snapshot.tabs))
+        self.assertEqual(state["selection"]["id"], "ses_child")
+        self.assertEqual(state["selection"]["activeRoot"], "ses_one")
+        self.assertFalse(state["selection"]["member"])
+        self.assertEqual(len(state["sessions"]), 2)
+        self.assertTrue(state["selection"]["route"].endswith("/session/ses_child"))
+        self.assertIn("owner-tui", state["selection"]["origin"])
+
+    def test_missing_native_snapshot_never_revives_declared_owner_selection(self):
+        gateway = service.Gateway(
+            box,
+            self.data,
+            self.connection,
+            selection_snapshot_reader=Mock(
+                return_value=SimpleNamespace(status="missing")
+            ),
+        )
+        gateway.url = "http://127.0.0.1:23456"
+        report = web.selection_report(gateway)
+        state = web.initial_state(gateway, self.inventory[:4], "valid", report=report)
+        self.assertIsNone(state["selection"])
+        gateway.connection = {**self.connection, "web_session_override": "ses_two"}
+        state = web.initial_state(gateway, self.inventory[:4], "valid", report=report)
+        self.assertEqual(state["selection"]["id"], "ses_two")
+        self.assertIn("Explicit --session", state["selection"]["origin"])
+
+    def test_malformed_native_snapshot_is_unavailable_not_a_partial_focus_report(self):
+        good = dict(
+            status="valid",
+            tabs=("ses_one",),
+            selected="ses_one",
+            activeRoot="ses_one",
+            source="owner-tui",
+        )
+        for replacement in (
+            {"tabs": ["ses_one"]},
+            {"tabs": ("ses_one", "ses_one")},
+            {"tabs": ("../wrong",)},
+            {"selected": "../wrong"},
+            {"activeRoot": "ses_absent"},
+            {"source": "newest-reporter"},
+        ):
+            with self.subTest(replacement=replacement):
+                gateway = service.Gateway(
+                    box,
+                    self.data,
+                    self.connection,
+                    selection_snapshot_reader=Mock(
+                        return_value=SimpleNamespace(**{**good, **replacement})
+                    ),
+                )
+                self.assertEqual(
+                    web.selection_report(gateway), {"status": "unavailable"}
+                )
+
+    def test_native_snapshot_catalog_refuses_missing_or_duplicated_members(self):
+        gateway = service.Gateway(box, self.data, self.connection)
+        report = {"_native_snapshot": True, "tabs": ("ses_one", "ses_two")}
+        for found in ([self.inventory[0]], [self.inventory[0], self.inventory[0]]):
+            with (
+                self.subTest(found=found),
+                patch.object(service, "web_session_catalog", return_value=found),
+                self.assertRaises(box.BoxError),
+            ):
+                web.reported_open_sessions(gateway, report)
+
+    def test_child_root_display_uses_only_same_service_ancestry_and_is_bounded(self):
+        gateway = service.Gateway(box, self.data, self.connection)
+        with patch.object(
+            web, "explicit_session", return_value=self.inventory[0]
+        ) as read:
+            self.assertEqual(
+                web.root_member(gateway, self.inventory[6], {"ses_one"}), "ses_one"
+            )
+        self.assertEqual(
+            read.call_args.args, (box, self.data, self.connection, "ses_one")
+        )
+        self.assertGreater(read.call_args.kwargs["timeout"], 0)
+        self.assertLessEqual(read.call_args.kwargs["timeout"], 4)
+        cycle = {"id": "ses_child", "parentID": "ses_child"}
+        with patch.object(web, "explicit_session", return_value=cycle) as read:
+            self.assertIsNone(web.root_member(gateway, cycle, {"ses_one"}))
+        self.assertEqual(read.call_count, 1)
+
+    def test_explicit_child_keeps_exact_route_and_root_when_tui_is_elsewhere(self):
+        report = {
+            "status": "verified",
+            "_native_snapshot": True,
+            "selectedSessionID": "ses_two",
+            "activeRoot": "ses_two",
+            "tabs": ("ses_one", "ses_two"),
+            "source": "owner-tui",
+        }
+        by_id = {info["id"]: info for info in self.inventory}
+        gateway = service.Gateway(box, self.data, self.connection)
+        gateway.url = "http://127.0.0.1:23456"
+        for mode in ("cli", "url"):
+            with self.subTest(mode=mode):
+                gateway.connection = {
+                    **self.connection,
+                    **({"web_session_override": "ses_child"} if mode == "cli" else {}),
+                }
+                with patch.object(
+                    service,
+                    "web_session_catalog",
+                    side_effect=lambda _box, _data, _connection, ids, **_kwargs: [
+                        by_id[ident] for ident in ids
+                    ],
+                ):
+                    state = web.initial_state(
+                        gateway,
+                        self.inventory[:2],
+                        "valid",
+                        requested="ses_child" if mode == "url" else None,
+                        report=report,
+                    )
+                self.assertEqual(state["selection"]["id"], "ses_child")
+                self.assertEqual(state["selection"]["activeRoot"], "ses_one")
+                self.assertTrue(
+                    state["selection"]["route"].endswith("/session/ses_child")
+                )
+                self.assertEqual(len(state["sessions"]), 2)
+
+    def test_unavailable_child_ancestry_never_prevents_explicit_selection(self):
+        gateway = service.Gateway(
+            box,
+            self.data,
+            {**self.connection, "web_session_override": "ses_child"},
+        )
+        gateway.url = "http://127.0.0.1:23456"
+        with patch.object(
+            service,
+            "web_session_catalog",
+            side_effect=[[self.inventory[6]], box.BoxError("private parent failure")],
+        ):
+            state = web.initial_state(gateway, self.inventory[:2], "valid")
+        self.assertEqual(state["selection"]["id"], "ses_child")
+        self.assertIsNone(state["selection"]["activeRoot"])
+        self.assertNotIn("private parent failure", json.dumps(state))
+
     @unittest.skipUnless(
         shutil.which("node"), "Node is required for common-shell DOM checks"
     )
