@@ -30,8 +30,11 @@
         typeof value.route !== "string" ||
         !/^\/server\/[A-Za-z0-9_-]+\/session\/ses[A-Za-z0-9_-]+$/.test(value.route) ||
         !value.route.endsWith("/session/" + value.id) ||
-        (nativePrefix && value.route !== nativePrefix + value.id)) throw new Error("catalog");
-    return { id: value.id, title: value.title.slice(0, 256), route: value.route };
+         (nativePrefix && value.route !== nativePrefix + value.id) ||
+         (value.activeRoot != null && (typeof value.activeRoot !== "string" ||
+           !idPattern.test(value.activeRoot)))) throw new Error("catalog");
+    return { id: value.id, title: value.title.slice(0, 256), route: value.route,
+      activeRoot: value.activeRoot ?? null };
   }
   function selection() {
     if (!selected || awaitingLoad) return null;
@@ -40,6 +43,7 @@
       if (url.origin !== window.location.origin || url.pathname !== selected.route) return null;
     } catch { return null; }
     return Object.freeze({ sessionID: selected.id, nativeRoute: selected.route,
+      activeRoot: membershipKnown && members.some(item => item.id === selected.activeRoot) ? selected.activeRoot : null,
       member: selected.member, origin: selected.origin });
   }
   function changed() {
@@ -50,7 +54,9 @@
     }));
   }
   function render() {
-    const activeId = awaitingLoad ? selected?.id : selection()?.sessionID;
+    const current = awaitingLoad ? selected : selection();
+    const activeId = membershipKnown && current && members.some(item => item.id === current.activeRoot) ?
+      current.activeRoot : awaitingLoad ? selected?.id : current?.sessionID;
     tabs.replaceChildren();
     for (const item of members) {
       const button = document.createElement("button");
@@ -66,13 +72,16 @@
     retained.replaceChildren();
     if (selected) {
       selected.member = membershipKnown && members.some(item => item.id === selected.id);
-      notice.textContent = selected.origin + (selected.member ? "" :
+      const childOfOpenTab = membershipKnown && !selected.member &&
+        members.some(item => item.id === selected.activeRoot);
+      notice.textContent = selected.origin + (selected.member ? "" : childOfOpenTab ?
+        " — viewing a child of open TUI tab " + selected.activeRoot :
         membershipKnown ? " — selection is not in the latest TUI membership; conversation retained" :
           " — TUI membership is unavailable; conversation retained");
       if (!selected.member) {
         const label = document.createElement("p");
-        label.textContent = "Retained browser selection (not counted as TUI-open): " +
-          selected.title + " · " + selected.id;
+        label.textContent = (childOfOpenTab ? "Child conversation in the highlighted TUI tab: " :
+          "Retained browser selection (not counted as TUI-open): ") + selected.title + " · " + selected.id;
         retained.append(label);
       }
     } else notice.textContent = "No native conversation is currently verified. Choose a tab or use native Home.";
@@ -83,7 +92,8 @@
   function select(item, origin) {
     const next = row(item);
     navigation += 1;
-    selected = { ...next, origin, member: members.some(value => value.id === next.id) };
+    selected = { ...next, origin, member: members.some(value => value.id === next.id),
+      activeRoot: next.activeRoot ?? (members.some(value => value.id === next.id) ? next.id : null) };
     let differs = frame.getAttribute("src") !== next.route;
     try {
       const url = new URL(frame.contentWindow.location.href);
