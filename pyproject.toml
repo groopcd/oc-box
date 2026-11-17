@@ -48,6 +48,8 @@ include-package-data = false
 oc_box = [
   "plugin_bridge.js",
   "web_attachments.js",
+  "web_sessions.js",
+  "web_sessions.css",
 ]
 
 [tool.setuptools.data-files]

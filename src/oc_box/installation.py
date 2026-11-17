@@ -27,6 +27,8 @@ RUNTIME_FILES = (
     "web_attachments.py",
     "web_attachments.js",
     "web_sessions.py",
+    "web_sessions.js",
+    "web_sessions.css",
     "workspace_control.py",
     "history_reader.py",
     "history_recovery.py",
@@ -91,6 +93,7 @@ MANUAL_FILES = (
     "host-plugins.md",
     "tui.md",
     "update-channels.md",
+    "web-shell.md",
 )
 COMPLETION_FILE = "completions/oc-box"
 

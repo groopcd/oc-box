@@ -45,9 +45,10 @@ function fixture() {
   };
   const realm = { File, DataTransfer: Transfer, DragEvent: Drop, document: doc, location: { href: origin + route } };
   const frame = { contentWindow: realm };
+  let selected = Object.freeze({ sessionID: "ses_synthetic", nativeRoute: route, member: true, origin: "Explicit selection" });
   let done;
   const settled = new Promise((resolve) => { done = resolve; });
-  const current = api.adapter(frame, origin, route, (text) => { notices.push(text); done(); });
+  const current = api.adapter(frame, origin, () => selected, (text) => { notices.push(text); done(); });
   current.install();
   // Faithful bounded representation of the pinned native precedence contract:
   // text/plain file: first, then File bytes. This is NOT a native/browser pass.
@@ -56,7 +57,10 @@ function fixture() {
     if (text.startsWith("file:")) received.push({ mention: text });
     else received.push({ files: [...event.dataTransfer.files] });
   });
-  return { doc, frame, realm, current, received, notices, settled };
+  return { doc, frame, realm, current, received, notices, settled,
+    select(value) { selected = value; current.invalidate(); },
+    selection: () => selected,
+  };
 }
 
 function transfer(files, text) {
@@ -112,7 +116,7 @@ for (const connected of [true, false]) {
   if (!connected) assert.match(f.notices[0], /original drop target/);
 }
 
-// The wrapper's own drop target accepts no URL/path-only payload or arbitrary type.
+// The addon's own drop target accepts no URL/path-only payload or arbitrary type.
 for (const files of [
   [],
   [new File(["/host/private.png"], "path.txt")],
@@ -196,4 +200,58 @@ for (const href of [
   assert.match(f.notices[0], /actual browser file drop/);
 }
 
-console.log("PASS synthetic browser attachment forwarding and refusal matrix");
+// Selection generation refuses ABA (away-and-back) and even a same-ID metadata
+// event while bytes are pending. URL/document equality alone is insufficient.
+for (const mode of ["away-back", "same-id", "document", "load"]) {
+  const f = fixture();
+  const delayed = image();
+  const original = delayed.arrayBuffer.bind(delayed);
+  delayed.arrayBuffer = async () => {
+    const before = f.selection();
+    if (mode === "away-back") { f.select(null); f.select(before); }
+    if (mode === "same-id") f.select(before);
+    if (mode === "document") f.realm.document = { ...f.doc };
+    if (mode === "load") f.current.invalidate();
+    return original();
+  };
+  await f.current.add([delayed]);
+  assert.equal(f.received.length, 0, mode);
+  assert.match(f.notices[0], /session changed/, mode);
+}
+
+// Recheck the actual public location immediately before forwarding, even while
+// a shell's asynchronous URL verification has not published the new selection.
+{
+  const f = fixture();
+  f.realm.DataTransfer = class extends Transfer {
+    constructor() {
+      super();
+      f.realm.location.href = origin + "/server/local/session/ses_pending_verification";
+    }
+  };
+  await f.current.add([image()]);
+  assert.equal(f.received.length, 0);
+  assert.match(f.notices[0], /session changed/);
+}
+
+// A persistent iframe document gets one interceptor. Changing selected tabs
+// updates its public binding instead of leaving old per-session handlers behind.
+{
+  const f = fixture();
+  f.realm.location.href = origin + "/server/local/session/ses_second";
+  f.select(Object.freeze({ sessionID: "ses_second", nativeRoute: "/server/local/session/ses_second",
+    member: true, origin: "Explicit tab" }));
+  f.current.install();
+  f.current.install();
+  f.doc.dispatchEvent(new Drop("drop", { dataTransfer: transfer([image()]), isTrusted: true }));
+  await f.settled;
+  assert.equal(f.received.length, 1);
+}
+{
+  const f = fixture();
+  f.select(null);
+  await f.current.add([image()]);
+  assert.equal(f.received.length, 0);
+  assert.match(f.notices[0], /Select a verified existing conversation/);
+}
+console.log("PASS synthetic browser attachment forwarding, limits, exact-target, selection-generation and pending-route refusal matrix");

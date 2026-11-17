@@ -30,12 +30,18 @@ not a deprecated feature that can be removed from the regression suite.
 
 ### Experimental browser attachment adapter
 
-`tests/test_web_attachments.py` and `tests/web_attachments_browser.mjs` cover
+`tests/test_web_attachments.py`, `tests/web_attachments_browser.mjs` and
+`tests/web_attachments_shell_dom.mjs` cover
 bodyless authenticated local resource routes, Host/Origin/Fetch Metadata/CSRF
 refusals, source-version preflight, file-only standard DOM forwarding, native
 path-mention defaults, media signatures, byte/count bounds, route changes and
-no automatic prompt admission. The JavaScript fixture uses synthetic browser
-objects; it is not a real browser compositor/drag protocol test.
+no automatic prompt admission. The DOM fixture executes the actual common-shell
+script and the attachment addon together, with one iframe/four tabs, trusted
+input, same-target forwarding, per-document interceptors and selection-generation
+refusals for same-ID events, explicit/observed SPA away-and-back changes, metadata
+refresh, document loads and URLs changed before public verification completes.
+These fixtures use synthetic browser objects, not a real browser compositor or
+Spectacle drag protocol.
 
 Run the separate provider-free native API contract on each supported release:
 
@@ -47,21 +53,22 @@ Its source-bound versions are 2.2.6
 (`dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06`) and 2.3.0
 (`a6b15d33daf6ab7d35569f6d711fdb630b9f04e7`). The fixture verifies real
 native pairing/cookie authentication, bundled app assets, unchanged history/inbox
-after wrapper reads, and separate **explicit fixture-only** PNG/PDF byte
+after shell/addon reads, and separate **explicit fixture-only** PNG/PDF byte
 admissions with `resume=false`. The production adapter never calls that prompt
 API. These checks do not prove browser/Spectacle/Wayland/X11/portal behavior,
 native composer thumbnail admission, provider interpretation, live rootless
 Podman isolation or new host acceptance. No native source/binary modifications
 or private widget selector hooks are used by the adapter.
 
-The composed chooser routes each verified row through an explicit selected-ID
-wrapper link when attachments are enabled, while native Home remains separate.
-Strict missing/duplicate/unknown selection parameters refuse; wrapper iframes
-use native session routes, never the chooser. The native attachment fixture uses
+The common shell alone owns selection, tabstrip, metadata endpoints and its
+single native iframe; attachments use only its frozen v1 API, events and optional
+fixed script/controls slot. The independent wrapper is retired and tested as a
+native 404, while addon script queries refuse. Default common mode imports no
+addon. The native attachment fixture uses
 a synthetic catalog of real native API sessions to isolate this HTTP composition;
 the separate four-tab fixture below owns actual TUI membership verification.
 Pinned baseline 2.2.6 CI invokes both fixtures. A keep-alive-capable HTTP client
-also checks native-to-chooser/wrapper/script navigation and preserved pairing
+also checks native-to-shell/addon-script navigation and preserved pairing
 cookies under the response-close policy. Neither HTTP fixture is proof of
 normal browser rendering or real browser file-drop admission.
 
@@ -114,6 +121,17 @@ its oracle. These fixtures do not establish the composed attachment feature's
 real-browser pairing pass. Retain the earlier Chromium native-404 evidence until
 the final composed source is separately tested; a fresh-cookie workaround was
 diagnostic, not acceptance of the original flow.
+
+The common-shell successor requires new-source checks; earlier chooser/transport
+passes are not promoted into UI acceptance. `tests/web_sessions_dom.mjs` executes
+the editable browser JS in a bounded DOM fixture: four actual membership buttons,
+selection/ARIA/query changes, one retained iframe/draft on refresh, same-private-
+prefix SPA navigation verified by GET, foreign/Home/draft unbinding, safe text
+rendering and non-overlapping metadata requests. This does not inspect native
+DOM/stores or establish rendered native composer/focus acceptance.
+The native web script checks the new shell bootstrap, single iframe, authenticated
+assets/catalog/selection endpoints and explicit selection against both pinned
+native versions, retaining cross-directory/archive and unchanged-history checks.
 
 ### Reviewed 5573965 candidate evidence
 

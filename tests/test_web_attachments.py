@@ -1,6 +1,8 @@
 import contextlib
+from html import unescape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
+import json
 from pathlib import Path
 import re
 import shutil
@@ -23,13 +25,12 @@ from oc_box import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SELECTED = adapter.session_link("ses_synthetic")
 
 
 class RequestTests(unittest.TestCase):
     origin = "http://127.0.0.1:5555"
 
-    def raw(self, *, method="GET", target=SELECTED, headers=()):
+    def raw(self, *, method="GET", target=adapter.SCRIPT, headers=()):
         return (
             f"{method} {target} HTTP/1.1\r\nHost: 127.0.0.1:5555\r\n"
             + "".join(key + ": " + value + "\r\n" for key, value in headers)
@@ -48,7 +49,7 @@ class RequestTests(unittest.TestCase):
             )
         )
         method, target, probe = adapter.request(raw, self.origin)
-        self.assertEqual((method, target), ("GET", SELECTED))
+        self.assertEqual((method, target), ("GET", adapter.SCRIPT))
         self.assertIn(b"GET /api/info HTTP/1.1", probe)
         self.assertIn(b"cookie: native=synthetic", probe)
         self.assertIn(b"authorization: Basic synthetic", probe)
@@ -59,17 +60,17 @@ class RequestTests(unittest.TestCase):
         cases = [
             self.raw(method="POST"),
             self.raw(method="OPTIONS"),
-            self.raw(target=adapter.PATH + "?url=https://outside.invalid"),
-            self.raw(target=adapter.PATH),
-            self.raw(target=SELECTED + "&session=ses_other"),
-            self.raw(target=SELECTED + "&other=1"),
-            self.raw(target=adapter.PATH + "?session="),
-            self.raw(target=adapter.PATH + "?session=../../private"),
-            self.raw(target=adapter.PATH + "?session=ses_%73ynthetic"),
-            self.raw(target=adapter.PATH + "?session=ses_synthetic&"),
+            self.raw(target=adapter.SCRIPT + "?url=https://outside.invalid"),
+            self.raw(target="/auth/oc-box-attachments"),
+            self.raw(target=adapter.SCRIPT + "?session=ses_one&session=ses_other"),
+            self.raw(target=adapter.SCRIPT + "?other=1"),
+            self.raw(target=adapter.SCRIPT + "?session="),
+            self.raw(target=adapter.SCRIPT + "?session=../../private"),
+            self.raw(target=adapter.SCRIPT + "?session=ses_%73ynthetic"),
+            self.raw(target=adapter.SCRIPT + "?session=ses_synthetic&"),
             self.raw(target=adapter.SCRIPT + "?session=ses_synthetic"),
-            self.raw(target=adapter.PATH + "/../private"),
-            self.raw(target="http://outside.invalid" + adapter.PATH),
+            self.raw(target=adapter.SCRIPT + "/../private"),
+            self.raw(target="http://outside.invalid" + adapter.SCRIPT),
             self.raw(headers=(("Origin", "http://127.0.0.1:5556"),)),
             self.raw(headers=(("Origin", "null"),)),
             self.raw(headers=(("Referer", "https://outside.invalid/"),)),
@@ -92,23 +93,27 @@ class RequestTests(unittest.TestCase):
             ):
                 adapter.request(raw, self.origin)
 
-    def test_html_escapes_native_route_and_does_not_contain_secrets(self):
-        html = adapter.page(
-            '/server/local/session/ses_test"><script>bad</script>'
-        ).decode()
-        self.assertNotIn('ses_test"><script>', html)
-        self.assertIn("&lt;script&gt;", html)
-        self.assertNotIn("password", html)
-        self.assertIn("IndexedDB", html)
+    def test_only_shared_shell_document_and_explicit_addon_slot_exist(self):
+        body = web_sessions.document("http://127.0.0.1:5555", [], "valid")
+        self.assertNotIn(adapter.SCRIPT.encode(), body)
+        enabled = web_sessions.document(
+            "http://127.0.0.1:5555", [], "valid", addon_scripts=(adapter.SCRIPT,)
+        )
+        self.assertEqual(enabled.count(b"<iframe "), 1)
+        self.assertEqual(enabled.count(adapter.SCRIPT.encode()), 1)
+        self.assertFalse(hasattr(adapter, "page"))
+        self.assertFalse(hasattr(adapter, "session_link"))
 
     def test_adapter_navigation_uses_native_service_worker_exclusion(self):
         # Source-bound native vite.pwa.ts contract in both supported versions.
         # Ordinary app navigation falls back to cached index.html; /auth/ does not.
         denied = re.compile(r"^/(?:api|auth)(?:/|$)")
-        self.assertRegex(adapter.PATH, denied)
         self.assertRegex(adapter.SCRIPT, denied)
         self.assertIn(
-            adapter.SCRIPT.encode(), adapter.page("/server/local/session/ses_test")
+            adapter.SCRIPT.encode(),
+            web_sessions.document(
+                "http://127.0.0.1:5555", [], "valid", addon_scripts=(adapter.SCRIPT,)
+            ),
         )
 
     def test_opt_in_and_native_version_preflight_before_pairing(self):
@@ -179,6 +184,9 @@ class RequestTests(unittest.TestCase):
                 )
                 self.assertTrue(gateway.call_args.kwargs["attachments"])
                 self.assertEqual(
+                    gateway.call_args.kwargs["shell_addon_scripts"], (adapter.SCRIPT,)
+                )
+                self.assertEqual(
                     [call.args[3] for call in native.call_args_list], ["GET", "POST"]
                 )
 
@@ -186,15 +194,17 @@ class RequestTests(unittest.TestCase):
         shutil.which("node"), "Node is needed for synthetic browser events"
     )
     def test_synthetic_browser_event_contract(self):
-        result = subprocess.run(
-            ["node", str(ROOT / "tests/web_attachments_browser.mjs")],
-            cwd=ROOT,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("PASS synthetic browser", result.stdout)
+        for script in ("web_attachments_browser.mjs", "web_attachments_shell_dom.mjs"):
+            with self.subTest(script=script):
+                result = subprocess.run(
+                    ["node", str(ROOT / "tests" / script)],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn("PASS ", result.stdout)
 
 
 class GatewayTests(unittest.TestCase):
@@ -218,6 +228,8 @@ class GatewayTests(unittest.TestCase):
                 elif self.path == "/api/info":
                     valid = self.headers.get("Cookie") == "native=synthetic"
                     self.send_response(200 if valid else 401)
+                elif self.path.startswith("/auth/oc-box-attachments"):
+                    self.send_response(404)
                 else:
                     self.send_response(200)
                 self.send_header("Content-Length", "0")
@@ -249,10 +261,11 @@ class GatewayTests(unittest.TestCase):
             {},
             {"url": "http://127.0.0.1:" + str(self.server.server_port)},
             attachments=True,
+            shell_addon_scripts=(adapter.SCRIPT,),
         ).__enter__()
         self.addCleanup(self.gateway.__exit__)
 
-    def get(self, target=SELECTED, **headers):
+    def get(self, target=adapter.SCRIPT, **headers):
         return self.opener.open(
             Request(self.gateway.url + target, headers=headers), timeout=10
         )
@@ -263,11 +276,8 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(failed.exception.code, 401)
         with self.get(Cookie="native=synthetic") as reply:
             body = reply.read()
-            self.assertIn(b"oc-box attachment adapter", body)
-            self.assertIn(
-                self.gateway.native_session_route("ses_synthetic").encode(), body
-            )
-            self.assertNotIn(b'data-route="' + web_sessions.INDEX.encode(), body)
+            self.assertIn(b"ocBoxWebShell", body)
+            self.assertNotIn(b"<iframe ", body)
             self.assertEqual(reply.headers["Cache-Control"], "no-store")
             self.assertEqual(reply.headers["Referrer-Policy"], "no-referrer")
             self.assertIn(
@@ -292,7 +302,7 @@ class GatewayTests(unittest.TestCase):
             self.assertEqual(failed.exception.code, 403)
         self.assertEqual(self.probes, [])
 
-    def test_four_chooser_links_open_their_selected_wrappers_not_owner_or_index(self):
+    def test_four_shared_shell_selections_use_one_native_frame_and_addon(self):
         sessions = [
             {"id": "ses_" + name, "title": name}
             for name in ("archived", "worktree", "moved", "current")
@@ -303,26 +313,32 @@ class GatewayTests(unittest.TestCase):
             with self.get(web_sessions.INDEX, Cookie="native=synthetic") as reply:
                 body = reply.read()
             self.assertIn(b"Open native OpenCode Home", body)
+            self.assertEqual(body.count(b"<iframe "), 1)
+            self.assertEqual(body.count(adapter.SCRIPT.encode()), 1)
             for item in sessions:
-                link = adapter.session_link(item["id"])
-                self.assertIn(('href="' + link + '"').encode(), body)
+                link = web_sessions.INDEX + "?session=" + item["id"]
                 with self.get(link, Cookie="native=synthetic") as reply:
-                    wrapper = reply.read()
+                    shell = reply.read()
                 expected = self.gateway.native_session_route(item["id"])
-                self.assertIn(('data-route="' + expected + '"').encode(), wrapper)
-                self.assertNotIn(b'data-route="' + web_sessions.INDEX.encode(), wrapper)
+                state = json.loads(
+                    unescape(re.search(rb'data-bootstrap="([^"]*)"', shell)[1].decode())
+                )
+                self.assertEqual(state["selection"]["id"], item["id"])
+                self.assertEqual(state["selection"]["route"], expected)
+                self.assertIn((' src="' + expected + '"').encode(), shell)
+                self.assertNotRegex(shell, rb'<iframe\b[^>]*\bsrc="/auth/')
+                self.assertEqual(shell.count(b"<iframe "), 1)
         with patch.object(web_sessions, "open_sessions", return_value=([], "valid")):
             with self.get(web_sessions.INDEX, Cookie="native=synthetic") as reply:
                 body = reply.read()
             self.assertIn(b'href="/"', body)
             self.assertNotIn(b"?session=", body)
 
-    def test_invalid_selection_queries_refuse_before_native_auth_probe(self):
+    def test_invalid_addon_queries_refuse_before_native_auth_probe(self):
         for target in (
-            adapter.PATH,
-            adapter.PATH + "?session=",
-            SELECTED + "&session=ses_other",
-            SELECTED + "&unknown=1",
+            adapter.SCRIPT + "?session=",
+            adapter.SCRIPT + "?session=ses_one&session=ses_other",
+            adapter.SCRIPT + "?unknown=1",
             adapter.SCRIPT + "?version=1",
         ):
             with self.subTest(target=target), self.assertRaises(HTTPError) as failed:
@@ -332,7 +348,7 @@ class GatewayTests(unittest.TestCase):
 
     def test_head_has_no_body_and_pairing_redirect_selects_chooser(self):
         request = Request(
-            self.gateway.url + SELECTED,
+            self.gateway.url + adapter.SCRIPT,
             headers={"Cookie": "native=synthetic"},
             method="HEAD",
         )

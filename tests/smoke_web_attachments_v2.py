@@ -14,6 +14,7 @@ below test native PNG/PDF handling; the production adapter has no prompt call.
 import argparse
 import base64
 import contextlib
+from html import unescape
 from http.client import HTTPConnection
 from http.cookiejar import CookieJar
 from http.cookies import SimpleCookie
@@ -25,6 +26,7 @@ import sys
 import tempfile
 from unittest.mock import patch
 from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
 from urllib.request import build_opener, HTTPCookieProcessor, ProxyHandler, Request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -38,6 +40,17 @@ from oc_box import (
 )
 from smoke_session_sync_v2 import bounded, private_environment, require, seed
 from smoke_sharing_v2 import PNG
+
+
+def shell_state(body):
+    match = re.search(rb'data-bootstrap="([^"]*)"', body)
+    require(match is not None, "Common shell bootstrap is missing.")
+    require(body.count(b"<iframe ") == 1, "Attachment addon introduced another iframe.")
+    require(
+        body.count(web_attachments.SCRIPT.encode()) == 1,
+        "Trusted addon script slot is missing or duplicated.",
+    )
+    return json.loads(unescape(match[1].decode()))
 
 
 def pdf():
@@ -116,16 +129,18 @@ def exercise(binary, root):
                     web_sessions, "open_sessions", return_value=(catalog, "valid")
                 ),
                 workspace_service.Gateway(
-                    box, {}, connection, attachments=True
+                    box,
+                    {},
+                    connection,
+                    attachments=True,
+                    shell_addon_scripts=(web_attachments.SCRIPT,),
                 ) as gateway,
             ):
                 browser = build_opener(
                     ProxyHandler({}), HTTPCookieProcessor(CookieJar())
                 )
                 try:
-                    browser.open(
-                        gateway.url + web_attachments.session_link(ident), timeout=10
-                    )
+                    browser.open(gateway.url + web_attachments.SCRIPT, timeout=10)
                 except HTTPError as error:
                     require(error.code == 401, "Unpaired adapter did not refuse.")
                 else:
@@ -140,33 +155,40 @@ def exercise(binary, root):
                 ) as reply:
                     require(
                         reply.geturl() == gateway.url + web_sessions.INDEX,
-                        "Pairing did not open the chooser.",
+                        "Pairing did not open the common shell.",
                     )
                     chooser = reply.read()
                     require(
                         b"Open native OpenCode Home" in chooser,
                         "Native Home navigation missing.",
                     )
+                    require(
+                        shell_state(chooser)["selection"] is None,
+                        "Unbound shell invented an owner/first-row selection.",
+                    )
                 for selected in members:
-                    link = web_attachments.session_link(selected)
-                    require(link.encode() in chooser, "Selected wrapper row missing.")
+                    link = web_sessions.INDEX + "?session=" + selected
+                    require(
+                        gateway.native_session_route(selected).encode() in chooser,
+                        "Native fallback row missing.",
+                    )
                     with browser.open(gateway.url + link, timeout=10) as reply:
                         body = reply.read()
+                    state = shell_state(body)
                     require(
-                        b"oc-box attachment adapter" in body, "Adapter page missing."
+                        state["selection"]["id"] == selected,
+                        "Shell selected the wrong conversation.",
                     )
                     require(
                         (
-                            'data-route="'
-                            + gateway.native_session_route(selected)
-                            + '"'
+                            ' src="' + gateway.native_session_route(selected) + '"'
                         ).encode()
                         in body,
-                        "Wrapper iframe did not target the selected native session.",
+                        "Common iframe did not target the selected native session.",
                     )
                     require(
-                        b'data-route="' + web_sessions.INDEX.encode() not in body,
-                        "Wrapper incorrectly framed the chooser.",
+                        re.search(rb'<iframe\b[^>]*\bsrc="/auth/', body) is None,
+                        "Common shell incorrectly framed itself.",
                     )
                 with browser.open(
                     gateway.url + web_attachments.SCRIPT, timeout=10
@@ -190,19 +212,31 @@ def exercise(binary, root):
                 try:
                     browser.open(
                         Request(
-                            gateway.url + web_attachments.session_link(ident),
+                            gateway.url + web_attachments.SCRIPT,
                             headers={"Origin": "https://outside.invalid"},
                         ),
                         timeout=10,
                     )
                 except HTTPError as error:
-                    require(error.code == 403, "Foreign-origin wrapper did not refuse.")
+                    require(error.code == 403, "Foreign-origin addon did not refuse.")
                 else:
-                    raise AssertionError("Foreign-origin wrapper was accepted.")
+                    raise AssertionError("Foreign-origin addon was accepted.")
+                try:
+                    browser.open(
+                        gateway.url + "/auth/oc-box-attachments?session=" + ident,
+                        timeout=10,
+                    )
+                except HTTPError as error:
+                    require(
+                        error.code == 404,
+                        "Retired independent wrapper route did not disappear.",
+                    )
+                else:
+                    raise AssertionError("Retired independent wrapper still exists.")
 
                 # This client requests persistent connections, unlike urllib.
                 # Native final-response headers must force a fresh transaction
-                # before each host-dispatched chooser/wrapper resource.
+                # before each host-dispatched shell/addon resource.
                 client = HTTPConnection(
                     "127.0.0.1", gateway.listener.getsockname()[1], timeout=15
                 )
@@ -216,7 +250,7 @@ def exercise(binary, root):
                     require(
                         reply.status == 302
                         and reply.getheader("Location") == web_sessions.INDEX,
-                        "Keep-alive pairing did not select the chooser.",
+                        "Keep-alive pairing did not select the common shell.",
                     )
                     cookies = SimpleCookie()
                     for name, value in reply.getheaders():
@@ -233,9 +267,9 @@ def exercise(binary, root):
                     for route in (
                         web_sessions.INDEX,
                         gateway.native_session_route(ident),
-                        web_attachments.session_link(ident),
+                        web_sessions.INDEX + "?session=" + ident,
                         gateway.native_session_route(other),
-                        web_attachments.session_link(other),
+                        web_sessions.INDEX + "?session=" + other,
                         web_attachments.SCRIPT,
                         web_sessions.INDEX,
                     ):
@@ -248,16 +282,21 @@ def exercise(binary, root):
                             and reply.getheader("Connection", "").lower() == "close",
                             "Native-to-first-party keep-alive navigation lost dispatch.",
                         )
-                        if route.startswith(web_attachments.PATH + "?"):
-                            selected = web_attachments.selection(route)
+                        if route.startswith(web_sessions.INDEX + "?"):
+                            selected = parse_qs(urlsplit(route).query)["session"][0]
+                            state = shell_state(body)
+                            require(
+                                state["selection"]["id"] == selected,
+                                "Keep-alive shell selected the wrong ID.",
+                            )
                             require(
                                 (
-                                    'data-route="'
+                                    ' src="'
                                     + gateway.native_session_route(selected)
                                     + '"'
                                 ).encode()
                                 in body,
-                                "Keep-alive wrapper iframe selected the wrong session.",
+                                "Keep-alive common iframe selected the wrong session.",
                             )
                 finally:
                     client.close()
@@ -281,7 +320,7 @@ def exercise(binary, root):
             print(
                 "PASS native "
                 + release
-                + ": synthetic two-row chooser, selected wrappers/native iframe routes, authenticated assets, native/host keep-alive close-policy navigation, foreign-origin refusal, unchanged history/inboxes."
+                + ": common shell/two-row catalog, single selected iframe and addon slot, authenticated assets, native/host keep-alive close-policy navigation, foreign-origin refusal, retired wrapper 404, unchanged history/inboxes."
             )
 
             # Explicit, separate fixture mutation, never a production drop action.

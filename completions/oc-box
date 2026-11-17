@@ -51,7 +51,7 @@ _oc_box()
         if (( ! ended )); then
             case $word in
                 --*=*) continue ;;
-                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--min-passphrase-length|--feature|--port)
+                --project|--workspace|--session|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--min-passphrase-length|--feature|--port)
                     skip=1; continue ;;
                 --status) command=status; continue ;;
                 -*) continue ;;
@@ -92,7 +92,7 @@ _oc_box()
                 _oc_box_words 'launch private-output maintenance history backup backup-info restore vault github-upgrade bootstrap storage overlay manuals docs-build'; return 0 ;;
             --auto-update) _oc_box_words 'on off'; return 0 ;;
             --credential-mode) _oc_box_words 'env selected vault'; return 0 ;;
-            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port)
+            --workspace|--session|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port)
                 return 0 ;;
         esac
     fi
@@ -103,7 +103,7 @@ _oc_box()
         sync) options="$help $selectors" ;;
         stop|repair) options="$help $selectors" ;;
         terminal) options="$help $selectors --maintenance" ;;
-        web) options="$help $selectors --port --no-open --no-vault --attachments" ;;
+        web) options="$help $selectors --session --port --no-open --no-vault --attachments" ;;
         tui) options="$help $selectors --read-only --demo" ;;
         share) options="$help $selectors --acknowledge-risk" ;;
         status) options="$help $selectors --json" ;;

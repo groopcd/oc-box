@@ -34,6 +34,9 @@ class Links(HTMLParser):
         super().__init__()
         self.sessions = []
         self.home = []
+        self.state = None
+        self.frames = []
+        self.scripts = []
 
     def handle_starttag(self, tag, attrs):
         values = dict(attrs)
@@ -41,6 +44,12 @@ class Links(HTMLParser):
             self.sessions.append(values["href"])
         if tag == "a" and values.get("href") == "/":
             self.home.append(values["href"])
+        if values.get("id") == "web-shell":
+            self.state = json.loads(values["data-bootstrap"])
+        if tag == "iframe":
+            self.frames.append(values)
+        if tag == "script":
+            self.scripts.append(values.get("src"))
 
 
 def fresh_home(native, data, release, home, project, local_exec, local_relay):
@@ -107,6 +116,13 @@ def fresh_home(native, data, release, home, project, local_exec, local_relay):
                     require(
                         links.sessions == [] and links.home == ["/"],
                         "Empty index did not offer Home without fabricated rows.",
+                    )
+                    require(
+                        links.state["selection"] is None
+                        and len(links.frames) == 1
+                        and links.frames[0]["id"] == "native"
+                        and "src" not in links.frames[0],
+                        "Unbound shell guessed a conversation or added frames.",
                     )
                 else:
                     require(
@@ -297,7 +313,7 @@ def exercise(binary, root, *, home_only=False):
             connection = {
                 **native.endpoint,
                 "workspace": data["id"],
-                "session": opened[0],
+                "session": opened[2],
             }
             opener = build_opener(ProxyHandler({}), HTTPCookieProcessor(CookieJar()))
             with (
@@ -330,6 +346,52 @@ def exercise(binary, root, *, home_only=False):
                     == [gateway.native_session_route(ident) for ident in opened],
                     "Native paired index did not list exactly four ordered open tabs.",
                 )
+                require(
+                    len(parser.frames) == 1
+                    and parser.frames[0]["id"] == "native"
+                    and parser.frames[0]["src"]
+                    == gateway.native_session_route(opened[2])
+                    and parser.state["selection"]["id"] == opened[2]
+                    and "Launcher-declared" in parser.state["selection"]["origin"],
+                    "Common shell replaced the declared member with a first-tab guess.",
+                )
+                for resource, mime in (
+                    (web_sessions.SCRIPT, "javascript"),
+                    (web_sessions.STYLE, "text/css"),
+                ):
+                    with opener.open(gateway.url + resource, timeout=10) as response:
+                        require(
+                            mime in response.headers["Content-Type"]
+                            and response.read(),
+                            "Authenticated common-shell resource unavailable.",
+                        )
+                with opener.open(
+                    gateway.url + web_sessions.CATALOG, timeout=10
+                ) as response:
+                    require(
+                        [row["id"] for row in json.loads(response.read())["sessions"]]
+                        == opened,
+                        "Refreshed shell catalog lost native TUI membership.",
+                    )
+                with opener.open(
+                    gateway.url + web_sessions.SELECTION + "?session=" + closed,
+                    timeout=10,
+                ) as response:
+                    require(
+                        json.loads(response.read())["id"] == closed,
+                        "Explicit private existing-ID verification failed.",
+                    )
+                with opener.open(
+                    gateway.url + web_sessions.INDEX + "?session=" + closed, timeout=10
+                ) as response:
+                    explicit = Links()
+                    explicit.feed(response.read().decode())
+                    require(
+                        explicit.state["selection"]["id"] == closed
+                        and not explicit.state["selection"]["member"]
+                        and len(explicit.state["sessions"]) == 4,
+                        "Explicit browser-only selection fabricated TUI-open membership.",
+                    )
                 for route, ident in zip(parser.sessions, opened):
                     with opener.open(gateway.url + route, timeout=10) as response:
                         require(

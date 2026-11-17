@@ -1175,9 +1175,25 @@ class NativeResponseHeaders:
 
 
 class Gateway:
-    def __init__(self, box, data, connection, port=0, *, attachments=False):
+    # Trusted first-party extension hook; never populated by browser input.
+    shell_addon_scripts = ()
+
+    def __init__(
+        self,
+        box,
+        data,
+        connection,
+        port=0,
+        *,
+        attachments=False,
+        shell_addon_scripts=None,
+        selection_snapshot_reader=None,
+    ):
         self.box, self.data, self.connection, self.port = box, data, connection, port
         self.attachments = attachments
+        if shell_addon_scripts is not None:
+            self.shell_addon_scripts = shell_addon_scripts
+        self.selection_snapshot_reader = selection_snapshot_reader
         self.closed = threading.Event()
         self.children = set()
         self.lock = threading.Lock()
@@ -1242,9 +1258,7 @@ class Gateway:
                     else:
                         import web_attachments
                     if web_attachments.matches(headers):
-                        web_attachments.serve(
-                            stream, headers, child, self.url, self.native_session_route
-                        )
+                        web_attachments.serve(stream, headers, child, self.url)
                         return
                 if __package__:
                     from . import web_sessions
@@ -1292,20 +1306,6 @@ class Gateway:
                     with self.lock:
                         self.children.discard(child)
                 self.capacity.release()
-
-    def entry_route(self):
-        return self.session_route()
-
-    def session_link(self, ident):
-        """Chooser row destination; the iframe always uses the native route."""
-        native = self.native_session_route(ident)
-        if self.attachments:
-            if __package__:
-                from . import web_attachments
-            else:
-                import web_attachments
-            return web_attachments.session_link(ident)
-        return native
 
     def session_route(self):
         # Native browser tabs are client-local, not the native TUI's open tabs.
@@ -1359,6 +1359,15 @@ def web_session(box, data, connection, args):
                 "Browser attachment adapter native version verification failed."
             )
         options["attachments"] = True
+        options["shell_addon_scripts"] = (web_attachments.SCRIPT,)
+    override = getattr(args, "web_session", None)
+    if override is not None:
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        web_sessions.explicit_session(box, data, connection, override)
+        connection = {**connection, "web_session_override": override}
     with Gateway(box, data, connection, args.port, **options) as gateway:
         pair = api(box, data, connection, "POST", "/api/pair")
         if not isinstance(pair.get("code"), str) or not re.fullmatch(
@@ -1439,6 +1448,10 @@ def web_parser():
         help="host project directory (default: current directory)",
     )
     group.add_argument("--workspace", help="existing workspace ID")
+    result.add_argument(
+        "--session",
+        help="explicit existing private-service conversation ID; overrides the launcher selection",
+    )
     result.add_argument(
         "--port",
         type=int,

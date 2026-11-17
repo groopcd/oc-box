@@ -61,7 +61,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box distros
      oc-box doctor [--json] [--feature FEATURE ...]
      oc-box completion bash
-     oc-box web [--project PATH | --workspace ID] [--port N] [--no-open] [--no-vault] [--attachments]
+     oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments]
      oc-box --status [--project PATH | --workspace ID] [--json]
      oc-box status [--project PATH | --workspace ID] [--json]
      oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
@@ -478,41 +478,59 @@ created using the host's default distro.  Requires host OpenCode 2.x;
      oc-box --project ~/devel/demo
      # While it runs, use another host terminal:
      oc-box web --project ~/devel/demo
+     oc-box web --project ~/devel/demo --session SESSION_ID
      oc-box terminal --project ~/devel/demo
 
 The browser uses upstream's short-lived one-use pairing link and opens
-an authenticated oc-box session index at ‘/auth/oc-box-sessions’.  This
+an authenticated common web shell at ‘/auth/oc-box-sessions’.  This
 first-party ‘/auth/’ path bypasses native's service-worker navigation
 fallback without changing or disabling that worker.  The index lists all
 verified open native TUI tabs in this private service, including idle
-sessions, in native tab order.  Select a link to open that session in
-the unmodified native web app in a separate browser tab; keep the index
-open or return to its URL and refresh to see later TUI membership
-changes.  Native browser tabs are client-local and are **not**
-automatically seeded or synchronized with TUI tabs.  Already-open
-archived sessions, moved/worktree locations and saved child IDs are not
-silently filtered: each listed ID must belong to native's saved tab
-membership and pass an identity-matching GET from this same private
-service.  Unopened history and missing/deleted IDs are not listed.
-Native normally groups child navigation under its root tab; the index
-does not invent a family tab.  Global TUI tab scope does not combine
-private workspace services or host history.  For restored workspaces,
-the saved scope uses the retained internal launch path; sessions within
-that scope may legitimately have other directories.  If saved TUI
-membership is unavailable, the index labels that limitation and does not
-guess a current session or list historical sessions.  An empty saved
-scope stays empty; unverifiable state shows a retry message.  The
-chooser always offers **Open native OpenCode Home**, including when
+sessions, in native tab order in one outer tabstrip.  Click a tab to
+show that conversation in the single unmodified native app iframe and
+update the selected highlight/URL. Refresh TUI tabs updates membership
+without reloading the iframe or discarding a loaded draft.  A selected
+conversation closed in the TUI is retained visibly as a browser
+selection outside the TUI-open count; it is not silently replaced.
+Native browser tabs and controls inside the iframe remain client-local
+and are **not** automatically seeded or synchronized with TUI tabs.
+Already-open archived sessions, moved/worktree locations and saved child
+IDs are not silently filtered: each listed ID must belong to native's
+saved tab membership and pass an identity-matching GET from this same
+private service.  Unopened history and missing/deleted IDs are not
+listed.  Native normally groups child navigation under its root tab; the
+index does not invent a family tab.  Global TUI tab scope does not
+combine private workspace services or host history.  For restored
+workspaces, the saved scope uses the retained internal launch path;
+sessions within that scope may legitimately have other directories.  If
+saved TUI membership is unavailable, the index labels that limitation
+and does not guess a current session or list historical sessions.  An
+empty saved scope stays empty; unverifiable state shows a retry message.
+The chooser always offers **Open native OpenCode Home**, including when
 there are no TUI tabs, saved membership is missing, or an authenticated
 index query fails.  This explicit link opens the unmodified native Home
 at ‘/’, where you can create or open a browser session without first
 running a TUI. It does not choose historical sessions, add fake TUI
 rows, or create a session by itself.  Browser-only tabs remain
-native-client local and do not populate this TUI membership list.  These
-explicit browsing rules do not broaden automatic owner resume or history
-synchronization.  Owner resume keeps its existing eligible-root policy;
-history sync keeps its existing discovery and archive semantics,
-including children and archived history.
+native-client local and do not populate this TUI membership list.
+‘--session ID’ explicitly selects an existing ID in this same private
+DB, even when it is not a TUI-open member, and does not add a fake open
+tab or create a session.  It wins initial selection.  Without it, a
+URL-selected ID is verified; otherwise the existing launcher-declared ID
+is retained only if it is an actual verified member.  That declaration
+is **not proof of native TUI focus**.  No first-tab, timestamp or
+foreground-activity guess is used; without a reliable target the shell
+offers all tabs for explicit selection.  Multiple TUI clients remain
+ambiguous.  Standard same-origin iframe URL observation tracks native
+SPA navigation only after identity verification; Home/drafts/foreign
+server views assert no selected TUI session.  Whole-page reloads and
+explicit conversation changes can navigate native content; draft
+persistence across those actions is the native client's responsibility.
+See [the common-shell contract](web-shell.md).  These explicit browsing
+rules do not broaden automatic owner resume or history synchronization.
+Owner resume keeps its existing eligible-root policy; history sync keeps
+its existing discovery and archive semantics, including children and
+archived history.
 
 A host relay binds only ‘127.0.0.1’, forwards HTTP/streaming/WebSocket
 bytes through Podman exec to container loopback, and does not publish a
@@ -552,43 +570,51 @@ explicitly:
 
      oc-box web --project ~/devel/demo --attachments
 
-Pairing still opens the session chooser.  Each verified TUI row now
-links to a visibly labeled oc-box wrapper for **that selected session**,
-containing the unmodified native web app, not a host-side OpenCode TUI.
-The iframe never loads the chooser or silently substitutes an
-owner/first session.  A wrapper URL requires exactly one valid ‘session’
-query parameter; unknown or duplicate parameters refuse.  The chooser's
-native Home link stays available for fresh/empty scopes and browser-only
-tabs.  That direct Home link is not an attachment wrapper: the adapter
-currently targets explicitly selected existing sessions, not
-Home/new-session drafts or automatically mirrored browser tabs.  If the
-iframe navigates to another session, the adapter refuses forwarding;
-select that session's chooser row to open its own wrapper instead.
-There is no last-used/owner/other-session fallback.  It uses only the
-existing loopback relay and native pairing/authentication.  Native
-OpenCode **2.2.6 and 2.3.0 only** are source-checked; other versions
-refuse the adapter rather than assuming compatibility.  Omit the option
-for chooser links directly to the native web app.
+Pairing opens the same common shell described above: **one outer
+tabstrip and one unmodified native app iframe**.  The optional addon
+adds visible attachment controls to that shell; it does not create
+another wrapper, tabstrip or iframe, seed native browser stores, or
+change the common selection/focus rules.  Use the outer tabs or
+‘--session ID’ to select an existing private conversation.  It also
+follows native SPA navigation only after the common shell verifies that
+same private ID. During an unverified route, Home, draft or
+foreign-server view, attachment forwarding refuses instead of guessing
+another target.  Native Home and the shell's direct native fallback
+links remain available; those separate direct views do not load this
+addon.  The addon uses only the existing loopback relay and native
+pairing/authentication.  Native OpenCode **2.2.6 and 2.3.0 only** are
+source-checked; other versions refuse the adapter rather than assuming
+compatibility.  Omit the option for the common shell with no attachment
+addon.  Its fixed authenticated script is ‘/auth/oc-box-attachments.js’;
+the earlier independent ‘/auth/oc-box-attachments?session=...’ wrapper
+is retired.
 
 Wait for the native composer to load, then drag the screenshot from
-Spectacle into it (or use the wrapper's drop area/file chooser).  Actual
-browser ‘File’ objects are copied and forwarded as a file-only standard
-DOM drop.  This avoids native's competing ‘text/plain’ ‘file:’ flavor
-turning an actual file drop into a path mention.  There is no model tool
-request, per-image host approval, private widget lookup or native
-source/binary patch.  **No prompt/inference Send happens
+Spectacle into it (or use the shell addon's drop area/file chooser).
+Actual browser ‘File’ objects are copied and forwarded as a file-only
+standard DOM drop.  This avoids native's competing ‘text/plain’ ‘file:’
+flavor turning an actual file drop into a path mention.  There is no
+model tool request, per-image host approval, private widget lookup or
+native source/binary patch.  **No prompt/inference Send happens
 automatically**: check native thumbnails, edit the native prompt and
 press native Send yourself.  Native may stage attachment bytes into its
 container temporary directory before Send, especially when using its
 file/path fallback.  "Draft" does not mean the bytes remain exclusively
 in the host browser.  The adapter cannot acknowledge native draft
 admission through a public API, so its forwarding notice is not proof of
-a thumbnail or successful model input.  Do not drop while changing the
-native session; an observed route/document change during file reads, or
-a detached original drop target, refuses forwarding without automatic
-retry.  The wrapper uses native's existing ‘/auth/’ service-worker
-navigation exclusion; native assets and its service worker remain
-unchanged.
+a thumbnail or successful model input.  Do not drop while changing
+sessions.  Every common-shell selection event and iframe load
+invalidates an in-progress file read, including explicit away-and-back
+changes to the same ID and metadata-refresh events.  The addon also
+checks the actual same-origin iframe URL, exact selected route, document
+and original drop target immediately before forwarding.  Pending SPA
+verification, changed documents and detached original targets refuse
+without automatic retry.  This is not an atomic navigation/inactivity
+guarantee: a native SPA excursion away and back entirely between public
+observations may be unobserved.  No native history methods or private
+widgets are patched to manufacture stronger evidence.  Addon resources
+use native's existing ‘/auth/’ service-worker navigation exclusion;
+native assets and its service worker remain unchanged.
 
 The adapter accepts signature-recognizable **PNG, JPEG, GIF, WebP and
 PDF** only: 20 MiB per file, eight files and 40 MiB per drop.  Signature
@@ -601,10 +627,10 @@ direct native link retains upstream's other attachment behaviors.
 
 Spectacle/browser/Wayland/X11/portal combinations can expose a temporary
 file as an actual browser file, URL-only text, or another MIME payload.
-**Only actual browser files work here**; the wrapper does not resolve
-host paths, dereference ‘file:’/web URLs or offer a host file server.
-Its own drop area rejects URL/text- only input.  Non-file drops inside
-the native iframe retain native defaults (including workspace path
+**Only actual browser files work here**; the addon does not resolve host
+paths, dereference ‘file:’/web URLs or offer a host file server.  Its
+own drop area rejects URL/text- only input.  Non-file drops inside the
+native iframe retain native defaults (including workspace path
 mentions), not host-file access.  Native paste of a clipboard image
 remains available when the browser exposes a file item; copying an
 image's path is not copying image bytes.  No clipboard polling is added.
@@ -2122,7 +2148,16 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.26 -attachments
+5.26 -session SESSION_ID
+========================
+
+Web only: explicitly display an existing native session from this same
+private workspace service in the common shell.  This overrides
+URL/declared initial selection, never creates a session or adds a fake
+TUI-open tab, and is not proof of current native TUI focus.  See ‘web’
+for membership and selection semantics.
+
+5.27 -attachments
 =================
 
 Web only: explicitly select the visible, source-version-bounded browser
@@ -2130,7 +2165,7 @@ File-drop adapter described under ‘web’.  Keeps the native app and its
 draft/Send controls unchanged.  No automatic prompt admission or
 host-path/URL reading.
 
-5.27 -no-vault
+5.28 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -2149,7 +2184,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.28 -env-secret NAME
+5.29 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -2162,7 +2197,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.29 -vault-secret NAME
+5.30 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -2174,7 +2209,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.30 -clear-credentials
+5.31 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -2186,7 +2221,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.31 -output FILE
+5.32 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -2196,7 +2231,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.32 -portable
+5.33 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -2206,7 +2241,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.33 -recipient AGE_KEY
+5.34 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -2217,7 +2252,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.34 -identity FILE
+5.35 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -2228,7 +2263,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.35 -cpus NUMBER
+5.36 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -2239,7 +2274,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.36 -memory SIZE
+5.37 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -2251,7 +2286,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.37 -pids-limit NUMBER
+5.38 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -2259,7 +2294,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.38 -device MAPPING
+5.39 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -2273,7 +2308,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.39 -podman-arg=-OPTION[=VALUE]
+5.40 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -2300,7 +2335,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.40 -clear-devices
+5.41 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -2311,7 +2346,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.41 -clear-podman-args
+5.42 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -2321,7 +2356,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.42 -delete-sessions
+5.43 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -2330,7 +2365,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.43 -all
+5.44 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -2338,7 +2373,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.44 -y, -yes
+5.45 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -3562,22 +3597,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description2746
-Node: Commands6344
-Node: Options99251
-Node: Lifecycle and persistence123317
-Node: Distribution images125437
-Node: Sessions and recovery130312
-Node: Devices and host permissions136897
-Node: Resource reports139243
-Node: Configuration and environment141354
-Node: Files152735
-Node: Exit status158679
-Node: Examples159532
-Node: Troubleshooting161618
-Node: Installation and manuals172970
-Node: Authors and license182222
-Node: See also182829
+Node: Description2761
+Node: Commands6359
+Node: Options101058
+Node: Lifecycle and persistence125496
+Node: Distribution images127616
+Node: Sessions and recovery132491
+Node: Devices and host permissions139076
+Node: Resource reports141422
+Node: Configuration and environment143533
+Node: Files154914
+Node: Exit status160858
+Node: Examples161711
+Node: Troubleshooting163797
+Node: Installation and manuals175149
+Node: Authors and license184401
+Node: See also185008
 
 End Tag Table
 

@@ -19,7 +19,7 @@ oc-box list
 oc-box distros
 oc-box doctor [--json] [--feature FEATURE ...]
 oc-box completion bash
-oc-box web [--project PATH | --workspace ID] [--port N] [--no-open] [--no-vault] [--attachments]
+oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
@@ -388,17 +388,21 @@ OpenCode 2.x; 1.x has no web command through this launcher.
 oc-box --project ~/devel/demo
 # While it runs, use another host terminal:
 oc-box web --project ~/devel/demo
+oc-box web --project ~/devel/demo --session SESSION_ID
 oc-box terminal --project ~/devel/demo
 ```
 
 The browser uses upstream's short-lived one-use pairing link and opens an
-authenticated oc-box session index at `/auth/oc-box-sessions`. This first-party
+authenticated common web shell at `/auth/oc-box-sessions`. This first-party
 `/auth/` path bypasses native's service-worker navigation fallback without
 changing or disabling that worker. The index lists all verified
 open native TUI tabs in this private service, including idle sessions, in native
-tab order. Select a link to open that session in the unmodified native web app
-in a separate browser tab; keep the index open or return to its URL and refresh
-to see later TUI membership changes. Native browser tabs are client-local and
+tab order in one outer tabstrip. Click a tab to show that conversation in the
+single unmodified native app iframe and update the selected highlight/URL.
+Refresh TUI tabs updates membership without reloading the iframe or discarding
+a loaded draft. A selected conversation closed in the TUI is retained visibly
+as a browser selection outside the TUI-open count; it is not silently replaced.
+Native browser tabs and controls inside the iframe remain client-local and
 are **not** automatically seeded or synchronized with TUI tabs. Already-open
 archived sessions, moved/worktree locations and saved child IDs are not silently
 filtered: each listed ID must belong to native's saved tab membership and pass
@@ -417,6 +421,18 @@ fails. This explicit link opens the unmodified native Home at `/`, where you can
 create or open a browser session without first running a TUI. It does not choose
 historical sessions, add fake TUI rows, or create a session by itself. Browser-only
 tabs remain native-client local and do not populate this TUI membership list.
+`--session ID` explicitly selects an existing ID in this same private DB, even
+when it is not a TUI-open member, and does not add a fake open tab or create a
+session. It wins initial selection. Without it, a URL-selected ID is verified;
+otherwise the existing launcher-declared ID is retained only if it is an actual
+verified member. That declaration is **not proof of native TUI focus**. No
+first-tab, timestamp or foreground-activity guess is used; without a reliable
+target the shell offers all tabs for explicit selection. Multiple TUI clients
+remain ambiguous. Standard same-origin iframe URL observation tracks native SPA
+navigation only after identity verification; Home/drafts/foreign server views
+assert no selected TUI session. Whole-page reloads and explicit conversation
+changes can navigate native content; draft persistence across those actions is
+the native client's responsibility. See [the common-shell contract](web-shell.md).
 These explicit browsing rules do not broaden automatic owner resume or history
 synchronization. Owner resume keeps its existing eligible-root policy; history
 sync keeps its existing discovery and archive semantics, including children and
@@ -456,24 +472,25 @@ For browser-provided screenshot/image/PDF attachments, opt in explicitly:
 oc-box web --project ~/devel/demo --attachments
 ```
 
-Pairing still opens the session chooser. Each verified TUI row now links to a
-visibly labeled oc-box wrapper for **that selected session**, containing the
-unmodified native web app, not a host-side OpenCode TUI. The iframe never loads
-the chooser or silently substitutes an owner/first session. A wrapper URL requires
-exactly one valid `session` query parameter; unknown or duplicate parameters refuse.
-The chooser's native Home link stays available for fresh/empty scopes and
-browser-only tabs. That direct Home link is not an attachment wrapper: the adapter
-currently targets explicitly selected existing sessions, not Home/new-session
-drafts or automatically mirrored browser tabs. If the iframe navigates to another
-session, the adapter refuses forwarding; select that session's chooser row to
-open its own wrapper instead. There is no last-used/owner/other-session fallback.
-It uses only the existing loopback relay and
-native pairing/authentication. Native OpenCode **2.2.6 and 2.3.0 only** are
+Pairing opens the same common shell described above: **one outer tabstrip and
+one unmodified native app iframe**. The optional addon adds visible attachment
+controls to that shell; it does not create another wrapper, tabstrip or iframe,
+seed native browser stores, or change the common selection/focus rules. Use the
+outer tabs or `--session ID` to select an existing private conversation. It also
+follows native SPA navigation only after the common shell verifies that same
+private ID. During an unverified route, Home, draft or foreign-server view,
+attachment forwarding refuses instead of guessing another target.
+Native Home and the shell's direct native fallback links remain available;
+those separate direct views do not load this addon.
+The addon uses only the existing loopback relay and native pairing/authentication.
+Native OpenCode **2.2.6 and 2.3.0 only** are
 source-checked; other versions refuse the adapter rather than assuming
-compatibility. Omit the option for chooser links directly to the native web app.
+compatibility. Omit the option for the common shell with no attachment addon.
+Its fixed authenticated script is `/auth/oc-box-attachments.js`; the earlier
+independent `/auth/oc-box-attachments?session=...` wrapper is retired.
 
 Wait for the native composer to load, then drag the screenshot from Spectacle
-into it (or use the wrapper's drop area/file chooser). Actual browser `File`
+into it (or use the shell addon's drop area/file chooser). Actual browser `File`
 objects are copied and forwarded as a file-only standard DOM drop. This avoids
 native's competing `text/plain` `file:` flavor turning an actual file drop into
 a path mention. There is no model tool request, per-image host approval, private
@@ -484,10 +501,17 @@ directory before Send, especially when using its file/path fallback. "Draft"
 does not mean the bytes remain exclusively in the host browser.
 The adapter cannot acknowledge native draft admission through a public API, so
 its forwarding notice is not proof of a thumbnail or successful model input.
-Do not drop while changing the native session; an observed route/document change
-during file reads, or a detached original drop target, refuses forwarding without
-automatic retry. The wrapper uses native's existing `/auth/` service-worker
-navigation exclusion; native assets and its service worker remain unchanged.
+Do not drop while changing sessions. Every common-shell selection event and
+iframe load invalidates an in-progress file read, including explicit
+away-and-back changes to the same ID and metadata-refresh events. The addon
+also checks the actual same-origin iframe URL, exact selected route, document
+and original drop target immediately before forwarding. Pending SPA verification,
+changed documents and detached original targets refuse without automatic retry.
+This is not an atomic navigation/inactivity guarantee: a native SPA excursion
+away and back entirely between public observations may be unobserved. No native
+history methods or private widgets are patched to manufacture stronger evidence.
+Addon resources use native's existing `/auth/` service-worker navigation exclusion;
+native assets and its service worker remain unchanged.
 
 The adapter accepts signature-recognizable **PNG, JPEG, GIF, WebP and PDF** only:
 20 MiB per file, eight files and 40 MiB per drop. Signature checks are not a full
@@ -499,7 +523,7 @@ The direct native link retains upstream's other attachment behaviors.
 
 Spectacle/browser/Wayland/X11/portal combinations can expose a temporary file as
 an actual browser file, URL-only text, or another MIME payload. **Only actual
-browser files work here**; the wrapper does not resolve host paths, dereference
+browser files work here**; the addon does not resolve host paths, dereference
 `file:`/web URLs or offer a host file server. Its own drop area rejects URL/text-
 only input. Non-file drops inside the native iframe retain native defaults
 (including workspace path mentions), not host-file access. Native paste of a
@@ -1877,6 +1901,13 @@ owner, not to an active client. To replace an existing selection:
 ```sh
 oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 ```
+
+### --session SESSION_ID
+
+Web only: explicitly display an existing native session from this same private
+workspace service in the common shell. This overrides URL/declared initial
+selection, never creates a session or adds a fake TUI-open tab, and is not proof
+of current native TUI focus. See `web` for membership and selection semantics.
 
 ### --attachments
 
