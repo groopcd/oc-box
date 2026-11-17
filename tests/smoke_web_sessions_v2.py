@@ -7,6 +7,8 @@ browser rendering, shared host service, Podman or host-acceptance claim.
 """
 
 import argparse
+from http.client import HTTPConnection
+from http.cookies import SimpleCookie
 from http.cookiejar import CookieJar
 from html.parser import HTMLParser
 import json
@@ -48,35 +50,71 @@ def fresh_home(native, data, release, home, project, local_exec, local_relay):
     before = bridge.service_session_catalog(native)
     require(before == [], "Fresh Home fixture had existing sessions.")
     connection = {**native.endpoint, "workspace": data["id"], "session": None}
-    opener = build_opener(ProxyHandler({}), HTTPCookieProcessor(CookieJar()))
     with (
         patch.object(box, "run", side_effect=local_exec),
         patch.object(service, "relay_command", side_effect=local_relay),
         service.Gateway(box, data, connection) as gateway,
     ):
-        pair = native("POST", "/api/pair")
-        request = Request(
-            gateway.url + "/auth/connect/" + pair["code"],
-            headers={"Accept": "text/html"},
+        # Unlike urllib's forced-close requests, this client would reuse a
+        # keep-alive socket. Only the response close policy must prevent that.
+        client = HTTPConnection(
+            "127.0.0.1", gateway.listener.getsockname()[1], timeout=15
         )
-        with opener.open(request, timeout=15) as response:
+        try:
+            pair = native("POST", "/api/pair")
+            headers = {"Accept": "text/html", "Connection": "keep-alive"}
+            client.request("GET", "/auth/connect/" + pair["code"], headers=headers)
+            response = client.getresponse()
             require(
-                response.geturl() == gateway.url + web_sessions.INDEX,
+                response.status == 302
+                and response.getheader("Location") == web_sessions.INDEX,
                 "Fresh pairing did not land on the session index.",
             )
-            links = Links()
-            links.feed(response.read().decode())
-        require(
-            links.sessions == [] and links.home == ["/"],
-            "Empty index did not offer native Home without fabricated rows.",
-        )
-        with opener.open(gateway.url + links.home[0], timeout=10) as response:
-            require(
-                response.status == 200
-                and "text/html" in response.headers["Content-Type"]
-                and response.read(),
-                "Native Home did not serve its public web shell.",
+            cookie = SimpleCookie()
+            for name, value in response.getheaders():
+                if name.lower() == "set-cookie":
+                    cookie.load(value)
+            headers["Cookie"] = "; ".join(
+                item.OutputString(attrs=[]) for item in cookie.values()
             )
+            require(
+                bool(headers["Cookie"]) and response.will_close,
+                "Native pairing did not preserve cookies and forbid socket reuse.",
+            )
+            response.read()
+            for path in (
+                web_sessions.INDEX,
+                "/",
+                web_sessions.INDEX,
+                "/",
+                web_sessions.INDEX,
+            ):
+                client.request("GET", path, headers=headers)
+                response = client.getresponse()
+                body = response.read()
+                require(
+                    response.status == 200 and response.will_close,
+                    "Keep-alive follow-up missed native or first-party routing.",
+                )
+                require(
+                    response.getheader("Connection", "").lower() == "close"
+                    and response.getheader("Keep-Alive") is None,
+                    "Native/first-party response allowed browser socket reuse.",
+                )
+                if path == web_sessions.INDEX:
+                    links = Links()
+                    links.feed(body.decode())
+                    require(
+                        links.sessions == [] and links.home == ["/"],
+                        "Empty index did not offer Home without fabricated rows.",
+                    )
+                else:
+                    require(
+                        "text/html" in response.headers["Content-Type"] and body,
+                        "Native Home did not serve its public web shell.",
+                    )
+        finally:
+            client.close()
     require(
         native_tabs.read_snapshot(str(home), str(project), release) == snapshot,
         "Fresh Home navigation changed TUI membership.",
@@ -87,7 +125,8 @@ def fresh_home(native, data, release, home, project, local_exec, local_relay):
     )
     print(
         "PASS native " + release + ": fresh unbound pairing, empty chooser "
-        "with explicit native Home, public Home shell, unchanged missing TUI "
+        "with explicit native Home, repeated keep-alive native/host navigation "
+        "using fresh transactions and preserved pairing cookies, unchanged missing TUI "
         "state and empty private session inventory; no session mutations.",
         flush=True,
     )

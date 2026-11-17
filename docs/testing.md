@@ -58,6 +58,17 @@ availability is not rendered Home chat or installed-service-worker acceptance.
 The existing V2 CI job runs the default combined script against pinned 2.2.6;
 both source/package and distro workflows also trigger on `fix/**` branches.
 
+`tests/test_workspace_service.py` additionally checks bounded native response
+headers, retained interim replies, response-close-driven redirect/cookie and
+return navigation, HTTP 204/HEAD, binary uploads/downloads, streaming chunked SSE
+and byte-exact bidirectional 101 upgrades. Only headers are mediated, never full
+response bodies. The native `--home-only` mode uses a keep-alive-capable client
+for pairing and repeated native/host navigation; request-side close alone is not
+its oracle. These fixtures do not establish the composed attachment feature's
+real-browser pairing pass. Retain the earlier Chromium native-404 evidence until
+the final composed source is separately tested; a fresh-cookie workaround was
+diagnostic, not acceptance of the original flow.
+
 ### Reviewed 5573965 candidate evidence
 
 The following is a review of retained evidence for clean
