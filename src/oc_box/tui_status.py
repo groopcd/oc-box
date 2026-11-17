@@ -379,7 +379,7 @@ class HostResourceCards(_CardPanel):
     def __init__(self, kind="system", **kwargs):
         kwargs.setdefault("id", "system-report")
         super().__init__(kind, **kwargs)
-        self.caption = "Host resources"
+        self.caption = "Host resources (OS-reported)"
 
     def _render_snapshot(self):
         width = max(1, self.content_size.width)
@@ -465,46 +465,38 @@ class HostResourceCards(_CardPanel):
             return
 
         inner = max(1, width - 4)
-        rows = []
-        captions = [
-            readings[0][2] + " · whole host",
-            readings[1][2],
-            readings[2][2] + " · OS capacity",
-        ]
-        bar_width = min(
-            16, inner - 12 - max(Text(caption).cell_len for caption in captions)
+        # Compact layouts keep the readings, rather than redundant bar rows.
+        # Histories below retain the same fixed scale as the wide cards.
+        resources = Text(f"CPU {readings[0][2]} whole host", style=styles["cpu"])
+        resources.append(" · RAM " + readings[1][2], style=styles["memory"])
+        rows = [resources]
+        filesystem_row = Text("Home FS " + readings[2][2], style=styles["storage"])
+        workspace_row = Text(
+            f"Workspaces {running}/{registered} running/registered",
+            style=styles["title"],
         )
-        for label, (_, value, _, color), caption in zip(
-            ("CPU", "RAM", "Home FS"), readings, captions
-        ):
-            prefix = Text(f"{label:<10} ", style=styles[color])
-            if bar_width >= 4:
-                prefix.append_text(
-                    _card_bar(value, bar_width, styles[color], styles["muted"])
-                )
-                prefix.append(" ")
-            prefix.append(caption)
-            rows.append(prefix)
-        rows.append(
-            Text(
-                f"Workspaces {running} running / {registered} registered",
-                style=styles["title"],
-            )
+        if filesystem_row.cell_len + workspace_row.cell_len + 3 <= inner:
+            filesystem_row.append(" · ")
+            filesystem_row.append_text(workspace_row)
+            rows.append(filesystem_row)
+        else:
+            rows.extend([filesystem_row, workspace_row])
+        history_suffix = " · 0–100%; gaps=n/a"
+        history_width = max(
+            0, min(24, (inner - 10 - Text(history_suffix).cell_len) // 2)
         )
-        history_width = max(0, min(24, (inner - 10) // 2))
         history = Text("CPU ", style=styles["muted"])
         history.append(
             spark(self.cpu_history, history_width).ljust(history_width),
             style=styles["cpu"],
         )
         history.append("  RAM ", style=styles["muted"])
-        history.append(spark(self.ram_history, history_width), style=styles["memory"])
-        rows.extend(
-            [
-                history,
-                Text("History 0–100% · gaps = unavailable", style=styles["muted"]),
-            ]
+        history.append(
+            spark(self.ram_history, history_width).ljust(history_width),
+            style=styles["memory"],
         )
+        history.append(history_suffix, style=styles["muted"])
+        rows.append(history)
         self.update(self._card_box(rows, self.caption, width, styles))
 
 

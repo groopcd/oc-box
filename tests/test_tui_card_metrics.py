@@ -119,15 +119,19 @@ class CardWidgetTests(unittest.IsolatedAsyncioTestCase):
                     for title in ("HOST CPU", "HOST RAM", "HOST HOME FS", "WORKSPACES"):
                         self.assertIn(title, lines[0])
                 else:
-                    self.assertEqual(len(lines), 7 if width < 4 else 8)
+                    self.assertLessEqual(len(lines), 6)
                     if width >= 60:
-                        meter_widths = [
-                            sum(char in "█░" for char in line) for line in lines[1:4]
-                        ]
-                        self.assertGreater(meter_widths[0], 0)
-                        self.assertEqual(len(set(meter_widths)), 1)
+                        self.assertIn("CPU 22.0% whole host", lines[1])
+                        self.assertIn("RAM 6.0 GiB / 16.0 GiB", lines[1])
+                        self.assertIn("0–100%; gaps=n/a", lines[-2])
+                        self.assertIn("Host resources (OS-reported)", lines[0])
+                    if width == 80:
+                        self.assertEqual(len(lines), 5)
+                        self.assertIn("Home FS", lines[2])
+                        self.assertIn("Workspaces 2/5 running/registered", lines[2])
             self.assertEqual((host, workspace), original)
             self.assertEqual(cards.cpu_history, (22,) * 60)
+            self.assertEqual(cards.caption, "Host resources (OS-reported)")
             self.assertEqual(inspector.caption, "Selected workspace")
 
     async def test_cpu_uses_observed_quota_and_private_size_requires_scan(self):
@@ -197,13 +201,11 @@ class CardWidgetTests(unittest.IsolatedAsyncioTestCase):
             await pilot.resize_terminal(80, 48)
             await pilot.pause()
             cards.update_snapshot(host_snapshot(), [22, None, 100], [0, math.nan, 38])
-            self.assertIn("Workspaces 2 running / 5 registered", cards.render().plain)
+            self.assertIn("Workspaces 2/5 running/registered", cards.render().plain)
             self.assertIn("CPU ▃ █", cards.render().plain)
             self.assertIn("RAM ▁ ▄", cards.render().plain)
             cards.update_snapshot({})
-            self.assertIn(
-                "Workspaces n/a running / n/a registered", cards.render().plain
-            )
+            self.assertIn("Workspaces n/a/n/a running/registered", cards.render().plain)
 
     async def test_literal_metadata_and_no_unrequested_configuration_details(self):
         app = CardApp()
