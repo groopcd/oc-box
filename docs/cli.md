@@ -556,7 +556,8 @@ focused text inputs or the native shell. A focused terminal keeps its keys,
 including `s`, `F2` and `Ctrl+L`; use `Ctrl-]` to detach its client without ending
 the native shell before using dashboard shortcuts.
 
-Nonempty editable search and form inputs have a bold red `✖` inside the field.
+Nonempty editable search and form inputs have a double-width red `❌` inside the
+field's reserved right padding. Both icon cells are clickable.
 Click it to clear that field and retain editing focus, without submitting,
 connecting or accessing the clipboard. Password and disabled fields are excluded.
 Session/log filtering waits for a 120 ms typing pause rather than rebuilding

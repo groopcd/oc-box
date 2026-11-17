@@ -5,6 +5,7 @@ import unittest
 
 AVAILABLE = importlib.util.find_spec("textual") is not None
 if AVAILABLE:
+    from rich.cells import cell_len
     from rich.color import Color
     from textual.app import App
     from textual.geometry import Region
@@ -49,7 +50,7 @@ class InputControlsTests(unittest.IsolatedAsyncioTestCase):
         return field.render_lines(Region(0, 0, field.region.width, field.region.height))
 
     async def click_clear(self, pilot, field, **kwargs):
-        # Native tall border is one cell; ✖ is the last right-padding cell.
+        # Native tall border is one cell; the right icon cell precedes it.
         await pilot.click(field, offset=(field.region.width - 2, 1), **kwargs)
         await pilot.pause()
 
@@ -65,7 +66,7 @@ class InputControlsTests(unittest.IsolatedAsyncioTestCase):
                         segment
                         for line in self.rendered(field)
                         for segment in line
-                        if segment.text == "✖"
+                        if segment.text == "❌"
                     ]
                     self.assertEqual(len(glyphs), 1)
                     self.assertTrue(glyphs[0].style.bold)
@@ -80,6 +81,8 @@ class InputControlsTests(unittest.IsolatedAsyncioTestCase):
                         "Resolved clear color must follow the theme's error red",
                     )
                     self.assertEqual(len(glyphs[0].text), 1)
+                    self.assertEqual(cell_len(glyphs[0].text), 2)
+                    self.assertEqual(field._clear_region.width, 2)
 
     async def test_mouse_clear_is_one_changed_event_not_submit_and_keeps_native_input(
         self,
@@ -91,8 +94,8 @@ class InputControlsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(search.region.width, native.region.width)
             self.assertEqual(search.content_region.width, native.content_region.width)
             self.assertIsInstance(search, ClipboardInput)
-            self.assertEqual(self.rendered(search)[1].text[-2], "✖")
-            self.assertNotIn("✖", search.get_selection(SELECT_ALL)[0])
+            self.assertEqual(self.rendered(search)[1].text[-2], "❌")
+            self.assertNotIn("❌", search.get_selection(SELECT_ALL)[0])
             native.focus()
             await pilot.pause()
             app.changes.clear()
@@ -104,7 +107,7 @@ class InputControlsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(search.cursor_position, 0)
             self.assertEqual(tuple(search.selection), (0, 0))
             self.assertIs(app.focused, search)
-            self.assertNotIn("✖", self.rendered(search)[1].text)
+            self.assertNotIn("❌", self.rendered(search)[1].text)
             self.assertEqual(app.submissions, [])
             self.assertEqual(app.buttons, [])
             self.assertEqual(app.copies, [])
@@ -115,10 +118,48 @@ class InputControlsTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(search.cursor_position, 3)
             await pilot.press("ctrl+a", "r")
             self.assertEqual(search.value, "r")
-            self.assertEqual(self.rendered(search)[1].text[-2], "✖")
+            self.assertEqual(self.rendered(search)[1].text[-2], "❌")
             self.assertEqual(app.submissions, [])
 
-    async def test_normal_inputs_resize_scroll_and_crop_without_consuming_text_columns(
+    async def test_both_clear_cells_are_clickable_and_partial_crops_stay_cell_bounded(
+        self,
+    ):
+        app = InputControlsApp()
+        async with app.run_test(size=(80, 28)) as pilot:
+            field = app.query_one("#path", ClipboardInput)
+            for width in (80, 36, 16):
+                await pilot.resize_terminal(width, 28)
+                for cell in (0, 1):
+                    with self.subTest(width=width, clear_cell=cell):
+                        field.value = "clear 界/" * 8
+                        await pilot.pause()
+                        clear = field._clear_region
+                        self.assertEqual((clear.width, clear.height), (2, 1))
+                        full = self.rendered(field)[clear.y]
+                        for start, count in (
+                            (clear.x, 1),
+                            (clear.x + 1, 1),
+                            (clear.x, 2),
+                            (clear.x - 1, 3),
+                        ):
+                            cropped = field.render_lines(
+                                Region(start, clear.y, count, 1)
+                            )[0]
+                            self.assertEqual(cropped.cell_length, count)
+                            self.assertEqual(
+                                cropped.text, full.crop(start, start + count).text
+                            )
+                        app.changes.clear()
+                        await pilot.click(field, offset=(clear.x + cell, clear.y))
+                        await pilot.pause()
+                        self.assertEqual(field.value, "")
+                        self.assertEqual(app.changes, [("path", "")])
+                        self.assertIs(app.focused, field)
+            self.assertEqual(app.submissions, [])
+            self.assertEqual(app.buttons, [])
+            self.assertEqual(app.copies, [])
+
+    async def test_normal_inputs_resize_scroll_and_crop_with_reserved_clear_padding(
         self,
     ):
         app = InputControlsApp()
@@ -139,7 +180,7 @@ class InputControlsTests(unittest.IsolatedAsyncioTestCase):
                     self.assertGreater(field.scroll_x, 0)
                     full = self.rendered(field)
                     self.assertTrue(all(line.cell_length == width for line in full))
-                    self.assertEqual(full[1].text[-2], "✖")
+                    self.assertEqual(full[1].text[-2], "❌")
                     crop = Region(width - 4, 1, 4, 1)
                     self.assertEqual(
                         field.render_lines(crop)[0].text,
@@ -162,7 +203,9 @@ class InputControlsTests(unittest.IsolatedAsyncioTestCase):
                 with self.subTest(ident=ident):
                     field = app.query_one(f"#{ident}", Input)
                     value = field.value
-                    self.assertNotIn("✖", "".join(s.text for s in self.rendered(field)))
+                    self.assertNotIn(
+                        "❌", "".join(s.text for s in self.rendered(field))
+                    )
                     if ident != "compact":
                         await self.click_clear(pilot, field)
                     self.assertEqual(field.value, value)

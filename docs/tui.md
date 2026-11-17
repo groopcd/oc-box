@@ -489,7 +489,8 @@ text and settings changes are never saved or written to the activity journal.
 The header shows **N log entries** when search is empty and **N log matches**
 when filtering, with singular forms for one result. These are retained log
 entries in the selected Logs source, not sessions, workspaces or agent calls.
-Hover for an explanation. The bold red **✖** clears only the input/filter,
+Hover for an explanation. The double-width red **❌**, with a two-cell click
+target, clears only the input/filter,
 restoring the unfiltered count rather than deleting logs. Search feedback stays
 current while a selected output snapshot is held still for copying.
 

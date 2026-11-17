@@ -235,7 +235,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     Screen.compact #dashboard-header Select > SelectCurrent {
       height: 1; border: none; padding: 0 1; }
     Screen.compact #log-tools { height: 1; }
-    Screen.compact #log-search { height: 1; border: none; padding: 0 1; }
+    Screen.compact #log-search { height: 1; border: none; padding: 0 2 0 1; }
     Screen.compact #log-hits { height: 1; padding: 0 1; }
     Screen.compact #log-tools Button { height: 1; border: none; padding: 0 1; }
     Screen.compact #overview-body { layout: vertical; }

@@ -664,9 +664,10 @@ keeps its keys, including ‘s’, ‘F2’ and ‘Ctrl+L’; use ‘Ctrl-]’ t
 its client without ending the native shell before using dashboard
 shortcuts.
 
-Nonempty editable search and form inputs have a bold red ‘✖’ inside the
-field.  Click it to clear that field and retain editing focus, without
-submitting, connecting or accessing the clipboard.  Password and
+Nonempty editable search and form inputs have a double-width red ‘❌’
+inside the field's reserved right padding.  Both icon cells are
+clickable.  Click it to clear that field and retain editing focus,
+without submitting, connecting or accessing the clipboard.  Password and
 disabled fields are excluded.  Session/log filtering waits for a 120 ms
 typing pause rather than rebuilding tables on every key.  Input editing
 remains immediate.  Unchanged views skip rebuilds, and favorites I/O is
@@ -3460,20 +3461,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2730
 Node: Commands6328
-Node: Options93423
-Node: Lifecycle and persistence117216
-Node: Distribution images119336
-Node: Sessions and recovery124211
-Node: Devices and host permissions130796
-Node: Resource reports133142
-Node: Configuration and environment135253
-Node: Files146634
-Node: Exit status152578
-Node: Examples153431
-Node: Troubleshooting155517
-Node: Installation and manuals166869
-Node: Authors and license176121
-Node: See also176728
+Node: Options93488
+Node: Lifecycle and persistence117281
+Node: Distribution images119401
+Node: Sessions and recovery124276
+Node: Devices and host permissions130861
+Node: Resource reports133207
+Node: Configuration and environment135318
+Node: Files146699
+Node: Exit status152643
+Node: Examples153496
+Node: Troubleshooting155582
+Node: Installation and manuals166934
+Node: Authors and license176186
+Node: See also176793
 
 End Tag Table
 

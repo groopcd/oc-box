@@ -18,7 +18,7 @@ from textual.binding import Binding
 from textual.content import Content
 from textual.containers import Horizontal
 from textual.errors import NoWidget
-from textual.geometry import Offset
+from textual.geometry import Offset, Region
 from textual.screen import ModalScreen
 from textual.strip import Strip
 from textual.widget import Widget
@@ -521,55 +521,70 @@ class ClipboardActions:
 
 
 class ClipboardInput(SelectableViewport, Input):
-    """Native Input editing plus a click-only clear action in its right padding.
+    """Native editing plus a two-cell clear action in reserved right padding.
 
-    The line-API Input isn't a container. Composite a bold clear glyph after its
-    normal border/padding rendering instead of wrapping/replacing the Input or
-    stealing text/cursor columns. The action is not selectable field content.
+    The line-API Input isn't a container. Composite a double-width glyph after its
+    normal border/padding rendering instead of wrapping/replacing native editing.
+    Native right padding reserves room; the action is not selectable field content.
     Passwords, disabled fields and paddingless/empty fields have no clear action.
     """
 
     BINDINGS = [Binding("ctrl+a,super+a", "select_all", show=False)]
+    CLEAR_GLYPH = "❌"
+    CLEAR_WIDTH = 2
     COMPONENT_CLASSES = Input.COMPONENT_CLASSES | {"input--clear"}
     DEFAULT_CSS = """
     ClipboardInput .input--clear { color: $error; text-style: bold; }
     """
 
     @property
-    def _clear_offset(self):
+    def _clear_region(self):
         if (
             self.password
             or self.is_disabled
             or not self.value
-            or not self.styles.padding.right
+            or self.styles.padding.right < self.CLEAR_WIDTH
             or not self.content_region.width
             or not self.content_region.height
         ):
             return None
-        return Offset(
-            self.content_region.right + self.styles.padding.right - 1 - self.region.x,
+        return Region(
+            self.content_region.right
+            + self.styles.padding.right
+            - self.CLEAR_WIDTH
+            - self.region.x,
             self.content_region.y - self.region.y,
+            self.CLEAR_WIDTH,
+            1,
         )
+
+    @property
+    def _clear_offset(self):
+        region = self._clear_region
+        return region.offset if region is not None else None
 
     def render_lines(self, crop):
         lines = super().render_lines(crop)
-        offset = self._clear_offset
-        if offset is not None and crop.contains(*offset):
-            x, y = offset - crop.offset
+        region = self._clear_region
+        visible = region.intersection(crop) if region is not None else None
+        if visible:
+            x, y = visible.offset - crop.offset
             line = lines[y]
             style = self.get_component_rich_style("input--clear")
-            lines = list(lines)
-            lines[y] = Strip.join(
-                (line.crop(0, x), Strip([Segment("✖", style)]), line.crop(x + 1))
+            icon = Strip([Segment(self.CLEAR_GLYPH, style)]).crop(
+                visible.x - region.x, visible.right - region.x
             )
+            lines = list(lines)
+            lines[y] = Strip.join((line.crop(0, x), icon, line.crop(x + visible.width)))
         return lines
 
     def on_mouse_down(self, event):
         self._clear_pointer = None
-        if self._clear_offset is not None and event.offset == self._clear_offset:
+        region = self._clear_region
+        if region is not None and region.contains(*event.offset):
             if event.button == 1:
                 self._clear_pointer = event.screen_offset
-            # Do not let native Input start a text-selection gesture on ✖.
+            # Do not start a native selection on either cell of the clear icon.
             event.stop()
             event.prevent_default()
 
@@ -583,16 +598,12 @@ class ClipboardInput(SelectableViewport, Input):
     def on_click(self, event):
         pointer = getattr(self, "_clear_pointer", None)
         self._clear_pointer = None
-        if pointer is not None or (
-            self._clear_offset is not None and event.offset == self._clear_offset
-        ):
+        region = self._clear_region
+        on_clear = region is not None and region.contains(*event.offset)
+        if pointer is not None or on_clear:
             event.stop()
             event.prevent_default()
-            if (
-                event.button == 1
-                and event.screen_offset == pointer
-                and event.offset == self._clear_offset
-            ):
+            if event.button == 1 and event.screen_offset == pointer and on_clear:
                 # The native reactive setter validates/clamps selection and
                 # posts exactly one ordinary Input.Changed; never submit.
                 self.value = ""

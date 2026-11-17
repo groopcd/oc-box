@@ -46,6 +46,7 @@ class LogFeedbackTests(unittest.IsolatedAsyncioTestCase):
                             # expose the actual composited clear-cell location.
                             offset = field._clear_offset
                             self.assertIsNotNone(offset)
+                            self.assertEqual(field._clear_region.width, 2)
                             with (
                                 patch.object(app.backend, "collect") as collect,
                                 patch.object(app.backend, "logs") as logs,

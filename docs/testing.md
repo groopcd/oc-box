@@ -213,8 +213,10 @@ tools. Check the wide rail and compact header section picker without hiding log
 search. Search must stay visible and case-insensitive/literal across tabs, source
 changes, follow and pause. Check global retention of at most 2000 entries and
 the 1000-generated-entry display bound per refresh.
-Verify that input-clear controls are bold/error-colored heavy crosses without
-taking text columns or entering copied field contents. Clearing log search in
+Verify that input-clear controls are double-width error-colored crosses in
+reserved padding, excluded from copied field contents. Both icon cells must
+clear exactly once; crops through either half must preserve terminal-cell
+bounds and not damage Unicode input rendering. Clearing log search in
 wide and one-row compact headers restores the source-scoped entry count, never
 deletes entries or triggers backend/native work. Distinguish unfiltered entries
 from filtered matches, including zero and singular counts. A selected log
