@@ -43,7 +43,40 @@ def exercise(binary, root):
     project.mkdir()
     foreign = root / "other-project"
     foreign.mkdir()
+    worktree = root / "worktree"
+    moved = root / "moved-project"
+    moved.mkdir()
     env = private_environment(root / "native")
+    bounded(["git", "init", "-q"], env, project)
+    (project / "fixture.txt").write_text("Synthetic web session worktree fixture.\n")
+    bounded(["git", "add", "fixture.txt"], env, project)
+    bounded(
+        [
+            "git",
+            "-c",
+            "user.name=Synthetic Fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "commit",
+            "-qm",
+            "Synthetic",
+        ],
+        env,
+        project,
+    )
+    bounded(
+        [
+            "git",
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "synthetic-web",
+            str(worktree),
+        ],
+        env,
+        project,
+    )
     home = Path(env["HOME"])
     for name, relative in (
         ("CONFIG", ".config"),
@@ -110,7 +143,7 @@ def exercise(binary, root):
                 seed(
                     native,
                     "ses_web_" + str(index),
-                    project,
+                    worktree if index == 1 else project,
                     title="Synthetic " + str(index),
                 )
                 for index in range(4)
@@ -133,6 +166,21 @@ def exercise(binary, root):
                     # Membership can persist before native startup/hydration
                     # finishes; retain the established PTY fixture's settle.
                     client.drain(1.3)
+                    if index == 3:
+                        native(
+                            "POST",
+                            "/api/session/" + opened[2] + "/move",
+                            {"directory": str(moved)},
+                        )
+                        native("PATCH", "/api/session/" + opened[3], {"archived": True})
+                        client.drain(1.3)
+                        require(
+                            native_tabs.read_snapshot(
+                                str(home), str(project), release
+                            ).tabs
+                            == tuple(opened),
+                            "Native moving/archiving removed an explicitly open tab.",
+                        )
                 finally:
                     client.close()
                 print("Native TUI tabs opened: " + str(index + 1), flush=True)
@@ -141,15 +189,19 @@ def exercise(binary, root):
                 "Idle web fixture unexpectedly had an active foreground drain.",
             )
             before_tabs = native_tabs.read_snapshot(str(home), str(project), release)
-            before_ids = {
-                info["id"] for info in bridge.session_inventory(native, str(project))
-            }
+            before_ids = {info["id"] for info in bridge.service_session_catalog(native)}
             before = {
                 ident: native("GET", "/api/experimental/session/" + ident + "/export")[
                     "data"
                 ]
                 for ident in [*opened, closed]
             }
+            require(
+                before[opened[1]]["info"]["location"]["directory"] == str(worktree)
+                and before[opened[2]]["info"]["location"]["directory"] == str(moved)
+                and before[opened[3]]["info"]["time"].get("archived") is not None,
+                "Native cross-directory/archive fixture did not establish its cases.",
+            )
             connection = {
                 **native.endpoint,
                 "workspace": data["id"],
@@ -183,10 +235,7 @@ def exercise(binary, root):
                     parser.feed(response.read().decode())
                 require(
                     parser.sessions
-                    == [
-                        web_sessions.session_route(gateway.url, ident)
-                        for ident in opened
-                    ],
+                    == [gateway.native_session_route(ident) for ident in opened],
                     "Native paired index did not list exactly four ordered open tabs.",
                 )
                 for route, ident in zip(parser.sessions, opened):
@@ -224,7 +273,7 @@ def exercise(binary, root):
                 "Web navigation changed native TUI membership.",
             )
             require(
-                {info["id"] for info in bridge.session_inventory(native, str(project))}
+                {info["id"] for info in bridge.service_session_catalog(native)}
                 == before_ids,
                 "Web index created or deleted native history.",
             )
@@ -241,7 +290,8 @@ def exercise(binary, root):
     finally:
         os.chdir(previous)
     print(
-        "PASS native " + release + ": four idle native TUI tabs, authenticated "
+        "PASS native " + release + ": four idle native TUI tabs spanning current "
+        "directory, real Git worktree, native move and native archive; authenticated "
         "pairing/index, four public native web routes and session GETs, foreign "
         "origin refusal, unchanged membership and transcripts.",
         flush=True,

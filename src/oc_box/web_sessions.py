@@ -13,54 +13,53 @@ import subprocess
 import time
 
 if __package__:
-    from . import native_tabs
+    from . import native_tabs, opencode_v2_io
 else:
     import native_tabs
+    import opencode_v2_io
 
-INDEX = "/oc-box/sessions"
+# Native 2.2.6/2.3.0 app/vite.pwa.ts excludes /auth/ from its navigation
+# fallback. A path outside that namespace can be swallowed by an installed SW.
+INDEX = "/auth/oc-box-sessions"
 
 
-def session_route(url, ident):
+def native_session_route(url, ident):
     encoded = base64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
     return "/server/" + encoded + "/session/" + ident
 
 
 def open_sessions(box, data, connection):
-    """Intersect native membership with a complete, source-bound root catalog.
+    """List verified native membership, not automatic-resume/history candidates.
 
     An idle tab remains open. Activity is deliberately not consulted. The
-    directory is the container path (including restored paths), not a host path
-    or a prefix match. Global tab scope never widens the private workspace API.
+    native saved scope may contain worktree/moved, archived or child IDs.
+    Every listed ID must still exist in THIS private service; no other service
+    or host history is queried and no missing membership is guessed.
     """
     if connection.get("workspace") != data["id"]:
         raise box.BoxError("Open web sessions could not be verified.")
     box.workspace_service.validate_endpoint(connection)
     snapshot = native_tabs.inspect(box, data, connection=connection)
-    if snapshot.status == "invalid":
+    if snapshot.status not in ("valid", "missing"):
         raise box.BoxError("Open web sessions could not be verified.")
-    inventory = box.workspace_service.tab_inventory(box, data, connection)
-    directory = box.container_project(data)
-    # Validate the whole catalog and snapshot using the shared admission policy.
-    current = native_tabs.choose(
-        snapshot, inventory, connection.get("session"), directory=directory
+    if snapshot.status == "missing" or not snapshot.tabs:
+        return [], snapshot.status
+    inventory = box.workspace_service.web_session_catalog(
+        box, data, connection, snapshot.tabs
     )
     if native_tabs.inspect(box, data, connection=connection) != snapshot:
         raise box.BoxError("Open web sessions changed; refresh the session index.")
-    roots = {
-        info["id"]: info
-        for info in inventory
-        if info["location"]["directory"] == directory
-        and not info.get("parentID")
-        and info["time"].get("archived") is None
-    }
-    identities = (
-        snapshot.tabs
-        if snapshot.status == "valid"
-        else (current,)
-        if current is not None
-        else ()
-    )
-    return [roots[ident] for ident in identities if ident in roots], snapshot.status
+    if not isinstance(inventory, list):
+        raise box.BoxError("Open web sessions could not be verified.")
+    verified = {}
+    for info in inventory:
+        opencode_v2_io.web_session_info(info)
+        if info["id"] in verified:
+            raise box.BoxError("Open web sessions could not be verified.")
+        verified[info["id"]] = info
+    return [
+        verified[ident] for ident in snapshot.tabs if ident in verified
+    ], snapshot.status
 
 
 def document(url, sessions, status):
@@ -71,19 +70,19 @@ def document(url, sessions, status):
         title = title[:256] if isinstance(title, str) and title else ident
         items.append(
             '<li><a href="'
-            + escape(session_route(url, ident), quote=True)
+            + escape(native_session_route(url, ident), quote=True)
             + '" target="_blank" rel="noopener noreferrer">'
             + escape(title)
             + "</a> <small>"
             + escape(ident)
             + "</small></li>"
         )
-    heading = "Open TUI sessions" if status == "valid" else "Current workspace session"
+    heading = "Open TUI sessions"
     note = (
         "Open TUI tabs, including idle sessions, in native tab order."
         if status == "valid"
-        else "Saved TUI tab membership is unavailable. Only the verified current "
-        "session is listed; history is not automatically reopened."
+        else "Saved TUI tab membership is unavailable. No current session or "
+        "historical session is guessed."
     )
     return (
         '<!doctype html><html lang="en"><meta charset="utf-8">'

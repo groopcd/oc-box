@@ -6,6 +6,8 @@ from copy import deepcopy
 from http.cookiejar import CookieJar
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
+import json
+import re
 import socket
 import sys
 import threading
@@ -52,6 +54,9 @@ class WebSessionsTests(unittest.TestCase):
             )
         ]
         self.inventory[4]["time"]["updated"] = 100
+        self.inventory[1]["location"]["directory"] = "/private/worktree"
+        self.inventory[2]["location"]["directory"] = "/private/moved"
+        self.inventory[3]["time"]["archived"] = 0
         self.inventory[5]["time"]["archived"] = 0
         self.inventory[6]["parentID"] = "ses_one"
         self.inventory[7]["location"]["directory"] = "/original/project-sibling"
@@ -60,9 +65,6 @@ class WebSessionsTests(unittest.TestCase):
             "ses_one",
             "ses_two",
             "ses_three",
-            "ses_archived",
-            "ses_child",
-            "ses_foreign",
             "ses_absent",
         )
 
@@ -71,7 +73,7 @@ class WebSessionsTests(unittest.TestCase):
             patch.object(native_tabs, "inspect", return_value=snapshot),
             patch.object(
                 service,
-                "tab_inventory",
+                "web_session_catalog",
                 return_value=self.inventory if inventory is None else inventory,
             ),
         ):
@@ -79,7 +81,7 @@ class WebSessionsTests(unittest.TestCase):
                 box, self.data, self.connection if connection is None else connection
             )
 
-    def test_four_idle_tabs_use_membership_order_exact_restored_directory_and_scope(
+    def test_four_idle_tabs_include_open_worktree_moved_and_archived_in_saved_scope(
         self,
     ):
         before = deepcopy(self.inventory)
@@ -95,6 +97,11 @@ class WebSessionsTests(unittest.TestCase):
                 )
         self.assertEqual(self.inventory, before)
 
+    def test_explicit_saved_child_id_is_not_silently_removed_or_mapped_to_parent(self):
+        sessions, _ = self.collect(native_tabs.Snapshot("valid", ("ses_child",)))
+        self.assertEqual([info["id"] for info in sessions], ["ses_child"])
+        self.assertEqual(sessions[0]["parentID"], "ses_one")
+
     def test_missing_empty_invalid_and_changed_state_never_reopen_history(self):
         for reason in ("absent", "disabled", "scope-absent"):
             with self.subTest(reason=reason):
@@ -102,7 +109,7 @@ class WebSessionsTests(unittest.TestCase):
                     native_tabs.Snapshot("missing", reason=reason)
                 )
                 self.assertEqual(status, "missing")
-                self.assertEqual([item["id"] for item in sessions], ["ses_one"])
+                self.assertEqual(sessions, [])
         self.assertEqual(self.collect(native_tabs.Snapshot("valid")), ([], "valid"))
         with self.assertRaises(box.BoxError):
             self.collect(native_tabs.Snapshot("invalid", reason="transport"))
@@ -129,7 +136,7 @@ class WebSessionsTests(unittest.TestCase):
                     native_tabs.Snapshot("valid"),
                 ],
             ),
-            patch.object(service, "tab_inventory", return_value=self.inventory),
+            patch.object(service, "web_session_catalog", return_value=self.inventory),
             self.assertRaisesRegex(box.BoxError, "changed"),
         ):
             web.open_sessions(box, self.data, self.connection)
@@ -142,7 +149,7 @@ class WebSessionsTests(unittest.TestCase):
             )
         for inventory in ({}, self.inventory + self.inventory[:1], [{}]):
             with self.subTest(inventory=type(inventory).__name__):
-                with self.assertRaises(native_tabs.TabError):
+                with self.assertRaises((box.BoxError, bridge.FixedError)):
                     self.collect(native_tabs.Snapshot("valid", self.members), inventory)
 
     def test_complete_native_catalog_pagination_retains_all_four_not_first_page_only(
@@ -152,7 +159,9 @@ class WebSessionsTests(unittest.TestCase):
 
         def request(method, route):
             self.assertEqual(method, "GET")
-            self.assertIn("directory=%2Foriginal%2Fproject", route)
+            self.assertNotIn("directory=", route)
+            self.assertNotIn("parentID=", route)
+            self.assertNotIn("archived=", route)
             self.assertNotIn("/active", route)
             index = len(calls)
             calls.append(route)
@@ -161,11 +170,97 @@ class WebSessionsTests(unittest.TestCase):
                 "cursor": {"next": "page+" + str(index + 1) if index < 3 else None},
             }
 
-        catalog = bridge.session_inventory(request, "/original/project")
+        catalog = bridge.service_session_catalog(request)
         self.assertEqual(len(calls), 4)
         self.assertIn("cursor=page%2B1", calls[1])
         sessions, _ = self.collect(native_tabs.Snapshot("valid", self.members), catalog)
         self.assertEqual(len(sessions), 4)
+
+    def test_native_get_verifies_member_identity_and_omits_deleted_or_missing_ids(self):
+        calls = []
+
+        def request(method, route):
+            self.assertEqual(method, "GET")
+            calls.append(route)
+            if route.startswith("/api/session?"):
+                return {"data": self.inventory, "cursor": {"next": None}}
+            ident = route.rsplit("/", 1)[1]
+            if ident == "ses_child":
+                raise HTTPError("http://127.0.0.1/synthetic", 404, "", {}, None)
+            return {
+                "data": next(info for info in self.inventory if info["id"] == ident)
+            }
+
+        members = ["ses_four", "ses_two", "ses_child", "ses_absent"]
+        result = bridge.verified_web_sessions(request, members)
+        self.assertEqual([info["id"] for info in result], ["ses_four", "ses_two"])
+        self.assertEqual(
+            calls[1:],
+            [
+                "/api/session/ses_four",
+                "/api/session/ses_two",
+                "/api/session/ses_child",
+            ],
+        )
+        self.assertNotIn("/api/session/ses_closed", calls)
+        with self.assertRaises(bridge.FixedError):
+            bridge.verified_web_sessions(
+                lambda method, route: (
+                    {"data": self.inventory, "cursor": {"next": None}}
+                    if "?" in route
+                    else {"data": self.inventory[1]}
+                ),
+                ["ses_one"],
+            )
+        for invalid in (["ses_one", "ses_one"], ["not-a-session"], {}):
+            with self.subTest(invalid=invalid), self.assertRaises(bridge.FixedError):
+                bridge.verified_web_sessions(request, invalid)
+
+    def test_private_service_catalog_refuses_partial_malformed_or_repeated_pages(self):
+        for pages in (
+            [{"data": [{}], "cursor": {"next": None}}],
+            [{"data": self.inventory[:1] * 2, "cursor": {"next": None}}],
+            [{"data": [], "cursor": {"next": ""}}],
+            [
+                {"data": self.inventory[:1], "cursor": {"next": "repeat"}},
+                {"data": [], "cursor": {"next": "repeat"}},
+            ],
+        ):
+            with self.subTest(pages=len(pages)), self.assertRaises(bridge.FixedError):
+                bridge.service_session_catalog(Mock(side_effect=pages))
+
+    def test_web_catalog_transport_is_providerless_and_bound_to_existing_endpoint(self):
+        data = {**self.data, "home": "/private/home", "container": "synthetic"}
+
+        def metadata(command, **settings):
+            self.assertIn("web-sessions", command)
+            self.assertNotIn(self.connection["password"], " ".join(command))
+            self.assertNotIn("OPENAI_API_KEY", command.environment)
+            payload = json.loads(settings["input"])
+            self.assertEqual(set(payload), {"endpoint", "members"})
+            self.assertEqual(payload["members"], list(self.members))
+            self.assertEqual(
+                payload["endpoint"],
+                {key: self.connection[key] for key in ("url", "password")},
+            )
+            self.assertTrue(settings["private"])
+            return SimpleNamespace(stdout=json.dumps(self.inventory[:4]))
+
+        with (
+            patch.object(box, "run", side_effect=metadata),
+            patch.object(box, "exec_command", side_effect=AssertionError("owner env")),
+            patch.object(
+                service, "tab_inventory", side_effect=AssertionError("resume scope")
+            ),
+        ):
+            self.assertEqual(
+                service.web_session_catalog(box, data, self.connection, self.members),
+                self.inventory[:4],
+            )
+        with patch.object(bridge, "server", side_effect=AssertionError("discovery")):
+            with patch.object(sys, "stdin", io.StringIO('{"members":[]}')):
+                with self.assertRaises(KeyError):
+                    bridge.main(["web-sessions", "unused"])
 
     def test_document_escapes_titles_and_uses_public_native_routes_without_secrets(
         self,
@@ -183,10 +278,24 @@ class WebSessionsTests(unittest.TestCase):
         self.assertNotIn(self.connection["password"], text)
         self.assertEqual(
             base64.urlsafe_b64decode(
-                web.session_route(url, "ses_one").split("/")[2] + "=="
+                web.native_session_route(url, "ses_one").split("/")[2] + "=="
             ).decode(),
             url,
         )
+
+    def test_native_service_worker_navigation_boundary_and_selected_row_routes(self):
+        # Native v2.2.6 and v2.3.0 packages/app/vite.pwa.ts navigation denylist:
+        # /^\/(?:api|auth)(?:\/|$)/. Test routing behavior, not documentation text.
+        excluded = re.compile(r"^/(?:api|auth)(?:/|$)")
+        gateway = service.Gateway(box, self.data, self.connection)
+        gateway.url = "http://127.0.0.1:23456"
+        self.assertRegex(gateway.session_route(), excluded)
+        route = gateway.native_session_route("ses_one")
+        self.assertEqual(route, web.native_session_route(gateway.url, "ses_one"))
+        self.assertIsNone(excluded.match(route))
+        self.assertNotEqual(route, gateway.session_route())
+        with self.assertRaises(box.BoxError):
+            gateway.native_session_route("../auth")
 
     def test_web_can_pair_at_native_home_without_fabricating_a_selected_session(self):
         gateway = SimpleNamespace(url="http://127.0.0.1:23456")
@@ -213,7 +322,8 @@ class WebSessionsTests(unittest.TestCase):
         state = {"last": "ses_closed"}
         for snapshot, expected in (
             (native_tabs.Snapshot("valid"), None),
-            (native_tabs.Snapshot("valid", ("ses_two", "ses_one")), "ses_two"),
+            (native_tabs.Snapshot("valid", ("ses_two", "ses_one")), "ses_one"),
+            (native_tabs.Snapshot("valid", ("ses_four",)), None),
         ):
             with self.subTest(snapshot=snapshot):
                 owner = SimpleNamespace(
@@ -310,7 +420,7 @@ class WebSessionsTests(unittest.TestCase):
                 return_value=native_tabs.Snapshot("valid", self.members),
             ),
             patch.object(
-                service, "tab_inventory", return_value=self.inventory
+                service, "web_session_catalog", return_value=self.inventory
             ) as inventory,
             service.Gateway(
                 box,
@@ -378,13 +488,14 @@ class WebSessionsTests(unittest.TestCase):
             self.assertEqual(refusal.exception.code, 401)
             for route in (
                 "/",
+                "/oc-box/sessions",
                 "/api/session/active",
                 "/server/example/session/ses_one",
             ):
                 with opener.open(gateway.url + route, timeout=5) as response:
                     self.assertEqual(response.read(), b"native-unchanged")
             with patch.object(
-                service, "tab_inventory", side_effect=ValueError("private")
+                service, "web_session_catalog", side_effect=ValueError("private")
             ):
                 with self.assertRaises(HTTPError) as refusal:
                     opener.open(gateway.url + web.INDEX, timeout=5)

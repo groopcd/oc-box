@@ -31,14 +31,17 @@ not a deprecated feature that can be removed from the regression suite.
 ### Open TUI sessions in the web interface
 
 `tests/test_web_sessions.py` checks four-session membership, complete paginated
-catalogs, native tab order, idle versus active semantics, exact restored container
-paths, global/cwd scope, closed/archived/child/foreign exclusions, empty/missing/
-invalid state, owning-web selection, HTML escaping and authenticated relay
-behavior. Native port-scoped cookies and Origin checks remain authoritative.
+catalogs, native tab order, idle versus active semantics, restored launch scopes,
+global/cwd scope, already-open archived/moved/worktree/child IDs, unopened-history
+and foreign-service exclusions, identity-matching native GETs, empty/missing/
+invalid state, owning-web selection, HTML escaping, native service-worker routing
+boundaries and authenticated relay behavior. Native port-scoped cookies and
+Origin checks remain authoritative. Automatic resume/history policy is separate.
 
 Run `python3 -B tests/smoke_web_sessions_v2.py --opencode /path/to/opencode`
 separately with native 2.2.6 and 2.3.0. It opens four tabs using native PTYs in
-fresh synthetic stores, then exercises the production index with real native
+fresh synthetic stores, including a real Git worktree, a native-moved root and
+a native-archived root, then exercises the production index with real native
 HTTP pairing, session GETs and public web-shell routes. Only the outer Podman
 exec boundary is replaced with local processes. Fixture state is retained under
 a fresh temporary directory, including on failure. This does not render a

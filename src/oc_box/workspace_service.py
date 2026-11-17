@@ -566,6 +566,48 @@ def tab_inventory(box, data, connection, *, timeout=4):
     return inventory
 
 
+def web_session_catalog(box, data, connection, members, *, timeout=4):
+    """Explicit chooser only: same private service, membership + native GET.
+
+    Unlike tab_inventory this permits already-open worktree/moved/archived/child
+    IDs. It must not be used by automatic owner selection or history sync.
+    """
+    if connection.get("workspace") != data["id"]:
+        raise box.BoxError("Web session catalog does not match the workspace.")
+    validate_endpoint(connection)
+    command = client_command(
+        box,
+        data,
+        connection,
+        [
+            "python3",
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            (box.PACKAGE / "opencode_v2_io.py").read_text(),
+            "web-sessions",
+            box.CONTAINER_OPENCODE,
+        ],
+    )
+    result = box.run(
+        command,
+        input=json.dumps(
+            {
+                "members": list(members),
+                "endpoint": {key: connection[key] for key in ("url", "password")},
+            }
+        ),
+        capture=True,
+        private=True,
+        timeout=timeout,
+    )
+    inventory = json.loads(result.stdout)
+    if not isinstance(inventory, list):
+        raise box.BoxError("Invalid private web session catalog.")
+    return inventory
+
+
 def api(box, data, connection, method, target, value=None, *, timeout=60):
     args = [
         box.CONTAINER_OPENCODE,
@@ -1180,7 +1222,21 @@ class Gateway:
 
     def session_route(self):
         # Native browser tabs are client-local, not the native TUI's open tabs.
-        return "/oc-box/sessions"
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        return web_sessions.INDEX
+
+    def native_session_route(self, ident):
+        """A selected native row, never the default chooser/entry route."""
+        if not self.box.valid_session_id(ident):
+            raise self.box.BoxError("Invalid native web session ID.")
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        return web_sessions.native_session_route(self.url, ident)
 
     def __exit__(self, *_):
         self.closed.set()
