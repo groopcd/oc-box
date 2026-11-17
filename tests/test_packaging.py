@@ -136,6 +136,7 @@ class PackagingTests(unittest.TestCase):
                     "tests/test_history_reader.py",
                     "tests/test_history_recovery.py",
                     "tests/smoke_history_recovery_v2.py",
+                    "tests/smoke_history_subagent_recovery_v2.py",
                     "src/oc_box/private_memory.py",
                     "src/oc_box/workspace_control.py",
                     "src/oc_box/history_reader.py",

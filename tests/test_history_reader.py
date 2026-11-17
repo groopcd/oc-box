@@ -18,6 +18,14 @@ from oc_box import history_reader as reader, workspace_service
 
 
 SCHEMA = "CREATE TABLE schedule (id TEXT PRIMARY KEY, session_id TEXT, status TEXT, last_message_id TEXT)"
+JOB_SCHEMA = """CREATE TABLE job (
+notification_id TEXT PRIMARY KEY, id TEXT NOT NULL, session_id TEXT NOT NULL,
+child_session_id TEXT, kind TEXT NOT NULL, title TEXT, status TEXT NOT NULL,
+output TEXT, error TEXT, recovery TEXT NOT NULL,
+time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)"""
+KV_SCHEMA = """CREATE TABLE kv (
+key TEXT PRIMARY KEY, value TEXT NOT NULL,
+time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)"""
 ENDPOINT = {"url": "http://127.0.0.1:23456", "password": "synthetic_" + "x" * 32}
 DATA = {
     "id": "synthetic-workspace",
@@ -265,6 +273,392 @@ class SchedulerGuardTests(unittest.TestCase):
         link.unlink()
         self.database.chmod(0o666)
         self.refusal("database-unsafe")
+
+
+class JobMetadataGuardTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="history-job-metadata-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.home = self.root / "home"
+        self.database = self.home / ".local/share/opencode/oc-box-v2.db"
+        self.database.parent.mkdir(parents=True)
+        with self.connect() as connection:
+            for schema in (SCHEMA, JOB_SCHEMA, KV_SCHEMA):
+                connection.execute(schema)
+
+    @contextlib.contextmanager
+    def connect(self):
+        with (
+            contextlib.closing(sqlite3.connect(self.database)) as connection,
+            connection,
+        ):
+            yield connection
+
+    def job(self, kind="subagent", **changes):
+        recovery = (
+            {
+                "kind": "shell",
+                "sessionID": "ses_parent",
+                "shellID": "sh_synthetic",
+                "command": "private-sentinel",
+            }
+            if kind == "shell"
+            else {
+                "kind": kind,
+                "parentSessionID": "ses_parent",
+                "childSessionID": "ses_child",
+                "agent": "private-sentinel",
+                "description": "private-sentinel",
+            }
+        )
+        return {
+            "notification_id": "msg_synthetic",
+            "id": "sh_synthetic" if kind == "shell" else "ses_child",
+            "session_id": "ses_parent",
+            "child_session_id": None if kind == "shell" else "ses_child",
+            "kind": kind,
+            "title": "private-sentinel",
+            "status": "running",
+            "output": "private-sentinel",
+            "error": "private-sentinel",
+            "recovery": json.dumps(recovery),
+            "time_created": 1,
+            "time_updated": 2,
+            **changes,
+        }
+
+    def store(self, job):
+        with self.connect() as connection:
+            connection.execute("DELETE FROM job")
+            connection.execute(
+                "INSERT INTO job ("
+                + ",".join(job)
+                + ") VALUES ("
+                + ",".join("?" for _ in job)
+                + ")",
+                tuple(job.values()),
+            )
+
+    def refusal(self, category):
+        before = self.database.read_bytes()
+        with self.assertRaises(reader.Refusal) as raised:
+            reader._check_database(self.database, version="2.3.0")
+        self.assertEqual(str(raised.exception), f"History reader refused ({category}).")
+        self.assertNotIn("private-sentinel", str(raised.exception))
+        self.assertEqual(self.database.read_bytes(), before)
+
+    def test_exact_profiles_and_default_scheduler_only_compatibility(self):
+        self.assertEqual(set(reader.SNAPSHOT_JOB_KINDS), set(reader.SUPPORTED))
+        self.assertEqual(reader.SNAPSHOT_JOB_KINDS["2.3.0"], {"shell", "subagent"})
+        self.store(self.job("image"))
+        for version in (None, "2.2.6", "2.2.7"):
+            with self.subTest(version=version):
+                reader._check_database(self.database, version=version)
+        self.refusal("job-kind")
+        for version in ("2.2.8", "2.3.1", "2.3.0+unknown", "2.3.0-dev"):
+            with self.subTest(version=version):
+                with patch.object(reader.sqlite3, "connect") as native_store:
+                    with self.assertRaisesRegex(reader.Refusal, "unsupported-version"):
+                        reader._check_database(self.database, version=version)
+                native_store.assert_not_called()
+
+    def test_known_shell_subagent_statuses_are_read_only_not_execution_claim_waivers(
+        self,
+    ):
+        with self.connect() as connection:
+            connection.execute("CREATE TABLE session_inbox (private TEXT)")
+            connection.execute("INSERT INTO session_inbox VALUES ('private-sentinel')")
+            connection.execute("CREATE TABLE session_v2 (time_suspended INTEGER)")
+            connection.execute("INSERT INTO session_v2 VALUES (1)")
+        connect = sqlite3.connect
+        queries = []
+
+        def observed(*args, **kwargs):
+            self.assertTrue(args[0].endswith("?mode=ro"))
+            self.assertNotIn("immutable", args[0])
+            result = connect(*args, **kwargs)
+            result.set_trace_callback(queries.append)
+            return result
+
+        for kind in ("shell", "subagent"):
+            for status in ("running", "completed", "error", "cancelled"):
+                with self.subTest(kind=kind, status=status):
+                    self.store(self.job(kind, status=status))
+                    before = self.database.read_bytes()
+                    with patch.object(reader.sqlite3, "connect", side_effect=observed):
+                        reader._check_database(self.database, version="2.3.0")
+                    self.assertEqual(self.database.read_bytes(), before)
+        for query in queries:
+            if query.startswith("SELECT"):
+                self.assertNotIn("session_inbox", query)
+                self.assertNotIn("session_v2", query)
+                self.assertNotIn("session_message", query)
+                self.assertNotIn("credential", query)
+                if " FROM job " in query:
+                    for column in ("title", "output", "error"):
+                        self.assertNotIn(column + ",", query)
+        self.assertFalse(
+            any(query.startswith(("UPDATE", "DELETE", "INSERT")) for query in queries)
+        )
+        self.assertFalse(any("private-sentinel" in query for query in queries))
+
+    def test_unknown_job_and_kv_schemas_refuse_even_when_empty(self):
+        cases = (
+            ("job", None),
+            ("job", "CREATE VIEW job AS SELECT 1 AS id"),
+            (
+                "job",
+                JOB_SCHEMA.replace("recovery TEXT NOT NULL", "recovery BLOB NOT NULL"),
+            ),
+            ("job", JOB_SCHEMA.replace("id TEXT NOT NULL,", "id TEXT,")),
+            (
+                "job",
+                JOB_SCHEMA.replace(
+                    "notification_id TEXT PRIMARY KEY", "notification_id TEXT"
+                ),
+            ),
+            (
+                "job",
+                JOB_SCHEMA.replace(
+                    "time_updated INTEGER NOT NULL",
+                    "time_updated INTEGER NOT NULL, unknown TEXT",
+                ),
+            ),
+            (
+                "job",
+                JOB_SCHEMA.replace(
+                    "time_updated INTEGER NOT NULL",
+                    "time_updated INTEGER NOT NULL, unknown TEXT GENERATED ALWAYS AS (kind) VIRTUAL",
+                ),
+            ),
+            ("kv", KV_SCHEMA.replace("key TEXT PRIMARY KEY", "key TEXT")),
+            ("kv", KV_SCHEMA.replace("value TEXT NOT NULL", "value BLOB NOT NULL")),
+            ("kv", KV_SCHEMA.replace("value TEXT NOT NULL", "value TEXT")),
+            ("kv", "CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)"),
+            (
+                "kv",
+                KV_SCHEMA.replace(
+                    "time_updated INTEGER NOT NULL",
+                    "time_updated INTEGER NOT NULL, unknown TEXT",
+                ),
+            ),
+            (
+                "kv",
+                KV_SCHEMA.replace(
+                    "time_updated INTEGER NOT NULL",
+                    "time_updated INTEGER NOT NULL, unknown TEXT GENERATED ALWAYS AS (value) VIRTUAL",
+                ),
+            ),
+        )
+        for table, schema in cases:
+            with self.subTest(table=table, schema=schema):
+                with self.connect() as connection:
+                    connection.execute("DROP TABLE " + table)
+                    if schema:
+                        connection.execute(schema)
+                self.refusal("job-schema")
+                with self.connect() as connection:
+                    connection.execute(
+                        "DROP VIEW IF EXISTS " + table
+                    ) if schema and "VIEW" in schema else connection.execute(
+                        "DROP TABLE IF EXISTS " + table
+                    )
+                    connection.execute(JOB_SCHEMA if table == "job" else KV_SCHEMA)
+
+    def test_mixed_jobs_are_validated_individually_without_order_shortcuts(self):
+        self.store(self.job("shell"))
+        with self.connect() as connection:
+            subagent = self.job("subagent", notification_id="msg_subagent")
+            connection.execute(
+                "INSERT INTO job VALUES (" + ",".join("?" for _ in subagent) + ")",
+                tuple(subagent.values()),
+            )
+        before = self.database.read_bytes()
+        reader._check_database(self.database, version="2.3.0")
+        self.assertEqual(self.database.read_bytes(), before)
+        with self.connect() as connection:
+            connection.execute("UPDATE job SET status='unknown' WHERE kind='subagent'")
+        self.refusal("job-metadata")
+
+    def test_unknown_kind_status_invalid_ids_and_timestamp_types_are_fixed_refusals(
+        self,
+    ):
+        cases = (
+            ({"kind": "image"}, "job-kind"),
+            ({"kind": "private-sentinel"}, "job-kind"),
+            ({"status": "private-sentinel"}, "job-metadata"),
+            ({"notification_id": "private-sentinel"}, "job-metadata"),
+            ({"id": ""}, "job-metadata"),
+            ({"session_id": "private-sentinel"}, "job-metadata"),
+            ({"child_session_id": "private-sentinel"}, "job-metadata"),
+            ({"id": "x" * 257}, "job-metadata"),
+            ({"time_created": "private-sentinel"}, "job-metadata"),
+        )
+        for changes, category in cases:
+            with self.subTest(changes=tuple(changes)):
+                self.store(self.job(**changes))
+                self.refusal(category)
+
+    def test_recovery_json_discriminants_bindings_keys_and_types_are_validated(self):
+        for kind in ("shell", "subagent"):
+            valid = self.job(kind)
+            decoded = json.loads(valid["recovery"])
+            cases = [
+                "{private-sentinel",
+                "[]",
+                "null",
+                json.dumps("private-sentinel"),
+                json.dumps({**decoded, "kind": "image"}),
+                json.dumps({**decoded, "unknown": "private-sentinel"}),
+                json.dumps(
+                    {key: value for key, value in decoded.items() if key != "kind"}
+                ),
+                '{"kind":"image",' + valid["recovery"][1:],
+                json.dumps(
+                    {**decoded, "command" if kind == "shell" else "description": None}
+                ),
+                json.dumps(
+                    {
+                        **decoded,
+                        "sessionID"
+                        if kind == "shell"
+                        else "parentSessionID": "ses_foreign",
+                    }
+                ),
+                json.dumps(
+                    {
+                        **decoded,
+                        "shellID"
+                        if kind == "shell"
+                        else "childSessionID": "ses_foreign",
+                    }
+                ),
+            ]
+            for encoded in cases:
+                with self.subTest(kind=kind, case=cases.index(encoded)):
+                    self.store({**valid, "recovery": encoded})
+                    self.refusal("job-metadata")
+        self.store(self.job("shell", child_session_id="ses_unexpected"))
+        self.refusal("job-metadata")
+        self.store(self.job("shell", child_session_id="x" * 257))
+        self.refusal("job-metadata")
+
+    def test_legacy_rows_and_wal_job_refusals_are_not_hidden_or_deleted(self):
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO kv VALUES ('job.background/private', 'private-sentinel', 0, 0)"
+            )
+        self.refusal("legacy-jobs")
+        with self.connect() as connection:
+            connection.execute("DELETE FROM kv")
+        writer = sqlite3.connect(self.database)
+        self.addCleanup(writer.close)
+        writer.execute("PRAGMA journal_mode=WAL")
+        writer.execute("PRAGMA wal_autocheckpoint=0")
+        job = self.job("image")
+        writer.execute(
+            "INSERT INTO job VALUES (" + ",".join("?" for _ in job) + ")",
+            tuple(job.values()),
+        )
+        writer.commit()
+        self.assertTrue(Path(str(self.database) + "-wal").is_file())
+        self.refusal("job-kind")
+        self.assertEqual(
+            writer.execute("SELECT kind FROM job").fetchall(), [("image",)]
+        )
+        self.assert_pre_native_refusal("job-kind")
+
+    def test_new_profile_store_permissions_links_and_owner_refuse_before_native(self):
+        self.database.chmod(0o666)
+        self.assert_pre_native_refusal("database-unsafe")
+        self.database.chmod(0o600)
+        link = self.root / "linked.db"
+        os.link(self.database, link)
+        self.assert_pre_native_refusal("database-unsafe")
+        link.unlink()
+        with patch.object(reader.os, "getuid", return_value=os.getuid() + 1):
+            self.assert_pre_native_refusal("database-unsafe")
+
+    def test_count_recovery_payload_total_and_deadline_limits_are_bounded(self):
+        self.store(self.job())
+        for constant, value in (
+            ("MAX_JOB_ROWS", 0),
+            ("MAX_JOB_RECOVERY_BYTES", 8),
+            ("MAX_JOB_METADATA_BYTES", 8),
+        ):
+            with self.subTest(constant=constant), patch.object(reader, constant, value):
+                self.refusal("job-limit")
+        with patch.object(reader.time, "monotonic", side_effect=[100, 102]):
+            self.refusal("deadline")
+
+    def test_source_refuses_before_native_and_destination_before_projection(self):
+        for changes, category in (
+            ({"kind": "image"}, "job-kind"),
+            ({"kind": "private-sentinel"}, "job-kind"),
+            ({"status": "private-sentinel"}, "job-metadata"),
+            ({"recovery": "{private-sentinel"}, "job-metadata"),
+        ):
+            with self.subTest(category=category):
+                self.store(self.job(**changes))
+                self.assert_pre_native_refusal(category)
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO kv VALUES ('job.background/private', 'private-sentinel', 0, 0)"
+            )
+        self.assert_pre_native_refusal("legacy-jobs")
+        with self.connect() as connection:
+            connection.execute("DELETE FROM kv")
+            connection.execute("DROP TABLE job")
+        self.assert_pre_native_refusal("job-schema")
+        self.database.unlink()
+        inputs = SimpleNamespace(
+            buffer=io.BytesIO(b'{"bridge":"public","version":"2.3.0"}\n')
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(reader.sys, "stdin", inputs),
+            patch.object(reader, "_check_system_config"),
+            patch.object(reader.subprocess, "run") as native,
+            self.assertRaisesRegex(reader.Refusal, "database-missing"),
+        ):
+            reader._remote(["lease", str(self.home), "synthetic-opencode"])
+        native.assert_not_called()
+        reader._check_database(self.database, allow_missing=True, version="2.3.0")
+        self.assertFalse(self.database.exists())
+
+    def assert_pre_native_refusal(self, category):
+        inputs = SimpleNamespace(
+            buffer=io.BytesIO(b'{"bridge":"public","version":"2.3.0"}\n')
+        )
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch.object(reader.sys, "stdin", inputs),
+            patch.object(reader, "_check_system_config"),
+            patch.object(reader.subprocess, "run") as native,
+            patch.object(reader, "exec", create=True) as execute,
+            self.assertRaisesRegex(reader.Refusal, category),
+        ):
+            reader._remote(["lease", str(self.home), "synthetic-opencode"])
+        native.assert_not_called()
+        execute.assert_not_called()
+        box = fake_box()
+        box.run.side_effect = lambda command, **_kw: SimpleNamespace(
+            stdout="2.3.0\n"
+            if command[1:] == ["--version"]
+            else str(self.database) + "\n"
+        )
+        with (
+            patch.object(reader, "_check_system_config"),
+            self.assertRaisesRegex(BoxError, category),
+        ):
+            reader.assert_host_safe(
+                box, None, {**DATA, "opencode_version": "2.3.0"}, {}, lambda: 5
+            )
+        self.assertEqual(
+            [call.args[0][1:] for call in box.run.call_args_list],
+            [["--version"], ["debug", "paths", "db"]],
+        )
 
 
 class SystemConfigGuardTests(unittest.TestCase):
@@ -936,7 +1330,7 @@ class RemoteHelperTests(unittest.TestCase):
             patch.object(
                 reader,
                 "_check_database",
-                side_effect=lambda *args: events.append("guard"),
+                side_effect=lambda *args, **kwargs: events.append("guard"),
             ) as guard,
             patch.object(reader, "exec", side_effect=execute, create=True),
             patch.object(reader.subprocess, "run", side_effect=version),
@@ -945,7 +1339,8 @@ class RemoteHelperTests(unittest.TestCase):
                 reader._remote(["lease", DATA["home"], "synthetic-opencode"]), 0
             )
         guard.assert_called_once_with(
-            Path(DATA["home"]) / ".local/share/opencode/oc-box-v2.db"
+            Path(DATA["home"]) / ".local/share/opencode/oc-box-v2.db",
+            version="2.2.6",
         )
         self.assertEqual(events, ["guard", "version", "bridge", "server", "reaped"])
         self.assertEqual(json.loads(output.getvalue()), ENDPOINT)
@@ -953,7 +1348,9 @@ class RemoteHelperTests(unittest.TestCase):
         self.assertTrue(all(not root.exists() for root in roots))
 
     def test_guard_refusal_never_executes_bridge_or_native(self):
-        inputs = SimpleNamespace(buffer=io.BytesIO(b'{"bridge":"public"}\n'))
+        inputs = SimpleNamespace(
+            buffer=io.BytesIO(b'{"bridge":"public","version":"2.2.6"}\n')
+        )
         with (
             patch.dict(os.environ, {}, clear=True),
             patch.object(reader.sys, "stdin", inputs),

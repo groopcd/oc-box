@@ -582,12 +582,13 @@ assuming a reaped host-side Podman wrapper proves the remote service stopped.
 #### Post-stop persisted-history snapshot candidate
 
 `history_recovery.py`, `history_reader.py` and `workspace_control.py` add a one-shot
-snapshot path after eligible shell-only timeouts. The ordinary live wait still
+snapshot path after eligible timeouts. The original profile is shell-only; the
+native 2.3.0 retained-subagent extension is described below. The ordinary live wait still
 fails. Eligibility is based on two prior complete validated pairs, not the final
 query phase: a tiny remaining CLI-query budget must not randomly disable the
 snapshot. A real timeout may retain those observations, but contradictory late
 responses and known non-timeout API failures invalidate them. All versions/kinds
-outside the supported 2.2.6/2.2.7/2.3.0 shell case retain the existing pending behavior.
+outside the supported version-specific profiles retain the existing pending behavior.
 
 Unit/process matrices cover private stop intent before admission, stable locks,
 uncertain transition fences, immutable resource identity, stop/start/snapshot/stop
@@ -645,6 +646,71 @@ keep unknown diagnostic categories, exception contents and metadata out of outpu
 capture diagnostics never add native probes or repair control state.
 This closes an observability/test-composition gap, not proof of the cause of an
 uninspected host timeout or new whole-container acceptance.
+
+#### Retained subagent jobs on native 2.3.0
+
+The upstream `v2.3.0` implementation (`a6b15d33daf6ab7d35569f6d711fdb630b9f04e7`)
+merges durable job rows with a process-local job registry. Its foreground-active
+endpoint describes process-local execution, not historical transcripts. A new
+unregistered process can therefore expose zero foreground sessions alongside
+retained running subagent jobs. Ten jobs alone are not evidence of a slow active
+query, and a timeout in the `foreground-query` phase does not establish that one
+request consumed the whole budget.
+
+The dedicated `smoke_history_subagent_recovery_v2.py` fixture creates real native
+subagents through a bounded loopback provider, closes/reaps the producer, and
+exercises the full production `Reader`, unchanged checked exports, host archive
+imports and independent native verification. It observes one reader and no
+additional provider, shell or plugin execution. Durable jobs, execution claims,
+inbox and history must remain unchanged, with no fabricated completion notice.
+Saved and project configuration canaries, source/destination schedule refusals,
+and ambient credential exclusion remain part of the test boundary.
+
+Only exact native 2.3.0 gains shell/subagent snapshot eligibility after repeated
+validated foreground-idle observations. The live wait still refuses all pending
+jobs, and the original nonzero interruption result remains. Before native history
+processing, the new profile validates durable job schemas and recovery metadata;
+image/unknown kinds, unknown recovery forms and legacy background rows refuse.
+The source remains unregistered, while destination clients remain standalone.
+Managed restart continuity and ordinary workspace preparation are not fallbacks.
+The original source/destination scheduler, ownership, stop-intent, uncertain-start,
+cleanup and fresh-verification guards remain authoritative.
+
+```sh
+python3 -B tests/smoke_history_subagent_recovery_v2.py \
+  --opencode /srv/native/opencode-2.3.0
+```
+
+These are synthetic local/native checks, not whole-container stop/restart or a
+new external-host acceptance. The earlier 42-check history and 12/six recovery
+reports retain their original source, harness and native identities; they do not
+accept this new profile. Image-job recovery remains unaccepted. Do not infer the
+kind or cause of a real user's retained jobs from a matching synthetic count.
+
+##### Focused external-host evidence; formal gate remains incomplete
+
+A later synthetic host run used clean source
+`631d317b0b6d5c4bf42d1d95d2138dde97b2ab3a`, native 2.3.0 and Podman 6.1.4.
+It recorded an eligible live timeout, verified stop/same-ID restart, one fenced
+Reader, successful snapshot and twelve native-verified archives, retaining
+launcher exits `[0,1]`. The original v3 runner nevertheless remains **FAILED,
+20/29 checks**: its import observer expected `import PATH`, while the native
+adapter emits `session import PATH`. The assertion also short-circuited its
+subsequent digest comparison; nine final named checks were not completed.
+
+A separate guarded informational audit, without native OpenCode or lifecycle
+execution, then confirmed twelve current archive bindings and matching baseline
+logical row hashes in all seven source/original-destination table scopes,
+including ten retained source jobs and one original destination job. Both known
+shell markers matched one execution and the current owned container was stopped.
+Original plugin/schema/export/digest/output/process baselines were not all
+serialized and remain unavailable. This supplements the historical observations;
+it neither retroactively passes the original gate nor proves every no-execution
+or final-cleanup assertion. Raw fixture evidence remains private.
+
+These observations belong to the exact source above, not automatically to later
+integrations. They support focused development integration, not the retained
+42/12/six gate identities, stable promotion or security certification.
 
 #### History-sync performance and integrity
 

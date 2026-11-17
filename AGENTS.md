@@ -145,8 +145,12 @@ their checkout ownership distinct from unrelated source and flat installations.
   Owners wait for attached clients before sync/stop, and lifecycle locks remain
   exclusive against reset/purge/backup. Attach never refreshes credentials.
 - `history_recovery.py` / `history_reader.py` / `workspace_control.py`: one bounded
-  persisted-history snapshot after shell-only live timeouts, never a live readiness
-  waiver or native job cleanup. Require actual verified whole-container stop,
+  persisted-history snapshot after audited live timeouts: shell-only on native
+  2.2.6/2.2.7; shell/subagent on exact 2.3.0. Never a live readiness waiver or
+  native job cleanup. The 2.3.0 profile checks durable job/recovery metadata before
+  source/destination native history processing; image/unknown jobs, unknown forms,
+  legacy background rows and incompatible schemas refuse. Never substitute normal
+  manual-sync preparation or managed restart continuity. Require actual verified whole-container stop,
   immutable same-resource restart, stop intent/admission and persistent uncertainty
   fences. Readers are unregistered/non-executing, with source/destination scheduler
   metadata and system-config refusals, one endpoint, unchanged checked exports and

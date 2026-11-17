@@ -419,7 +419,8 @@ bounded checking, not an atomic freeze of every possible history producer.
 On timeout, a separate diagnostic reports the wait phase (`foreground-query`,
 `background-query` or `poll-delay`) and counts from the last complete, validated
 activity/job observation. Job counts distinguish running, completed, error and
-cancelled entries; counts above 9999 appear as `9999+`. If no complete pair was
+cancelled entries, with separate allowlisted shell/subagent/image kind counts;
+counts above 9999 appear as `9999+`. If no complete pair was
 validated, the observation is `unavailable`, not zero. These are previous
 observations, not proof of the current state or that a native request succeeded:
 a request failure at the deadline also retains the `activity-timeout` category.
@@ -427,9 +428,13 @@ No session/job identifiers, commands, transcript text or native errors are print
 
 If automatic post-stop recovery is not attempted, a separate fixed-category line
 explains its routing guards. For example, `custom-podman-options` means the
-container baseline is outside this conservative path; `non-shell-jobs` means the
-observations were not shell-only; `insufficient-shell-observations` means fewer
-than two qualifying pairs were retained. Control-state, attached-client and
+container baseline is outside this conservative path; `non-shell-jobs` is the
+legacy fixed label for jobs outside that native version's audited snapshot
+profile, including image jobs on 2.3.0. `insufficient-shell-observations` or the
+2.3.0 counterpart `insufficient-job-observations` means fewer than two qualifying
+pairs were retained. Native 2.3.0 has a separately audited retained-subagent
+profile; unsupported job kinds still refuse automatic recovery. Control-state,
+attached-client and
 unverified-owner-close refusals are also distinguished. These labels do not waive
 any guard or establish that a job completed. Do not clear control markers, remove
 job rows or reset a workspace merely to bypass a refusal.
@@ -447,12 +452,21 @@ checks native exports without the original owner's activity wait and does not
 prove that its retained job disappeared. The native job-cleanup issue is not
 repaired by the diagnostic or by the persisted-history snapshot described below.
 Native 2.3.0 drains the reload case, but can retain a running shell after its
-producer terminates; that retained work still blocks the ordinary live wait.
+producer terminates. It can also retain durable running subagent jobs after the
+old producer closes, while a new unregistered process reports no foreground
+activity. Foreground activity describes that process, not proof that durable
+jobs finished. Retained work still blocks the ordinary live wait.
 
-For supported native 2.2.6/2.2.7/2.3.0 owners, a shell-only timeout can trigger **one
-post-stop persisted-history snapshot**. Two complete validated observations must
-have shown no foreground activity and only shell jobs. A later real query timeout
-does not manufacture an observation; a contradictory/malformed response or known
+For supported native owners, a qualifying timeout can trigger **one post-stop
+persisted-history snapshot** automatically:
+
+* Native **2.2.6/2.2.7** retains the original shell-only profile.
+* Native **2.3.0** also permits retained subagent jobs, including mixtures of
+  shell and subagent jobs. Image jobs remain outside this audited profile.
+
+Two complete validated observations must have shown no foreground activity and
+only jobs allowed by that exact-version profile. A later real query timeout does
+not manufacture an observation; a contradictory/malformed response or known
 non-timeout API error invalidates the hint. The live wait still refuses, and no
 live export is authorized by that hint.
 
@@ -461,6 +475,13 @@ the same existing, ready container. If stop intent is unchanged, it starts that
 exact container once for an isolated history reader, never a replacement or a
 normal owning launch. There is no runtime/configuration/auth refresh, vault unlock,
 credential forwarding, controller publication or requested model/tool execution.
+This uses the normal checked archival implementation through the fenced reader;
+it does **not** recursively invoke ordinary `oc-box sync`, prepare the workspace
+again or refresh credentials. Native 2.3.0 job metadata is checked before source
+or destination native history processing: image/unknown jobs, unknown recovery
+forms, legacy background state and incompatible schemas refuse rather than
+starting managed job recovery. Retained jobs, execution claims and queued input
+are not acknowledged, cleared or replayed.
 The transition budget is 35 seconds and the snapshot budget 180 seconds, with
 separate bounded cleanup. The container is stopped again before exit.
 

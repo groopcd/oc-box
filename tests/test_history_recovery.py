@@ -459,14 +459,21 @@ class HistoryRecoveryTests(unittest.TestCase):
     def test_real_exit_routing_distinguishes_identical_timeout_counts(self):
         cases = {
             "eligible-shell": {},
+            "eligible-subagent": {"kind": "subagent"},
+            "eligible-native-home-ten-subagents": {
+                "kind": "subagent",
+                "count": 10,
+                "home": True,
+                "foreground_timeout": True,
+            },
             "unsafe-baseline": {
                 "custom_options": True,
                 "refusal": "custom-podman-options",
             },
-            "non-shell": {"kind": "subagent", "refusal": "non-shell-jobs"},
+            "unsupported-image": {"kind": "image", "refusal": "non-shell-jobs"},
             "one-pair": {
                 "slow_query": True,
-                "refusal": "insufficient-shell-observations",
+                "refusal": "insufficient-job-observations",
             },
             "uncertain-control": {
                 "control_failure": "uncertain-control",
@@ -520,7 +527,12 @@ class HistoryRecoveryTests(unittest.TestCase):
                     requests.append(target)
                     now[0] += (
                         timeout
-                        if case.get("slow_query") and len(requests) == 4
+                        if (
+                            case.get("slow_query")
+                            and len(requests) == 4
+                            or case.get("foreground_timeout")
+                            and len(requests) == 5
+                        )
                         else min(5, timeout)
                     )
                     return {
@@ -528,11 +540,12 @@ class HistoryRecoveryTests(unittest.TestCase):
                         if target == "/api/session/active"
                         else [
                             {
-                                "id": "job_synthetic",
+                                "id": "job_synthetic_" + str(index),
                                 "sessionID": "ses_synthetic",
                                 "kind": case.get("kind", "shell"),
                                 "status": "running",
                             }
+                            for index in range(case.get("count", 1))
                         ]
                     }
 
@@ -541,7 +554,7 @@ class HistoryRecoveryTests(unittest.TestCase):
                     events.append("recover")
                     return True
 
-                output = io.StringIO()
+                output, terminal_output = io.StringIO(), io.StringIO()
                 with (
                     contextlib.ExitStack() as boundaries,
                     patch.object(box, "check_private_output"),
@@ -551,12 +564,17 @@ class HistoryRecoveryTests(unittest.TestCase):
                         box.native_tabs,
                         "inspect",
                         return_value=box.native_tabs.Snapshot(
-                            "missing", reason="absent"
+                            "valid" if case.get("home") else "missing",
+                            reason=None if case.get("home") else "absent",
                         ),
                     ),
                     patch.object(box.workspace_service, "Owner", side_effect=service),
                     patch.object(
-                        box, "refresh_sessions", return_value={"last": "ses_synthetic"}
+                        box,
+                        "refresh_sessions",
+                        return_value={
+                            "last": None if case.get("home") else "ses_synthetic"
+                        },
                     ),
                     patch.object(
                         box, "run_tui", return_value=case.get("client_code", 0)
@@ -585,7 +603,7 @@ class HistoryRecoveryTests(unittest.TestCase):
                         side_effect=lambda *_a: events.append("final-stop"),
                     ),
                     contextlib.redirect_stderr(output),
-                    contextlib.redirect_stdout(io.StringIO()),
+                    contextlib.redirect_stdout(terminal_output),
                 ):
                     if case.get("control_failure"):
                         boundaries.enter_context(
@@ -602,12 +620,22 @@ class HistoryRecoveryTests(unittest.TestCase):
                         case.get("client_code", 0) or 1,
                     )
                 self.assertIn(
-                    "last complete observation: foreground=0, jobs-running=1, "
+                    "last complete observation: foreground=0, jobs-running="
+                    + str(case.get("count", 1))
+                    + ", "
                     "jobs-completed=0, jobs-error=0, jobs-cancelled=0.",
                     output.getvalue(),
                 )
                 live_sync.assert_not_called()
                 owner.wait_clients.assert_called_once()
+                if case.get("home"):
+                    owner.publish.assert_called_once_with(None)
+                    self.assertIn(
+                        "native home (no open session selected)",
+                        terminal_output.getvalue(),
+                    )
+                    self.assertIn("phase=foreground-query", output.getvalue())
+                    self.assertIn("shell=0, subagent=10, image=0", output.getvalue())
                 if "refusal" not in case:
                     recover.assert_called_once()
                     self.assertEqual(

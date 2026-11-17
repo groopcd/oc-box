@@ -24,10 +24,19 @@ import time
 
 CURRENT = contextvars.ContextVar("oc_box_history_reader", default=None)
 # Exact audited native versions only. 2.2.x retains cancelled reload jobs; 2.3.0
-# drains reload jobs but can retain a running shell after producer termination.
-# Both profiles require the same non-executing reader and unchanged durable jobs;
-# neither is a live-readiness exception or a claim of whole-container acceptance.
+# drains reload jobs but can retain shell/subagent rows after producer termination.
+# The 2.3.0 profile is ONLY for unregistered serve --stdio: unlike the managed
+# service it does not resume durable jobs/claims. Images have no native canary.
+# Neither profile waives live readiness or establishes whole-container acceptance.
 SUPPORTED = frozenset(("2.2.6", "2.2.7", "2.3.0"))
+SNAPSHOT_JOB_KINDS = {
+    "2.2.6": frozenset(("shell",)),
+    "2.2.7": frozenset(("shell",)),
+    "2.3.0": frozenset(("shell", "subagent")),
+}
+MAX_JOB_ROWS = 10000
+MAX_JOB_RECOVERY_BYTES = 65536
+MAX_JOB_METADATA_BYTES = 8 * 1024 * 1024
 MAX_CONTROL = 16384
 MAX_PAYLOAD = 131072
 PATH = "/opt/oc-box/runtime/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -39,6 +48,12 @@ GUARD_CATEGORIES = frozenset(
         "database-invalid",
         "schedule-schema",
         "schedule-present",
+        "job-schema",
+        "job-metadata",
+        "job-kind",
+        "job-limit",
+        "legacy-jobs",
+        "deadline",
         "system-config",
         "unsupported-version",
     )
@@ -101,14 +116,186 @@ def _budget(remaining, maximum):
     return min(value, maximum)
 
 
-def _check_database(path, *, allow_missing=False, timeout=1):
-    """Inspect scheduler metadata only, without creating or migrating a DB.
+def _check_jobs(connection, deadline):
+    """Validate bounded 2.3.0 recovery metadata, never outputs or transcripts.
+
+    All known statuses remain historical metadata, not proof of completion. The
+    unregistered native profile must preserve these rows, including execution
+    claims/inbox state; this guard never edits, acknowledges or resumes anything.
+    """
+
+    def budget():
+        if time.monotonic() >= deadline:
+            raise Refusal("deadline")
+
+    def table(name, expected):
+        if connection.execute(
+            "SELECT type FROM sqlite_master WHERE name = ?", (name,)
+        ).fetchall() != [("table",)]:
+            raise Refusal("job-schema")
+        columns = {
+            row[1]: row
+            for row in connection.execute("PRAGMA table_xinfo('" + name + "')")
+        }
+        if set(columns) != set(expected) or any(
+            columns[key][2].upper() != kind
+            or bool(columns[key][5]) != primary
+            or (required is not None and bool(columns[key][3]) != required)
+            or columns[key][6] != 0
+            for key, (kind, required, primary) in expected.items()
+        ):
+            raise Refusal("job-schema")
+
+    budget()
+    table(
+        "job",
+        {
+            "notification_id": ("TEXT", None, True),
+            "id": ("TEXT", True, False),
+            "session_id": ("TEXT", True, False),
+            "child_session_id": ("TEXT", False, False),
+            "kind": ("TEXT", True, False),
+            "title": ("TEXT", False, False),
+            "status": ("TEXT", True, False),
+            "output": ("TEXT", False, False),
+            "error": ("TEXT", False, False),
+            "recovery": ("TEXT", True, False),
+            "time_created": ("INTEGER", True, False),
+            "time_updated": ("INTEGER", True, False),
+        },
+    )
+    table(
+        "kv",
+        {
+            "key": ("TEXT", None, True),
+            "value": ("TEXT", True, False),
+            "time_created": ("INTEGER", True, False),
+            "time_updated": ("INTEGER", True, False),
+        },
+    )
+    if connection.execute(
+        "SELECT 1 FROM kv WHERE key LIKE 'job.background/%' LIMIT 1"
+    ).fetchone():
+        raise Refusal("legacy-jobs")
+
+    def identity(value, prefix):
+        return (
+            isinstance(value, str)
+            and len(value) <= 256
+            and re.fullmatch(prefix + r"[A-Za-z0-9_-]+", value) is not None
+        )
+
+    def pairs(items):
+        value = {}
+        for key, item in items:
+            if key in value:
+                raise Refusal("job-metadata")
+            value[key] = item
+        return value
+
+    total = 0
+    # Bound SQL result strings BEFORE passing recovery JSON into Python. Its
+    # command/description are read only to validate their types; never select the
+    # job's title/output/error or any message/part/credential data.
+    identities = ", ".join(
+        "CASE WHEN typeof(" + name + ") = 'text' AND "
+        "length(CAST(" + name + " AS BLOB)) <= 256 THEN " + name + " END"
+        for name in ("notification_id", "id", "session_id", "child_session_id")
+    )
+    rows = connection.execute(
+        "SELECT " + identities + ", child_session_id IS NULL, "
+        "CASE WHEN kind IN ('shell','subagent','image') THEN kind END, "
+        "CASE WHEN status IN ('running','completed','error','cancelled') THEN status END, "
+        "typeof(time_created) = 'integer' AND typeof(time_updated) = 'integer', "
+        "length(CAST(recovery AS BLOB)), "
+        "CASE WHEN typeof(recovery) = 'text' AND "
+        "length(CAST(recovery AS BLOB)) <= ? THEN recovery ELSE NULL END "
+        "FROM job LIMIT ?",
+        (MAX_JOB_RECOVERY_BYTES, MAX_JOB_ROWS + 1),
+    )
+    for count, row in enumerate(rows, 1):
+        budget()
+        if count > MAX_JOB_ROWS:
+            raise Refusal("job-limit")
+        (
+            notice,
+            ident,
+            session,
+            child,
+            child_null,
+            kind,
+            status,
+            times_valid,
+            size,
+            encoded,
+        ) = row
+        if kind not in SNAPSHOT_JOB_KINDS["2.3.0"]:
+            raise Refusal("job-kind")
+        if (
+            not identity(notice, "msg")
+            or not isinstance(ident, str)
+            or not ident
+            or len(ident) > 256
+            or not identity(session, "ses")
+            or status not in ("running", "completed", "error", "cancelled")
+            or times_valid != 1
+        ):
+            raise Refusal("job-metadata")
+        if not isinstance(encoded, str):
+            raise Refusal(
+                "job-limit"
+                if size and size > MAX_JOB_RECOVERY_BYTES
+                else "job-metadata"
+            )
+        total += size
+        if total > MAX_JOB_METADATA_BYTES:
+            raise Refusal("job-limit")
+        try:
+            recovery = json.loads(encoded, object_pairs_hook=pairs)
+        except (ValueError, RecursionError):
+            raise Refusal("job-metadata") from None
+        keys = (
+            {"kind", "sessionID", "shellID", "command"}
+            if kind == "shell"
+            else {"kind", "parentSessionID", "childSessionID", "agent", "description"}
+        )
+        if (
+            not isinstance(recovery, dict)
+            or set(recovery) != keys
+            or any(not isinstance(value, str) for value in recovery.values())
+            or recovery["kind"] != kind
+        ):
+            raise Refusal("job-metadata")
+        if kind == "shell":
+            valid = (
+                child_null == 1
+                and recovery["sessionID"] == session
+                and recovery["shellID"] == ident
+            )
+        else:
+            valid = (
+                identity(child, "ses")
+                and child != session
+                and recovery["parentSessionID"] == session
+                and recovery["childSessionID"] == child == ident
+            )
+        if not valid:
+            raise Refusal("job-metadata")
+    budget()
+
+
+def _check_database(path, *, allow_missing=False, timeout=1, version=None):
+    """Inspect scheduler and explicitly selected job metadata without mutation.
 
     A disabled schedules flag does NOT disable native Schedule.rewake. All rows,
     including terminal/unknown statuses, therefore refuse service construction.
     Missing schemas are not evidence of an empty scheduler. Never use immutable
     SQLite mode here: it can hide committed schedule rows in an existing WAL.
+    The default remains scheduler-only for the independent quiet-source guard.
     """
+    if version is not None and version not in SUPPORTED:
+        raise Refusal("unsupported-version")
+    deadline = time.monotonic() + timeout
     path = Path(path)
     try:
         before = path.lstat()
@@ -132,6 +319,11 @@ def _check_database(path, *, allow_missing=False, timeout=1):
             opened = os.fstat(descriptor)
             if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
                 raise Refusal("database-unsafe")
+            if version == "2.3.0" and any(
+                getattr(opened, key) != getattr(before, key)
+                for key in ("st_uid", "st_mode", "st_nlink")
+            ):
+                raise Refusal("database-unsafe")
             connection = stack.enter_context(
                 contextlib.closing(
                     sqlite3.connect(
@@ -139,6 +331,10 @@ def _check_database(path, *, allow_missing=False, timeout=1):
                     )
                 )
             )
+            if version == "2.3.0":
+                connection.set_progress_handler(
+                    lambda: int(time.monotonic() >= deadline), 1000
+                )
             connection.execute("PRAGMA query_only=ON")
             connection.execute("BEGIN")
             kind = connection.execute(
@@ -163,7 +359,14 @@ def _check_database(path, *, allow_missing=False, timeout=1):
                 is not None
             ):
                 raise Refusal("schedule-present")
+            if version == "2.3.0":
+                _check_jobs(connection, deadline)
             after = path.lstat()
+            if version == "2.3.0" and any(
+                getattr(after, key) != getattr(before, key)
+                for key in ("st_mode", "st_nlink")
+            ):
+                raise Refusal("database-unsafe")
             if (after.st_dev, after.st_ino, after.st_uid) != (
                 before.st_dev,
                 before.st_ino,
@@ -177,6 +380,8 @@ def _check_database(path, *, allow_missing=False, timeout=1):
     except (OSError, sqlite3.Error, ValueError) as error:
         if isinstance(error, Refusal):
             raise
+        if version == "2.3.0" and time.monotonic() >= deadline:
+            raise Refusal("deadline") from None
         raise Refusal("database-invalid") from None
 
 
@@ -291,7 +496,12 @@ def assert_host_safe(box, path, data, env, remaining):
             or len(candidate) > 4096
         ):
             raise Refusal("host-database-path")
-        _check_database(candidate, allow_missing=True, timeout=_budget(remaining, 1))
+        _check_database(
+            candidate,
+            allow_missing=True,
+            timeout=_budget(remaining, 1),
+            version=data["opencode_version"],
+        )
         return result_env
     except Refusal as error:
         raise _boxed(box, error.category) from None
@@ -335,8 +545,13 @@ def _remote(argv):
         if len(payload) > MAX_PAYLOAD or not payload.endswith(b"\n"):
             raise Refusal("startup-payload")
         settings = json.loads(payload)
+        if not isinstance(settings, dict) or settings.get("version") not in SUPPORTED:
+            raise Refusal("unsupported-version")
         _check_system_config()
-        _check_database(Path(home) / ".local/share/opencode/oc-box-v2.db")
+        _check_database(
+            Path(home) / ".local/share/opencode/oc-box-v2.db",
+            version=settings["version"],
+        )
     elif action != "command":
         raise Refusal("startup-payload")
     with _remote_environment(home) as (root, env):
@@ -362,7 +577,9 @@ def _remote(argv):
         _check_version(version.stdout, settings["version"])
         namespace = {"__name__": "oc_box_history_bridge"}
         exec(settings["bridge"], namespace)
-        # Reuse the public bridge unchanged: it owns/reaps the native child.
+        # Reuse only its unregistered serve --stdio server; no managed-service
+        # discovery/restart continuity, which can resume native 2.3.0 subagents.
+        # The public bridge owns/reaps the one native child.
         exit_info = {}
         with namespace["server"](arguments[0], exit_info=exit_info) as request:
             print(json.dumps(request.endpoint), flush=True)

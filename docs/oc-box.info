@@ -511,24 +511,28 @@ is bounded checking, not an atomic freeze of every possible history
 producer.  On timeout, a separate diagnostic reports the wait phase
 (‘foreground-query’, ‘background-query’ or ‘poll-delay’) and counts from
 the last complete, validated activity/job observation.  Job counts
-distinguish running, completed, error and cancelled entries; counts
-above 9999 appear as ‘9999+’.  If no complete pair was validated, the
-observation is ‘unavailable’, not zero.  These are previous
-observations, not proof of the current state or that a native request
-succeeded: a request failure at the deadline also retains the
-‘activity-timeout’ category.  No session/job identifiers, commands,
-transcript text or native errors are printed.
+distinguish running, completed, error and cancelled entries, with
+separate allowlisted shell/subagent/image kind counts; counts above 9999
+appear as ‘9999+’.  If no complete pair was validated, the observation
+is ‘unavailable’, not zero.  These are previous observations, not proof
+of the current state or that a native request succeeded: a request
+failure at the deadline also retains the ‘activity-timeout’ category.
+No session/job identifiers, commands, transcript text or native errors
+are printed.
 
 If automatic post-stop recovery is not attempted, a separate
 fixed-category line explains its routing guards.  For example,
 ‘custom-podman-options’ means the container baseline is outside this
-conservative path; ‘non-shell-jobs’ means the observations were not
-shell-only; ‘insufficient-shell-observations’ means fewer than two
-qualifying pairs were retained.  Control-state, attached-client and
-unverified-owner-close refusals are also distinguished.  These labels do
-not waive any guard or establish that a job completed.  Do not clear
-control markers, remove job rows or reset a workspace merely to bypass a
-refusal.
+conservative path; ‘non-shell-jobs’ is the legacy fixed label for jobs
+outside that native version's audited snapshot profile, including image
+jobs on 2.3.0.  ‘insufficient-shell-observations’ or the 2.3.0
+counterpart ‘insufficient-job-observations’ means fewer than two
+qualifying pairs were retained.  Native 2.3.0 has a separately audited
+retained-subagent profile; unsupported job kinds still refuse automatic
+recovery.  Control-state, attached-client and unverified-owner-close
+refusals are also distinguished.  These labels do not waive any guard or
+establish that a job completed.  Do not clear control markers, remove
+job rows or reset a workspace merely to bypass a refusal.
 
 The 30-second readiness budget precedes history export/import; it is not
 the duration limit for the entire synchronization.  An explicit ‘oc-box
@@ -545,26 +549,43 @@ original owner's activity wait and does not prove that its retained job
 disappeared.  The native job-cleanup issue is not repaired by the
 diagnostic or by the persisted-history snapshot described below.  Native
 2.3.0 drains the reload case, but can retain a running shell after its
-producer terminates; that retained work still blocks the ordinary live
-wait.
+producer terminates.  It can also retain durable running subagent jobs
+after the old producer closes, while a new unregistered process reports
+no foreground activity.  Foreground activity describes that process, not
+proof that durable jobs finished.  Retained work still blocks the
+ordinary live wait.
 
-For supported native 2.2.6/2.2.7/2.3.0 owners, a shell-only timeout can
-trigger **one post-stop persisted-history snapshot**.  Two complete
-validated observations must have shown no foreground activity and only
-shell jobs.  A later real query timeout does not manufacture an
-observation; a contradictory/malformed response or known non-timeout API
-error invalidates the hint.  The live wait still refuses, and no live
-export is authorized by that hint.
+For supported native owners, a qualifying timeout can trigger **one
+post-stop persisted-history snapshot** automatically:
+
+   • Native **2.2.6/2.2.7** retains the original shell-only profile.
+   • Native **2.3.0** also permits retained subagent jobs, including
+     mixtures of shell and subagent jobs.  Image jobs remain outside
+     this audited profile.
+
+Two complete validated observations must have shown no foreground
+activity and only jobs allowed by that exact-version profile.  A later
+real query timeout does not manufacture an observation; a
+contradictory/malformed response or known non-timeout API error
+invalidates the hint.  The live wait still refuses, and no live export
+is authorized by that hint.
 
 After the owner closes normally and all clients detach, oc-box verifies
 and stops the same existing, ready container.  If stop intent is
 unchanged, it starts that exact container once for an isolated history
 reader, never a replacement or a normal owning launch.  There is no
 runtime/configuration/auth refresh, vault unlock, credential forwarding,
-controller publication or requested model/tool execution.  The
-transition budget is 35 seconds and the snapshot budget 180 seconds,
-with separate bounded cleanup.  The container is stopped again before
-exit.
+controller publication or requested model/tool execution.  This uses the
+normal checked archival implementation through the fenced reader; it
+does **not** recursively invoke ordinary ‘oc-box sync’, prepare the
+workspace again or refresh credentials.  Native 2.3.0 job metadata is
+checked before source or destination native history processing:
+image/unknown jobs, unknown recovery forms, legacy background state and
+incompatible schemas refuse rather than starting managed job recovery.
+Retained jobs, execution claims and queued input are not acknowledged,
+cleared or replayed.  The transition budget is 35 seconds and the
+snapshot budget 180 seconds, with separate bounded cleanup.  The
+container is stopped again before exit.
 
 This conservative path requires a passive container entrypoint, no
 custom Podman arguments or automatic health/restart/shell-loader hooks,
@@ -3461,20 +3482,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description2730
 Node: Commands6328
-Node: Options93488
-Node: Lifecycle and persistence117281
-Node: Distribution images119401
-Node: Sessions and recovery124276
-Node: Devices and host permissions130861
-Node: Resource reports133207
-Node: Configuration and environment135318
-Node: Files146699
-Node: Exit status152643
-Node: Examples153496
-Node: Troubleshooting155582
-Node: Installation and manuals166934
-Node: Authors and license176186
-Node: See also176793
+Node: Options94825
+Node: Lifecycle and persistence118618
+Node: Distribution images120738
+Node: Sessions and recovery125613
+Node: Devices and host permissions132198
+Node: Resource reports134544
+Node: Configuration and environment136655
+Node: Files148036
+Node: Exit status153980
+Node: Examples154833
+Node: Troubleshooting156919
+Node: Installation and manuals168271
+Node: Authors and license177523
+Node: See also178130
 
 End Tag Table
 
