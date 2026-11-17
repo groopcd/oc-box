@@ -317,6 +317,24 @@ preserving it for reattachment; `exit` closes that shell. `terminal --maintenanc
 retains the restricted shell, and 1.x retains its previous terminal behavior. See the
 [V2 client guide](docs/opencode-2.md#concurrent-web-terminal-and-full-tui-clients).
 
+The web shell shows all verified open TUI tabs, including idle conversations,
+around one unmodified native web view. On a normally prepared supported V2 owner,
+a fresh TUI report opens the current conversation and highlights its root tab;
+child conversations keep their exact route. Explicit selection wins:
+
+```sh
+oc-box web --project ~/devel/demo --session ses_example --attachments
+```
+
+`--attachments` adds browser-selected PNG/JPEG/GIF/WebP/PDF drops and a file chooser
+to that same view. Verify native thumbnails/cards before pressing native Send;
+the adapter never submits a prompt automatically. Browser/native history and
+provider retention still apply. Older running owners cannot acquire the reporting
+helper on attach: choose a displayed tab or use `--session` without restarting
+them. Missing, stale or ambiguous reports are not guessed from activity or tab
+order. Native browser tabs remain separate from the mirrored TUI membership.
+See the [web reference](docs/cli.md#web--browser-interface) for limits and privacy.
+
 ### Temporary live host-file access (experimental)
 
 Share a specific outside folder or screenshot from a second host terminal:

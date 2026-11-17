@@ -180,8 +180,13 @@ their checkout ownership distinct from unrelated source and flat installations.
   host-drop interceptor. Native queued input is not a composer draft or an
   inactivity guarantee. Refuse observed staged reverts and document the residual
   native check/admission race; no host acceptance follows from offline probes.
-- `host_drop.py` / `host_drop_input.py` / `host_drop_io.py`: separately opted-in
-  `--host-drop` native TUI input bridge. Qualifying pathname pastes authorize
+- `host_drop.py` / `host_drop_input.py` / `host_drop_io.py`: native TUI input
+  bridge, enabled by default per workspace on supported clients.
+  `workspace_preferences.py` stores private host-only future-client policy beside
+  workspace metadata under a separate lock; never mutate owner metadata, unlock,
+  launch or live-toggle a client from `preferences`. Explicit startup overrides
+  persist; automatic unsupported-client mode skips importing, explicit enable
+  remains strict, and corrupt/unsafe preferences refuse. Qualifying pathname pastes authorize
   imports anywhere in that connection, not proof of a physical drag/composer
   focus. Only host stdin or terminal-offered structured drops select sources;
   never add model/MCP/prompt-text triggers. Keep opaque terminal replies,
@@ -198,6 +203,24 @@ their checkout ownership distinct from unrelated source and flat installations.
   can retain staging/history/provider/backup copies. Default relay behavior and
   the independent-confirmation broker remain unchanged. No host acceptance is
   established by synthetic parser/process/native checks.
+- `ui_state.py` / `ui_state_*.js`: public-SDK container TUI/server/RPC reports,
+  installed only during normal supported V2 owning preparation, never on attach.
+  Keep exact routed children separate from active root membership and verify all
+  IDs through the same private service. Custom client IDs are cooperative
+  metadata, not attestation or host authority. Prefer the fresh owner even when
+  blurred; missing/expired/ambiguous reports never justify focus guesses.
+  Bound receipt freshness, retain sequence/release high-water history through
+  expiry, and fail closed at capacity without evicting replay protection.
+- `web_sessions.py` / `web_sessions.js` / `web_attachments.py` /
+  `web_attachments.js`: one first-party tabstrip around one unmodified native
+  iframe, never private native-store seeding, asset patches or nested wrappers.
+  Preserve authenticated `/auth/` routing and native cookie/Origin checks.
+  Explicit session selection wins; fresh reports supply ordered membership and
+  exact selection, with saved membership only a non-focus fallback.
+  Browser attachments remain explicitly enabled, trusted File-only and manually
+  sent. Recheck exact live URL, document, original target and selection generation
+  after asynchronous reads, including explicit away/back changes. Silent SPA
+  excursions between public observations remain a documented residual race.
 - `tools/test_sharing_podman.py` and its provider/archive helpers are a separate
   source-pinned host harness, not a change to an already frozen release candidate.
   Keep host guards, verified fresh private stores, controlling-PTY consent,

@@ -173,6 +173,41 @@ while acknowledging retained tool results/history. Verify on an enforcing SELinu
 host without relabeling original sources or disabling labeling. Preserve failed
 reports and do not infer acceptance from unit/native or earlier TUI/vault passes.
 
+### Cooperative native TUI selection reports
+
+`tests/test_ui_state.py` and `tests/ui_state_fixture.mjs` cover the public-SDK
+reporter, bounded server memory and stdlib host reader. Keep exact routed children
+separate from ordered root tabs, verify native ancestry in the same private
+service and reread the snapshot after verification. Test owner preference while
+blurred, alternate ambiguity, initially unknown focus, heartbeat/release,
+reload/epoch changes, expiry and replay after both ordinary and release expiry.
+Registration capacity must refuse new IDs rather than evict sequence history.
+Informational commands stay stdlib-only; attach must not install a helper,
+refresh credentials/configuration or infer focus from saved tab order/activity.
+
+Run the bounded provider-free native fixture separately against retained and
+current unmodified supported V2 binaries:
+
+```sh
+python3 -B tests/smoke_ui_state_v2.py --opencode /path/to/opencode-v2
+```
+
+Its separate fixture-only public-SDK control plugin may navigate actual native
+routes/tabs and exit the synthetic TUI; it must not replace report production,
+fake native readiness or select through prompt/session-move APIs. Check already
+read/no-idle route changes, exact child/root relationships, full ordered tabs,
+pause/expiry/recovery, clean shutdown and unchanged native transcripts.
+
+The composed browser gate additionally requires normal one-context pairing,
+all actual open tabs visible around one native iframe, automatic selection from
+real TUI reports, explicit override precedence, correct child/root display,
+and no stale-owner fallback. Test PNG/PDF drafts before native Send, retained
+drafts on metadata refresh, exact original-target binding and asynchronous
+selection-change refusal. Record source/binary/browser identities and
+service-worker activation separately; HTTP/Node checks alone are not browser
+acceptance. Synthetic native/browser checks are not physical desktop gestures,
+rootless-Podman lifecycle, real-provider or security acceptance.
+
 ### Experimental host-image attachments
 
 `oc-box attach PATH --session ID` sends a host-authorized native image user
