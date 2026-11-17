@@ -12,7 +12,7 @@ import sys
 import threading
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.error import HTTPError
 from urllib.request import build_opener, ProxyHandler, Request
 
@@ -37,6 +37,95 @@ class RequestTests(unittest.TestCase):
             + "".join(key + ": " + value + "\r\n" for key, value in headers)
             + "\r\n"
         ).encode()
+
+    def test_owning_web_passes_verified_version_without_skipping_native_cross_check(
+        self,
+    ):
+        for version in ("2.2.6", "2.3.0"):
+            for native_version in (version, "2.99.0"):
+                with self.subTest(version=version, native_version=native_version):
+                    data = {
+                        "id": "a" * 32,
+                        "project": "/synthetic/project",
+                        "distro": "synthetic",
+                        "opencode_version": version,
+                    }
+                    # The stdio owner endpoint does not include a version.
+                    connection = {
+                        "url": "http://127.0.0.1:12345",
+                        "password": "a" * 43,
+                        "workspace": data["id"],
+                    }
+                    owner = SimpleNamespace(
+                        connection=connection, publish=Mock(), wait_clients=Mock()
+                    )
+                    args = SimpleNamespace(
+                        command="web",
+                        new=False,
+                        model=None,
+                        resume=False,
+                        attachments=True,
+                        web_session=None,
+                        port=0,
+                        no_open=True,
+                    )
+
+                    def native(_box, _data, endpoint, method, target):
+                        self.assertEqual(endpoint["version"], version)
+                        if (method, target) == ("GET", "/api/info"):
+                            return {"version": native_version}
+                        self.assertEqual((method, target), ("POST", "/api/pair"))
+                        return {"code": "synthetic_pair"}
+
+                    with (
+                        patch.object(
+                            box, "refresh_sessions", return_value={"last": "ses_one"}
+                        ),
+                        patch.object(
+                            box, "native_tab_selection", return_value=("ses_one", False)
+                        ),
+                        patch.object(service, "api", side_effect=native) as api,
+                        patch.object(
+                            service,
+                            "Gateway",
+                            return_value=contextlib.nullcontext(
+                                SimpleNamespace(url="http://127.0.0.1:23456")
+                            ),
+                        ) as gateway,
+                        patch.object(
+                            service.time, "sleep", side_effect=KeyboardInterrupt
+                        ),
+                        patch.object(service, "wait_history"),
+                        patch.object(box, "sync_sessions"),
+                        contextlib.redirect_stdout(io.StringIO()),
+                    ):
+                        if native_version != version:
+                            with self.assertRaisesRegex(
+                                box.BoxError, "version verification"
+                            ):
+                                box.launch_client(
+                                    None, data, args, version, None, owner
+                                )
+                            gateway.assert_not_called()
+                            self.assertEqual(api.call_count, 1)
+                        else:
+                            self.assertEqual(
+                                box.launch_client(
+                                    None, data, args, version, None, owner
+                                ),
+                                0,
+                            )
+                            self.assertEqual(api.call_count, 2)
+                            self.assertEqual(
+                                gateway.call_args.args[2]["version"], version
+                            )
+                            self.assertTrue(gateway.call_args.kwargs["attachments"])
+                            self.assertIs(
+                                gateway.call_args.kwargs["selection_snapshot_reader"],
+                                ui_state.read_snapshot,
+                            )
+                    owner.wait_clients.assert_called_once()
+                    self.assertNotIn("version", owner.connection)
 
     def test_native_auth_probe_preserves_only_browser_credentials(self):
         raw = self.raw(
