@@ -35,6 +35,7 @@ RUNTIME_FILES = (
     "host_drop.py",
     "host_drop_io.py",
     "host_drop_input.py",
+    "workspace_preferences.py",
     "plugin_compat.py",
     "plugin_bridge.js",
     "backups.py",

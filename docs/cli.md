@@ -16,6 +16,7 @@ oc-box terminal [--project PATH | --workspace ID] [--maintenance]
 oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
 oc-box attach PATH --session ID [--project PATH | --workspace ID] [--text TEXT] [--send] [--acknowledge-risk]
 oc-box attach --broker --session ID [--project PATH | --workspace ID]
+oc-box preferences [--project PATH | --workspace ID] [--host-drop on|off] [--json]
 oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
 oc-box list
 oc-box distros
@@ -224,11 +225,36 @@ session-shell and browser attachments require a verified open root; otherwise
 they refuse with guidance to open one or explicitly start with `--new`.
 Location-scoped sharing and metadata browsing do not invent a session.
 
-For experimental outside-host image/PDF drops into the native TUI, explicitly
-add `--host-drop`. It is off by default and can also be selected for an additional
-`start` TUI client without restarting the existing owner. This is separate from
+Experimental outside-host image/PDF drops into the native TUI are enabled by
+default for supported clients. Save `--no-host-drop` to disable importing for
+this workspace, or `--host-drop` to enable it again. A new additional
+`start` TUI client reads the preference without restarting the existing owner;
+existing clients do not live-toggle. This is separate from
 the `attach` confirmation broker and from browser uploads; see the option below
 for the host-input authorization boundary and terminal requirements.
+
+### preferences
+
+Read or change host-only UI preferences for an **existing registered workspace**
+without opening a client, starting/stopping a container, refreshing native
+configuration or unlocking credentials:
+
+```sh
+oc-box preferences --project ~/devel/demo
+oc-box preferences --project ~/devel/demo --host-drop off
+oc-box preferences --workspace WORKSPACE_ID --host-drop on
+oc-box preferences --project ~/devel/demo --json
+```
+
+`--project` and `--workspace` are mutually exclusive. With no change option this
+is read-only. Missing preferences mean importing is enabled by default; corrupt,
+unsafe or mismatched preferences refuse rather than silently granting access.
+Changes apply to future clients only. Preferences survive ordinary stop/start
+and reset in a private host `ui-preferences.json` beside workspace metadata,
+with an independent lock so an active owning launcher need not exit.
+They are not native CLI settings, credential policy or archived authority:
+backup/restore into a fresh workspace does not reactivate this host preference.
+The new workspace uses the restoring host's default until explicitly changed.
 
 ### stop
 
@@ -1888,14 +1914,21 @@ oc-box reset --project ~/devel/demo --image-preview
 
 ### --host-drop
 
-Experimental and **off by default**, on native OpenCode V2 2.2.6/2.2.7/2.3.0
-only. Enable a host-input bridge for this full native TUI client on `start`
-(including the default command) or `reset`. An additional `start --host-drop`
-client may attach to an existing owner without restarting it, refreshing its
-credentials or changing the owner's configuration. Repeat the flag for each
-client that needs it; it is not saved as a workspace preference. V1, `web`,
-`terminal`/maintenance, the `tui` dashboard, sync, informational commands and all
-other commands refuse the flag.
+Experimental and **enabled by default per workspace** for supported native
+OpenCode V2 2.2.6/2.2.7/2.3.0 clients. Plain `start` (including the default command)
+or `reset` reads the saved host preference. `--host-drop` saves enabled and
+requires a supported client; `--no-host-drop` saves disabled. The flags are
+mutually exclusive. An additional `start` client may attach to an existing owner
+without restarting it, refreshing credentials or changing native configuration.
+It reads the preference for its own relay; **existing clients keep their setting**.
+Running another `oc-box` opens another TUI, not a live toggle.
+
+Automatic/default mode skips importing on unsupported terminals, native versions
+or noninteractive clients rather than preventing ordinary startup. Explicit
+`--host-drop` remains strict and refuses V1; `--no-host-drop` may save an opt-out
+for V1 without activating any bridge. Importing never activates for `web`,
+`terminal`/maintenance, the `tui` dashboard, sync or informational commands;
+those commands reject both startup flags.
 
 Use a direct interactive host TTY, without SSH, tmux (`TMUX`) or screen (`STY`).
 The experimental profiles are direct Konsole and Kitty. Exactly one host
@@ -1915,7 +1948,7 @@ action sends raw, unframed input and is intentionally not intercepted. Bare
 absolute names, quoting for spaces and the normal trailing space are accepted.
 No timing or pathname-shaped keystroke guessing is used.
 
-**A qualifying pathname paste anywhere in this opted-in TUI authorizes capture,
+**A qualifying pathname paste anywhere in an importing-enabled TUI authorizes capture,
 without a per-file confirmation prompt.** The bridge cannot prove a real desktop
 drag gesture or composer focus. Do not paste a sensitive path merely to discuss
 it. Model output, an MCP request or a proposed host path is never capture
@@ -1959,7 +1992,16 @@ new live-host acceptance result. See `SECURITY.md` and `docs/testing.md`.
 oc-box --project ~/devel/demo --host-drop
 oc-box start --project ~/devel/demo --host-drop
 oc-box reset --project ~/devel/demo --host-drop
+oc-box --project ~/devel/demo --no-host-drop
+oc-box preferences --project ~/devel/demo --host-drop off
 ```
+
+### --no-host-drop
+
+Save host importing disabled for future workspace TUI clients and open this
+client without the bridge. Mutually exclusive with `--host-drop`; neither flag
+live-toggles existing clients. To change only the preference without opening a
+TUI, use `oc-box preferences --host-drop off`.
 
 ### --credential-mode env|selected|vault
 
@@ -3113,8 +3155,10 @@ Credential modes include `env`, `selected`, and `vault`; `--no-vault` is offered
 for start/reset/web only (including the default start context). Completion does
 not inspect the OpenCode major version or whether a service is already active;
 the command itself rejects V1 or attached-client use of `--no-vault`.
-`--host-drop` is offered only for default/start/reset TUI clients, not web,
-terminal or the separate dashboard. Its direct-TTY, native-version and
+`--host-drop` and `--no-host-drop` startup flags are offered only for
+default/start/reset TUI clients, not web, terminal or the separate dashboard.
+The separate `preferences --host-drop` setting completes `on`/`off`.
+Direct-TTY, native-version and
 host-input requirements are checked by the command, not during completion.
 `--project` completes directories; backup archive inputs, `--output`, and
 `--identity` complete paths, including spaces. Both `--option VALUE` and

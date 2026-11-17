@@ -150,7 +150,7 @@ native argv, its activity journal or project files. This is not a scanner for
 sensitive screenshot content or a security boundary against host root or a
 malicious same-user process.
 
-Without the separate `--host-drop` opt-in described below, the ordinary container
+Without the host-input bridge described below, the ordinary container
 TUI has no direct host path access. This confirmation-broker feature does not
 install a transparent drop/paste interceptor. Users start the broker
 in a second host terminal and explicitly ask OpenCode to propose a pasted
@@ -169,7 +169,7 @@ unit/native and external-host requirements are documented separately in
 
 ## Opt-in native TUI host drops
 
-Experimental `--host-drop` is a separate, default-off host-input authorization
+Experimental host-drop importing is a separate, default-on per-workspace host-input authorization
 surface, not a change to `attach --broker` consent. It is limited to full native
 V2 2.2.6/2.2.7/2.3.0 TUI start/reset clients, including an additional `start`
 client on an existing owner without an owner restart or credential refresh.
@@ -177,11 +177,20 @@ It requires a direct interactive host TTY and refuses SSH, tmux and screen.
 It is not enabled for web, the session-shell terminal, the manager/dashboard,
 sync or informational/other commands.
 
-**A qualifying complete pathname paste anywhere in the opted-in TUI authorizes
+Save `--no-host-drop` to disable it for future workspace TUI clients, or use
+`oc-box preferences --host-drop off` without opening a client. `--host-drop`
+saves enabled and strictly requires compatibility; ordinary automatic launches
+skip unsupported clients. Existing clients retain their original setting.
+Private host preferences survive stop/reset but do not grant archive-restore
+authority to a new workspace ID. Missing preferences mean enabled by default;
+unsafe/corrupt preferences refuse. This is a broader default disclosure policy
+than the earlier per-client opt-in; it does not change the independent broker.
+
+**A qualifying complete pathname paste anywhere in an importing-enabled TUI authorizes
 capture without per-file host confirmation.** The relay cannot prove a desktop
 drag gesture, composer focus or the user's intention to attach rather than
 discuss a path. Model output, MCP calls and remote path proposals are not
-authorization. Keep the flag off when that input policy is inappropriate;
+authorization. Save importing disabled when that input policy is inappropriate;
 use the independent per-image confirmation broker instead.
 
 The experimental profiles are direct Konsole and Kitty, selected by exactly one

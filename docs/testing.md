@@ -257,13 +257,15 @@ certification or transparent native autoattachment claim follows from this gate.
 
 ### Experimental transparent native TUI host drops
 
-`--host-drop` is a new, default-off native TUI input bridge, separate from the
+Host-drop importing is a default-on per-workspace native TUI input bridge,
+separate from the
 per-image `attach --broker` confirmation workflow, browser uploads and web
 session-routing fixes. Its supported native versions are 2.2.6/2.2.7/2.3.0.
 The experimental terminal profiles are direct Konsole and Kitty, chosen by
 unambiguous host compatibility markers, not authenticated emulator identity.
-Unknown/ambiguous, multiplexer and SSH setups refuse. A complete qualifying pathname paste anywhere in the opted-in
-TUI authorizes capture without per-file prompts; neither a genuine desktop drag
+Unknown/ambiguous, multiplexer and SSH setups skip automatic importing; explicit
+enable refuses them. A complete qualifying pathname paste anywhere in an
+importing-enabled TUI authorizes capture without per-file prompts; neither a genuine desktop drag
 gesture nor composer focus is established. Konsole is pathname-paste-only and
 leaves child output unchanged. Only the Kitty profile probes/enables structured
 OSC 72 DnD after actual capability detection; graphics support alone is not DnD.
@@ -276,11 +278,15 @@ working-tree state and native binary identities.
 
 **Unit, protocol and process contracts.** Exercise the normal imports in
 `tests/test_host_drop.py`, `tests/test_host_drop_input.py` and
-`tests/test_host_drop_io.py`. Cover default-off behavior and opt-in start/reset,
+`tests/test_host_drop_io.py`, `tests/test_workspace_preferences.py` and
+`tests/test_host_drop_preferences.py`. Cover default-on supported clients,
+saved opt-out/enable, read-only preference display, corrupt/unsafe policy refusal,
+unsupported-client automatic fallback versus strict explicit enable, and start/reset,
 plus an additional start TUI client that joins the existing owner without
-restart, credential/config refresh or new ownership. Refuse V1/unsupported
-native versions, web, terminal/maintenance, the dashboard, sync, informational
-and other commands; require an actual interactive TTY without TMUX/STY/SSH.
+restart, credential/config refresh or new ownership. Never activate on V1 or
+unsupported native versions. Reject startup flags on web, terminal/maintenance,
+the dashboard, sync, informational and other commands; require an actual
+interactive TTY without TMUX/STY/SSH for importing.
 Keep parser, completion, manuals, installed-runtime and wheel/sdist membership
 contracts together.
 

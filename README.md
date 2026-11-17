@@ -332,18 +332,23 @@ limits and lifecycle details. Its 37-check scripted host acceptance belongs to
 the earlier exact `5573965` source and native 2.2.6, not automatically to every
 later development build; see [the evidence scope](docs/releases/1.7.md#reviewed-earlier-source-evidence).
 
-### Native TUI host image/PDF drops (experimental, opt-in)
+### Native TUI host image/PDF drops (experimental)
 
-For outside-host attachments in the full native TUI, explicitly opt in:
+Outside-host importing is enabled by default per workspace on supported native
+TUI clients. Save an override while opening a client, or change only the preference:
 
 ```sh
 oc-box --project ~/devel/demo --host-drop
+oc-box --project ~/devel/demo --no-host-drop
+oc-box preferences --project ~/devel/demo --host-drop off
 ```
 
-This is **off by default**, requires native V2 2.2.6/2.2.7/2.3.0 and a direct
+Importing requires native V2 2.2.6/2.2.7/2.3.0 and a direct
 interactive host terminal without SSH, tmux or screen. It works on owning
 start/reset and on an additional `start` TUI client without restarting the owner;
-repeat the flag for each client. It is not a `web`, session-shell or dashboard
+the preference is saved for future clients, not live-toggled in running ones.
+Normal launches gracefully skip unsupported clients; explicit `--host-drop`
+refuses unsupported setups. It is not a `web`, session-shell or dashboard
 option. Exactly one host Konsole/Kitty compatibility marker must identify the
 profile; unknown or inherited ambiguous setups refuse. This is not emulator
 authentication. Konsole uses complete pathname pastes and leaves child output
@@ -351,7 +356,7 @@ unchanged; its default direct-drop setting is needed, not the optional raw
 **Paste Location** menu action. Only the Kitty profile probes/enables structured
 OSC 72 drops after a positive capability reply. Kitty graphics alone is not DnD.
 
-**A qualifying path paste anywhere in this opted-in TUI authorizes copying,
+**A qualifying path paste anywhere in an importing-enabled TUI authorizes copying,
 without a per-file prompt.** The bridge cannot prove a true drag gesture or
 composer focus. It accepts a whole paste of one to four absolute Linux paths
 (supported quoting/escaping for spaces), not mixed prose, newlines, traversal,
@@ -377,7 +382,7 @@ blanket security guarantee or a new live-host acceptance pass. See
 
 ### Host screenshots for one session (experimental)
 
-Without the separate `--host-drop` opt-in, an outside host screenshot path is
+With host importing disabled or unavailable, an outside host screenshot path is
 not directly readable by the container TUI. This confirmation-broker feature
 does **not** transparently intercept native drop/paste. For repeated screenshots,
 start a broker once in a second **host terminal**, explicitly choosing the
