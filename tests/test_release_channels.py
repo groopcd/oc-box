@@ -289,7 +289,12 @@ class ReleaseChannelTests(unittest.TestCase):
                 )
                 self.assertIsNotNone(selected)
                 filters = [item.strip().strip("'\"") for item in selected[1].split(",")]
-                branches = ["master", "devel", "feature/history-sync"]
+                branches = [
+                    "master",
+                    "devel",
+                    "feature/history-sync",
+                    "fix/web-open-sessions",
+                ]
                 if name == "ci.yml":
                     branches.append("fix/devel-history-sync-timeout")
                 for branch in branches:
@@ -303,6 +308,19 @@ class ReleaseChannelTests(unittest.TestCase):
                         for item in filters
                     )
                 )
+        native = (APP / ".github/workflows/ci.yml").read_text()
+        command = 'python3 -B tests/smoke_web_sessions_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"'
+        self.assertEqual(native.count(command), 1)
+        self.assertLess(
+            native.index("tests/smoke_sharing_v2.py"), native.index(command)
+        )
+        attachments = 'python3 -B tests/smoke_web_attachments_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"'
+        self.assertEqual(native.count(attachments), 1)
+        self.assertLess(native.index(command), native.index(attachments))
+        ui_state = 'python3 -B tests/smoke_ui_state_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"'
+        self.assertEqual(native.count(ui_state), 1)
+        self.assertLess(native.index(attachments), native.index(ui_state))
+        self.assertIn("@opencode/cli@2.2.6", native)
 
 
 class BuildBackendChannelTests(unittest.TestCase):

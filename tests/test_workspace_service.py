@@ -1,4 +1,5 @@
 import contextlib
+from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import io
 import json
@@ -16,7 +17,13 @@ from unittest.mock import Mock, patch
 from urllib.parse import urlparse
 from urllib.request import urlopen
 
-from oc_box import oc_box as box, workspace_service as service, vault
+from oc_box import (
+    native_tabs,
+    oc_box as box,
+    web_sessions,
+    workspace_service as service,
+    vault,
+)
 
 
 class HistoryWaitTests(unittest.TestCase):
@@ -803,7 +810,7 @@ class WorkspaceServiceTests(unittest.TestCase):
             native.assert_not_called()
         self.assertIsNone(owner.child)
 
-    def test_unbound_session_consumers_refuse_before_browser_or_terminal_work(self):
+    def test_unbound_terminal_refuses_before_native_work(self):
         connection = {**self.connection, "session": None}
         with (
             patch.object(service, "Gateway") as gateway,
@@ -819,10 +826,6 @@ class WorkspaceServiceTests(unittest.TestCase):
             ),
             contextlib.redirect_stderr(io.StringIO()),
         ):
-            with self.assertRaisesRegex(box.BoxError, "No open native session"):
-                service.web_session(
-                    box, self.data, connection, box.parser().parse_args(["web"])
-                )
             with self.assertRaisesRegex(box.BoxError, "No open native session"):
                 box.main(["terminal", "--workspace", self.data["id"]])
         for operation in (gateway, native, client, prepare, credentials):
@@ -1043,10 +1046,23 @@ class WorkspaceServiceTests(unittest.TestCase):
             contextlib.redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(
-                box.main(["web", "--workspace", self.data["id"], "--no-open"]), 0
+                box.main(
+                    [
+                        "web",
+                        "--workspace",
+                        self.data["id"],
+                        "--no-open",
+                        "--attachments",
+                        "--session",
+                        "ses_explicit",
+                    ]
+                ),
+                0,
             )
             self.assertEqual(box.main(["start", "--workspace", self.data["id"]]), 0)
         self.assertEqual(web.call_args.args[2]["session"], "ses_shared")
+        self.assertTrue(web.call_args.args[3].attachments)
+        self.assertEqual(web.call_args.args[3].web_session, "ses_explicit")
         self.assertIn("ses_shared", tui.call_args.args[0])
         prepare.assert_not_called()
 
@@ -1467,3 +1483,349 @@ class WorkspaceServiceTests(unittest.TestCase):
                     data.extend(stream.recv(8192))
                 self.assertIn(b"101", data)
                 stream.sendall(b"x")
+
+
+class GatewayHTTPTests(unittest.TestCase):
+    @contextlib.contextmanager
+    def relay(self, handler):
+        upstream = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        thread = threading.Thread(
+            target=lambda: upstream.serve_forever(poll_interval=0.02), daemon=True
+        )
+        thread.start()
+
+        def local_relay(_box, _data, port):
+            return box.ContainerCommand(
+                [sys.executable, "-B", "-c", service.PROXY, str(port)],
+                box.maintenance_host_env(),
+            )
+
+        connection = {
+            "workspace": "a" * 32,
+            "url": "http://127.0.0.1:" + str(upstream.server_port),
+            "password": "a" * 43,
+            "session": None,
+        }
+        try:
+            with (
+                patch.object(service, "relay_command", side_effect=local_relay),
+                patch.object(
+                    native_tabs,
+                    "inspect",
+                    return_value=native_tabs.Snapshot("missing", reason="absent"),
+                ),
+                service.Gateway(
+                    box, {"id": connection["workspace"]}, connection
+                ) as gateway,
+            ):
+                yield gateway
+        finally:
+            upstream.shutdown()
+            upstream.server_close()
+            thread.join(timeout=2)
+
+    @staticmethod
+    def read_head(reader):
+        result = bytearray()
+        while not result.endswith(b"\r\n\r\n"):
+            line = reader.readline(65537 - len(result))
+            if not line or len(result) + len(line) > 65536:
+                raise AssertionError("Fixture response headers missing or oversized.")
+            result.extend(line)
+        return bytes(result)
+
+    def test_fragmented_interims_pairing_headers_and_body_bytes(self):
+        interim = (
+            b"HTTP/1.1 100 Continue\r\n\r\n"
+            b"HTTP/1.1 103 Early Hints\r\nLink: </asset>; rel=preload\r\n\r\n"
+        )
+        body = b"\x00\xffLocation: /\r\nConnection: keep-alive\r\n\r\nbody"
+        fields = (
+            b"HTTP/1.1 302 Found\r\nlOcAtIoN: /\r\nSet-Cookie: native=fixture\r\n"
+            b"Content-Length: "
+            + str(len(body)).encode()
+            + b"\r\nConnection: keep-alive\r\nkEeP-aLiVe: timeout=60\r\n\r\n"
+        )
+        wire = interim + fields + body
+        expected = (
+            interim + b"HTTP/1.1 302 Found\r\nLocation: /auth/oc-box-sessions\r\n"
+            b"Set-Cookie: native=fixture\r\nContent-Length: "
+            + str(len(body)).encode()
+            + b"\r\nConnection: close\r\n\r\n"
+            + body
+        )
+        for split in range(len(wire) + 1):
+            with self.subTest(split=split):
+                route = Mock(return_value=web_sessions.INDEX)
+                response = service.NativeResponseHeaders(route)
+                self.assertEqual(
+                    response.feed(wire[:split]) + response.feed(wire[split:]), expected
+                )
+                self.assertTrue(response.complete)
+                self.assertEqual(response.pending, b"")
+                route.assert_called_once_with()
+                opaque = b"binary body" * 10000
+                self.assertIs(response.feed(opaque), opaque)
+
+    def test_header_bounds_exclude_body_and_upgrade_is_byte_exact(self):
+        response = service.NativeResponseHeaders()
+        response.LIMIT = 80
+        body = b"\x00\xff" * 10000
+        head = b"HTTP/1.1 200 OK\r\nContent-Length: 20000\r\n\r\n"
+        self.assertEqual(
+            response.feed(head + body),
+            head[:-2] + b"Connection: close\r\n\r\n" + body,
+        )
+        for data in (
+            b"not HTTP\r\n\r\n",
+            b"HTTP/1.1 200 OK\r\nX: " + b"x" * 65536,
+            (b"HTTP/1.1 103 Early Hints\r\n\r\n" * 3000),
+        ):
+            with self.subTest(size=len(data)), self.assertRaises(ValueError):
+                service.NativeResponseHeaders().feed(data)
+        upgrade = (
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+            b"Connection: Upgrade\r\nKeep-Alive: untouched\r\n\r\n\x82\x02\x00\xff"
+        )
+        response = service.NativeResponseHeaders(
+            Mock(side_effect=AssertionError("pair"))
+        )
+        self.assertEqual(response.feed(upgrade), upgrade)
+        self.assertIs(response.feed(body), body)
+
+    def test_keepalive_pair_cookie_and_return_navigation_reenter_host_routes(self):
+        observed = []
+        accepted = []
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(handler):
+                observed.append((handler.path, handler.headers.get("Cookie")))
+                if handler.path == "/auth/connect/fixture":
+                    handler.send_response(302)
+                    handler.send_header("Location", "/")
+                    handler.send_header(
+                        "Set-Cookie", "native=fixture; Path=/; HttpOnly"
+                    )
+                    body = b""
+                elif handler.path == "/api/info":
+                    handler.send_response(
+                        200
+                        if handler.headers.get("Cookie") == "native=fixture"
+                        else 401
+                    )
+                    body = b"{}"
+                elif handler.path == "/native-page":
+                    handler.send_response(200)
+                    body = b"native page"
+                else:
+                    handler.send_response(404)
+                    body = b"native has no host route"
+                handler.send_header("Content-Length", str(len(body)))
+                handler.send_header("Connection", "keep-alive")
+                handler.send_header("Keep-Alive", "timeout=60")
+                handler.end_headers()
+                handler.wfile.write(body)
+
+        original = service.Gateway.forward
+
+        def forward(gateway, stream):
+            accepted.append(stream.getpeername())
+            return original(gateway, stream)
+
+        with (
+            patch.object(service.Gateway, "forward", forward),
+            self.relay(Handler) as gateway,
+        ):
+            client = HTTPConnection("127.0.0.1", urlparse(gateway.url).port, timeout=5)
+            self.addCleanup(client.close)
+            headers = {"Connection": "keep-alive", "Accept": "text/html"}
+            client.request("GET", "/auth/connect/fixture", headers=headers)
+            paired = client.getresponse()
+            self.assertEqual(paired.status, 302)
+            location = paired.getheader("Location")
+            cookie = paired.getheader("Set-Cookie").split(";", 1)[0]
+            close = [paired.will_close]
+            self.assertEqual(location, web_sessions.INDEX)
+            self.assertEqual(cookie, "native=fixture")
+            paired.read()
+            for path in (location, "/native-page", location, "/native-page", location):
+                client.request("GET", path, headers={**headers, "Cookie": cookie})
+                response = client.getresponse()
+                body = response.read()
+                # Old Gateway tunnels the redirect follow-up to native, giving 404.
+                self.assertEqual(response.status, 200)
+                close.append(response.will_close)
+                self.assertEqual(response.getheader("Connection"), "close")
+                self.assertIsNone(response.getheader("Keep-Alive"))
+                if path == location:
+                    self.assertIn(b'href="/"', body)
+                else:
+                    self.assertEqual(body, b"native page")
+            self.assertTrue(all(close))
+            self.assertEqual(len(accepted), 6)
+            self.assertFalse(any(path == location for path, _cookie in observed))
+            self.assertEqual(
+                [cookie for path, cookie in observed if path == "/api/info"],
+                ["native=fixture"] * 3,
+            )
+            client.close()
+
+    def test_head_204_download_and_expect_continue_upload_are_not_truncated(self):
+        payload = (bytes(range(256)) + b"\r\nLocation: /\r\n\r\n") * 4096
+        interims = (
+            b"HTTP/1.1 100 Continue\r\n\r\n"
+            b"HTTP/1.1 103 Early Hints\r\nLink: </asset>; rel=preload\r\n\r\n"
+        )
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_args):
+                pass
+
+            def reply(handler, code, body=b"", length=None):
+                handler.send_response(code)
+                if length is not None:
+                    handler.send_header("Content-Length", str(length))
+                handler.send_header("Connection", "keep-alive")
+                handler.send_header("Keep-Alive", "timeout=60")
+                handler.end_headers()
+                for start in range(0, len(body), 8192):
+                    handler.wfile.write(body[start : start + 8192])
+
+            def do_HEAD(handler):
+                handler.reply(200, length=len(payload))
+
+            def do_GET(handler):
+                if handler.path == "/empty":
+                    handler.reply(204)
+                else:
+                    handler.reply(200, payload, len(payload))
+
+            def handle_expect_100(handler):
+                handler.wfile.write(interims)
+                handler.wfile.flush()
+                return True
+
+            def do_POST(handler):
+                body = handler.rfile.read(int(handler.headers["Content-Length"]))
+                handler.reply(200, body, len(body))
+
+        with self.relay(Handler) as gateway:
+            client = HTTPConnection("127.0.0.1", urlparse(gateway.url).port, timeout=5)
+            try:
+                for method, path, expected in (
+                    ("HEAD", "/download", b""),
+                    ("GET", "/empty", b""),
+                    ("GET", "/download", payload),
+                ):
+                    client.request(method, path, headers={"Connection": "keep-alive"})
+                    response = client.getresponse()
+                    self.assertTrue(response.will_close)
+                    self.assertEqual(response.read(), expected)
+                    if method == "HEAD":
+                        self.assertEqual(
+                            response.getheader("Content-Length"), str(len(payload))
+                        )
+            finally:
+                client.close()
+            with (
+                socket.create_connection(
+                    ("127.0.0.1", urlparse(gateway.url).port), timeout=5
+                ) as stream,
+                stream.makefile("rb") as reader,
+            ):
+                stream.sendall(
+                    (
+                        "POST /upload HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                        "Connection: keep-alive\r\nExpect: 100-continue\r\nContent-Length: "
+                        + str(len(payload))
+                        + "\r\n\r\n"
+                    ).encode()
+                )
+                self.assertEqual(
+                    self.read_head(reader) + self.read_head(reader), interims
+                )
+                for start in range(0, len(payload), 8192):
+                    stream.sendall(payload[start : start + 8192])
+                head = self.read_head(reader)
+                self.assertIn(b"Connection: close\r\n", head)
+                self.assertEqual(reader.read(len(payload)), payload)
+
+    def test_chunked_sse_streams_before_completion_and_101_stays_bidirectional(self):
+        release = threading.Event()
+        first = b"data: first\x00\xff\r\nLocation: /\r\n\r\n"
+        second = b"data: second\r\n\r\n"
+        chunk = lambda value: (
+            format(len(value), "x").encode() + b"\r\n" + value + b"\r\n"
+        )
+        upgrade = (
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
+            b"Connection: Upgrade\r\nKeep-Alive: untouched\r\n\r\n"
+        )
+        frame = b"\x82\x04\x00\xffAB"
+        masked = b"\x82\x82\x01\x02\x03\x04\x40\x40"
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(handler):
+                if handler.path == "/upgrade":
+                    handler.wfile.write(upgrade + frame)
+                    handler.wfile.flush()
+                    handler.wfile.write(handler.rfile.read(len(masked)))
+                    handler.wfile.flush()
+                    handler.close_connection = True
+                    return
+                handler.wfile.write(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
+                    b"Transfer-Encoding: chunked\r\nConnection: keep-alive\r\n"
+                    b"Keep-Alive: timeout=60\r\n\r\n" + chunk(first)
+                )
+                handler.wfile.flush()
+                if release.wait(5):
+                    handler.wfile.write(
+                        chunk(second) + b"0\r\nX-Trailer: fixed\r\n\r\n"
+                    )
+                    handler.wfile.flush()
+
+        try:
+            with self.relay(Handler) as gateway:
+                with (
+                    socket.create_connection(
+                        ("127.0.0.1", urlparse(gateway.url).port), timeout=5
+                    ) as stream,
+                    stream.makefile("rb") as reader,
+                ):
+                    stream.sendall(b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                    head = self.read_head(reader)
+                    self.assertIn(b"Connection: close\r\n", head)
+                    self.assertIn(b"Transfer-Encoding: chunked\r\n", head)
+                    self.assertEqual(reader.read(len(chunk(first))), chunk(first))
+                    release.set()
+                    tail = chunk(second) + b"0\r\nX-Trailer: fixed\r\n\r\n"
+                    self.assertEqual(reader.read(len(tail)), tail)
+                with (
+                    socket.create_connection(
+                        ("127.0.0.1", urlparse(gateway.url).port), timeout=5
+                    ) as stream,
+                    stream.makefile("rb") as reader,
+                ):
+                    stream.sendall(
+                        b"GET /upgrade HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                        b"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n"
+                    )
+                    self.assertEqual(self.read_head(reader), upgrade)
+                    self.assertEqual(reader.read(len(frame)), frame)
+                    stream.sendall(masked)
+                    self.assertEqual(reader.read(len(masked)), masked)
+        finally:
+            release.set()

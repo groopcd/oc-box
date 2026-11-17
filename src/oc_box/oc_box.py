@@ -1706,6 +1706,18 @@ def config_archive(data, *, image_preview=False, image_preview_snapshot=None):
     replacements = {}
     sandbox_version = None
     config_home = data["home"] + "/.config/opencode"
+    if v2:
+        if __package__:
+            from . import ui_state
+        else:
+            import ui_state
+        if release in ui_state.SUPPORTED and (
+            (source / "plugins/oc-box-ui-state").exists()
+            or (source / "plugins/oc-box-ui-state").is_symlink()
+        ):
+            raise BoxError(
+                "Generated UI-state helper conflicts with an existing host plugin."
+            )
     if v2 and source.is_dir():
         candidates = set()
         configured = {}
@@ -1916,6 +1928,12 @@ def config_archive(data, *, image_preview=False, image_preview_snapshot=None):
                 "plugins/oc-box-build-permissions/package.json",
                 b'{"type":"module","main":"index.js"}',
             )
+            if release in ui_state.SUPPORTED:
+                # Only normal owning configuration preparation installs this.
+                # Native/project/managed plugin policy remains authoritative:
+                # unlike the Build helper it gets no final mandatory overlay.
+                for name, content in ui_state.package_sources(PACKAGE).items():
+                    add_bytes("plugins/oc-box-ui-state/" + name, content)
     return buffer.getvalue()
 
 
@@ -2949,6 +2967,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                         sys.modules[__name__],
                         path,
                         data,
+                        ui_bridge=version in native_tabs.SUPPORTED,
                         **(
                             {"image_preview": args.image_preview}
                             if getattr(args, "image_preview", False)
@@ -3052,10 +3071,20 @@ def launch_client(path, data, args, version, exported, owner=None):
             sessions = refresh_sessions(path, data)
     selected_session = sessions.get("last") if not args.new else None
     allow_creation, created_session = True, False
+    explicit_web = getattr(args, "web_session", None) if args.command == "web" else None
+    if owner and explicit_web is not None:
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        web_sessions.explicit_session(
+            sys.modules[__name__], data, owner.connection, explicit_web
+        )
+        selected_session, allow_creation = explicit_web, False
     if (
         owner
+        and explicit_web is None
         and version in native_tabs.SUPPORTED
-        and args.command != "web"
         and not any(
             (args.new, exported is not None, getattr(args, "resume", False), args.model)
         )
@@ -3136,6 +3165,7 @@ def launch_client(path, data, args, version, exported, owner=None):
                     owner.connection,
                     command,
                     interactive=True,
+                    ui_owner=True,
                 )
                 if owner
                 else exec_command(data, command, interactive=True),
@@ -3726,6 +3756,8 @@ def main(argv=None):
             )
         if not 0 <= web.port <= 65535:
             raise BoxError("--port must be 0 (automatic) or 1..65535.")
+        if web.session is not None and not valid_session_id(web.session):
+            raise BoxError("--session must be a valid native session ID.")
         selectors = (
             ["--workspace", web.workspace]
             if web.workspace
@@ -3733,12 +3765,23 @@ def main(argv=None):
         )
         args = parser().parse_args(["start", *selectors])
         args.command, args.port, args.no_open = "web", web.port, web.no_open
+        args.web_session = web.session
         args.no_vault = web.no_vault
+        args.attachments = web.attachments
         args._opencode_release = detect_opencode_release()
         if opencode_compat.major(args._opencode_release) != 2:
             raise BoxError(
                 "'oc-box web' requires OpenCode 2.x; use the native TUI with 1.x."
             )
+        if web.attachments:
+            if __package__:
+                from .web_attachments import SUPPORTED
+            else:
+                from web_attachments import SUPPORTED
+            if args._opencode_release not in SUPPORTED:
+                raise BoxError(
+                    "The browser attachment adapter requires native OpenCode 2.2.6 or 2.3.0."
+                )
         workspace_service.preflight_port(web.port)
     else:
         args = parser().parse_args(argv)

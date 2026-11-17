@@ -22,7 +22,7 @@ oc-box list
 oc-box distros
 oc-box doctor [--json] [--feature FEATURE ...]
 oc-box completion bash
-oc-box web [--project PATH | --workspace ID] [--port N] [--no-open] [--no-vault]
+oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
@@ -508,11 +508,74 @@ OpenCode 2.x; 1.x has no web command through this launcher.
 oc-box --project ~/devel/demo
 # While it runs, use another host terminal:
 oc-box web --project ~/devel/demo
+oc-box web --project ~/devel/demo --session SESSION_ID
 oc-box terminal --project ~/devel/demo
 ```
 
-The browser uses upstream's short-lived one-use pairing link and opens the same
-session through the native web app. A host relay binds only `127.0.0.1`, forwards
+The browser uses upstream's short-lived one-use pairing link and opens an
+authenticated common web shell at `/auth/oc-box-sessions`. This first-party
+`/auth/` path bypasses native's service-worker navigation fallback without
+changing or disabling that worker. The index lists all verified
+open native TUI tabs in this private service, including idle sessions, in native
+tab order in one outer tabstrip. Click a tab to show that conversation in the
+single unmodified native app iframe and update the selected highlight/URL.
+Refresh TUI tabs updates membership without reloading the iframe or discarding
+a loaded draft. A selected conversation closed in the TUI is retained visibly
+as a browser selection outside the TUI-open count; it is not silently replaced.
+Native browser tabs and controls inside the iframe remain client-local and
+are **not** automatically seeded or synchronized with TUI tabs. Already-open
+archived sessions, moved/worktree locations and saved child IDs are not silently
+filtered: each listed ID must belong to a fresh native TUI report, or the
+verified saved-membership fallback, and pass an identity-matching GET from this
+same private service. Unopened history and
+missing/deleted IDs are not listed. Native normally groups child navigation
+under its root tab; the index does not invent a family tab.
+Global TUI tab scope does not combine private workspace services or host history.
+For restored workspaces, the saved scope uses the retained internal launch path;
+sessions within that scope may legitimately have other directories.
+Without a fresh report, the shell may use verified saved TUI membership. If that
+fallback is also unavailable, it labels the limitation and does not invent tabs
+or list historical sessions.
+An empty saved scope stays empty; unverifiable state shows a retry message.
+The chooser always offers **Open native OpenCode Home**, including when there
+are no TUI tabs, saved membership is missing, or an authenticated index query
+fails. This explicit link opens the unmodified native Home at `/`, where you can
+create or open a browser session without first running a TUI. It does not choose
+historical sessions, add fake TUI rows, or create a session by itself. Browser-only
+tabs remain native-client local and do not populate this TUI membership list.
+`--session ID` explicitly selects an existing ID in this same private DB, even
+when it is not a TUI-open member, and does not add a fake open tab or create a
+session. It wins initial selection. Without it, a URL-selected ID is verified;
+otherwise a fresh report from the container-native TUI supplies the exact current
+conversation and ordered open roots. A routed child stays the exact iframe
+conversation while its separately verified root is highlighted in the tabstrip.
+
+The normal supported V2 owning preparation installs a small public-SDK helper
+inside the container. A fresh report from the owning TUI is preferred, even when
+blurred; opening a browser naturally blurs its terminal. If it is gone, exactly
+one fresh alternate TUI may supply the selection. Multiple alternates, expired,
+missing or invalid reports require explicit selection: no first-tab, timestamp,
+foreground-activity or old owner-declaration guess is used. Reports are bounded
+cooperative UI metadata, not client attestation or host-file authorization.
+Selection is verified at snapshot time, not continuously followed.
+
+Older running owners cannot acquire the helper on attach. Use `--session ID` or
+choose a displayed tab; a subsequent normal owning startup can enable reporting.
+Attach never installs the helper, refreshes configuration/credentials or unlocks
+the vault. Project/managed plugin policy may disable reporting without preventing
+explicit browsing. See [the reporting lifetime and limits](ui-state.md).
+
+Standard same-origin iframe URL observation tracks native SPA
+navigation only after identity verification; Home/drafts/foreign server views
+assert no selected TUI session. Whole-page reloads and explicit conversation
+changes can navigate native content; draft persistence across those actions is
+the native client's responsibility. See [the common-shell contract](web-shell.md).
+These explicit browsing rules do not broaden automatic owner resume or history
+synchronization. Owner resume keeps its existing eligible-root policy; history
+sync keeps its existing discovery and archive semantics, including children and
+archived history.
+
+A host relay binds only `127.0.0.1`, forwards
 HTTP/streaming/WebSocket bytes through Podman exec to container loopback, and
 does not publish a container port, allow LAN access, or join the host OpenCode
 service. Links grant access to the workspace service; do not share or log them.
@@ -520,6 +583,15 @@ service. Links grant access to the workspace service; do not share or log them.
 (choose a free loopback port). Keep the web command open; Ctrl-C closes that
 relay. Browser commands use a sanitized host environment without provider/vault
 values; the server retains the owning launch's credential snapshot.
+
+Native HTTP replies force `Connection: close` after each final non-upgrade
+response, so compliant browsers use a fresh connection when returning to oc-box
+routes after pairing or a native page. Response bodies, including streaming
+events and downloads, remain streamed unchanged; WebSocket `101` upgrades stay
+bidirectional tunnels. The relay is not a general per-request HTTP dispatcher:
+pipelining and clients that ignore the close policy are unsupported. Subsequent
+requests on such a socket remain native tunnel traffic, not host-route dispatch;
+reserved oc-box routes then reach native handling rather than gaining host access.
 
 The owner keeps the lifecycle lock and waits for attached terminal/web/TUI
 clients before final history sync and container stop. Closing one attached
@@ -530,6 +602,81 @@ running web-owned session with the full TUI. Additional clients accept selectors
 (and start's `--resume`) only; change model/session/configuration when no owner
 is active. The owning foreground command is needed for web access; closing the
 browser tab alone does not close its relay or terminate the owner.
+
+For browser-provided screenshot/image/PDF attachments, opt in explicitly:
+
+```sh
+oc-box web --project ~/devel/demo --attachments
+```
+
+Pairing opens the same common shell described above: **one outer tabstrip and
+one unmodified native app iframe**. The optional addon adds visible attachment
+controls to that shell; it does not create another wrapper, tabstrip or iframe,
+seed native browser stores, or change the common selection/focus rules. Use the
+outer tabs or `--session ID` to select an existing private conversation. It also
+follows native SPA navigation only after the common shell verifies that same
+private ID. During an unverified route, Home, draft or foreign-server view,
+attachment forwarding refuses instead of guessing another target.
+Native Home and the shell's direct native fallback links remain available;
+those separate direct views do not load this addon.
+The addon uses only the existing loopback relay and native pairing/authentication.
+Native OpenCode **2.2.6 and 2.3.0 only** are
+source-checked; other versions refuse the adapter rather than assuming
+compatibility. Omit the option for the common shell with no attachment addon.
+Its fixed authenticated script is `/auth/oc-box-attachments.js`; the earlier
+independent `/auth/oc-box-attachments?session=...` wrapper is retired.
+
+Wait for the native composer to load, then drag the screenshot from Spectacle
+into it (or use the shell addon's drop area/file chooser). Actual browser `File`
+objects are copied and forwarded as a file-only standard DOM drop. This avoids
+native's competing `text/plain` `file:` flavor turning an actual file drop into
+a path mention. There is no model tool request, per-image host approval, private
+widget lookup or native source/binary patch. **No prompt/inference Send happens
+automatically**: check native thumbnails, edit the native prompt and press native
+Send yourself. Native may stage attachment bytes into its container temporary
+directory before Send, especially when using its file/path fallback. "Draft"
+does not mean the bytes remain exclusively in the host browser.
+The adapter cannot acknowledge native draft admission through a public API, so
+its forwarding notice is not proof of a thumbnail or successful model input.
+Do not drop while changing sessions. Every common-shell selection event and
+iframe load invalidates an in-progress file read, including explicit
+away-and-back changes to the same ID and metadata-refresh events. The addon
+also checks the actual same-origin iframe URL, exact selected route, document
+and original drop target immediately before forwarding. Pending SPA verification,
+changed documents and detached original targets refuse without automatic retry.
+This is not an atomic navigation/inactivity guarantee: a native SPA excursion
+away and back entirely between public observations may be unobserved. No native
+history methods or private widgets are patched to manufacture stronger evidence.
+Addon resources use native's existing `/auth/` service-worker navigation exclusion;
+native assets and its service worker remain unchanged.
+
+The adapter accepts signature-recognizable **PNG, JPEG, GIF, WebP and PDF** only:
+20 MiB per file, eight files and 40 MiB per drop. Signature checks are not a full
+document decoder, malware scan or guarantee of provider support. The selected
+native model must advertise image/PDF input for inline model delivery; native
+otherwise uses its normal container temporary-file/path route. No DOCX support,
+document conversion or arbitrary-file ingestion is promised by this adapter.
+The direct native link retains upstream's other attachment behaviors.
+
+Spectacle/browser/Wayland/X11/portal combinations can expose a temporary file as
+an actual browser file, URL-only text, or another MIME payload. **Only actual
+browser files work here**; the addon does not resolve host paths, dereference
+`file:`/web URLs or offer a host file server. Its own drop area rejects URL/text-
+only input. Non-file drops inside the native iframe retain native defaults
+(including workspace path mentions), not host-file access. Native paste of a
+clipboard image remains available when the browser exposes a file item; copying
+an image's path is not copying image bytes. No clipboard polling is added.
+
+Native browser draft storage, including **IndexedDB**, still stores attachment
+data. Sending can retain it in container history and disclose it to the selected
+provider; ordinary history synchronization still applies. Removal/detach is not
+guaranteed erasure or recall. Pairing/session cookies remain governed by native
+authentication; the adapter does not put the controller password into a URL,
+HTML, JavaScript, files or browser storage. Standard browser file authorization
+or desktop portal UI may still be required by the browser/desktop itself.
+Synthetic DOM/API checks are not an interactive Spectacle/browser or live
+rootless-Podman acceptance claim.
+
 After the last client exits, V2 final sync waits up to 30 seconds for the same
 private server's foreground sessions and unconsumed background jobs to settle.
 An idle persistent shell terminal does not block this wait. Timeout or an invalid
@@ -2062,6 +2209,19 @@ owner, not to an active client. To replace an existing selection:
 ```sh
 oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 ```
+
+### --session SESSION_ID
+
+Web only: explicitly display an existing native session from this same private
+workspace service in the common shell. This overrides URL/declared initial
+selection, never creates a session or adds a fake TUI-open tab, and is not proof
+of current native TUI focus. See `web` for membership and selection semantics.
+
+### --attachments
+
+Web only: explicitly select the visible, source-version-bounded browser File-drop
+adapter described under `web`. Keeps the native app and its draft/Send controls
+unchanged. No automatic prompt admission or host-path/URL reading.
 
 ### --no-vault
 

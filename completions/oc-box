@@ -111,7 +111,7 @@ _oc_box()
         sync) options="$help $selectors" ;;
         stop|repair) options="$help $selectors" ;;
         terminal) options="$help $selectors --maintenance" ;;
-        web) options="$help $selectors --port --no-open --no-vault" ;;
+        web) options="$help $selectors --session --port --no-open --no-vault --attachments" ;;
         tui) options="$help $selectors --read-only --demo" ;;
         share) options="$help $selectors --acknowledge-risk" ;;
         attach)

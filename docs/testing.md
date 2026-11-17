@@ -28,6 +28,111 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
+### Experimental browser attachment adapter
+
+`tests/test_web_attachments.py`, `tests/web_attachments_browser.mjs` and
+`tests/web_attachments_shell_dom.mjs` cover
+bodyless authenticated local resource routes, Host/Origin/Fetch Metadata/CSRF
+refusals, source-version preflight, file-only standard DOM forwarding, native
+path-mention defaults, media signatures, byte/count bounds, route changes and
+no automatic prompt admission. The DOM fixture executes the actual common-shell
+script and the attachment addon together, with one iframe/four tabs, trusted
+input, same-target forwarding, per-document interceptors and selection-generation
+refusals for same-ID events, explicit/observed SPA away-and-back changes, metadata
+refresh, document loads and URLs changed before public verification completes.
+These fixtures use synthetic browser objects, not a real browser compositor or
+Spectacle drag protocol.
+
+Run the separate provider-free native API contract on each supported release:
+
+```sh
+python3 -B tests/smoke_web_attachments_v2.py --opencode /path/to/opencode-v2
+```
+
+Its source-bound versions are 2.2.6
+(`dc2ffcf8bf26f9e669b6aa22b95f50e12be15e06`) and 2.3.0
+(`a6b15d33daf6ab7d35569f6d711fdb630b9f04e7`). The fixture verifies real
+native pairing/cookie authentication, bundled app assets, unchanged history/inbox
+after shell/addon reads, and separate **explicit fixture-only** PNG/PDF byte
+admissions with `resume=false`. The production adapter never calls that prompt
+API. These checks do not prove browser/Spectacle/Wayland/X11/portal behavior,
+native composer thumbnail admission, provider interpretation, live rootless
+Podman isolation or new host acceptance. No native source/binary modifications
+or private widget selector hooks are used by the adapter.
+
+The common shell alone owns selection, tabstrip, metadata endpoints and its
+single native iframe; attachments use only its frozen v1 API, events and optional
+fixed script/controls slot. The independent wrapper is retired and tested as a
+native 404, while addon script queries refuse. Default common mode imports no
+addon. The native attachment fixture uses
+a synthetic catalog of real native API sessions to isolate this HTTP composition;
+the separate four-tab fixture below owns actual TUI membership verification.
+Pinned baseline 2.2.6 CI invokes both fixtures. A keep-alive-capable HTTP client
+also checks native-to-shell/addon-script navigation and preserved pairing
+cookies under the response-close policy. Neither HTTP fixture is proof of
+normal browser rendering or real browser file-drop admission.
+
+**Pending integration gate:** normal Chromium pairing on the original
+`5c9fd883ded5d83c09a5d5e2842c739afd65647f` failed with a redirected wrapper 404:
+the Gateway classified only the first request of a persistent connection.
+That failure is retained, and a fresh-cookie diagnostic is not a normal-flow
+pass. The separately reviewed Gateway response/connection repair
+`0f1a366996833c65f56fbe5077159daf452790f2` is now merged without a duplicate
+transport implementation. Subsequent normal-browser checks on the final composed
+source remain required; this integration does not claim that browser acceptance.
+
+### Open TUI sessions in the web interface
+
+`tests/test_web_sessions.py` checks four-session membership, complete paginated
+catalogs, native tab order, idle versus active semantics, restored launch scopes,
+global/cwd scope, already-open archived/moved/worktree/child IDs, unopened-history
+and foreign-service exclusions, identity-matching native GETs, empty/missing/
+invalid state, owning-web selection, HTML escaping, native service-worker routing
+boundaries and authenticated relay behavior. Native port-scoped cookies and
+Origin checks remain authoritative. Empty/missing and authenticated error pages
+retain explicit native Home navigation without invented session rows. Automatic
+resume/history policy is separate.
+
+Run `python3 -B tests/smoke_web_sessions_v2.py --opencode /path/to/opencode`
+separately with native 2.2.6 and 2.3.0. It opens four tabs using native PTYs in
+fresh synthetic stores, including a real Git worktree, a native-moved root and
+a native-archived root, then exercises the production index with real native
+HTTP pairing, session GETs and public web-shell routes. Only the outer Podman
+exec boundary is replaced with local processes. Fixture state is retained under
+a fresh temporary directory, including on failure. This does not render a
+browser, certify browser-local tab seeding (which is not implemented), or
+establish external-host/rootless-Podman acceptance.
+
+The script first checks fresh, unbound HTTP pairing into an empty chooser and
+its explicit native Home link, with unchanged missing TUI state and empty session
+inventory. Use `--home-only` to run just this bounded read-only navigation check
+without a TUI or session create/open/prompt mutations. Native Home web-shell
+availability is not rendered Home chat or installed-service-worker acceptance.
+The existing V2 CI job runs the default combined script against pinned 2.2.6;
+both source/package and distro workflows also trigger on `fix/**` branches.
+
+`tests/test_workspace_service.py` additionally checks bounded native response
+headers, retained interim replies, response-close-driven redirect/cookie and
+return navigation, HTTP 204/HEAD, binary uploads/downloads, streaming chunked SSE
+and byte-exact bidirectional 101 upgrades. Only headers are mediated, never full
+response bodies. The native `--home-only` mode uses a keep-alive-capable client
+for pairing and repeated native/host navigation; request-side close alone is not
+its oracle. These fixtures do not establish the composed attachment feature's
+real-browser pairing pass. Retain the earlier Chromium native-404 evidence until
+the final composed source is separately tested; a fresh-cookie workaround was
+diagnostic, not acceptance of the original flow.
+
+The common-shell successor requires new-source checks; earlier chooser/transport
+passes are not promoted into UI acceptance. `tests/web_sessions_dom.mjs` executes
+the editable browser JS in a bounded DOM fixture: four actual membership buttons,
+selection/ARIA/query changes, one retained iframe/draft on refresh, same-private-
+prefix SPA navigation verified by GET, foreign/Home/draft unbinding, safe text
+rendering and non-overlapping metadata requests. This does not inspect native
+DOM/stores or establish rendered native composer/focus acceptance.
+The native web script checks the new shell bootstrap, single iframe, authenticated
+assets/catalog/selection endpoints and explicit selection against both pinned
+native versions, retaining cross-directory/archive and unchanged-history checks.
+
 ### Reviewed 5573965 candidate evidence
 
 The following is a review of retained evidence for clean

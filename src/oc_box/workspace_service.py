@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import select
+import secrets
 import signal
 import socket
 import stat
@@ -398,6 +399,12 @@ def validate_endpoint(value):
         raise ValueError("Invalid private workspace service response.")
     if type(value.get("image_preview", False)) is not bool:
         raise ValueError("Invalid private workspace image-preview setting.")
+    if "ui_state" in value:
+        if __package__:
+            from . import ui_state
+        else:
+            import ui_state
+        ui_state._metadata(value)
     parsed = urlparse(value.get("url", ""))
     if (
         parsed.scheme != "http"
@@ -467,7 +474,14 @@ def validate_workspace(box, path, data):
 
 
 def client_command(
-    box, data, connection, arguments, *, interactive=False, force_tty=False
+    box,
+    data,
+    connection,
+    arguments,
+    *,
+    interactive=False,
+    force_tty=False,
+    ui_owner=False,
 ):
     """No host pass_env, auth refresh, profiles, or vault unlock on attach."""
     image_preview = connection.get("image_preview", False)
@@ -502,6 +516,29 @@ def client_command(
         "XDG_CACHE_HOME": data["home"] + "/.cache",
         "OPENCODE_DB": "oc-box-v2.db",
     }
+    if (
+        interactive
+        and len(arguments) >= 2
+        and arguments[:2] == [box.CONTAINER_OPENCODE, box.container_project(data)]
+        and "--server" in arguments
+        and arguments[arguments.index("--server") + 1 :]
+        and arguments[arguments.index("--server") + 1] == connection["url"]
+    ):
+        if __package__:
+            from . import ui_state
+        else:
+            import ui_state
+        try:
+            binding = ui_state._metadata(connection)
+        except ui_state.StateError:
+            raise box.BoxError("Invalid private workspace UI-state setting.") from None
+        if binding is not None:
+            # NONSECRET labels, not native identity or caller attestation. Do
+            # not overwrite cli.json plugins to supply per-client options.
+            names["OC_BOX_UI_STATE_CLIENT"] = (
+                binding["ownerClient"] if ui_owner else secrets.token_hex(16)
+            )
+            names["OC_BOX_UI_STATE_GENERATION"] = binding["generation"]
     if (
         image_preview
         and interactive
@@ -563,6 +600,48 @@ def tab_inventory(box, data, connection, *, timeout=4):
     inventory = json.loads(result.stdout)
     if not isinstance(inventory, list):
         raise box.BoxError("Invalid native tab inventory.")
+    return inventory
+
+
+def web_session_catalog(box, data, connection, members, *, timeout=4):
+    """Explicit chooser only: same private service, membership + native GET.
+
+    Unlike tab_inventory this permits already-open worktree/moved/archived/child
+    IDs. It must not be used by automatic owner selection or history sync.
+    """
+    if connection.get("workspace") != data["id"]:
+        raise box.BoxError("Web session catalog does not match the workspace.")
+    validate_endpoint(connection)
+    command = client_command(
+        box,
+        data,
+        connection,
+        [
+            "python3",
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            (box.PACKAGE / "opencode_v2_io.py").read_text(),
+            "web-sessions",
+            box.CONTAINER_OPENCODE,
+        ],
+    )
+    result = box.run(
+        command,
+        input=json.dumps(
+            {
+                "members": list(members),
+                "endpoint": {key: connection[key] for key in ("url", "password")},
+            }
+        ),
+        capture=True,
+        private=True,
+        timeout=timeout,
+    )
+    inventory = json.loads(result.stdout)
+    if not isinstance(inventory, list):
+        raise box.BoxError("Invalid private web session catalog.")
     return inventory
 
 
@@ -777,11 +856,12 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
 
 
 class Owner:
-    def __init__(self, box, path, data, *, image_preview=False):
+    def __init__(self, box, path, data, *, image_preview=False, ui_bridge=False):
         if type(image_preview) is not bool:
             raise box.BoxError("Invalid private workspace image-preview setting.")
         self.box, self.path, self.data = box, path, data
         self.image_preview = image_preview
+        self.ui_bridge = ui_bridge is True
         self.address = socket_path(box, data)
         self.clients = 0
         self.condition = threading.Condition()
@@ -844,6 +924,20 @@ class Owner:
             self.connection = validate_endpoint(json.loads(output.split(b"\n", 1)[0]))
             self.connection["workspace"] = self.data["id"]
             self.connection["image_preview"] = self.image_preview
+            if __package__:
+                from . import ui_state
+            else:
+                import ui_state
+            self.connection["ui_state"] = (
+                {
+                    "available": True,
+                    "generation": secrets.token_hex(16),
+                    "ownerClient": secrets.token_hex(16),
+                }
+                if self.ui_bridge
+                and ui_state.available(box, self.data, self.connection)
+                else {"available": False}
+            )
             self.token = CONNECTION.set(self.connection)
             self.listener = socket.socket(socket.AF_UNIX)
             self.listener.bind(str(self.address))
@@ -1080,9 +1174,99 @@ def relay_command(box, data, port):
     )
 
 
+class NativeResponseHeaders:
+    """Bounded initial HTTP headers, then opaque streaming bytes.
+
+    Gateway classifies only the first request on a socket. Final non-upgrade
+    replies therefore forbid browser connection reuse, including after pairing.
+    This is not body framing, pipelining support or a per-request dispatcher.
+    """
+
+    LIMIT = 65536
+
+    def __init__(self, pairing_route=None):
+        self.pending = bytearray()
+        self.header_bytes = 0
+        self.complete = False
+        self.pairing_route = pairing_route
+
+    def feed(self, data):
+        if self.complete:
+            return data
+        # Production feeds at most one 64-KiB pipe read. Body bytes sharing the
+        # final header read are immediately emitted, never accumulated further.
+        self.pending.extend(data)
+        output = bytearray()
+        while not self.complete:
+            boundary = self.pending.find(b"\r\n\r\n")
+            if boundary < 0:
+                if self.header_bytes + len(self.pending) > self.LIMIT:
+                    raise ValueError("Native HTTP response headers exceed the limit.")
+                break
+            boundary += 4
+            self.header_bytes += boundary
+            if self.header_bytes > self.LIMIT:
+                raise ValueError("Native HTTP response headers exceed the limit.")
+            head = bytes(self.pending[:boundary])
+            del self.pending[:boundary]
+            fields = head[:-4].split(b"\r\n")
+            status = re.fullmatch(
+                rb"HTTP/1\.[01] ([1-9][0-9]{2})(?: [^\r\n]*)?", fields[0]
+            )
+            if status is None:
+                raise ValueError("Invalid native HTTP response status.")
+            status = int(status[1])
+            if 100 <= status < 200:
+                output.extend(head)
+                self.complete = status == 101
+            else:
+                rewritten = [fields[0]]
+                paired = False
+                for field in fields[1:]:
+                    name, separator, value = field.partition(b":")
+                    if not separator:
+                        raise ValueError("Invalid native HTTP response header.")
+                    name = name.lower()
+                    if name in (b"connection", b"keep-alive"):
+                        continue
+                    if (
+                        self.pairing_route is not None
+                        and not paired
+                        and name == b"location"
+                        and value.strip() == b"/"
+                    ):
+                        field = b"Location: " + self.pairing_route().encode()
+                        paired = True
+                    rewritten.append(field)
+                rewritten.append(b"Connection: close")
+                output.extend(b"\r\n".join(rewritten) + b"\r\n\r\n")
+                self.complete = True
+            if self.complete:
+                output.extend(self.pending)
+                self.pending.clear()
+        return bytes(output)
+
+
 class Gateway:
-    def __init__(self, box, data, connection, port=0):
+    # Trusted first-party extension hook; never populated by browser input.
+    shell_addon_scripts = ()
+
+    def __init__(
+        self,
+        box,
+        data,
+        connection,
+        port=0,
+        *,
+        attachments=False,
+        shell_addon_scripts=None,
+        selection_snapshot_reader=None,
+    ):
         self.box, self.data, self.connection, self.port = box, data, connection, port
+        self.attachments = attachments
+        if shell_addon_scripts is not None:
+            self.shell_addon_scripts = shell_addon_scripts
+        self.selection_snapshot_reader = selection_snapshot_reader
         self.closed = threading.Event()
         self.children = set()
         self.lock = threading.Lock()
@@ -1141,12 +1325,29 @@ class Gateway:
                     headers.extend(data)
                 if b"\r\n\r\n" not in headers:
                     return
-                pairing = bytes(headers).startswith(b"GET /auth/connect/")
+                if self.attachments:
+                    if __package__:
+                        from . import web_attachments
+                    else:
+                        import web_attachments
+                    if web_attachments.matches(headers):
+                        web_attachments.serve(stream, headers, child, self.url)
+                        return
+                if __package__:
+                    from . import web_sessions
+                else:
+                    import web_sessions
+                if web_sessions.respond(self, stream, child, bytes(headers)):
+                    return
+                response = NativeResponseHeaders(
+                    self.session_route
+                    if bytes(headers).startswith(b"GET /auth/connect/")
+                    else None
+                )
                 child.stdin.write(headers)
                 child.stdin.flush()
                 stream.settimeout(None)
                 readers = [stream, child.stdout]
-                response = bytearray()
                 while not self.closed.is_set():
                     ready, _, _ = select.select(readers, [], [], 0.2)
                     for item in ready:
@@ -1160,21 +1361,7 @@ class Gateway:
                             data = os.read(child.stdout.fileno(), 65536)
                             if not data:
                                 return
-                            if pairing:
-                                response.extend(data)
-                                if b"\r\n\r\n" not in response:
-                                    if len(response) > 65536:
-                                        return
-                                    continue
-                                route = self.session_route()
-                                data = re.sub(
-                                    rb"(?im)^location: /\r$",
-                                    b"location: " + route.encode() + b"\r",
-                                    bytes(response),
-                                    count=1,
-                                )
-                                pairing = False
-                            stream.sendall(data)
+                            stream.sendall(response.feed(data))
             except (OSError, ValueError):
                 pass
             finally:
@@ -1194,13 +1381,22 @@ class Gateway:
                 self.capacity.release()
 
     def session_route(self):
-        encoded = base64.urlsafe_b64encode(self.url.encode()).decode().rstrip("=")
-        return (
-            "/server/"
-            + encoded
-            + "/session/"
-            + require_session(self.box, self.connection)
-        )
+        # Native browser tabs are client-local, not the native TUI's open tabs.
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        return web_sessions.INDEX
+
+    def native_session_route(self, ident):
+        """A selected native row, never the default chooser/entry route."""
+        if not self.box.valid_session_id(ident):
+            raise self.box.BoxError("Invalid native web session ID.")
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        return web_sessions.native_session_route(self.url, ident)
 
     def __exit__(self, *_):
         self.closed.set()
@@ -1219,8 +1415,37 @@ class Gateway:
 
 
 def web_session(box, data, connection, args):
-    selected_session = require_session(box, connection)
-    with Gateway(box, data, connection, args.port) as gateway:
+    if __package__:
+        from . import ui_state
+    else:
+        import ui_state
+    options = {"selection_snapshot_reader": ui_state.read_snapshot}
+    if getattr(args, "attachments", False):
+        if __package__:
+            from . import web_attachments
+        else:
+            import web_attachments
+        version = connection.get("version")
+        if version not in web_attachments.SUPPORTED:
+            raise box.BoxError(
+                "The browser attachment adapter requires native OpenCode 2.2.6 or 2.3.0."
+            )
+        info = api(box, data, connection, "GET", "/api/info")
+        if not isinstance(info, dict) or info.get("version") != version:
+            raise box.BoxError(
+                "Browser attachment adapter native version verification failed."
+            )
+        options["attachments"] = True
+        options["shell_addon_scripts"] = (web_attachments.SCRIPT,)
+    override = getattr(args, "web_session", None)
+    if override is not None:
+        if __package__:
+            from . import web_sessions
+        else:
+            import web_sessions
+        web_sessions.explicit_session(box, data, connection, override)
+        connection = {**connection, "web_session_override": override}
+    with Gateway(box, data, connection, args.port, **options) as gateway:
         pair = api(box, data, connection, "POST", "/api/pair")
         if not isinstance(pair.get("code"), str) or not re.fullmatch(
             r"[A-Za-z0-9_-]+", pair["code"]
@@ -1228,9 +1453,7 @@ def web_session(box, data, connection, args):
             raise box.BoxError("Invalid native OpenCode browser pairing response.")
         link = gateway.url + "/auth/connect/" + pair["code"]
         print(
-            "oc-box: OpenCode web session "
-            + selected_session
-            + "\n"
+            "oc-box: OpenCode web workspace session index\n"
             + link
             + "\nThis one-use link grants access to this workspace service. Keep this command open; Ctrl-C closes web access.",
             flush=True,
@@ -1303,6 +1526,10 @@ def web_parser():
     )
     group.add_argument("--workspace", help="existing workspace ID")
     result.add_argument(
+        "--session",
+        help="explicit existing private-service conversation ID; overrides the launcher selection",
+    )
+    result.add_argument(
         "--port",
         type=int,
         default=0,
@@ -1312,6 +1539,11 @@ def web_parser():
         "--no-open",
         action="store_true",
         help="print the pairing link without opening a browser",
+    )
+    result.add_argument(
+        "--attachments",
+        action="store_true",
+        help="opt in to the visible browser File-drop adapter (native 2.2.6/2.3.0 only; no automatic Send)",
     )
     result.add_argument(
         "--no-vault",
