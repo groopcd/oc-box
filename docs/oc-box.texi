@@ -742,6 +742,10 @@ With @code{credentials}, save an explicit forwarding mode for that workspace. @c
 oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 @end example
 
+@section --session SESSION_ID
+
+Web only: explicitly display an existing native session from this same private workspace service in the common shell. This overrides URL/declared initial selection, never creates a session or adds a fake TUI-open tab, and is not proof of current native TUI focus. See @code{web} for membership and selection semantics.
+
 @section --no-vault
 
 V2-only, for one **owning** start (including @code{--import-session}), reset, or web invocation. Skip vault use without changing the saved workspace policy. Global mode temporarily uses legacy env-file forwarding; explicit env/selected modes skip vault entries but retain their env constraints. The next normal owner uses the saved/default policy again. Attached TUI/web clients reject this flag and never unlock or refresh an existing service. V1, info/status/list/doctor, credentials/secrets, terminal/maintenance, sync, stop, repair, purge, backup/info/ restore, upgrade, and other non-owning commands reject it. It does not erase already persisted config/auth or hide secrets from existing container processes.

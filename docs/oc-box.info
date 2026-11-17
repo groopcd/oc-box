@@ -2084,7 +2084,16 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.26 -no-vault
+5.26 -session SESSION_ID
+========================
+
+Web only: explicitly display an existing native session from this same
+private workspace service in the common shell.  This overrides
+URL/declared initial selection, never creates a session or adds a fake
+TUI-open tab, and is not proof of current native TUI focus.  See ‘web’
+for membership and selection semantics.
+
+5.27 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -2103,7 +2112,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.27 -env-secret NAME
+5.28 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -2116,7 +2125,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.28 -vault-secret NAME
+5.29 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -2128,7 +2137,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.29 -clear-credentials
+5.30 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -2140,7 +2149,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.30 -output FILE
+5.31 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -2150,7 +2159,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.31 -portable
+5.32 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -2160,7 +2169,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.32 -recipient AGE_KEY
+5.33 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -2171,7 +2180,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.33 -identity FILE
+5.34 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -2182,7 +2191,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.34 -cpus NUMBER
+5.35 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -2193,7 +2202,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.35 -memory SIZE
+5.36 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -2205,7 +2214,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.36 -pids-limit NUMBER
+5.37 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -2213,7 +2222,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.37 -device MAPPING
+5.38 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -2227,7 +2236,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.38 -podman-arg=-OPTION[=VALUE]
+5.39 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -2254,7 +2263,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.39 -clear-devices
+5.40 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -2265,7 +2274,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.40 -clear-podman-args
+5.41 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -2275,7 +2284,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.41 -delete-sessions
+5.42 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -2284,7 +2293,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.42 -all
+5.43 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -2292,7 +2301,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.43 -y, -yes
+5.44 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -3519,19 +3528,19 @@ Node: Synopsis930
 Node: Description2730
 Node: Commands6328
 Node: Options97084
-Node: Lifecycle and persistence120877
-Node: Distribution images122997
-Node: Sessions and recovery127872
-Node: Devices and host permissions134457
-Node: Resource reports136803
-Node: Configuration and environment138914
-Node: Files150295
-Node: Exit status156239
-Node: Examples157092
-Node: Troubleshooting159178
-Node: Installation and manuals170530
-Node: Authors and license179782
-Node: See also180389
+Node: Lifecycle and persistence121249
+Node: Distribution images123369
+Node: Sessions and recovery128244
+Node: Devices and host permissions134829
+Node: Resource reports137175
+Node: Configuration and environment139286
+Node: Files150667
+Node: Exit status156611
+Node: Examples157464
+Node: Troubleshooting159550
+Node: Installation and manuals170902
+Node: Authors and license180154
+Node: See also180761
 
 End Tag Table
 

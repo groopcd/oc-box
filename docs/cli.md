@@ -1844,6 +1844,13 @@ owner, not to an active client. To replace an existing selection:
 oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 ```
 
+### --session SESSION_ID
+
+Web only: explicitly display an existing native session from this same private
+workspace service in the common shell. This overrides URL/declared initial
+selection, never creates a session or adds a fake TUI-open tab, and is not proof
+of current native TUI focus. See `web` for membership and selection semantics.
+
 ### --no-vault
 
 V2-only, for one **owning** start (including `--import-session`), reset, or web

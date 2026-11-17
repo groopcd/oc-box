@@ -727,6 +727,9 @@ With \fBcredentials\fR, save an explicit forwarding mode for that workspace. \fB
 oc\-box credentials \-\-project ~/devel/demo \-\-credential\-mode vault \-\-clear\-credentials
 .fam T
 .fi
+.SS \-\-session SESSION_ID
+.PP
+Web only: explicitly display an existing native session from this same private workspace service in the common shell. This overrides URL/declared initial selection, never creates a session or adds a fake TUI\-open tab, and is not proof of current native TUI focus. See \fBweb\fR for membership and selection semantics.
 .SS \-\-no\-vault
 .PP
 V2\-only, for one **owning** start (including \fB\-\-import\-session\fR), reset, or web invocation. Skip vault use without changing the saved workspace policy. Global mode temporarily uses legacy env\-file forwarding; explicit env/selected modes skip vault entries but retain their env constraints. The next normal owner uses the saved/default policy again. Attached TUI/web clients reject this flag and never unlock or refresh an existing service. V1, info/status/list/doctor, credentials/secrets, terminal/maintenance, sync, stop, repair, purge, backup/info/ restore, upgrade, and other non\-owning commands reject it. It does not erase already persisted config/auth or hide secrets from existing container processes.
