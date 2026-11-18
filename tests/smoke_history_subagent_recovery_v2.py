@@ -1,4 +1,4 @@
-"""Native 2.3.0 retained-subagent Reader checks, not host/Podman acceptance.
+"""Native 2.3.x retained-subagent Reader checks, not host/Podman acceptance.
 
 Run with python3 -B tests/smoke_history_subagent_recovery_v2.py
 --opencode /path/to/opencode --temp-dir /short/private/temporary/directory.
@@ -211,7 +211,7 @@ def file_digest(path):
 
 
 def execution_snapshot(database):
-    """Include all native claims/inbox rows, not just exported transcript data."""
+    """Bind the actual scheduler layout and all native claims/inbox/history rows."""
     snapshot = persisted_history(database)
     with contextlib.closing(
         sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1)
@@ -278,7 +278,10 @@ def exercise(binary, root, children=10):
     host_env = environment(root / "destination")
     host_env.pop("OPENCODE_DB")
     release = compat.version(bounded([binary, "--version"], source_env, project))
-    require(release == "2.3.0", "This fixture requires unmodified native 2.3.0.")
+    require(
+        history_reader.snapshot_profile(release) == "2.3",
+        "This fixture requires an unmodified stable native 2.3.x release.",
+    )
     native_digest = file_digest(binary)
     bounded(["git", "init", "--quiet"], source_env, project)
     data = {
@@ -583,7 +586,7 @@ def exercise(binary, root, children=10):
         # Compare original rows from BEFORE the first genuine standalone host
         # export, so a premature resume cannot be hidden by a late baseline.
         destination_exports = {}
-        history_reader._check_database(host_db)
+        history_reader._check_database(host_db, version=release)
         for ident in destination_ids:
             destination_exports[ident] = json.loads(
                 bounded(
@@ -876,6 +879,8 @@ def exercise(binary, root, children=10):
         return {
             "native_version": release,
             "native_binary_sha256": native_digest,
+            "source_scheduler_layout": persisted["scheduler_layout"],
+            "destination_scheduler_layout": destination_persisted["scheduler_layout"],
             "children": children,
             "sessions_verified": len(expected_ids),
             "recovery_hint": recovery_hint,
@@ -917,7 +922,7 @@ def main(binary, temp_dir=None, children=10):
     finally:
         os.umask(previous)
     print(
-        "PASS: native 2.3.0 retained subagents, production Reader, real archive/import "
+        f"PASS: native {result['native_version']} retained subagents, production Reader, real archive/import "
         "and fresh destination verification; durable claims/jobs/history preserved.",
         flush=True,
     )

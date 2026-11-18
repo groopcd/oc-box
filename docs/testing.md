@@ -1002,7 +1002,7 @@ inbox and history must remain unchanged, with no fabricated completion notice.
 Saved and project configuration canaries, source/destination schedule refusals,
 and ambient credential exclusion remain part of the test boundary.
 
-Only exact native 2.3.0 gains shell/subagent snapshot eligibility after repeated
+The original extension gave only exact native 2.3.0 shell/subagent snapshot eligibility after repeated
 validated foreground-idle observations. The live wait still refuses all pending
 jobs, and the original nonzero interruption result remains. Before native history
 processing, the new profile validates durable job schemas and recovery metadata;
@@ -1048,11 +1048,98 @@ These observations belong to the exact source above, not automatically to later
 integrations. They support focused development integration, not the retained
 42/12/six gate identities, stable promotion or security certification.
 
+#### Stable native 2.3.x recovery compatibility
+
+The later compatibility amendment replaces the exact 2.3.0 selector with one
+shared profile for canonical stable `2.3.N` identities, including 2.3.1/2.3.2
+and future patches. Version routing is not native execution acceptance: the
+existing strict source/destination scheduler, job/recovery metadata, filesystem,
+system-config and deadline refusals remain mandatory. Executable versions must
+match the exact captured patch on both sides, not merely the selected series.
+Other minor/major versions, prereleases, build suffixes, noncanonical leading
+zeros and malformed/nonstring identities remain refused.
+Known contract refusals must produce fixed-category upgrade guidance without
+printing native errors or protected metadata. Unsupported versions warn before
+the owning client; schema/metadata and malformed activity responses warn when
+detected. Ordinary activity, timeouts, stop requests and cleanup failures are not
+misclassified as version incompatibility. Unknown minor/major startup behavior
+cannot be certified from a matching schema alone.
+
+Exact-tag source inspection found that 2.3.1/2.3.2 replaced `schedule` with
+`automation`, whose startup rewake still requires an empty-table guard despite
+disabled feature flags. The runtime recognizes exactly one known scheduler
+column layout; it refuses missing/ambiguous/changed columns and every row,
+including terminal/unknown statuses and committed WAL rows. Native 2.3.0 is
+refused on the newer automation layout. Optional subagent `outstanding` metadata
+has bounded, explicit shell/subagent validation, with image/Code Mode, nested,
+unknown and malformed forms refused. This inspection is not native execution or
+host acceptance.
+
+These are column-layout checks, not a complete SQLite-schema fingerprint:
+defaults, triggers, indexes and foreign keys are not compared. Passing them
+does not prove an unknown future binary's startup behavior remains non-executing.
+
+Focused source coverage exercises capture, host/remote Reader admission, exact
+binary matching, shell/subagent timeout routing and the real owner exit path on
+2.3.2 and representative future-patch identities. Synthetic changed schemas and
+unknown recovery forms must still refuse before native startup. The existing
+native fixture now accepts a selected stable 2.3.x binary without relaxing its
+real-job, non-execution, archive/import, source/destination preservation or
+scheduler canaries; CI retains 2.3.0 and follows the latest stable 2.3 patch using
+the `~2.3.0` npm range, recording the actual selected version and binary hash.
+The current native target for this amendment is 2.3.2:
+
+```bash
+python3 -B tests/smoke_history_subagent_recovery_v2.py \
+  --opencode /srv/native/opencode-2.3.2 --temp-dir /srv/private-tmp
+```
+
+Keep actual runs source/native/hash-qualified. A fixture accepting future
+versions is not evidence that they have run or that native startup behavior
+cannot change. This amendment creates no new external-host acceptance, does not
+replay the historical failed/incomplete runner, and does not change the
+30-second grace, cleanup/result policy or required manual-sync failure guidance.
+
+The local compatibility amendment based on `cb1e299` passed 22 selected source
+methods across its focused run and one corrected negative-fixture case. That
+case initially left the automation schema unchanged because its replacement
+literal assumed a space instead of a newline; only the fixture was corrected.
+The first native attempt also failed and remains failed evidence: a leftover
+fixture call selected the legacy scheduler guard instead of the tested version.
+After passing that version explicitly, a fresh synthetic native **2.3.2** run
+passed in 51.0 seconds, with unchanged tracked bytes during execution:
+
+* Native executable SHA-256:
+  `e6543f6e5c39c40971ba38afd1819ac852c29ac735b5a89065d3d148d47f27ad`.
+* Ten source subagents, twelve native-verified sessions and one Reader lease;
+  one retained destination subagent and both original destination sessions
+  preserved, including real standalone archive replacement.
+* Source and destination both used native `automation`; all eight refusal cases
+  per side passed, including committed WAL cases.
+* Producer exits were clean and unforced. Durable execution/history were
+  unchanged, with no extra provider, shell or plugin execution.
+
+The frozen tested runtime hashes are:
+
+```text
+d7c3ae933b74f0184bfd318f111c77959dc1177e882e9ad931d3b338a13987be  history_reader.py
+13a85ccfd5b022148b2adab0808c51c7e34312d069e099e9a8310c7ddba64e92  history_recovery.py
+a62a85b636f05ececf675d49220201f1a8e51de2893055859753de417d18f9e9  workspace_service.py
+8a1201ee625fb1b9825846900ca68fa7db161469a4162bff36cb060ff804bf4f  oc_box.py
+```
+
+Nonempty `outstanding` forms have synthetic metadata coverage, not a separately
+observed native reproduction. Native 2.3.0 remains in CI but was not rerun
+locally for this amendment. No full local suite, host Podman fixture, retained
+recovery replay or new external-host acceptance is implied by these results.
+
 #### Focused shutdown-outcome policy checks
 
-The approved outcome-only amendment preserves the existing 30-second oc-box
-live-readiness grace and exact-version recovery guards: shell-only on native
-2.2.6/2.2.7, shell/subagent on 2.3.0. That grace is not a native export/import
+The approved outcome-only amendment preserved the existing 30-second oc-box
+live-readiness grace and was originally scoped to exact-version recovery guards:
+shell-only on native 2.2.6/2.2.7, shell/subagent on 2.3.0. The later series
+compatibility amendment above broadens eligibility, not that grace or its
+required metadata checks. That grace is not a native export/import
 timeout. Automatic exit can spend it before checked archive copying; manual sync
 omits the original owner's live wait. Both already use the same checked
 `sync_sessions` implementation. Recovery must not recursively invoke the CLI,

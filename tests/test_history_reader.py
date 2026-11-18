@@ -18,6 +18,24 @@ from oc_box import history_reader as reader, workspace_service
 
 
 SCHEMA = "CREATE TABLE schedule (id TEXT PRIMARY KEY, session_id TEXT, status TEXT, last_message_id TEXT)"
+# Independent fixtures from native 2.3.0 schedule/sql.ts plus its migrations,
+# and native 2.3.2 automation/sql.ts plus the event_position migration.
+SCHEDULE_SCHEMA = """CREATE TABLE schedule (
+id TEXT PRIMARY KEY, session_id TEXT, name TEXT, action TEXT NOT NULL,
+"check" TEXT, "when" TEXT NOT NULL, tz TEXT NOT NULL,
+status TEXT NOT NULL DEFAULT 'active', next_due_at INTEGER, ends_at INTEGER,
+remaining_runs INTEGER, run_count INTEGER NOT NULL DEFAULT 0,
+checks INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0,
+last_fired_at INTEGER, last_message_id TEXT, last_outcome TEXT, retry_at INTEGER,
+state TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)"""
+AUTOMATION_SCHEMA = """CREATE TABLE automation (
+id TEXT PRIMARY KEY, project_id TEXT NOT NULL, session_id TEXT,
+directory TEXT NOT NULL, name TEXT NOT NULL, "trigger" TEXT NOT NULL,
+tz TEXT NOT NULL, action TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+next_due_at INTEGER, expires_at INTEGER, run_count INTEGER NOT NULL DEFAULT 0,
+failures INTEGER NOT NULL DEFAULT 0, last_run_at INTEGER, last_message_id TEXT,
+last_outcome TEXT, last_output TEXT, retry_at INTEGER, state TEXT,
+event_position TEXT, time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)"""
 JOB_SCHEMA = """CREATE TABLE job (
 notification_id TEXT PRIMARY KEY, id TEXT NOT NULL, session_id TEXT NOT NULL,
 child_session_id TEXT, kind TEXT NOT NULL, title TEXT, status TEXT NOT NULL,
@@ -27,6 +45,7 @@ KV_SCHEMA = """CREATE TABLE kv (
 key TEXT PRIMARY KEY, value TEXT NOT NULL,
 time_created INTEGER NOT NULL, time_updated INTEGER NOT NULL)"""
 ENDPOINT = {"url": "http://127.0.0.1:23456", "password": "synthetic_" + "x" * 32}
+STABLE_23_VERSIONS = ("2.3.0", "2.3.1", "2.3.2", "2.3.47", "2.3.9999")
 DATA = {
     "id": "synthetic-workspace",
     "container": "a" * 64,
@@ -284,7 +303,7 @@ class JobMetadataGuardTests(unittest.TestCase):
         self.database = self.home / ".local/share/opencode/oc-box-v2.db"
         self.database.parent.mkdir(parents=True)
         with self.connect() as connection:
-            for schema in (SCHEMA, JOB_SCHEMA, KV_SCHEMA):
+            for schema in (SCHEDULE_SCHEMA, JOB_SCHEMA, KV_SCHEMA):
                 connection.execute(schema)
 
     @contextlib.contextmanager
@@ -340,28 +359,166 @@ class JobMetadataGuardTests(unittest.TestCase):
                 tuple(job.values()),
             )
 
-    def refusal(self, category):
+    def refusal(self, category, *, version="2.3.0"):
         before = self.database.read_bytes()
         with self.assertRaises(reader.Refusal) as raised:
-            reader._check_database(self.database, version="2.3.0")
+            reader._check_database(self.database, version=version)
         self.assertEqual(str(raised.exception), f"History reader refused ({category}).")
         self.assertNotIn("private-sentinel", str(raised.exception))
         self.assertEqual(self.database.read_bytes(), before)
 
-    def test_exact_profiles_and_default_scheduler_only_compatibility(self):
-        self.assertEqual(set(reader.SNAPSHOT_JOB_KINDS), set(reader.SUPPORTED))
-        self.assertEqual(reader.SNAPSHOT_JOB_KINDS["2.3.0"], {"shell", "subagent"})
+    def test_series_profiles_and_default_scheduler_only_compatibility(self):
+        self.assertEqual(
+            reader.SNAPSHOT_JOB_KINDS,
+            {"2.2": {"shell"}, "2.3": {"shell", "subagent"}},
+        )
         self.store(self.job("image"))
         for version in (None, "2.2.6", "2.2.7"):
             with self.subTest(version=version):
                 reader._check_database(self.database, version=version)
-        self.refusal("job-kind")
-        for version in ("2.2.8", "2.3.1", "2.3.0+unknown", "2.3.0-dev"):
+        for version in STABLE_23_VERSIONS:
+            with self.subTest(version=version):
+                self.refusal("job-kind", version=version)
+        for version in ("2.2.8", "2.4.0", "2.3.01", "2.3.0+unknown", "2.3.0-dev"):
             with self.subTest(version=version):
                 with patch.object(reader.sqlite3, "connect") as native_store:
                     with self.assertRaisesRegex(reader.Refusal, "unsupported-version"):
                         reader._check_database(self.database, version=version)
                 native_store.assert_not_called()
+
+    def test_strict_scheduler_layouts_refuse_rows_and_unknown_shapes_before_native(
+        self,
+    ):
+        def layout(*schemas):
+            with self.connect() as connection:
+                for table in ("schedule", "automation"):
+                    found = connection.execute(
+                        "SELECT type FROM sqlite_master WHERE name = ?", (table,)
+                    ).fetchone()
+                    if found:
+                        connection.execute(
+                            "DROP "
+                            + ("VIEW" if found[0] == "view" else "TABLE")
+                            + " "
+                            + table
+                        )
+                for schema in schemas:
+                    connection.execute(schema)
+
+        for schema, versions in (
+            (SCHEDULE_SCHEMA, ("2.3.0", "2.3.2", "2.3.9999")),
+            (AUTOMATION_SCHEMA, ("2.3.1", "2.3.2", "2.3.9999")),
+        ):
+            layout(schema)
+            for version in versions:
+                with self.subTest(layout=schema.split("(")[0], version=version):
+                    before = self.database.read_bytes()
+                    reader._check_database(self.database, version=version)
+                    self.assertEqual(self.database.read_bytes(), before)
+            if schema == AUTOMATION_SCHEMA:
+                self.assert_pre_native_refusal("schedule-schema", version="2.3.0")
+
+        for table, schema in (
+            ("schedule", SCHEDULE_SCHEMA),
+            ("automation", AUTOMATION_SCHEMA),
+        ):
+            layout(schema)
+            with contextlib.closing(sqlite3.connect(self.database)) as writer:
+                writer.execute("PRAGMA journal_mode=WAL")
+                writer.execute("PRAGMA wal_autocheckpoint=0")
+                for index, status in enumerate(
+                    (
+                        "active",
+                        "paused",
+                        "done",
+                        "completed",
+                        "error",
+                        "cancelled",
+                        "expired",
+                        "unknown",
+                    )
+                ):
+                    with self.subTest(table=table, status=status):
+                        row = {
+                            "id": "synthetic-scheduler",
+                            "session_id": "ses_parent",
+                            "action": "private-sentinel",
+                            "tz": "UTC",
+                            "status": status,
+                            "last_message_id": "msg_synthetic",
+                            "time_created": 1,
+                            "time_updated": 2,
+                        }
+                        row.update(
+                            {"when": "private-sentinel"}
+                            if table == "schedule"
+                            else {
+                                "project_id": "synthetic-project",
+                                "directory": "/synthetic-project",
+                                "name": "private-sentinel",
+                                "trigger": "private-sentinel",
+                            }
+                        )
+                        writer.execute("DELETE FROM " + table)
+                        writer.execute(
+                            "INSERT INTO "
+                            + table
+                            + " ("
+                            + ",".join('"' + key + '"' for key in row)
+                            + ") VALUES ("
+                            + ",".join("?" for _ in row)
+                            + ")",
+                            tuple(row.values()),
+                        )
+                        writer.commit()
+                        wal = Path(str(self.database) + "-wal")
+                        self.assertTrue(wal.is_file())
+                        before = (self.database.read_bytes(), wal.read_bytes())
+                        version = (
+                            "2.3.0"
+                            if table == "schedule"
+                            else ("2.3.2", "2.3.9999")[index % 2]
+                        )
+                        self.refusal("schedule-present", version=version)
+                        self.assert_pre_native_refusal(
+                            "schedule-present", version=version
+                        )
+                        self.assertEqual(
+                            (self.database.read_bytes(), wal.read_bytes()), before
+                        )
+
+        cases = [
+            (),
+            (SCHEMA,),
+            ("CREATE VIEW schedule AS SELECT 1 AS id",),
+            ("CREATE VIEW automation AS SELECT 1 AS id",),
+            (SCHEDULE_SCHEMA, AUTOMATION_SCHEMA),
+            (SCHEDULE_SCHEMA, "CREATE VIEW automation AS SELECT 1 AS id"),
+            (AUTOMATION_SCHEMA.replace("event_position TEXT, ", ""),),
+        ]
+        for schema in (SCHEDULE_SCHEMA, AUTOMATION_SCHEMA):
+            cases.extend(
+                (changed,)
+                for changed in (
+                    schema.replace("state TEXT,", ""),
+                    schema.replace("state TEXT", "state BLOB"),
+                    schema.replace("action TEXT NOT NULL", "action TEXT"),
+                    schema.replace("session_id TEXT,", "session_id TEXT NOT NULL,"),
+                    schema.replace("id TEXT PRIMARY KEY", "id TEXT"),
+                    schema.replace(
+                        "time_updated INTEGER NOT NULL)",
+                        "time_updated INTEGER NOT NULL, unknown TEXT)",
+                    ),
+                    schema.replace(
+                        "state TEXT", "state TEXT GENERATED ALWAYS AS (status) VIRTUAL"
+                    ),
+                )
+            )
+        for index, schemas in enumerate(cases):
+            with self.subTest(incompatible_layout=index):
+                layout(*schemas)
+                self.refusal("schedule-schema", version="2.3.9999")
+                self.assert_pre_native_refusal("schedule-schema", version="2.3.9999")
 
     def test_known_shell_subagent_statuses_are_read_only_not_execution_claim_waivers(
         self,
@@ -458,6 +615,7 @@ class JobMetadataGuardTests(unittest.TestCase):
                     if schema:
                         connection.execute(schema)
                 self.refusal("job-schema")
+                self.assert_pre_native_refusal("job-schema", version="2.3.9999")
                 with self.connect() as connection:
                     connection.execute(
                         "DROP VIEW IF EXISTS " + table
@@ -475,8 +633,10 @@ class JobMetadataGuardTests(unittest.TestCase):
                 tuple(subagent.values()),
             )
         before = self.database.read_bytes()
-        reader._check_database(self.database, version="2.3.0")
-        self.assertEqual(self.database.read_bytes(), before)
+        for version in STABLE_23_VERSIONS:
+            with self.subTest(version=version):
+                reader._check_database(self.database, version=version)
+                self.assertEqual(self.database.read_bytes(), before)
         with self.connect() as connection:
             connection.execute("UPDATE job SET status='unknown' WHERE kind='subagent'")
         self.refusal("job-metadata")
@@ -544,6 +704,102 @@ class JobMetadataGuardTests(unittest.TestCase):
         self.store(self.job("shell", child_session_id="x" * 257))
         self.refusal("job-metadata")
 
+    def test_subagent_outstanding_forms_are_bounded_flat_read_only_metadata(self):
+        job = self.job()
+        recovery = json.loads(job["recovery"])
+        shell = {
+            "kind": "shell",
+            "sessionID": "ses_child",
+            "shellID": "sh_outstanding",
+            "command": "private-sentinel",
+        }
+        subagent = {
+            "kind": "subagent",
+            "sessionID": "ses_child",
+            "childSessionID": "ses_grandchild",
+            "agent": "private-sentinel",
+            "description": "private-sentinel",
+        }
+
+        def store(items):
+            self.store(
+                {**job, "recovery": json.dumps({**recovery, "outstanding": items})}
+            )
+
+        for version, items in (
+            ("2.3.0", []),
+            ("2.3.2", [shell]),
+            ("2.3.2", [subagent]),
+            ("2.3.9999", []),
+            ("2.3.9999", [shell, subagent]),
+            (
+                "2.3.9999",
+                [{**shell, "sessionID": "ses_" + "x" * 252, "shellID": "x" * 256}],
+            ),
+            ("2.3.9999", [{**subagent, "childSessionID": "ses_" + "x" * 252}]),
+        ):
+            with self.subTest(version=version, count=len(items)):
+                store(items)
+                before = self.database.read_bytes()
+                reader._check_database(self.database, version=version)
+                self.assertEqual(self.database.read_bytes(), before)
+
+        cases = (
+            (None, "job-metadata"),
+            ({}, "job-metadata"),
+            ("private-sentinel", "job-metadata"),
+            (["private-sentinel"], "job-metadata"),
+            ([[shell]], "job-metadata"),
+            ([{}], "job-kind"),
+            ([{**shell, "kind": "image"}], "job-kind"),
+            ([{**shell, "kind": "codemode"}], "job-kind"),
+            ([{**shell, "kind": "private-sentinel"}], "job-kind"),
+            ([{**shell, "kind": None}], "job-kind"),
+            ([shell, {**subagent, "kind": "image"}], "job-kind"),
+            (
+                [{key: value for key, value in shell.items() if key != "command"}],
+                "job-metadata",
+            ),
+            ([{**shell, "command": None}], "job-metadata"),
+            ([{**shell, "shellID": ""}], "job-metadata"),
+            ([{**shell, "shellID": "x" * 257}], "job-metadata"),
+            ([{**shell, "sessionID": ""}], "job-metadata"),
+            ([{**shell, "sessionID": "private-sentinel"}], "job-metadata"),
+            ([{**shell, "sessionID": "ses_" + "x" * 253}], "job-metadata"),
+            ([{**shell, "unknown": "private-sentinel"}], "job-metadata"),
+            ([{**subagent, "agent": []}], "job-metadata"),
+            ([{**subagent, "description": 1}], "job-metadata"),
+            ([shell, {**subagent, "description": None}], "job-metadata"),
+            ([{**subagent, "childSessionID": "private-sentinel"}], "job-metadata"),
+            ([{**subagent, "childSessionID": "ses_child"}], "job-metadata"),
+            ([{**subagent, "childSessionID": "ses_" + "x" * 253}], "job-metadata"),
+            ([{**subagent, "outstanding": []}], "job-metadata"),
+            ([{**shell, "outstanding": [subagent]}], "job-metadata"),
+        )
+        for index, (items, category) in enumerate(cases):
+            with self.subTest(invalid_outstanding=index):
+                store(items)
+                self.refusal(category, version="2.3.9999")
+                self.assert_pre_native_refusal(category, version="2.3.9999")
+        with patch.object(reader, "MAX_JOB_ROWS", 2):
+            store([shell, subagent])
+            before = self.database.read_bytes()
+            reader._check_database(self.database, version="2.3.2")
+            self.assertEqual(self.database.read_bytes(), before)
+            store([shell, subagent, shell])
+            self.refusal("job-limit", version="2.3.2")
+            self.assert_pre_native_refusal("job-limit", version="2.3.2")
+        shell_job = self.job("shell")
+        self.store(
+            {
+                **shell_job,
+                "recovery": json.dumps(
+                    {**json.loads(shell_job["recovery"]), "outstanding": []}
+                ),
+            }
+        )
+        self.refusal("job-metadata", version="2.3.2")
+
     def test_legacy_rows_and_wal_job_refusals_are_not_hidden_or_deleted(self):
         with self.connect() as connection:
             connection.execute(
@@ -572,13 +828,16 @@ class JobMetadataGuardTests(unittest.TestCase):
     def test_new_profile_store_permissions_links_and_owner_refuse_before_native(self):
         self.database.chmod(0o666)
         self.assert_pre_native_refusal("database-unsafe")
+        self.assert_pre_native_refusal("database-unsafe", version="2.3.47")
         self.database.chmod(0o600)
         link = self.root / "linked.db"
         os.link(self.database, link)
         self.assert_pre_native_refusal("database-unsafe")
+        self.assert_pre_native_refusal("database-unsafe", version="2.3.47")
         link.unlink()
         with patch.object(reader.os, "getuid", return_value=os.getuid() + 1):
             self.assert_pre_native_refusal("database-unsafe")
+            self.assert_pre_native_refusal("database-unsafe", version="2.3.47")
 
     def test_count_recovery_payload_total_and_deadline_limits_are_bounded(self):
         self.store(self.job())
@@ -589,8 +848,13 @@ class JobMetadataGuardTests(unittest.TestCase):
         ):
             with self.subTest(constant=constant), patch.object(reader, constant, value):
                 self.refusal("job-limit")
-        with patch.object(reader.time, "monotonic", side_effect=[100, 102]):
-            self.refusal("deadline")
+                self.refusal("job-limit", version="2.3.47")
+        for version in ("2.3.0", "2.3.47"):
+            with (
+                self.subTest(version=version),
+                patch.object(reader.time, "monotonic", side_effect=[100, 102]),
+            ):
+                self.refusal("deadline", version=version)
 
     def test_source_refuses_before_native_and_destination_before_projection(self):
         for changes, category in (
@@ -598,15 +862,28 @@ class JobMetadataGuardTests(unittest.TestCase):
             ({"kind": "private-sentinel"}, "job-kind"),
             ({"status": "private-sentinel"}, "job-metadata"),
             ({"recovery": "{private-sentinel"}, "job-metadata"),
+            (
+                {
+                    "recovery": json.dumps(
+                        {
+                            **json.loads(self.job()["recovery"]),
+                            "unknown": "private-sentinel",
+                        }
+                    )
+                },
+                "job-metadata",
+            ),
         ):
             with self.subTest(category=category):
                 self.store(self.job(**changes))
                 self.assert_pre_native_refusal(category)
+                self.assert_pre_native_refusal(category, version="2.3.47")
         with self.connect() as connection:
             connection.execute(
                 "INSERT INTO kv VALUES ('job.background/private', 'private-sentinel', 0, 0)"
             )
         self.assert_pre_native_refusal("legacy-jobs")
+        self.assert_pre_native_refusal("legacy-jobs", version="2.3.47")
         with self.connect() as connection:
             connection.execute("DELETE FROM kv")
             connection.execute("DROP TABLE job")
@@ -627,9 +904,11 @@ class JobMetadataGuardTests(unittest.TestCase):
         reader._check_database(self.database, allow_missing=True, version="2.3.0")
         self.assertFalse(self.database.exists())
 
-    def assert_pre_native_refusal(self, category):
+    def assert_pre_native_refusal(self, category, *, version="2.3.0"):
         inputs = SimpleNamespace(
-            buffer=io.BytesIO(b'{"bridge":"public","version":"2.3.0"}\n')
+            buffer=io.BytesIO(
+                json.dumps({"bridge": "public", "version": version}).encode() + b"\n"
+            )
         )
         with (
             patch.dict(os.environ, {}, clear=True),
@@ -644,7 +923,7 @@ class JobMetadataGuardTests(unittest.TestCase):
         execute.assert_not_called()
         box = fake_box()
         box.run.side_effect = lambda command, **_kw: SimpleNamespace(
-            stdout="2.3.0\n"
+            stdout=version + "\n"
             if command[1:] == ["--version"]
             else str(self.database) + "\n"
         )
@@ -653,7 +932,7 @@ class JobMetadataGuardTests(unittest.TestCase):
             self.assertRaisesRegex(BoxError, category),
         ):
             reader.assert_host_safe(
-                box, None, {**DATA, "opencode_version": "2.3.0"}, {}, lambda: 5
+                box, None, {**DATA, "opencode_version": version}, {}, lambda: 5
             )
         self.assertEqual(
             [call.args[0][1:] for call in box.run.call_args_list],
@@ -691,31 +970,71 @@ class EnvironmentTests(unittest.TestCase):
         self.addCleanup(system.stop)
 
     def test_changed_host_native_version_refuses_before_path_or_store_projection(self):
-        box = fake_box()
-        box.run.side_effect = None
-        box.run.return_value.stdout = "opencode v2.2.7\n"
-        with patch.object(reader, "_check_database") as guard:
-            with self.assertRaisesRegex(BoxError, "unsupported-version"):
-                reader.assert_host_safe(
-                    box, Path("/synthetic/workspace.json"), DATA, {}, lambda: 3
-                )
-        guard.assert_not_called()
-        self.assertEqual(box.run.call_count, 1)
-        self.assertEqual(box.run.call_args.args[0], ["opencode", "--version"])
+        for expected, actual in (("2.2.6", "2.2.7"), ("2.3.2", "2.3.47")):
+            with self.subTest(expected=expected, actual=actual):
+                box = fake_box()
+                box.run.side_effect = None
+                box.run.return_value.stdout = "opencode v" + actual + "\n"
+                with patch.object(reader, "_check_database") as guard:
+                    with self.assertRaisesRegex(BoxError, "unsupported-version"):
+                        reader.assert_host_safe(
+                            box,
+                            Path("/synthetic/workspace.json"),
+                            {**DATA, "opencode_version": expected},
+                            {},
+                            lambda: 3,
+                        )
+                guard.assert_not_called()
+                self.assertEqual(box.run.call_count, 1)
+                self.assertEqual(box.run.call_args.args[0], ["opencode", "--version"])
 
-    def test_exact_native_version_matrix_and_unknown_future_versions_fail_closed(self):
-        supported = ("2.2.6", "2.2.7", "2.3.0")
-        self.assertEqual(reader.SUPPORTED, frozenset(supported))
+    def test_stable_series_profiles_require_exact_native_versions_and_fail_closed(self):
+        profiles = {
+            "2.2.6": "2.2",
+            "2.2.7": "2.2",
+            **dict.fromkeys(STABLE_23_VERSIONS, "2.3"),
+        }
+        supported = tuple(profiles)
         for release in supported:
+            self.assertEqual(reader.snapshot_profile(release), profiles[release])
             for output in (release, "opencode v" + release + "\n", "v" + release):
                 with self.subTest(release=release, output=output):
                     reader._check_version(output, release)
-            for changed in ("2.3.1", "2.4.0", "2.3.0+unknown", "2.3.0-dev"):
+            for changed in (
+                *(version for version in supported if version != release),
+                "2.4.0",
+                "2.3.0+unknown",
+                "2.3.0-dev",
+            ):
                 with self.subTest(release=release, changed=changed):
                     with self.assertRaisesRegex(reader.Refusal, "unsupported-version"):
                         reader._check_version(changed, release)
-        for unknown in ("2.2.8", "2.3.1", "2.4.0", "2.3.0+unknown", None):
+        for unknown in (
+            None,
+            False,
+            2.3,
+            ["2.3.2"],
+            {"version": "2.3.2"},
+            "",
+            "2.2.8",
+            "2.4.0",
+            "3.3.0",
+            "2.3",
+            "2.3.-1",
+            "2.3.00",
+            "2.3.01",
+            "2.3.٠",
+            "2.3.١",
+            "2.3.1٢",
+            "2.3.2\n",
+            " 2.3.2",
+            "v2.3.2",
+            "2.3.0+unknown",
+            "2.3.2+unknown",
+            "2.3.2-dev",
+        ):
             with self.subTest(unknown=unknown):
+                self.assertIsNone(reader.snapshot_profile(unknown))
                 box = fake_box()
                 with self.assertRaisesRegex(BoxError, "unsupported-version"):
                     reader.assert_host_safe(
@@ -869,38 +1188,44 @@ class ReaderTests(unittest.TestCase):
         self.children.append(value)
         return value
 
-    def test_230_reader_keeps_one_endpoint_command_fences_and_foreground_refusal(self):
-        lease = reader.Reader(
-            self.box, {**DATA, "opencode_version": "2.3.0"}, remaining=lambda: 4
-        )
-        child = self.child()
-        with patch.object(reader.subprocess, "Popen", return_value=child) as popen:
-            with lease:
-                self.assertEqual(popen.call_count, 1)
-                for args in (
-                    ["api", "post", "/api/session/private/prompt"],
-                    ["api", "delete", "/api/experimental/job/private"],
-                    ["api", "post", "/api/location/reload"],
-                    ["run", "private"],
-                    ["session", "list", "--standalone"],
-                    [
-                        "api",
-                        "get",
-                        "/api/session/active",
-                        "--server",
-                        "http://localhost:1",
-                    ],
-                ):
-                    with self.subTest(args=args):
-                        with self.assertRaisesRegex(BoxError, "client-command"):
-                            lease.command([self.box.CONTAINER_OPENCODE, *args])
-                self.box.run.return_value.stdout = '{"data":{"private":"running"}}'
-                with self.assertRaisesRegex(BoxError, "foreground-active"):
-                    lease.assert_idle()
-                self.box.run.return_value.stdout = '{"data":{}}'
-        self.assertEqual(json.loads(child.stdin.saved)["version"], "2.3.0")
-        self.assertIsNone(reader.current())
-        self.assertEqual(child.timeouts, [10])
+    def test_23x_reader_keeps_one_endpoint_command_fences_and_foreground_refusal(self):
+        for release in ("2.3.0", "2.3.2", "2.3.9999"):
+            with self.subTest(release=release):
+                lease = reader.Reader(
+                    self.box, {**DATA, "opencode_version": release}, remaining=lambda: 4
+                )
+                child = self.child()
+                with patch.object(
+                    reader.subprocess, "Popen", return_value=child
+                ) as popen:
+                    with lease:
+                        self.assertEqual(popen.call_count, 1)
+                        for args in (
+                            ["api", "post", "/api/session/private/prompt"],
+                            ["api", "delete", "/api/experimental/job/private"],
+                            ["api", "post", "/api/location/reload"],
+                            ["run", "private"],
+                            ["session", "list", "--standalone"],
+                            [
+                                "api",
+                                "get",
+                                "/api/session/active",
+                                "--server",
+                                "http://localhost:1",
+                            ],
+                        ):
+                            with self.subTest(args=args):
+                                with self.assertRaisesRegex(BoxError, "client-command"):
+                                    lease.command([self.box.CONTAINER_OPENCODE, *args])
+                        self.box.run.return_value.stdout = (
+                            '{"data":{"private":"running"}}'
+                        )
+                        with self.assertRaisesRegex(BoxError, "foreground-active"):
+                            lease.assert_idle()
+                        self.box.run.return_value.stdout = '{"data":{}}'
+                self.assertEqual(json.loads(child.stdin.saved)["version"], release)
+                self.assertIsNone(reader.current())
+                self.assertEqual(child.timeouts, [10])
 
     def test_one_private_lease_scoped_connections_idle_boundaries_and_no_election(self):
         child = self.child()
@@ -1220,8 +1545,10 @@ class ReaderTests(unittest.TestCase):
                 "2.2.5",
                 "2.2.8",
                 "2.2.7+unknown",
-                "2.3.1",
                 "2.4.0",
+                "2.3.01",
+                "2.3.٢",
+                "2.3.2-dev",
                 "2.3.0+unknown",
             ):
                 with (
@@ -1260,24 +1587,31 @@ class RemoteHelperTests(unittest.TestCase):
     def test_changed_source_binary_version_refuses_before_native_service_or_bridge(
         self,
     ):
-        inputs = SimpleNamespace(
-            buffer=io.BytesIO(b'{"bridge":"public","version":"2.2.6"}\n')
-        )
-        with (
-            patch.dict(os.environ, {}, clear=True),
-            patch.object(reader.sys, "stdin", inputs),
-            patch.object(reader.os, "chdir"),
-            patch.object(reader, "_check_database"),
-            patch.object(
-                reader.subprocess,
-                "run",
-                return_value=SimpleNamespace(returncode=0, stdout="opencode v2.2.7\n"),
-            ),
-            patch.object(reader, "exec", create=True) as execute,
-        ):
-            with self.assertRaisesRegex(reader.Refusal, "unsupported-version"):
-                reader._remote(["lease", DATA["home"], "synthetic-opencode"])
-        execute.assert_not_called()
+        for expected, actual in (("2.2.6", "2.2.7"), ("2.3.2", "2.3.47")):
+            with self.subTest(expected=expected, actual=actual):
+                inputs = SimpleNamespace(
+                    buffer=io.BytesIO(
+                        json.dumps({"bridge": "public", "version": expected}).encode()
+                        + b"\n"
+                    )
+                )
+                with (
+                    patch.dict(os.environ, {}, clear=True),
+                    patch.object(reader.sys, "stdin", inputs),
+                    patch.object(reader.os, "chdir"),
+                    patch.object(reader, "_check_database"),
+                    patch.object(
+                        reader.subprocess,
+                        "run",
+                        return_value=SimpleNamespace(
+                            returncode=0, stdout="opencode v" + actual + "\n"
+                        ),
+                    ),
+                    patch.object(reader, "exec", create=True) as execute,
+                ):
+                    with self.assertRaisesRegex(reader.Refusal, "unsupported-version"):
+                        reader._remote(["lease", DATA["home"], "synthetic-opencode"])
+                execute.assert_not_called()
 
     def test_remote_guard_precedes_single_bridge_and_empty_private_config_is_cleaned(
         self,

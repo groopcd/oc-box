@@ -283,6 +283,8 @@ class HistoryRecoveryTests(unittest.TestCase):
         self.assertNotIn("snapshots were synchronized", self.output.getvalue())
         self.assertIn("oc-box sync", self.output.getvalue())
         self.assertNotIn("private-sentinel", self.output.getvalue())
+        self.assertNotIn("Check for an oc-box update", self.output.getvalue())
+        self.assertNotIn("upgrade OpenCode", self.output.getvalue())
 
     def test_reader_exit_failure_cannot_be_reported_as_saved(self):
         self.reader.__exit__.side_effect = box.BoxError("private-sentinel")
@@ -293,6 +295,66 @@ class HistoryRecoveryTests(unittest.TestCase):
         self.assertNotIn("snapshots were synchronized", self.output.getvalue())
         self.assertIn("oc-box sync", self.output.getvalue())
         self.assertNotIn("private-sentinel", self.output.getvalue())
+
+    def test_reader_compatibility_refusals_keep_cleanup_and_only_fixed_upgrade_guidance(
+        self,
+    ):
+        self.data["opencode_version"] = "2.3.9999"
+        self.source = recovery.capture(box, self.data, self.info, self.token)
+        cases = (
+            ("unsupported-version", False, True),
+            ("schedule-schema", False, True),
+            ("job-schema", False, True),
+            ("job-metadata", False, True),
+            ("job-kind", False, True),
+            ("legacy-jobs", False, True),
+            ("active-response", False, True),
+            ("job-schema", True, True),
+            ("database-unsafe", False, False),
+            ("private-sentinel", False, False),
+            ({"private-sentinel": 1}, False, False),
+        )
+        for category, cleanup_failure, guidance in cases:
+            with self.subTest(category=category, cleanup_failure=cleanup_failure):
+                self.running = True
+                self.calls.clear()
+                self.output.seek(0)
+                self.output.truncate(0)
+                error = box.BoxError("private-sentinel")
+                error.history_reader_category = category
+
+                def fail(event):
+                    if event == "reader":
+                        raise error
+                    if (
+                        cleanup_failure
+                        and event == "stop"
+                        and self.calls.count("stop") == 2
+                    ):
+                        raise box.BoxError("private-sentinel")
+
+                self.inject = fail
+                result, lease, sync = self.recover()
+                self.assertIs(result, False)
+                self.assertFalse(self.running)
+                lease.assert_called_once()
+                sync.assert_not_called()
+                self.assertEqual(self.calls.count("start"), 1)
+                self.assertEqual(self.calls.count("stop"), 2)
+                output = self.output.getvalue()
+                self.assertIn("oc-box sync", output)
+                self.assertNotIn("snapshots were synchronized", output)
+                self.assertNotIn("private-sentinel", output)
+                self.assertEqual("Check for an oc-box update first" in output, guidance)
+                self.assertEqual("upgrade OpenCode" in output, guidance)
+                if guidance:
+                    self.assertIn(f"contract was not recognized ({category})", output)
+                    self.assertIn("if it is older than a supported release", output)
+                    self.assertIn("do not reset or downgrade state", output)
+                if cleanup_failure:
+                    self.assertIn("cleanup-unverified", output)
+                else:
+                    self.assertEqual(self.calls[-2:], ["stop", "inspect-stopped"])
 
     def test_stop_intent_between_process_boundaries_suppresses_the_next_process(self):
         environment = {"PATH": os.environ["PATH"], "LANG": "C.UTF-8"}
@@ -328,6 +390,8 @@ class HistoryRecoveryTests(unittest.TestCase):
         self.assertFalse(self.running)
         self.assertEqual(self.calls[-2:], ["stop", "inspect-stopped"])
         self.assertIsNone(recovery.remaining())
+        self.assertNotIn("Check for an oc-box update", self.output.getvalue())
+        self.assertNotIn("upgrade OpenCode", self.output.getvalue())
 
     def test_cleanup_refusal_cannot_be_reported_as_saved(self):
         stops = 0
@@ -421,9 +485,29 @@ class HistoryRecoveryTests(unittest.TestCase):
             recovery.report_skipped([])
         self.assertIn("non-shell-jobs, unavailable", output.getvalue())
         self.assertNotIn("private-sentinel", output.getvalue())
+        output = io.StringIO()
+        with contextlib.redirect_stderr(output):
+            for reason in (
+                "private-sentinel",
+                {"private-sentinel": 1},
+                None,
+                "activity-api-failed",
+                "deadline",
+                "system-config",
+            ):
+                recovery.report_compatibility_refusal(reason)
+        self.assertEqual(output.getvalue(), "")
 
-    def test_capture_uses_reader_exact_version_policy_not_a_second_allowlist(self):
-        for release in ("2.2.6", "2.2.7", "2.3.0"):
+    def test_capture_uses_reader_series_policy_not_a_second_allowlist(self):
+        for release in (
+            "2.2.6",
+            "2.2.7",
+            "2.3.0",
+            "2.3.1",
+            "2.3.2",
+            "2.3.47",
+            "2.3.9999",
+        ):
             with self.subTest(release=release):
                 self.assertEqual(
                     recovery.capture(
@@ -434,7 +518,17 @@ class HistoryRecoveryTests(unittest.TestCase):
                     ),
                     self.source,
                 )
-        for release in ("2.2.8", "2.3.1", "2.4.0", "2.3.0+unknown", None):
+        for release in (
+            "2.2.8",
+            "2.4.0",
+            "2.3.01",
+            "2.3.٢",
+            "2.3.0+unknown",
+            "2.3.2-dev",
+            None,
+            False,
+            ["2.3.2"],
+        ):
             with self.subTest(release=release):
                 self.assertIsNone(
                     recovery.capture(
@@ -444,28 +538,45 @@ class HistoryRecoveryTests(unittest.TestCase):
                         self.token,
                     )
                 )
-        with patch.object(recovery.history_reader, "SUPPORTED", frozenset()):
+        with patch.object(
+            recovery.history_reader, "snapshot_profile", return_value=None
+        ) as profile:
             self.assertIsNone(recovery.capture(box, self.data, self.info, self.token))
+        profile.assert_called_once_with(self.data["opencode_version"])
 
-    def test_230_recovery_preserves_same_resource_sequence_and_failure_warning(self):
-        self.data["opencode_version"] = "2.3.0"
-        self.source = recovery.capture(box, self.data, self.info, self.token)
-        result, lease, sync = self.recover()
-        self.assertTrue(result)
-        self.assertEqual(self.calls.count("start"), 1)
-        self.assertEqual(self.calls.count("stop"), 2)
-        self.assertLess(self.calls.index("inspect-stopped"), self.calls.index("reader"))
-        self.assertFalse(self.running)
-        self.assertEqual(lease.call_args.args[1]["opencode_version"], "2.3.0")
-        sync.assert_called_once()
-        self.assertIn("Execution was interrupted", self.output.getvalue())
-        self.assertIn(
-            "Background work is not declared complete", self.output.getvalue()
-        )
+    def test_23x_recovery_preserves_same_resource_sequence_and_failure_warning(self):
+        for release in ("2.3.0", "2.3.2", "2.3.47"):
+            with self.subTest(release=release):
+                self.data["opencode_version"] = release
+                self.source = recovery.capture(box, self.data, self.info, self.token)
+                self.running = True
+                self.calls.clear()
+                self.output.seek(0)
+                self.output.truncate(0)
+                result, lease, sync = self.recover()
+                self.assertTrue(result)
+                self.assertEqual(self.calls.count("start"), 1)
+                self.assertEqual(self.calls.count("stop"), 2)
+                self.assertLess(
+                    self.calls.index("inspect-stopped"), self.calls.index("reader")
+                )
+                self.assertFalse(self.running)
+                self.assertEqual(lease.call_args.args[1]["opencode_version"], release)
+                sync.assert_called_once()
+                self.assertIn("Execution was interrupted", self.output.getvalue())
+                self.assertIn(
+                    "Background work is not declared complete", self.output.getvalue()
+                )
 
     def test_real_exit_routing_distinguishes_identical_timeout_counts(self):
         cases = {
             "eligible-shell": {},
+            "eligible-shell-232": {"release": "2.3.2"},
+            "eligible-subagent-232": {"release": "2.3.2", "kind": "subagent"},
+            "eligible-future-subagent": {
+                "release": "2.3.9999",
+                "kind": "subagent",
+            },
             "eligible-client-failed": {"client_code": 7},
             "eligible-client-interrupted": {"client_code": 130},
             "eligible-subagent": {"kind": "subagent"},
@@ -478,6 +589,20 @@ class HistoryRecoveryTests(unittest.TestCase):
             "unsafe-baseline": {
                 "custom_options": True,
                 "refusal": "custom-podman-options",
+            },
+            "unsupported-version": {
+                "release": "2.4.0",
+                "refusal": "unsupported-version",
+            },
+            "future-invalid-active-response": {
+                "release": "2.3.9999",
+                "api_refusal": "/api/session/active",
+                "refusal": "invalid-active-response",
+            },
+            "232-invalid-jobs-response": {
+                "release": "2.3.2",
+                "api_refusal": "/api/experimental/job",
+                "refusal": "invalid-jobs-response",
             },
             "unsupported-image": {"kind": "image", "refusal": "non-shell-jobs"},
             "one-pair": {
@@ -505,15 +630,16 @@ class HistoryRecoveryTests(unittest.TestCase):
         }
         for name, case in cases.items():
             with self.subTest(case=name):
+                release = case.get("release", "2.3.0")
                 data = {
                     **self.data,
-                    "opencode_version": "2.3.0",
+                    "opencode_version": release,
                     "podman_args": ["--group-add=keep-groups"]
                     if case.get("custom_options")
                     else [],
                 }
                 args = box.parser().parse_args(["start"])
-                args._opencode_release = "2.3.0"
+                args._opencode_release = release
                 events, now, requests = [], [0.0], []
                 owner = SimpleNamespace(
                     connection={"url": "http://127.0.0.1:1", "password": "synthetic"},
@@ -525,7 +651,7 @@ class HistoryRecoveryTests(unittest.TestCase):
 
                 @contextlib.contextmanager
                 def service(*_args, ui_bridge=False):
-                    self.assertIs(ui_bridge, True)
+                    self.assertIs(ui_bridge, release == "2.3.0")
                     events.append("owner-open")
                     try:
                         yield owner
@@ -545,6 +671,8 @@ class HistoryRecoveryTests(unittest.TestCase):
                         )
                         else min(5, timeout)
                     )
+                    if target == case.get("api_refusal"):
+                        return {"data": "private-sentinel"}
                     return {
                         "data": {}
                         if target == "/api/session/active"
@@ -564,6 +692,29 @@ class HistoryRecoveryTests(unittest.TestCase):
                     events.append("recover")
                     return True
 
+                early_warning = (
+                    "Automatic post-stop history recovery is unavailable: the "
+                    "OpenCode compatibility contract was not recognized "
+                    "(unsupported-version)."
+                )
+                unsupported = case.get("refusal") == "unsupported-version"
+                launch_client = box.launch_client
+
+                def client(*args, **kwargs):
+                    self.assertEqual(
+                        output.getvalue().count(early_warning), int(unsupported)
+                    )
+                    self.assertEqual(
+                        "Check for an oc-box update first" in output.getvalue(),
+                        unsupported,
+                    )
+                    self.assertEqual(
+                        owner._history_source_refusal == "unsupported-version",
+                        unsupported,
+                    )
+                    events.append("client-open")
+                    return launch_client(*args, **kwargs)
+
                 output, terminal_output = io.StringIO(), io.StringIO()
                 with (
                     contextlib.ExitStack() as boundaries,
@@ -579,6 +730,7 @@ class HistoryRecoveryTests(unittest.TestCase):
                         ),
                     ),
                     patch.object(box.workspace_service, "Owner", side_effect=service),
+                    patch.object(box, "launch_client", side_effect=client),
                     patch.object(
                         box,
                         "refresh_sessions",
@@ -625,21 +777,42 @@ class HistoryRecoveryTests(unittest.TestCase):
                                 ),
                             )
                         )
+                    result = box.launch_environment(self.path, data, args)
+                    self.assertIs(type(result), int)
                     self.assertEqual(
-                        box.launch_environment(self.path, data, args),
+                        result,
                         (case.get("client_code", 0) or 1)
                         if "refusal" in case
                         else case.get("client_code", 0),
                     )
-                self.assertIn(
-                    "last complete observation: foreground=0, jobs-running="
-                    + str(case.get("count", 1))
-                    + ", "
-                    "jobs-completed=0, jobs-error=0, jobs-cancelled=0.",
-                    output.getvalue(),
-                )
+                if case.get("api_refusal"):
+                    self.assertNotIn("last complete observation", output.getvalue())
+                else:
+                    self.assertIn(
+                        "last complete observation: foreground=0, jobs-running="
+                        + str(case.get("count", 1))
+                        + ", "
+                        "jobs-completed=0, jobs-error=0, jobs-cancelled=0.",
+                        output.getvalue(),
+                    )
                 live_sync.assert_not_called()
                 owner.wait_clients.assert_called_once()
+                self.assertEqual(owner._client_exit_code, case.get("client_code", 0))
+                self.assertEqual(
+                    output.getvalue().count(early_warning), int(unsupported)
+                )
+                guidance = unsupported or bool(case.get("api_refusal"))
+                self.assertEqual(
+                    "Check for an oc-box update first" in output.getvalue(), guidance
+                )
+                self.assertEqual("upgrade OpenCode" in output.getvalue(), guidance)
+                self.assertNotIn("private-sentinel", output.getvalue())
+                if guidance:
+                    self.assertIn(
+                        f"contract was not recognized ({case['refusal']})",
+                        output.getvalue(),
+                    )
+                    self.assertIn("do not reset or downgrade state", output.getvalue())
                 if case.get("home"):
                     owner.publish.assert_called_once_with(None)
                     self.assertIn(
@@ -651,17 +824,26 @@ class HistoryRecoveryTests(unittest.TestCase):
                 if "refusal" not in case:
                     recover.assert_called_once()
                     self.assertEqual(
-                        events, ["owner-open", "owner-closed", "recover", "final-stop"]
+                        events,
+                        [
+                            "owner-open",
+                            "client-open",
+                            "owner-closed",
+                            "recover",
+                            "final-stop",
+                        ],
                     )
                     self.assertNotIn("not attempted", output.getvalue())
                 else:
                     recover.assert_not_called()
                     self.assertEqual(
-                        events, ["owner-open", "owner-closed", "final-stop"]
+                        events,
+                        ["owner-open", "client-open", "owner-closed", "final-stop"],
                     )
-                    self.assertIn(
-                        "Automatic persisted-history snapshot not attempted",
-                        output.getvalue(),
+                    self.assertEqual(
+                        "Automatic persisted-history snapshot not attempted"
+                        in output.getvalue(),
+                        not bool(case.get("api_refusal")),
                     )
                     self.assertIn(case["refusal"], output.getvalue())
                     self.assertEqual(

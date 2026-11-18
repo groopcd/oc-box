@@ -680,7 +680,7 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
     need a separate check in the export path. Persistent PTYs are not activity.
     Timeout diagnostics contain only the phase and the last fully validated pair
     of status/kind counts, never native identifiers, commands, responses or errors.
-    Exact native 2.3.0 may route retained shell/subagent jobs to a guarded
+    Stable native 2.3.x may route retained shell/subagent jobs to a guarded
     unregistered post-stop reader; older/unknown versions retain shell-only hints.
     """
     if __package__:
@@ -692,7 +692,8 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
     observation = "unavailable"
     kind_observation = "unavailable"
     kinds = history_reader.SNAPSHOT_JOB_KINDS.get(
-        data.get("opencode_version"), frozenset(("shell",))
+        history_reader.snapshot_profile(data.get("opencode_version")),
+        frozenset(("shell",)),
     )
     insufficient = (
         "insufficient-job-observations"
@@ -711,7 +712,10 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
                 recovery_eligible=job_pairs >= 2,
                 recovery_reason=recovery_reason,
             ) from None
-        raise box.BoxError(f"OpenCode 2.x history wait failed ({category}).") from None
+        error = box.BoxError(f"OpenCode 2.x history wait failed ({category}).")
+        if category in ("invalid-active-response", "invalid-jobs-response"):
+            error.history_compatibility_category = category
+        raise error from None
 
     if (
         not isinstance(timeout, (int, float))

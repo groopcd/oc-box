@@ -23,16 +23,14 @@ import tempfile
 import time
 
 CURRENT = contextvars.ContextVar("oc_box_history_reader", default=None)
-# Exact audited native versions only. 2.2.x retains cancelled reload jobs; 2.3.0
-# drains reload jobs but can retain shell/subagent rows after producer termination.
-# The 2.3.0 profile is ONLY for unregistered serve --stdio: unlike the managed
-# service it does not resume durable jobs/claims. Images have no native canary.
+# Legacy 2.2.6/2.2.7 and the stable 2.3.x storage profile only. Series membership
+# selects guards, never bypasses them: incompatible schemas/recovery forms refuse.
+# The 2.3 profile is ONLY for unregistered serve --stdio, not managed-service
+# restart continuity. Images have no native non-execution canary.
 # Neither profile waives live readiness or establishes whole-container acceptance.
-SUPPORTED = frozenset(("2.2.6", "2.2.7", "2.3.0"))
 SNAPSHOT_JOB_KINDS = {
-    "2.2.6": frozenset(("shell",)),
-    "2.2.7": frozenset(("shell",)),
-    "2.3.0": frozenset(("shell", "subagent")),
+    "2.2": frozenset(("shell",)),
+    "2.3": frozenset(("shell", "subagent")),
 }
 MAX_JOB_ROWS = 10000
 MAX_JOB_RECOVERY_BYTES = 65536
@@ -103,9 +101,24 @@ def current():
     return CURRENT.get()
 
 
+def snapshot_profile(version):
+    """Select a guarded storage contract, not an assurance of native acceptance.
+
+    Only canonical stable versions qualify; prereleases, build suffixes and
+    unknown minor/major series must not inherit the 2.3 contract.
+    """
+    if not isinstance(version, str):
+        return None
+    if re.fullmatch(r"2\.3\.(?:0|[1-9][0-9]*)", version):
+        return "2.3"
+    if version in ("2.2.6", "2.2.7"):
+        return "2.2"
+    return None
+
+
 def _check_version(output, expected):
     match = re.fullmatch(r"(?:opencode\s+)?v?([12]\.\d+\.\d+)", output.strip())
-    if not match or match[1] != expected or expected not in SUPPORTED:
+    if not match or match[1] != expected or snapshot_profile(expected) is None:
         raise Refusal("unsupported-version")
 
 
@@ -116,8 +129,103 @@ def _budget(remaining, maximum):
     return min(value, maximum)
 
 
+def _table_schema(connection, name, expected, category):
+    """Recognize a complete audited layout, never a view or unknown extension."""
+    if connection.execute(
+        "SELECT type FROM sqlite_master WHERE name = ?", (name,)
+    ).fetchall() != [("table",)]:
+        raise Refusal(category)
+    columns = {
+        row[1]: row for row in connection.execute("PRAGMA table_xinfo('" + name + "')")
+    }
+    if set(columns) != set(expected) or any(
+        columns[key][2].upper() != kind
+        or bool(columns[key][5]) != primary
+        or (required is not None and bool(columns[key][3]) != required)
+        or columns[key][6] != 0
+        for key, (kind, required, primary) in expected.items()
+    ):
+        raise Refusal(category)
+
+
+def _check_scheduler(connection, profile):
+    """Refuse before native's flag-independent scheduler/automation rewake."""
+    table = "schedule"
+    if profile == "2.3":
+        layouts = connection.execute(
+            "SELECT name, type FROM sqlite_master WHERE name IN ('schedule', 'automation')"
+        ).fetchall()
+        if len(layouts) != 1 or layouts[0][1] != "table":
+            raise Refusal("schedule-schema")
+        table = layouts[0][0]
+        # 2.3.0's schedule and 2.3.1+'s automation are the two known contracts.
+        # Empty old stores may migrate forward; missing/ambiguous/new shapes
+        # never inherit a pass merely because the native version is 2.3.x.
+        common = {
+            "id": ("TEXT", None, True),
+            "session_id": ("TEXT", False, False),
+            "name": ("TEXT", table == "automation", False),
+            "action": ("TEXT", True, False),
+            "tz": ("TEXT", True, False),
+            "status": ("TEXT", True, False),
+            "next_due_at": ("INTEGER", False, False),
+            "run_count": ("INTEGER", True, False),
+            "failures": ("INTEGER", True, False),
+            "last_message_id": ("TEXT", False, False),
+            "last_outcome": ("TEXT", False, False),
+            "retry_at": ("INTEGER", False, False),
+            "state": ("TEXT", False, False),
+            "time_created": ("INTEGER", True, False),
+            "time_updated": ("INTEGER", True, False),
+        }
+        specific = (
+            {
+                "check": ("TEXT", False, False),
+                "when": ("TEXT", True, False),
+                "ends_at": ("INTEGER", False, False),
+                "remaining_runs": ("INTEGER", False, False),
+                "checks": ("INTEGER", True, False),
+                "last_fired_at": ("INTEGER", False, False),
+            }
+            if table == "schedule"
+            else {
+                "project_id": ("TEXT", True, False),
+                "directory": ("TEXT", True, False),
+                "trigger": ("TEXT", True, False),
+                "expires_at": ("INTEGER", False, False),
+                "last_run_at": ("INTEGER", False, False),
+                "last_output": ("TEXT", False, False),
+                "event_position": ("TEXT", False, False),
+            }
+        )
+        _table_schema(connection, table, {**common, **specific}, "schedule-schema")
+    else:
+        if connection.execute(
+            "SELECT type FROM sqlite_master WHERE name = 'schedule'"
+        ).fetchall() != [("table",)]:
+            raise Refusal("schedule-schema")
+        columns = {
+            row[1]: row for row in connection.execute("PRAGMA table_info('schedule')")
+        }
+        required = ("id", "session_id", "status", "last_message_id")
+        if (
+            any(
+                name not in columns or columns[name][2].upper() != "TEXT"
+                for name in required
+            )
+            or not columns["id"][5]
+        ):
+            raise Refusal("schedule-schema")
+    if (
+        connection.execute('SELECT 1 FROM "' + table + '" LIMIT 1').fetchone()
+        is not None
+    ):
+        raise Refusal("schedule-present")
+    return table
+
+
 def _check_jobs(connection, deadline):
-    """Validate bounded 2.3.0 recovery metadata, never outputs or transcripts.
+    """Validate bounded 2.3.x recovery metadata, never outputs or transcripts.
 
     All known statuses remain historical metadata, not proof of completion. The
     unregistered native profile must preserve these rows, including execution
@@ -128,26 +236,9 @@ def _check_jobs(connection, deadline):
         if time.monotonic() >= deadline:
             raise Refusal("deadline")
 
-    def table(name, expected):
-        if connection.execute(
-            "SELECT type FROM sqlite_master WHERE name = ?", (name,)
-        ).fetchall() != [("table",)]:
-            raise Refusal("job-schema")
-        columns = {
-            row[1]: row
-            for row in connection.execute("PRAGMA table_xinfo('" + name + "')")
-        }
-        if set(columns) != set(expected) or any(
-            columns[key][2].upper() != kind
-            or bool(columns[key][5]) != primary
-            or (required is not None and bool(columns[key][3]) != required)
-            or columns[key][6] != 0
-            for key, (kind, required, primary) in expected.items()
-        ):
-            raise Refusal("job-schema")
-
     budget()
-    table(
+    _table_schema(
+        connection,
         "job",
         {
             "notification_id": ("TEXT", None, True),
@@ -163,8 +254,10 @@ def _check_jobs(connection, deadline):
             "time_created": ("INTEGER", True, False),
             "time_updated": ("INTEGER", True, False),
         },
+        "job-schema",
     )
-    table(
+    _table_schema(
+        connection,
         "kv",
         {
             "key": ("TEXT", None, True),
@@ -172,6 +265,7 @@ def _check_jobs(connection, deadline):
             "time_created": ("INTEGER", True, False),
             "time_updated": ("INTEGER", True, False),
         },
+        "job-schema",
     )
     if connection.execute(
         "SELECT 1 FROM kv WHERE key LIKE 'job.background/%' LIMIT 1"
@@ -192,6 +286,39 @@ def _check_jobs(connection, deadline):
                 raise Refusal("job-metadata")
             value[key] = item
         return value
+
+    def outstanding(items):
+        if not isinstance(items, list):
+            raise Refusal("job-metadata")
+        if len(items) > MAX_JOB_ROWS:
+            raise Refusal("job-limit")
+        for item in items:
+            budget()
+            if not isinstance(item, dict):
+                raise Refusal("job-metadata")
+            kind = item.get("kind")
+            if not isinstance(kind, str) or kind not in SNAPSHOT_JOB_KINDS["2.3"]:
+                raise Refusal("job-kind")
+            keys = (
+                {"kind", "sessionID", "shellID", "command"}
+                if kind == "shell"
+                else {"kind", "sessionID", "childSessionID", "agent", "description"}
+            )
+            if (
+                set(item) != keys
+                or any(not isinstance(value, str) for value in item.values())
+                or not identity(item["sessionID"], "ses")
+            ):
+                raise Refusal("job-metadata")
+            if kind == "shell":
+                valid = bool(item["shellID"]) and len(item["shellID"]) <= 256
+            else:
+                valid = (
+                    identity(item["childSessionID"], "ses")
+                    and item["childSessionID"] != item["sessionID"]
+                )
+            if not valid:
+                raise Refusal("job-metadata")
 
     total = 0
     # Bound SQL result strings BEFORE passing recovery JSON into Python. Its
@@ -229,7 +356,7 @@ def _check_jobs(connection, deadline):
             size,
             encoded,
         ) = row
-        if kind not in SNAPSHOT_JOB_KINDS["2.3.0"]:
+        if kind not in SNAPSHOT_JOB_KINDS["2.3"]:
             raise Refusal("job-kind")
         if (
             not identity(notice, "msg")
@@ -260,9 +387,19 @@ def _check_jobs(connection, deadline):
             else {"kind", "parentSessionID", "childSessionID", "agent", "description"}
         )
         if (
+            kind == "subagent"
+            and isinstance(recovery, dict)
+            and "outstanding" in recovery
+        ):
+            keys = keys | {"outstanding"}
+        if (
             not isinstance(recovery, dict)
             or set(recovery) != keys
-            or any(not isinstance(value, str) for value in recovery.values())
+            or any(
+                not isinstance(value, str)
+                for key, value in recovery.items()
+                if key != "outstanding"
+            )
             or recovery["kind"] != kind
         ):
             raise Refusal("job-metadata")
@@ -281,19 +418,22 @@ def _check_jobs(connection, deadline):
             )
         if not valid:
             raise Refusal("job-metadata")
+        if kind == "subagent" and "outstanding" in recovery:
+            outstanding(recovery["outstanding"])
     budget()
 
 
 def _check_database(path, *, allow_missing=False, timeout=1, version=None):
     """Inspect scheduler and explicitly selected job metadata without mutation.
 
-    A disabled schedules flag does NOT disable native Schedule.rewake. All rows,
+    Disabled schedules/automations flags do NOT disable native startup rewake. All rows,
     including terminal/unknown statuses, therefore refuse service construction.
     Missing schemas are not evidence of an empty scheduler. Never use immutable
     SQLite mode here: it can hide committed schedule rows in an existing WAL.
     The default remains scheduler-only for the independent quiet-source guard.
     """
-    if version is not None and version not in SUPPORTED:
+    profile = snapshot_profile(version)
+    if version is not None and profile is None:
         raise Refusal("unsupported-version")
     deadline = time.monotonic() + timeout
     path = Path(path)
@@ -319,7 +459,7 @@ def _check_database(path, *, allow_missing=False, timeout=1, version=None):
             opened = os.fstat(descriptor)
             if (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino):
                 raise Refusal("database-unsafe")
-            if version == "2.3.0" and any(
+            if profile == "2.3" and any(
                 getattr(opened, key) != getattr(before, key)
                 for key in ("st_uid", "st_mode", "st_nlink")
             ):
@@ -331,38 +471,22 @@ def _check_database(path, *, allow_missing=False, timeout=1, version=None):
                     )
                 )
             )
-            if version == "2.3.0":
+            if profile == "2.3":
                 connection.set_progress_handler(
                     lambda: int(time.monotonic() >= deadline), 1000
                 )
             connection.execute("PRAGMA query_only=ON")
             connection.execute("BEGIN")
-            kind = connection.execute(
-                "SELECT type FROM sqlite_master WHERE name = 'schedule'"
-            ).fetchall()
-            if kind != [("table",)]:
+            scheduler = _check_scheduler(connection, profile)
+            if version == "2.3.0" and scheduler == "automation":
+                # This known older executable cannot consume the newer layout.
+                # Forward migration of an empty schedule store is different from
+                # silently admitting an in-place native downgrade.
                 raise Refusal("schedule-schema")
-            columns = {
-                row[1]: row
-                for row in connection.execute("PRAGMA table_info('schedule')")
-            }
-            required = ("id", "session_id", "status", "last_message_id")
-            if any(
-                name not in columns or columns[name][2].upper() != "TEXT"
-                for name in required
-            ):
-                raise Refusal("schedule-schema")
-            if not columns["id"][5]:
-                raise Refusal("schedule-schema")
-            if (
-                connection.execute('SELECT 1 FROM "schedule" LIMIT 1').fetchone()
-                is not None
-            ):
-                raise Refusal("schedule-present")
-            if version == "2.3.0":
+            if profile == "2.3":
                 _check_jobs(connection, deadline)
             after = path.lstat()
-            if version == "2.3.0" and any(
+            if profile == "2.3" and any(
                 getattr(after, key) != getattr(before, key)
                 for key in ("st_mode", "st_nlink")
             ):
@@ -380,7 +504,7 @@ def _check_database(path, *, allow_missing=False, timeout=1, version=None):
     except (OSError, sqlite3.Error, ValueError) as error:
         if isinstance(error, Refusal):
             raise
-        if version == "2.3.0" and time.monotonic() >= deadline:
+        if profile == "2.3" and time.monotonic() >= deadline:
             raise Refusal("deadline") from None
         raise Refusal("database-invalid") from None
 
@@ -466,7 +590,7 @@ def assert_host_safe(box, path, data, env, remaining):
     """
     del path
     try:
-        if data.get("opencode_version") not in SUPPORTED:
+        if snapshot_profile(data.get("opencode_version")) is None:
             raise Refusal("unsupported-version")
         _check_system_config()
         result_env = fence_environment(env)
@@ -545,7 +669,10 @@ def _remote(argv):
         if len(payload) > MAX_PAYLOAD or not payload.endswith(b"\n"):
             raise Refusal("startup-payload")
         settings = json.loads(payload)
-        if not isinstance(settings, dict) or settings.get("version") not in SUPPORTED:
+        if (
+            not isinstance(settings, dict)
+            or snapshot_profile(settings.get("version")) is None
+        ):
             raise Refusal("unsupported-version")
         _check_system_config()
         _check_database(
@@ -563,7 +690,7 @@ def _remote(argv):
         if action == "command":
             # Keep the temporary discovery roots alive until the client exits.
             return subprocess.call(arguments, env=os.environ)
-        if settings.get("version") not in SUPPORTED:
+        if snapshot_profile(settings.get("version")) is None:
             raise Refusal("unsupported-version")
         version = subprocess.run(
             [arguments[0], "--version"],
@@ -578,7 +705,7 @@ def _remote(argv):
         namespace = {"__name__": "oc_box_history_bridge"}
         exec(settings["bridge"], namespace)
         # Reuse only its unregistered serve --stdio server; no managed-service
-        # discovery/restart continuity, which can resume native 2.3.0 subagents.
+        # discovery/restart continuity, which can resume native 2.3.x subagents.
         # The public bridge owns/reaps the one native child.
         exit_info = {}
         with namespace["server"](arguments[0], exit_info=exit_info) as request:
@@ -732,7 +859,7 @@ class Reader:
             raise _boxed(self.box, "reader-reuse")
         try:
             self.started = True
-            if self.data.get("opencode_version") not in SUPPORTED:
+            if snapshot_profile(self.data.get("opencode_version")) is None:
                 raise Refusal("unsupported-version")
             if (
                 not isinstance(self.data.get("container"), str)

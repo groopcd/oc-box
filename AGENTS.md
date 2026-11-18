@@ -146,11 +146,18 @@ their checkout ownership distinct from unrelated source and flat installations.
   exclusive against reset/purge/backup. Attach never refreshes credentials.
 - `history_recovery.py` / `history_reader.py` / `workspace_control.py`: one bounded
   persisted-history snapshot after audited live timeouts: shell-only on native
-  2.2.6/2.2.7; shell/subagent on exact 2.3.0. Never a live readiness waiver or
-  native job cleanup. The 2.3.0 profile checks durable job/recovery metadata before
-  source/destination native history processing; image/unknown jobs, unknown forms,
-  legacy background rows and incompatible schemas refuse. Never substitute normal
-  manual-sync preparation or managed restart continuity. Require actual verified whole-container stop,
+  2.2.6/2.2.7; shell/subagent on canonical stable 2.3.x. Never a live readiness
+  waiver or native job cleanup. The shared 2.3.x profile checks durable job/recovery
+  metadata before source/destination native history processing; image/unknown jobs, unknown forms,
+  legacy background rows and incompatible schemas refuse. Actual binary versions
+  must match the captured exact patch on both sides; a shared series is not a
+  patch-mismatch waiver or untested-future-native acceptance. Prereleases,
+  modified/malformed identities and unknown minor/major series refuse.
+  Detected contract/version incompatibilities give fixed-category guidance to
+  update oc-box/OpenCode as appropriate, never a reset or state-downgrade bypass.
+  Do not misclassify ordinary activity, timeouts or cleanup failures as version
+  drift. Never substitute normal manual-sync preparation or managed restart
+  continuity. Require actual verified whole-container stop,
   immutable same-resource restart, stop intent/admission and persistent uncertainty
   fences. Readers are unregistered/non-executing, with source/destination scheduler
   metadata and system-config refusals, one endpoint, unchanged checked exports and

@@ -3017,6 +3017,8 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                     if refusals
                     else "source-unavailable"
                 )
+                if history_reader.snapshot_profile(version) is None:
+                    history_recovery.report_compatibility_refusal("unsupported-version")
             history_started = True
             code = launch_client(path, data, args, version, exported, owner)
         timeout = getattr(owner, "_history_timeout", None) if owner else None
@@ -3262,6 +3264,9 @@ def launch_client(path, data, args, version, exported, owner=None):
                 )
                 return code or 1
             history_recovery.report_skipped(history_recovery.skip_reasons(owner, exc))
+        history_recovery.report_compatibility_refusal(
+            getattr(exc, "history_compatibility_category", None)
+        )
         print(
             f"oc-box: history sync pending: {exc}\nContainer data retained. Retry with 'oc-box sync'.",
             file=sys.stderr,

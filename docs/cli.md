@@ -711,10 +711,10 @@ If automatic post-stop recovery is not attempted, a separate fixed-category line
 explains its routing guards. For example, `custom-podman-options` means the
 container baseline is outside this conservative path; `non-shell-jobs` is the
 legacy fixed label for jobs outside that native version's audited snapshot
-profile, including image jobs on 2.3.0. `insufficient-shell-observations` or the
-2.3.0 counterpart `insufficient-job-observations` means fewer than two qualifying
-pairs were retained. Native 2.3.0 has a separately audited retained-subagent
-profile; unsupported job kinds still refuse automatic recovery. Control-state,
+profile, including image jobs on 2.3.x. `insufficient-shell-observations` or the
+2.3.x counterpart `insufficient-job-observations` means fewer than two qualifying
+pairs were retained. Stable native 2.3.x uses the guarded retained-subagent
+storage profile; unsupported job kinds still refuse automatic recovery. Control-state,
 attached-client and
 unverified-owner-close refusals are also distinguished. These labels do not waive
 any guard or establish that a job completed. Do not clear control markers, remove
@@ -751,11 +751,25 @@ For supported native owners, a qualifying timeout can trigger **one post-stop
 persisted-history snapshot** automatically:
 
 * Native **2.2.6/2.2.7** retains the original shell-only profile.
-* Native **2.3.0** also permits retained subagent jobs, including mixtures of
-  shell and subagent jobs. Image jobs remain outside this audited profile.
+* Stable native **2.3.x** also permits retained subagent jobs, including mixtures
+  of shell and subagent jobs. Image jobs remain outside this guarded profile.
+  Canonical releases such as `2.3.0`, `2.3.1` and `2.3.2` share this contract;
+  prereleases, build suffixes, malformed versions and other minor series do not.
+  Series membership selects the metadata checks, never bypasses them or certifies
+  untested future native behavior. Incompatible schemas and recovery forms refuse.
+  Other native integrations retain their independently documented version limits.
+
+The 2.3.x contract recognizes exactly one known scheduler column layout:
+2.3.0's `schedule` table or the `automation` replacement in 2.3.1/2.3.2.
+Missing, ambiguous, extended or incompatible column layouts refuse; **any** scheduler
+row refuses, including paused/terminal/unknown statuses and committed WAL rows.
+Native 2.3.0 cannot read an automation-layout store through this path.
+Subagent recovery may include a bounded `outstanding` list of known shell or
+subagent metadata. Image, Code Mode, nested/unknown forms and invalid bindings
+remain unsupported; these references are not completed, acknowledged or resumed.
 
 Two complete validated observations must have shown no foreground activity and
-only jobs allowed by that exact-version profile. A later real query timeout does
+only jobs allowed by that storage profile. A later real query timeout does
 not manufacture an observation; a contradictory/malformed response or known
 non-timeout API error invalidates the hint. The live wait still refuses, and no
 live export is authorized by that hint.
@@ -767,7 +781,7 @@ normal owning launch. There is no runtime/configuration/auth refresh, vault unlo
 credential forwarding, controller publication or requested model/tool execution.
 This uses the normal checked archival implementation through the fenced reader;
 it does **not** recursively invoke ordinary `oc-box sync`, prepare the workspace
-again or refresh credentials. Native 2.3.0 job metadata is checked before source
+again or refresh credentials. Native 2.3.x job metadata is checked before source
 or destination native history processing: image/unknown jobs, unknown recovery
 forms, legacy background state and incompatible schemas refuse rather than
 starting managed job recovery. Retained jobs, execution claims and queued input
@@ -781,6 +795,22 @@ It also refuses native scheduler rows (including paused/completed rows), unknown
 scheduler schemas, unsafe stores and nonempty system OpenCode configuration.
 Read-only executable-version probes must match the captured supported release
 on both sides; a binary changed during the session does not inherit that proof.
+The host and container must match the captured exact patch version, not merely
+belong to the same 2.3 series. Unsupported versions are warned about before the
+owning client opens; they retain normal live sync and manual-sync retry guidance,
+not an unsafe recovery fallback.
+The existing runtime checks validate the selected contract on each attempt:
+recognizing a future stable 2.3 patch does not waive its database or API checks.
+Recognized schema/metadata or activity-response incompatibilities also print an
+actionable compatibility warning when detected. Check for an oc-box update
+first; upgrade OpenCode too if it is older than a supported release. If both are
+current, report the fixed refusal category. Do not reset or downgrade workspace
+data to bypass a compatibility refusal. A matching schema alone cannot certify
+unknown native startup behavior; unrecognized minor/major series remain refused.
+Column-layout checks cover names, types, non-primary-column requiredness,
+primary-key membership and generated-column flags, but do not fingerprint
+defaults, triggers, indexes or foreign keys. They cannot detect every
+schema-preserving behavioral change.
 Source and destination helpers use isolated configuration, execution denials and
 disabled scheduling/warming; disabling scheduling alone is insufficient because
 native restart notification handling can still wake work. Other failures retain

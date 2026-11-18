@@ -69,6 +69,12 @@ class HistoryWaitTests(unittest.TestCase):
             f"OpenCode 2.x history wait failed ({category}).",
         )
         self.assertTrue(raised.exception.__suppress_context__)
+        if category in ("invalid-active-response", "invalid-jobs-response"):
+            self.assertEqual(raised.exception.history_compatibility_category, category)
+        else:
+            self.assertFalse(
+                hasattr(raised.exception, "history_compatibility_category")
+            )
         if category == "activity-timeout":
             self.assertIsInstance(raised.exception, box.HistoryWaitTimeout)
             self.assertNotIn("private-sentinel", raised.exception.diagnostic)
@@ -363,11 +369,26 @@ class HistoryWaitTests(unittest.TestCase):
                     self.assertEqual(error.recovery_reason, reason)
                 self.assertEqual(self.api.call_count, 4)
 
-    def test_exact_230_profile_allows_only_shell_subagent_hints_never_live_success(
+    def test_stable_23x_profile_allows_only_shell_subagent_hints_never_live_success(
         self,
     ):
-        versions = (None, "2.2.6", "2.2.7", "2.3.0", "2.3.1", "2.3.0+unknown")
-        for version in versions:
+        versions = (
+            (None, {"shell"}),
+            ("2.2.6", {"shell"}),
+            ("2.2.7", {"shell"}),
+            ("2.3.0", {"shell", "subagent"}),
+            ("2.3.1", {"shell", "subagent"}),
+            ("2.3.2", {"shell", "subagent"}),
+            ("2.3.47", {"shell", "subagent"}),
+            ("2.3.9999", {"shell", "subagent"}),
+            ("2.2.8", {"shell"}),
+            ("2.4.0", {"shell"}),
+            ("2.3.01", {"shell"}),
+            ("2.3.٢", {"shell"}),
+            ("2.3.0+unknown", {"shell"}),
+            ("2.3.2-dev", {"shell"}),
+        )
+        for version, allowed_kinds in versions:
             for kinds in (
                 ("shell",),
                 ("subagent",),
@@ -392,9 +413,7 @@ class HistoryWaitTests(unittest.TestCase):
                             service.wait_history(
                                 box, data, self.connection, timeout=0.5, interval=0.25
                             )
-                        eligible = set(kinds) <= (
-                            {"shell", "subagent"} if version == "2.3.0" else {"shell"}
-                        )
+                        eligible = set(kinds) <= allowed_kinds
                         self.assertEqual(raised.exception.recovery_eligible, eligible)
                         self.assertEqual(self.api.call_count, 4)
                         self.assertNotIn(

@@ -65,6 +65,35 @@ SKIP_REFUSALS = CAPTURE_REFUSALS | frozenset(
         "owner-close-unverified",
     )
 )
+COMPATIBILITY_REFUSALS = frozenset(
+    (
+        "unsupported-version",
+        "schedule-schema",
+        "job-schema",
+        "job-metadata",
+        "job-kind",
+        "legacy-jobs",
+        "invalid-active-response",
+        "invalid-jobs-response",
+        "active-response",
+    )
+)
+
+
+def report_compatibility_refusal(reason):
+    """Actionable fixed-category guidance, never native errors or store content."""
+    if not isinstance(reason, str) or reason not in COMPATIBILITY_REFUSALS:
+        return
+    print(
+        "oc-box: Automatic post-stop history recovery is unavailable: "
+        f"the OpenCode compatibility contract was not recognized ({reason}). "
+        "Check for an oc-box update first; upgrade OpenCode too if it is older "
+        "than a supported release. If both are current, report this compatibility "
+        "refusal. Keep workspace/history intact; do not reset or downgrade state "
+        "to bypass the check. If shutdown history remains pending, retry with "
+        "'oc-box sync'.",
+        file=sys.stderr,
+    )
 
 
 class RecoveryError(ValueError):
@@ -253,7 +282,7 @@ def capture(box, data, info, token, *, refusal=None):
 
     if not isinstance(token, str):
         return reject("control-unavailable")
-    if data.get("opencode_version") not in history_reader.SUPPORTED:
+    if history_reader.snapshot_profile(data.get("opencode_version")) is None:
         return reject("unsupported-version")
     if data.get("ready") is not True:
         return reject("workspace-not-ready")
@@ -372,6 +401,7 @@ def recover(box, path, data, source):
     Cleanup has its own budget even if the snapshot budget has expired.
     """
     category, saved, transitioned = "unavailable", False, False
+    compatibility_reason = None
     pinned = {**data, "container": source.container_id}
     try:
         if workspace_service.live_connection() is not None:
@@ -426,6 +456,8 @@ def recover(box, path, data, source):
         category = "control-state"
     except (box.BoxError, OSError, ValueError, subprocess.SubprocessError) as exc:
         reader_reason = getattr(exc, "history_reader_category", None)
+        if isinstance(reader_reason, str) and reader_reason in COMPATIBILITY_REFUSALS:
+            compatibility_reason = reader_reason
         category = (
             "reader-" + reader_reason
             if isinstance(reader_reason, str)
@@ -452,4 +484,5 @@ def recover(box, path, data, source):
             "Container data retained; retry with 'oc-box sync'.",
             file=sys.stderr,
         )
+        report_compatibility_refusal(compatibility_reason)
     return saved
