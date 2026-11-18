@@ -107,6 +107,18 @@ class ReleaseSummaryTests(unittest.TestCase):
                 )
                 self.assertLessEqual(len(text), 2800)
 
+    def test_release_opt_out_refuses_before_creating_announcement_content(self):
+        for channel in ("stable", "devel"):
+            identity, release = fixture(channel)
+            release["body"] = social.SKIP_ANNOUNCEMENT_MARKER + "\n" + release["body"]
+            with (
+                self.subTest(channel=channel),
+                self.assertRaisesRegex(
+                    social.Refusal, "^release-announcement-disabled$"
+                ),
+            ):
+                social.content(identity, release)
+
     def test_control_and_markdown_cleanup(self):
         self.assertEqual(
             social.plain("a\x1b\u202e **b** ![x](https://x) [c](https://y)", 50),
@@ -525,6 +537,20 @@ class EnabledEntryGateTests(unittest.TestCase):
         self.assertEqual(self.events[:3], ["source", "pypi", "asset"])
         self.assertIn("create", self.events)
         self.buffer.create.assert_called_once()
+
+    def test_release_opt_out_prevents_pypi_reads_assets_and_buffer_access(self):
+        self.release["body"] = (
+            social.SKIP_ANNOUNCEMENT_MARKER + "\n" + self.release["body"]
+        )
+        for action in ("announce", "reconcile"):
+            with self.subTest(action=action):
+                extra = ["--post-id", "post_123"] if action == "reconcile" else []
+                self.assertEqual(self.run_main(action, *extra), 1)
+                self.pypi.assert_not_called()
+                self.assertEqual(self.github.writes, [])
+                self.buffer.channel.assert_not_called()
+                self.buffer.create.assert_not_called()
+                self.buffer.post.assert_not_called()
 
     def test_source_or_pypi_refusal_prevents_every_mutation_in_both_modes(self):
         for gate in ("source", "pypi"):

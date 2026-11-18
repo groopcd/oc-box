@@ -36,6 +36,7 @@ TAG = re.compile(r"v\d+\.\d+\.\d+(?:\.dev0)?")
 IDENTIFIER = re.compile(r"[A-Za-z0-9_-]{1,128}")
 MAX_JSON = 4 * 1024 * 1024
 MAX_IMAGE = 8 * 1024 * 1024
+SKIP_ANNOUNCEMENT_MARKER = "<!-- oc-box: skip-linkedin -->"
 CHANNEL_FIELDS = (
     "id name displayName service type isDisconnected isLocked isQueuePaused"
 )
@@ -364,6 +365,10 @@ def highlights(body):
 
 
 def content(identity, release):
+    require(
+        SKIP_ANNOUNCEMENT_MARKER not in release["body"],
+        "release-announcement-disabled",
+    )
     features = highlights(release["body"])
     channel = identity["release_channel"]
     label = (

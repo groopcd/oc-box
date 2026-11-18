@@ -90,6 +90,16 @@ published PyPI version; it is not acceptance or permission to publish software.
 
 ## Publication hook and verification
 
+### Skip an individual release
+
+When one announcement already covers a development/stable rollout, put
+`<!-- oc-box: skip-linkedin -->` in the release body for the release that should
+not post. The publisher skips its LinkedIn job, and the announcement tool also
+refuses that marked release before generating content or contacting Buffer.
+For a manual package-publishing dispatch, also set `skip_linkedin: true`.
+Neither option disables or duplicates the other release's announcement, changes
+repository-wide settings, or affects package publication.
+
 The optional `linkedin` job runs only after the actual PyPI `publish` job
 succeeds **and** the build's existing `publish_validated` output is true.
 Build-only dispatches, push/PR checks and failed/skipped publication do not post.

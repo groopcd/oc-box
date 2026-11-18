@@ -30,7 +30,7 @@ jobs:
         run: |
           apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
           chmod 755 "$apt_root"
-          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config")
+          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config" --mirror azure --force-ipv4)
           sudo apt-get -c "$apt_config" update
           sudo apt-get -c "$apt_config" install -y --no-install-recommends age shellcheck
           bash -n completions/oc-box
@@ -61,7 +61,7 @@ jobs:
         run: |
           apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
           chmod 755 "$apt_root"
-          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config")
+          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config" --mirror azure --force-ipv4)
           sudo apt-get -c "$apt_config" update
           sudo apt-get -c "$apt_config" install -y --no-install-recommends poppler-utils
           npm install --prefix "$RUNNER_TEMP/opencode-v1" --no-audit --no-fund opencode-ai@1.19.5
@@ -92,7 +92,7 @@ jobs:
         run: |
           apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
           chmod 755 "$apt_root"
-          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config")
+          apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config" --mirror azure --force-ipv4)
           sudo apt-get -c "$apt_config" update
           sudo apt-get -c "$apt_config" install -y --no-install-recommends poppler-utils
           npm install --prefix "$RUNNER_TEMP/opencode-v2-native-2-3" --no-audit --no-fund @opencode/cli@2.3.0

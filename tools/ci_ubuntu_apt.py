@@ -15,6 +15,11 @@ import sys
 
 
 MIRROR = "https://mirrors.edge.kernel.org/ubuntu"
+MIRRORS = {
+    "edge": MIRROR,
+    "azure": "https://azure.archive.ubuntu.com/ubuntu",
+    "ubuntu": "https://archive.ubuntu.com/ubuntu",
+}
 CODENAMES = ("noble", "resolute")
 
 
@@ -63,6 +68,8 @@ def generate(
     output: Path,
     *,
     codename=None,
+    mirror="edge",
+    force_ipv4=False,
     os_release=Path("/etc/os-release"),
     ca_bundle=Path("/etc/ssl/certs/ca-certificates.crt"),
 ) -> Path:
@@ -72,6 +79,10 @@ def generate(
     generating host's os-release. Parents must already exist and be traversable
     by _apt; no permissions on existing paths are changed.
     """
+    if not isinstance(mirror, str) or mirror not in MIRRORS:
+        raise ConfigError("supported Ubuntu mirrors are edge, azure and ubuntu")
+    if not isinstance(force_ipv4, bool):
+        raise ConfigError("IPv4-only acquisition must be a boolean")
     if codename is None:
         codename = _ubuntu_codename(os_release)
     if codename not in CODENAMES:
@@ -99,6 +110,8 @@ def generate(
         "Acquire::Check-Valid-Until": '"true"',
         "Acquire::Check-Date": '"true"',
     }
+    if force_ipv4:
+        settings["Acquire::ForceIPv4"] = '"true"'
     if output.exists() or output.is_symlink():
         raise ConfigError("output already exists; choose a fresh directory")
     try:
@@ -115,7 +128,7 @@ def generate(
         codename + suffix for suffix in ("", "-updates", "-backports", "-security")
     )
     source_text = (
-        f"Types: deb\nURIs: {MIRROR}\nSuites: {suites}\n"
+        f"Types: deb\nURIs: {MIRRORS[mirror]}\nSuites: {suites}\n"
         "Components: main restricted universe multiverse\n"
         "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
     )
@@ -150,9 +163,16 @@ def main(argv=None):
     parser = _Parser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--codename", choices=CODENAMES)
+    parser.add_argument("--mirror", choices=tuple(MIRRORS), default="edge")
+    parser.add_argument("--force-ipv4", action="store_true")
     args = parser.parse_args(argv)
     try:
-        config = generate(args.output, codename=args.codename)
+        config = generate(
+            args.output,
+            codename=args.codename,
+            mirror=args.mirror,
+            force_ipv4=args.force_ipv4,
+        )
     except ConfigError as exc:
         print(f"ci_ubuntu_apt: {exc}", file=sys.stderr)
         return 1
