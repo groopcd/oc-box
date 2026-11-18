@@ -2196,7 +2196,9 @@ oc-box reset --project ~/devel/demo --image-preview
 ### --host-drop
 
 Experimental and **enabled by default per workspace** for supported native
-OpenCode V2 2.2.6/2.2.7/2.3.0 clients. Plain `start` (including the default command)
+OpenCode V2 clients. Any valid 2.x minor/patch release is eligible; there is no
+exact patch allowlist. V1, malformed versions and other major series refuse.
+Plain `start` (including the default command)
 or `reset` reads the saved host preference. `--host-drop` saves enabled and
 requires a supported client; `--no-host-drop` saves disabled. The flags are
 mutually exclusive. An additional `start` client may attach to an existing owner
@@ -2221,6 +2223,15 @@ only, with no OSC 72 probes/registration and unchanged child output. The Kitty
 profile enables structured OSC 72 drops only after an affirmative capability reply.
 Kitty graphics support, including Konsole's graphics support, is not proof of
 drag-and-drop capability. This is not a guarantee about every emulator/version.
+
+Compatibility is checked through the existing private V2 client connection,
+bounded transfer-helper handshake/replies and terminal framing, rather than
+rejecting a new 2.x version number. These checks fail closed when their observed
+contracts break. Native image composition has no public capability negotiation:
+oc-box cannot automatically prove that every future TUI still converts pathname
+pastes into attachments. A native refusal or literal staged path instead of an
+attachment should be reported, not bypassed by sending automatically. Separate
+history, recovery, browser and attachment-broker version guards are unchanged.
 
 Konsole's default direct URL-drop setting produces the required bracketed paste
 while native OpenCode enables mode 2004. Keep **Disable drag & drop menu for files
@@ -2283,6 +2294,131 @@ Save host importing disabled for future workspace TUI clients and open this
 client without the bridge. Mutually exclusive with `--host-drop`; neither flag
 live-toggles existing clients. To change only the preference without opening a
 TUI, use `oc-box preferences --host-drop off`.
+
+### --host-clipboard
+
+Experimental, **off by default and per native TUI client**. On a supported
+direct Konsole or Kitty terminal, opt in with `start` (the default command) or
+`reset`, then press **Ctrl+Y** to import a PNG clipboard image or copied
+local PNG/JPEG/GIF/WebP/PDF files. Ordinary Ctrl+V, terminal text paste, clipboard contents and
+host OpenCode settings are unchanged. The native TUI still runs inside the
+container; there is no Wayland/X11 socket mount or host clipboard MCP endpoint.
+
+The host relay recognizes the legacy Ctrl+Y byte (0x19) and distinct ASCII CSI-u
+or ModifyOtherKeys reports only at top-level host input, not inside bracketed
+pastes or terminal replies. Printable `y`/`Y` text never grants a read. A
+terminal/global shortcut that consumes the chord will not import content.
+Ctrl+Y is unassigned in the documented OpenCode 2.x defaults checked on
+2026-11-18; custom bindings and desktop shortcuts may still conflict. It replaces
+the earlier experimental Ctrl+Alt+Shift+V binding, without editing native
+keybindings or intercepting normal Ctrl+V. **Ctrl+Y is reserved throughout an
+opted-in client, including shell panes, so its usual shell-yank action is not
+available there.** Clients without this opt-in retain their native Ctrl+Y.
+It inherits the direct-TTY, native-version and terminal-profile
+requirements of `--host-drop`; SSH, tmux, screen, unknown/ambiguous profiles and
+unsupported clients refuse. CSI-u repeat/release reports do not request another
+import; legacy control-byte/ModifyOtherKeys repeats cannot be distinguished from
+new presses.
+
+Clipboard access occurs only in response to the opted-in host input shortcut,
+never from model output, a plugin/MCP request or background polling. The keyboard
+report is host input authority, not cryptographic proof of a physical keypress
+or composer focus. The shortcut authorizes import anywhere in that connection;
+focus the native prompt before using it. Other workspace tools can read imported
+bytes, and history, provider systems, backups, copies or crashes may retain them.
+Read-only import is not confidentiality or recall.
+
+Wayland requires `wl-paste` from `wl-clipboard` on the host. X11 requires `xclip`.
+If Wayland is selected, a missing helper does not fall back to another clipboard.
+Preflight only locates the helper; it reads no clipboard data. On the shortcut,
+one bounded content-type query selects `text/uri-list`,
+`x-special/gnome-copied-files`, or `image/png`, in that order. There is one payload
+read under the same helper deadline and desktop-only environment. File lists
+take precedence over an optional PNG thumbnail; refused/invalid file lists do
+not fall back to another format. Type lists and file-list payloads are limited
+to 16 KiB, with at most 128 offered targets.
+
+Only local `file:` references are accepted. **Clipboard file imports follow
+ordinary symlinks by default**, including links in parent folders. No folder
+approval or extra prompt is required. Add `--no-host-clipboard-symlinks` to reject
+linked sources for this client instead. This changes clipboard imports only:
+normal pathname/file drops and live sharing still refuse symlinks.
+
+The selected alias and its actual target are checked against protected-path
+rules. Kernel magic links, runtime/device paths, hard links, special/protected
+files, directories and unsupported extensions remain refused. Both the selected
+and target filename extensions must match the captured content. The target is
+pinned without reading source bytes, then matched by identity to the existing
+strict host-drop capture before any file bytes are read. Unsupported kernel
+resolution contracts refuse rather than fall back to ordinary link following.
+
+**A link may change between file-manager Copy and Ctrl+Y, so the file imported
+may be the new target.** There is no folder allowlist or remembered target.
+Once pinned, retargeting the symlink cannot redirect that read, but the file's
+contents remain mutable; existing capture-time mutation checks still apply.
+Up to four files may be imported, at most 8 MiB each and 16 MiB per batch, within
+existing per-client quotas. A batch is validated before staging. Import always
+snapshots copies, even for a cut selection: it never moves/deletes the source,
+clears the clipboard or acknowledges a file-manager move. No remote URL fetch is
+performed.
+
+These MIME targets describe data, not proof it came from a file manager. The
+shortcut authorizes their local file references without a per-file confirmation;
+do not use it to discuss untrusted copied file URLs. Clipboard selection may
+change between type discovery and payload retrieval; no atomic desktop snapshot
+is promised. For independent per-image host confirmation, use `attach --broker`.
+
+Arbitrary `text/plain`, bare text paths and raw PDF clipboard payloads are not
+requested or reinterpreted. Copy a PDF **file** in a file manager; selected text
+inside a PDF viewer remains ordinary text paste. PNG pixel data is still accepted
+when no supported copied-file list is offered. Unsupported/missing content
+produces a refusal placeholder with a fixed stage/category, without clipboard
+data, source paths, raw exceptions or helper stderr. Source-guard failures remain
+uniform for missing, inaccessible or protected sources and links refused by
+strict mode.
+No packages are installed automatically.
+Missing helpers name the selected utility and its host package explicitly:
+`wl-paste` is provided by `wl-clipboard`, and X11 uses `xclip`. These package
+names are the same across the supported distro catalog; see the host test guide
+for package-manager commands and a feature-branch checkout recipe.
+
+Captured bytes use the existing private drop transfer and staging/cleanup
+limits. The relay supplies a container pathname as native paste input; it never
+synthesizes Enter or submits a prompt. Native attachment composition and sending
+remain native behavior. `--image-preview` separately controls image visuals for
+a qualifying owning launch.
+
+No clipboard setting or data is saved in workspace preferences or the registry.
+An additional `start --host-clipboard` may attach to an existing private V2 owner
+without restart, credential refresh or unlock. It opts in only that new TUI
+client; existing clients are unchanged. `--no-host-drop --host-clipboard` can
+enable clipboard imports (including copied files) while retaining the explicit
+drag/pathname-paste file-drop opt-out.
+V1, web, the manager/embedded terminal, maintenance, sync and informational
+commands reject the flag. Do not reset a workspace just to enable this feature.
+
+```sh
+oc-box --project ~/devel/demo --host-clipboard
+# For a new owning launch when image previews are also wanted:
+oc-box --project ~/devel/demo --host-clipboard --image-preview
+```
+
+See the short [host test guide](host-clipboard-testing.md). Focused mocked tests
+are not acceptance of KDE/Wayland/X11 behavior or native image composition.
+
+### --no-host-clipboard-symlinks
+
+Restore strict no-symlink clipboard sources for this native TUI client.
+Requires `--host-clipboard` on `start` or `reset`; a symlink in the selected file
+or any parent folder produces the same fixed source refusal as other denied
+sources. PNG pixel imports are unchanged. This option is not persisted and
+cannot live-toggle an existing client; an additional client can use it without
+restarting the workspace owner. It changes neither file-drop preferences nor
+live sharing.
+
+```sh
+oc-box --project ~/devel/demo --host-clipboard --no-host-clipboard-symlinks
+```
 
 ### --credential-mode env|selected|vault
 

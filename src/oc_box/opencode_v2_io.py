@@ -951,11 +951,14 @@ def history_worker():
                 body = json.dumps(value).encode("utf-8")
                 if len(body) > HISTORY_WORKER_PAYLOAD:
                     raise FixedError(WORKER)
-            except Exception as error:
-                reason = str(error) if isinstance(error, FixedError) else WORKER
+            except FixedError as error:
+                reason = str(error)
                 reply({"id": sequence, "error": reason})
                 if reason not in PENDING_MESSAGES:
-                    raise FixedError(reason) from None
+                    raise
+            except Exception:
+                reply({"id": sequence, "error": WORKER})
+                raise FixedError(WORKER) from None
             else:
                 reply({"id": sequence, "size": len(body)}, body)
                 del value, body

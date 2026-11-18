@@ -15,6 +15,7 @@ See [installation](../installation.md) and [channels](../update-channels.md).
 
 **Contents:** [live host reads](#share-a-file-or-folder-for-live-reads),
 [default TUI imports](#import-through-native-tui-path-pastes),
+[clipboard images/files](#import-clipboard-images-and-copied-files-with-ctrly),
 [per-image approval](#require-independent-host-approval-for-every-image),
 and [direct messages](#queue-a-direct-image-message).
 
@@ -28,15 +29,17 @@ copies or a model provider.
 | Workflow | What authorizes access | Data | Native input behavior |
 | --- | --- | --- | --- |
 | Native TUI host imports | A qualifying host pathname paste; no per-file prompt | Images/PDF, up to 8 MiB/file | A native paste; no added Enter |
+| TUI `--host-clipboard` | Per-client opt-in and host Ctrl+Y; no per-file prompt | PNG pixels or copied image/PDF files, up to 8 MiB/file | Native paste; you send manually |
 | Browser `web --attachments` | Explicit addon and actual browser Files | Images/PDF, up to 20 MiB/file | Native composer; you press Send |
 | Direct `attach PATH` | Typed `attach`, or explicit risk acknowledgment | One image up to 8 MiB | Queues a native message; **not a draft** |
 | `attach --broker` | Independent host approval for every image | One captured image up to 8 MiB | Expiring, session-bound, one-use tool retrieval |
 | `share PATH` | Typed disclosure consent for the path | Live file/folder reads | Read-only tools, not a container mount or per-session attachment grant |
 
 These are different adapters, not interchangeable routes to arbitrary host
-files. Browser attachments are source-checked on native **2.2.6/2.3.0**, while
-native host imports and explicit image attachment support the separately
-documented **2.2.6/2.2.7/2.3.0** profiles. Browser batches allow eight files /
+files. Browser attachments are source-checked on native **2.2.6/2.3.0**.
+Native host drops/clipboard accept valid **2.x** releases subject to their
+private-client, terminal and transfer contracts; explicit image attachment keeps
+its separate **2.2.6/2.2.7/2.3.0** profiles. Browser batches allow eight files /
 40 MiB; native TUI imports allow four paths / 16 MiB per batch, with their own
 per-client limits. See the [browser reference](../cli.md#web--browser-interface)
 and the workflow sections below before choosing one.
@@ -76,7 +79,7 @@ oc-box --project ~/devel/demo --no-host-drop
 oc-box preferences --project ~/devel/demo --host-drop off
 ```
 
-Importing requires native V2 2.2.6/2.2.7/2.3.0 and a direct interactive host
+Importing requires native OpenCode 2.x and a direct interactive host
 terminal without SSH, tmux or screen. It works on owning start/reset and on an
 additional `start` TUI client without restarting the owner. The preference is
 saved for future clients, not live-toggled in running ones. Normal launches
@@ -114,6 +117,42 @@ read staged files. This is not a content scanner, blanket security guarantee or
 a new live-host acceptance pass. See [`--host-drop`](../cli.md#--host-drop),
 [security](../../SECURITY.md#opt-in-native-tui-host-drops) and
 [required checks](../testing.md#experimental-transparent-native-tui-host-drops).
+
+## Import clipboard images and copied files with Ctrl+Y
+
+Clipboard access is separate from default pathname drops: enable it for each
+native TUI client on a direct Konsole/Kitty host terminal:
+
+```sh
+oc-box --project ~/devel/demo --host-clipboard
+```
+
+Wayland requires host `wl-paste` (`wl-clipboard`); X11 requires `xclip`. Copy
+image pixels, or copy local PNG/JPEG/GIF/WebP/PDF files in a file manager, focus
+the native prompt and press **Ctrl+Y**. Ordinary Ctrl+V is unchanged. Ctrl+Y
+is reserved throughout this opted-in client, including shell panes, so its
+normal shell-yank action is unavailable there. There is no automatic Send.
+
+Copied files use typed local URI lists, not arbitrary clipboard text. Up to
+four files, 8 MiB each and 16 MiB per batch, share the existing private staging
+and client quotas. Only the shortcut reads the clipboard; no polling, model/MCP
+trigger, desktop socket mount, source move or clipboard modification is added.
+
+**Clipboard sources follow ordinary symlinks by default**, including linked
+folders, with no approval popup. A link changed after Copy may select a new
+target when Ctrl+Y is pressed. Protected aliases/targets, kernel magic links,
+hard links and special files remain refused; descriptor pinning does not freeze
+the file's contents. Add `--no-host-clipboard-symlinks` to the launch command to
+restore strict no-symlink clipboard sources for that client. Normal drops and
+live sharing remain strict.
+
+An additional client may use these flags without restarting/unlocking the owner.
+The option is not a workspace preference and cannot live-toggle existing
+clients. Imported bytes are readable by workspace tools and may survive in
+history, provider systems or retained copies. See the [full reference](../cli.md#--host-clipboard)
+and [short host check](../host-clipboard-testing.md). Source checks and reported
+host observations have distinct scopes; the default symlink policy still awaits
+its own host observation.
 
 ## Require independent host approval for every image
 

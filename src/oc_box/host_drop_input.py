@@ -23,6 +23,27 @@ _ESC_STRINGS = {
 _PASTE_START = b"\x1b[200~"
 _PASTE_END = b"\x1b[201~"
 
+# Explicit Ctrl+Y only. CSI-u press events grant a clipboard read;
+# repeat/release events consume the reserved shortcut without granting again.
+# Legacy Ctrl+Y is the C0 byte 0x19, accepted only at top-level host input.
+# Legacy/ModifyOtherKeys have no separate event type. No printable-text guesses
+# or aliases for the earlier Ctrl+Alt+Shift+V shortcut.
+_CLIPBOARD_CONTROL = b"\x19"
+_CLIPBOARD_KEYS = {
+    **{
+        key + b";" + modifiers + suffix: event in (b"", b":1")
+        for key in (b"121", b"121:89", b"121:89:121")
+        for modifiers in (b"5", b"69", b"133", b"197")  # Optional Caps/Num Lock.
+        for event, suffix in (
+            (b"", b"u"),
+            (b":1", b":1u"),
+            (b":2", b":2u"),
+            (b":3", b":3u"),
+        )
+    },
+    b"27;5;121~": True,
+}
+
 # Includes the ASCII "72;" selector, but not the introducer or terminator.
 # The broker must independently validate its protocol/chunk/session limits.
 MAX_OSC72 = 8192
@@ -109,6 +130,7 @@ class _Framing:
         output_filter,
         transform=None,
         on_osc72=None,
+        on_clipboard=None,
         max_paste=0,
         reserve_osc72=False,
     ):
@@ -118,6 +140,7 @@ class _Framing:
         self._reserve_osc72 = reserve_osc72
         self._transform = transform
         self._on_osc72 = on_osc72
+        self._on_clipboard = on_clipboard
         self._max_paste = max_paste
         self._units = _Units()
         self._state = "text"
@@ -309,8 +332,27 @@ class _Framing:
             self._start_csi(raw)
         elif code in _STRINGS:
             self._start_string(_STRINGS[code], raw, output)
+        elif (
+            not self._framing_only()
+            and self._on_clipboard is not None
+            and raw == _CLIPBOARD_CONTROL
+        ):
+            self._clipboard_press(raw, output)
         else:
             output.extend(raw)
+
+    def _clipboard_press(self, original, output):
+        try:
+            replacement = self._on_clipboard()
+        except Exception:
+            self._disable_callbacks()
+            output.extend(original)
+            return
+        if isinstance(replacement, bytes):
+            output.extend(_PASTE_START + replacement + _PASTE_END)
+        elif replacement is not None:
+            self._disable_callbacks()
+            output.extend(original)
 
     def _escape_unit(self, code, raw, output):
         if self._state == "escape":
@@ -368,7 +410,10 @@ class _Framing:
         candidate = None
         if self._csi_candidate is not None:
             candidate = self._csi_candidate + raw
-            if not (b"200~".startswith(candidate) or b"201~".startswith(candidate)):
+            candidates = (b"200~", b"201~")
+            if self._on_clipboard is not None and not self._child_output:
+                candidates += tuple(_CLIPBOARD_KEYS)
+            if not any(value.startswith(candidate) for value in candidates):
                 candidate = None
         self._csi_candidate = candidate
         if candidate is None:
@@ -376,6 +421,19 @@ class _Framing:
         else:
             self._held.extend(raw)
         if not final:
+            return
+        if (
+            not self._framing_only()
+            and self._csi_ascii
+            and self._on_clipboard is not None
+            and candidate in _CLIPBOARD_KEYS
+        ):
+            original = bytes(self._held)
+            self._held.clear()
+            self._state = "text"
+            if not _CLIPBOARD_KEYS[candidate]:
+                return
+            self._clipboard_press(original, output)
             return
         if (
             not self._framing_only()
@@ -572,12 +630,20 @@ class PasteInput(_Framing):
     """
 
     def __init__(
-        self, transform, *, on_osc72=None, max_paste=16384, reserve_osc72=False
+        self,
+        transform,
+        *,
+        on_osc72=None,
+        on_clipboard=None,
+        max_paste=16384,
+        reserve_osc72=False,
     ):
         if not callable(transform):
             raise TypeError("transform must be callable")
         if on_osc72 is not None and not callable(on_osc72):
             raise TypeError("on_osc72 must be callable or None")
+        if on_clipboard is not None and not callable(on_clipboard):
+            raise TypeError("on_clipboard must be callable or None")
         if (
             isinstance(max_paste, bool)
             or not isinstance(max_paste, int)
@@ -590,6 +656,7 @@ class PasteInput(_Framing):
             output_filter=False,
             transform=transform,
             on_osc72=on_osc72,
+            on_clipboard=on_clipboard,
             max_paste=max_paste,
             reserve_osc72=reserve_osc72,
         )

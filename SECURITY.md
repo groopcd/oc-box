@@ -195,7 +195,7 @@ unit/native and external-host requirements are documented separately in
 
 Experimental host-drop importing is a separate, default-on per-workspace host-input authorization
 surface, not a change to `attach --broker` consent. It is limited to full native
-V2 2.2.6/2.2.7/2.3.0 TUI start/reset clients, including an additional `start`
+OpenCode 2.x TUI start/reset clients, including an additional `start`
 client on an existing owner without an owner restart or credential refresh.
 It requires a direct interactive host TTY and refuses SSH, tmux and screen.
 It is not enabled for web, the session-shell terminal, the manager/dashboard,
@@ -262,6 +262,35 @@ or recall is promised. Existing host evidence does not accept this feature.
 See the separate [required checks](docs/testing.md#experimental-transparent-native-tui-host-drops);
 unit/native fixtures are not new desktop/rootless-Podman acceptance or a blanket
 security certification.
+
+## Opt-in native TUI host clipboard
+
+`--host-clipboard` separately enables a host clipboard reader for one supported
+native TUI client. Only the top-level host Ctrl+Y shortcut authorizes a bounded
+read; startup discovers a helper without reading the clipboard. There is no
+background polling, model/output/MCP trigger or desktop socket mount. Ctrl+Y is
+reserved throughout the opted-in client, including shell panes; ordinary Ctrl+V
+and clients without this flag retain their native behavior.
+
+Imports accept PNG pixels or typed local URI lists selecting supported image/PDF
+files, not arbitrary clipboard text or remote URLs. File-list MIME types are
+data, not proof of file-manager provenance. Clipboard selection may change
+between type discovery and retrieval. Source copies use the private staging
+channel, limits and manual Send boundary described above; imported bytes remain
+readable by workspace tools and can be retained after cleanup.
+
+Clipboard file sources follow ordinary symlinks by default, including linked
+parent folders. **Changing a link between Copy and Ctrl+Y can change which file
+is imported.** No folder approval, allowlist or remembered target is implied.
+Selected aliases and actual targets retain protected-path checks. Kernel magic
+links, special files and hard links remain refused. The strict export must match
+the still-pinned kernel-selected descriptor before reading; later link retargeting
+cannot redirect that read, but this does not freeze file contents or prevent all
+same-user filesystem races. `--no-host-clipboard-symlinks` restores strict
+no-symlink clipboard sources for this client. Normal host drops and live sharing
+remain strict. Fixed refusal markers never include paths, raw errors or clipboard
+contents. Local checks and earlier strict-source host observations do not accept
+the new default symlink policy; see [the clipboard test scope](docs/testing.md#experimental-host-clipboard-attachment-shortcut).
 
 ## Global V2 host credential vault and policy overrides
 

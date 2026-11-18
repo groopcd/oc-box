@@ -844,12 +844,16 @@ class DeadlineTests(unittest.TestCase):
 
         class Response:
             status = 200
+            closed = False
 
             def __enter__(self):
                 return self
 
             def __exit__(self, *_):
-                pass
+                self.closed = True
+
+            def isclosed(self):
+                return self.closed
 
             def read1(self, maximum):
                 self.assert_maximum = maximum
@@ -857,6 +861,7 @@ class DeadlineTests(unittest.TestCase):
                     clock[0] = 44
                     return b"{}"
                 clock[0] = 45.01
+                self.closed = True
                 return b""
 
         connection.getresponse.return_value = Response()

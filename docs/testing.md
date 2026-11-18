@@ -71,6 +71,45 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
+### Experimental host clipboard attachment shortcut
+
+`tests/test_host_clipboard.py` has seven focused groups: read-free helper
+discovery and bounded PNG reads with a desktop-only environment; exact top-level
+host shortcut framing and negative opaque/pasted-input cases; reuse of private
+staging without automatic Send or re-enabling file drops; and CLI/client scope
+plus distribution inclusion; bounded target negotiation without plain-text
+requests/retries; copied PDF/image batches through real synthetic-file
+capture guards; and default symlink following with strict opt-out, protected/
+magic/special/hard-link denials and descriptor-bound target replacement checks.
+No test reads the actual desktop clipboard or starts Podman.
+Existing directly affected input/drop/completion checks remain separate.
+The host-drop eligibility matrix accepts native 2.x minor/patch versions,
+including 2.3.2 and synthetic future 2.x values, while retaining V1/malformed/
+other-major and unsupported-terminal refusals. This is runtime eligibility, not
+a claim that all native releases have been tested. Private transfer handshake
+and framing checks remain authoritative; unrelated version-pinned fixtures and
+history/recovery guards are not broadened by this feature.
+
+The implementation deliberately leaves real Spectacle/Dolphin/Wayland/X11,
+Konsole/Kitty shortcut reporting, native composer focus and image attachment
+behavior to the operator's short [host check](host-clipboard-testing.md).
+These local checks establish no live rootless-Podman or desktop acceptance.
+Do not add a new broad harness or repeat unrelated release gates for this check.
+The owner's earlier "it worked" report covers the PNG workflow on native 2.3.2.
+On diagnostic revision `af73035d848daa93ca832351564ba9635082568c`, the owner
+reported `source-guard` for the original copied PDF, then a `[PDF 1]` attachment
+after testing an ordinary copy. Both reports used the older Ctrl+Alt+Shift+V
+shortcut. The Ctrl+Y binding is absent from the current documented OpenCode 2.x defaults
+(checked 2026-11-18). On `f9be952e281007e345af35b0de38df6b037c709d`,
+the owner confirmed Ctrl+Y delivery, identified a symlinked parent folder as
+the cause of the source refusal, and reported success through the real folder
+destination. This does not establish linked-path support or provider
+interpretation. Default clipboard symlink following and its strict opt-out are
+new behavior awaiting a focused host observation; do not relabel the earlier
+strict-source reports as acceptance of it.
+Keep these scopes separate; no broader checklist or host pass is established
+by the synthetic checks.
+
 ### Experimental browser attachment adapter
 
 `tests/test_web_attachments.py`, `tests/web_attachments_browser.mjs` and
