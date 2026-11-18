@@ -161,7 +161,11 @@ their checkout ownership distinct from unrelated source and flat installations.
   immutable same-resource restart, stop intent/admission and persistent uncertainty
   fences. Readers are unregistered/non-executing, with source/destination scheduler
   metadata and system-config refusals, one endpoint, unchanged checked exports and
-  host verification and separate cleanup. Preserve original client nonzero results
+  host verification and separate cleanup. Pass-local export helpers require
+  admission per request, bounded private framing, no restart/replay, and
+  reaping/strict EOF before success. Transport reuse is
+  post-stop only, never bulk work admission or destination writer reuse.
+  Preserve original client nonzero results
   and interruption/unconfirmed-completion warnings; only raw client exit 0 plus
   complete verified archival, recovery cleanup and final stop may return 0 after a
   live timeout. Unknown client status, partial/failure or uncertain cleanup remains

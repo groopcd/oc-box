@@ -23,6 +23,7 @@ import tempfile
 import time
 
 CURRENT = contextvars.ContextVar("oc_box_history_reader", default=None)
+EXPORTS = contextvars.ContextVar("oc_box_history_exports", default=None)
 # Legacy 2.2.6/2.2.7 and the stable 2.3.x storage profile only. Series membership
 # selects guards, never bypasses them: incompatible schemas/recovery forms refuse.
 # The 2.3 profile is ONLY for unregistered serve --stdio, not managed-service
@@ -74,6 +75,9 @@ CATEGORIES = GUARD_CATEGORIES | frozenset(
         "foreground-active",
         "active-query",
         "reader-source",
+        "history-command",
+        "history-response",
+        "history-cleanup",
     )
 )
 
@@ -718,6 +722,301 @@ def _remote(argv):
     return 0
 
 
+class _Exports:
+    """One demand-driven export helper, scoped inside an existing Reader lease."""
+
+    def __init__(self, box, reader, data):
+        self.box, self.reader = box, reader
+        self.workspace = data["id"]
+        self.version = data["opencode_version"]
+        self.directory = box.container_project(data)
+        self.endpoint = {key: reader.connection[key] for key in ("url", "password")}
+        self.child = self.errors = self.error_file = None
+        self.buffer = bytearray()
+        self.sequence = 0
+        self.failed = False
+
+    def fail(self, category):
+        self.failed = True
+        return _boxed(self.box, category)
+
+    def deadline(self, maximum=180):
+        return time.monotonic() + _budget(self.reader.remaining, maximum)
+
+    def write(self, payload, deadline):
+        descriptor = self.child.stdin.fileno()
+        offset = 0
+        while offset < len(payload):
+            timeout = min(
+                deadline - time.monotonic(), _budget(self.reader.remaining, 5)
+            )
+            if timeout <= 0:
+                raise self.fail("deadline")
+            if select.select([], [descriptor], [], min(0.1, timeout))[1]:
+                try:
+                    written = os.write(descriptor, payload[offset : offset + 4096])
+                    if written <= 0:
+                        raise self.fail("history-command")
+                    offset += written
+                except BlockingIOError:
+                    continue
+
+    def read(self, size, deadline, *, line=False):
+        while True:
+            if line:
+                end = self.buffer.find(b"\n")
+                if end >= 0:
+                    if end >= size:
+                        raise self.fail("history-response")
+                    value = bytes(self.buffer[:end])
+                    del self.buffer[: end + 1]
+                    return value
+                if len(self.buffer) >= size:
+                    raise self.fail("history-response")
+            elif len(self.buffer) >= size:
+                value = bytes(self.buffer[:size])
+                del self.buffer[:size]
+                return value
+            timeout = min(
+                deadline - time.monotonic(), _budget(self.reader.remaining, 180)
+            )
+            if timeout <= 0:
+                raise self.fail("deadline")
+            if select.select([self.child.stdout], [], [], min(0.1, timeout))[0]:
+                try:
+                    chunk = os.read(
+                        self.child.stdout.fileno(), min(65536, size - len(self.buffer))
+                    )
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    raise self.fail("history-command")
+                self.buffer.extend(chunk)
+
+    def start(self):
+        bridge = self.box.opencode_v2_io
+        command = self.reader.command(
+            [
+                "python3",
+                "-I",
+                "-S",
+                "-c",
+                (self.box.PACKAGE / "opencode_v2_io.py").read_text(),
+                "history-worker",
+                self.box.CONTAINER_OPENCODE,
+            ]
+        )
+        self.errors = self.box.captured_output(private=True)
+        self.error_file = self.errors.__enter__()
+        deadline = self.deadline(45)
+        with self.box.history_recovery.admit():
+            self.child = subprocess.Popen(
+                command,
+                env=command.environment,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=self.error_file,
+                start_new_session=True,
+            )
+        os.set_blocking(self.child.stdin.fileno(), False)
+        os.set_blocking(self.child.stdout.fileno(), False)
+        payload = (
+            json.dumps(
+                {
+                    "endpoint": self.endpoint,
+                    "directory": self.directory,
+                    "timeout": _budget(self.reader.remaining, 180),
+                }
+            )
+            + "\n"
+        ).encode()
+        if len(payload) > bridge.HISTORY_WORKER_CONTROL:
+            raise self.fail("history-command")
+        # Admission covers each bounded write, not the subsequent history read.
+        with self.box.history_recovery.admit():
+            self.write(payload, min(deadline, time.monotonic() + 5))
+        if json.loads(self.read(4096, deadline, line=True)) != {
+            "protocol": bridge.HISTORY_WORKER_PROTOCOL
+        }:
+            raise self.fail("history-response")
+
+    def run(self, data, action, settings):
+        bridge = self.box.opencode_v2_io
+        live = self.box.workspace_service.live_connection()
+        if (
+            self.failed
+            or CURRENT.get() is not self.reader
+            or data.get("id") != self.workspace
+            or data.get("opencode_version") != self.version
+            or self.box.container_project(data) != self.directory
+            or self.reader.child is None
+            or self.reader.child.poll() is not None
+            or live is None
+            or live.get("workspace") != self.workspace
+            or {key: live.get(key) for key in ("url", "password")} != self.endpoint
+            or action not in ("sessions", "export")
+            or set(settings) != ({"session"} if action == "export" else set())
+        ):
+            raise self.fail("reader-source")
+        try:
+            if self.child is None:
+                self.start()
+            if (
+                self.buffer
+                or self.child.poll() is not None
+                or select.select([self.child.stdout], [], [], 0)[0]
+            ):
+                raise self.fail("history-response")
+            self.sequence += 1
+            packet = {"id": self.sequence, "action": action, **settings}
+            payload = (json.dumps(packet) + "\n").encode()
+            if len(payload) > bridge.HISTORY_WORKER_CONTROL:
+                raise self.fail("history-command")
+            deadline = self.deadline()
+            with self.box.history_recovery.admit():
+                self.write(payload, min(deadline, time.monotonic() + 5))
+            response = json.loads(self.read(4096, deadline, line=True))
+            if (
+                not isinstance(response, dict)
+                or type(response.get("id")) is not int
+                or response["id"] != self.sequence
+            ):
+                raise self.fail("history-response")
+            if set(response) == {"id", "error"}:
+                reason = response["error"]
+                if not isinstance(reason, str) or reason not in bridge.FIXED_MESSAGES:
+                    raise self.fail("history-response")
+                self.failed = reason not in bridge.PENDING_MESSAGES
+                return subprocess.CompletedProcess([], 2, "", bridge.MARKER + reason)
+            if (
+                set(response) != {"id", "size"}
+                or type(response["size"]) is not int
+                or not 0 < response["size"] <= bridge.HISTORY_WORKER_PAYLOAD
+            ):
+                raise self.fail("history-response")
+            value = self.read(response["size"], deadline).decode("utf-8")
+            _budget(self.reader.remaining, 180)
+            return subprocess.CompletedProcess([], 0, value, "")
+        except Refusal as error:
+            raise self.fail(error.category) from None
+        except (
+            self.box.history_recovery.RecoveryError,
+            self.box.workspace_control.ControlError,
+        ):
+            self.failed = True
+            raise
+        except (OSError, ValueError, subprocess.SubprocessError):
+            raise self.fail("history-response") from None
+
+    def close(self):
+        failed, interruption = False, None
+
+        def caught(error):
+            nonlocal failed, interruption
+            failed = True
+            if interruption is None and isinstance(
+                error, (KeyboardInterrupt, SystemExit)
+            ):
+                interruption = error
+
+        if self.child is not None:
+            try:
+                failed = (
+                    bool(self.buffer)
+                    or self.child.poll() is not None
+                    or bool(select.select([self.child.stdout], [], [], 0)[0])
+                )
+            except BaseException as error:
+                caught(error)
+            try:
+                self.child.stdin.close()
+            except OSError:
+                pass
+            except BaseException as error:
+                caught(error)
+            try:
+                failed = self.child.wait(timeout=10) != 0 or failed
+            except BaseException as error:
+                caught(error)
+                try:
+                    os.killpg(self.child.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                except BaseException as error:
+                    caught(error)
+                try:
+                    self.child.wait(timeout=5)
+                except BaseException as error:
+                    caught(error)
+            try:
+                # Waiting can itself make delayed trailing output readable.
+                # A reaped helper must leave exact EOF, not another reply.
+                if self.buffer or os.read(self.child.stdout.fileno(), 1):
+                    failed = True
+            except BaseException as error:
+                caught(error)
+            try:
+                self.child.stdout.close()
+            except BaseException as error:
+                caught(error)
+            self.child = None
+        if self.error_file is not None:
+            try:
+                self.errors.__exit__(None, None, None)
+            except BaseException as error:
+                caught(error)
+            self.error_file = None
+        if interruption is not None:
+            if isinstance(interruption, SystemExit) and interruption.code in (None, 0):
+                interruption.code = 1
+            raise interruption
+        if failed:
+            raise self.fail("history-cleanup")
+
+
+@contextlib.contextmanager
+def export_pass(box, data):
+    """Amortize transport only for the already fenced post-stop Reader."""
+    reader = CURRENT.get()
+    if reader is None:
+        yield
+        return
+    if EXPORTS.get() is not None or data.get("id") != reader.data["id"]:
+        raise _boxed(box, "reader-reuse")
+    if reader.connection is None:
+        raise _boxed(box, "reader-source")
+    stream = _Exports(box, reader, data)
+    token = EXPORTS.set(stream)
+    original = None
+    try:
+        yield
+    except BaseException as error:
+        original = error
+        raise
+    finally:
+        EXPORTS.reset(token)
+        try:
+            stream.close()
+            if original is None and stream.failed:
+                raise stream.fail("history-command")
+        except BaseException as cleanup:
+            if original is None:
+                raise
+            if isinstance(original, SystemExit) and original.code in (None, 0):
+                original.code = 1
+            if isinstance(cleanup, (KeyboardInterrupt, SystemExit)):
+                if isinstance(cleanup, SystemExit) and cleanup.code in (None, 0):
+                    cleanup.code = 1
+                raise
+            # Keep the original error/interruption authoritative, but never
+            # silently turn uncertain helper cleanup into an apparent success.
+            print(
+                "oc-box: History export helper cleanup unverified. "
+                "Container data retained; retry with 'oc-box sync'.",
+                file=sys.stderr,
+            )
+
+
 class Reader:
     """One unregistered private native lease; never retry the same instance."""
 
@@ -770,12 +1069,21 @@ class Reader:
                     ],
                 ):
                     raise _boxed(self.box, "client-command")
-            elif (
-                len(args) != 5
-                or args[:2] != ["python3", "-c"]
-                or args[2] != (self.box.PACKAGE / "opencode_v2_io.py").read_text()
-                or args[3] not in ("sessions", "export")
-                or args[4] != self.box.CONTAINER_OPENCODE
+            elif not (
+                (
+                    len(args) == 5
+                    and args[:2] == ["python3", "-c"]
+                    and args[2] == (self.box.PACKAGE / "opencode_v2_io.py").read_text()
+                    and args[3] in ("sessions", "export")
+                    and args[4] == self.box.CONTAINER_OPENCODE
+                )
+                or (
+                    len(args) == 7
+                    and args[:4] == ["python3", "-I", "-S", "-c"]
+                    and args[4] == (self.box.PACKAGE / "opencode_v2_io.py").read_text()
+                    and args[5] == "history-worker"
+                    and args[6] == self.box.CONTAINER_OPENCODE
+                )
             ):
                 raise _boxed(self.box, "client-command")
         return self._helper_command("command", args)
