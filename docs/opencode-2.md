@@ -1,4 +1,30 @@
-# OpenCode 1.x and 2.x compatibility
+# OpenCode 2.x compatibility
+
+<a id="opencode-1x-and-2x-compatibility"></a>
+
+> **Primary documentation: OpenCode 2.x.** For operating a 1.x installation,
+> use the [legacy guide](legacy/README.md). References to 1.x below are retained
+> for capability comparisons, copied-plugin compatibility, migration, downgrade
+> and source-scoped validation—not as the default setup path.
+
+[Documentation hub](README.md) · [Getting started](getting-started.md) ·
+[Credential guide](guides/credentials.md) · [Client guide](guides/clients.md)
+
+**On this page**
+
+| Question | Start here |
+| --- | --- |
+| How do services, clients and credentials interact? | [Environment and service plan](#environment-and-service-plan) · [Concurrent clients](#concurrent-web-terminal-and-full-tui-clients) · [Global vault-first](#global-vault-first-from-the-first-project-launch) |
+| How do overrides and permissions differ? | [Workspace overrides](#intentional-workspace-overrides-and-one-off-opt-out) · [Plain host OpenCode](#plain-host-opencode-2x) · [Build defaults versus native autoapproval](#permissions-container-build-default-versus-native-autoapproval) |
+| Which capabilities differ between versions? | [Compatibility map](#compatibility-map) |
+| What happens to history during a downgrade? | [History and downgrade strategy](#history-and-downgrade-strategy) |
+| What was verified, and how are host checks scoped? | [Verification](#verification) · [Global-vault and Build host validation](#isolated-global-vault-and-build-approval-host-validation) · [Repeatable host validation](#repeatable-host-validation) |
+| Where are upstream details? | [Upstream references](#upstream-references) |
+
+Verification and host reports below retain their individual source identities
+and limitations; they are not a blanket acceptance claim for later builds.
+
+---
 
 Available since oc-box 1.5.x, with retained OpenCode 1.x support in 1.6. Validation uses
 unmodified OpenCode 1.19.5 and 2.2.6, plus accepted disposable Linux host/rootless
@@ -283,7 +309,7 @@ interactive TUI permission-prompt/reload pass has been accepted. See the publish
 
 ## Compatibility map
 
-| Feature | 1.x | 2.x behavior |
+| Feature | 1.x (legacy) | 2.x (primary) |
 | --- | --- | --- |
 | Exact runtime | `opencode-ai@VERSION` | `@opencode/cli@VERSION`, decorated version output normalized |
 | TUI | Native 1.x | Native 2.x on the workspace-owned private service |

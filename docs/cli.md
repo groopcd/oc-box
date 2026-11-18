@@ -78,6 +78,12 @@ Additional Podman options and devices explicitly extend these defaults.
 
 ### OpenCode versions
 
+**OpenCode 2.x is the primary documentation path.** OpenCode 1.x remains supported
+as a **legacy** line, with [separate operating guidance](legacy/README.md).
+The [documentation hub](README.md) and task guides focus on 2.x. This complete
+reference retains both versions' conditional rules so legacy behavior, history
+preservation and downgrade constraints remain discoverable.
+
 oc-box 1.7 retains OpenCode 1.x and 2.x support, tested with 1.19.5 and
 2.2.6. The host release selects the exact container package: `opencode-ai` for
 1.x, `@opencode/cli` for 2.x. V2 uses a workspace-owned private stdio server with

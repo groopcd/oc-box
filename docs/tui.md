@@ -1,5 +1,24 @@
 # Experimental workspace manager
 
+> **OpenCode 2.x TUI guide.** Native session connections and persistent-shell
+> integration here target 2.x workspaces. For legacy 1.x lifecycle and maintenance
+> terminals, use the [legacy guide](legacy/README.md#workspaces-and-terminal).
+
+[Documentation hub](README.md) · [Getting started](getting-started.md) ·
+[Client guide](guides/clients.md)
+
+**On this page**
+
+| Task | Start here |
+| --- | --- |
+| Understand the experimental boundary | [Design and scope](#design-and-scope) · [Stable-release validation gate](#stable-release-validation-gate) |
+| Install or restore dashboard dependencies | [Installation](#installation) · [Missing dependencies after a GitHub upgrade](#missing-tui-dependencies-after-a-github-upgrade) · [Card redesign availability](#card-redesign-availability) |
+| Launch, navigate and use the clipboard | [Launch and navigation](#launch-and-navigation) · [Copying and pasting](#copying-and-pasting) |
+| Find a dashboard section | [TUI guide](#tui-guide): [Status](#1-status), [Settings](#2-settings), [Sessions](#3-sessions), [Terminals](#4-terminals), [Logs](#5-logs), [Storage](#6-storage), [Backup/restore](#7-backuprestore) |
+| Review private prompts and cancellation | [Paths and passwords](#paths-and-passwords) · [Progress and cancellation](#progress-and-cancellation) |
+
+---
+
 `oc-box tui` is an optional Textual dashboard for inspecting oc-box workspaces,
 managing native OpenCode 2.x sessions, and attaching to their persistent session
 terminals. It is separate from the native OpenCode conversation TUI opened by
@@ -266,7 +285,21 @@ output as sensitive. OSC clipboard requests emitted by container applications
 remain stripped; only completed user selections or explicit dashboard copy
 actions write to the host clipboard.
 
-## Seven sections
+<a id="seven-sections"></a>
+
+## TUI guide
+
+<!-- tui-screenshot:about -->
+The images below are generated from the **actual Textual interface**, using
+synthetic in-memory workspaces, metrics and metadata. They are read-only/demo
+captures: disabled action buttons are intentional, no native service is connected,
+and no archive, credential, clipboard or host-workspace operation is performed.
+They illustrate appearance, **not live monitoring or host acceptance**.
+[Capture details and regeneration](assets/tui/README.md).
+The images are repository/source-documentation assets; installed copies without
+them can use the [online illustrated guide](https://github.com/groopcd/oc-box/blob/devel/docs/tui.md#tui-guide).
+
+<!-- /tui-screenshot -->
 
 Shortcuts `1`–`7` keep their existing order. Wide terminals use a left navigation
 rail. Below 118 columns or 32 rows the rail becomes a section picker in the header, leaving
@@ -279,6 +312,13 @@ in Settings. The visual inspiration is the supplied terminal dashboard and
 [gputaskman](https://github.com/shanselman/gputaskman), not its GPU/model telemetry.
 
 ### 1. Status
+
+<!-- tui-screenshot:status -->
+![Status section showing synthetic host resource cards, workspace inventory, selected-workspace inspector and retained activity](assets/tui/status.png)
+
+*Illustrative readings and storage sizes; unscanned/unknown values stay unknown.*
+
+<!-- /tui-screenshot -->
 
 Status presents shallow **Host CPU**, **Host RAM**, **Host Home FS** and
 **Workspaces** cards, a workspace inventory and a **Selected workspace** inspector.
@@ -323,6 +363,13 @@ filesystem capacity does not authorize changing it. See the
 [resource report reference](cli.md#resource-reports).
 
 ### 2. Settings
+
+<!-- tui-screenshot:settings -->
+![Settings section showing Monitoring, Display, Sessions, Logs, Resources and Safety groups in one inline page](assets/tui/settings.png)
+
+*Expanded-height capture of all six settings groups, with Apply, Reset and Revert.*
+
+<!-- /tui-screenshot -->
 
 All dashboard preferences appear directly in the Settings tab, not a separate
 window. `2`, `s` or `F2` navigates there using the normal section navigation;
@@ -374,6 +421,13 @@ restarting the host service and does not import new vault values or host config
 into a running workspace.
 
 ### 3. Sessions
+
+<!-- tui-screenshot:sessions -->
+![Sessions section showing synthetic root, child and archived metadata rows with explicit connection controls](assets/tui/sessions.png)
+
+*Synthetic catalog only: no native connection, lease, ownership or activity check.*
+
+<!-- /tui-screenshot -->
 
 Session discovery is an explicit **Connect**, followed by manual refresh. Merely
 visiting the tab never discovers/starts a service or synchronizes archives.
@@ -446,6 +500,13 @@ manager APIs are V2-only; this guide makes no native V1 archive/unarchive claim.
 
 ### 4. Terminals
 
+<!-- tui-screenshot:terminals -->
+![Terminals section with disabled attachment controls and a disconnected native terminal widget containing explanatory sample text](assets/tui/terminals.png)
+
+*Disconnected display fixture, not shell output; no terminal process was started.*
+
+<!-- /tui-screenshot -->
+
 The embedded view uses an optional `pyte` terminal emulator around a **local PTY
 running the existing native persistent-session terminal client**. It is not a
 new `podman exec` shell, a maintenance shell, or a mini chat interface. Terminal
@@ -477,6 +538,13 @@ cannot supply missing observations or establish lease cleanup after an
 unconfirmed manager Quit.
 
 ### 5. Logs
+
+<!-- tui-screenshot:logs -->
+![Logs section filtering fixed synthetic activity entries and showing a source-scoped log-match count](assets/tui/logs.png)
+
+*Fixed activity examples; no external container logs were loaded.*
+
+<!-- /tui-screenshot -->
 
 The case-insensitive **literal** log search stays visible across all seven tabs.
 `Ctrl+L` opens Logs and focuses it. Search applies to retained entries and can be
@@ -523,6 +591,13 @@ containers or unlimited historical output.
 
 ### 6. Storage
 
+<!-- tui-screenshot:storage -->
+![Storage section showing the all-workspaces inventory and guarded single-target actions with synthetic records](assets/tui/storage.png)
+
+*Metadata fixtures only: no storage scan, deletion or workspace removal took place.*
+
+<!-- /tui-screenshot -->
+
 Choose **Host OpenCode**, **Selected workspace**, or **All registered workspaces**.
 These are different scopes, not aliases for a database or filesystem directory.
 Host storage management is limited to individual session trees selected through
@@ -546,6 +621,13 @@ for the chosen source. Host archive copies are not workspace-source deletion
 targets, and a source switch cannot redirect a previously reviewed action.
 
 ### 7. Backup/restore
+
+<!-- tui-screenshot:backups -->
+![Backup and restore section showing example archive and destination paths, source scope, workspace target and disabled actions](assets/tui/backups.png)
+
+*Example paths, not real archives; no backup was created, inspected or restored.*
+
+<!-- /tui-screenshot -->
 
 The three scopes remain explicit here. Choose one workspace from the selected/all
 inventory for a full or portable encrypted `.ocbox` backup. The ordinary

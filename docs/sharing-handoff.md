@@ -1,5 +1,10 @@
 # Temporary host-folder sharing: integration handoff
 
+> **Historical integration record.** The branch ownership and merge instructions
+> below belong to that handoff, not a new authorization for the current checkout.
+> For usage, see [host-file workflows](guides/host-files.md); for current evidence
+> boundaries, see [project status](project-status.md) and [Testing](testing.md).
+
 ## Ownership and merge
 
 The sharing session delivers `feature/transient-folder-sharing`. The TUI session

@@ -1,5 +1,9 @@
 # Common web shell v1
 
+**Version scope:** “v1” names this web-shell contract, not OpenCode 1.x.
+The integration targets OpenCode **2.x**. For the native 1.x line, use the
+[legacy guide](legacy/README.md#features-that-require-opencode-2x).
+
 The first-party shell at `/auth/oc-box-sessions` mirrors verified native TUI tab
 membership from one existing private workspace service. It owns exactly one
 outer tabstrip and one unmodified native app iframe, `#native`. Native browser

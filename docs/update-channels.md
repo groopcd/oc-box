@@ -1,5 +1,26 @@
 # Update channels
 
+> **Two different version choices:** stable/development select the **oc-box**
+> release channel, not the native OpenCode major. The workspace follows the
+> host's installed OpenCode version. Current guides target [OpenCode 2.x](README.md);
+> existing 1.x installations use the [legacy documentation](legacy/README.md).
+
+[Documentation hub](README.md) · [Getting started](getting-started.md) ·
+[Installation](installation.md)
+
+**On this page**
+
+- [Select or preview a channel](#select-or-preview-a-channel)
+- [Enable the dashboard after a GitHub channel switch](#enable-the-dashboard-after-a-github-channel-switch)
+- [Automatic updates](#automatic-updates)
+- [Bootstrap and older installations](#bootstrap-and-older-installations)
+- [Publication policy](#publication-policy)
+
+For a first installation, start with the [installation guide](installation.md).
+This page covers release-channel selection and its compatibility limits.
+
+---
+
 Stable/devel are **release choices**, not installation methods or permanent
 version-series mappings. GitHub/curl and PyPI both remain supported.
 

@@ -1,5 +1,10 @@
 # External host-sharing acceptance harness
 
+> **Maintainer harness guide and source-scoped execution history.** For ordinary
+> sharing commands, use [host-file workflows](guides/host-files.md). Reports below
+> retain their original identities and outcomes; they are not automatic acceptance
+> of current branch HEAD. See [Testing](testing.md) for the evidence index.
+
 The harness was developed on a **separate branch** and is now included in the
 1.7 integration candidate. Its execution checkout and the tested runtime still
 have independent identities: `tools/test_sharing_podman.py` tests the candidate

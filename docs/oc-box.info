@@ -129,6 +129,13 @@ options and devices explicitly extend these defaults.
 3.1 OpenCode versions
 =====================
 
+**OpenCode 2.x is the primary documentation path.** OpenCode 1.x remains
+supported as a **legacy** line, with [separate operating
+guidance](legacy/README.md).  The [documentation hub](README.md) and
+task guides focus on 2.x.  This complete reference retains both
+versions' conditional rules so legacy behavior, history preservation and
+downgrade constraints remain discoverable.
+
 oc-box 1.7 retains OpenCode 1.x and 2.x support, tested with 1.19.5 and
 2.2.6.  The host release selects the exact container package:
 ‘opencode-ai’ for 1.x, ‘@opencode/cli’ for 2.x.  V2 uses a
@@ -4026,21 +4033,21 @@ Node: Top210
 Node: Name769
 Node: Synopsis930
 Node: Description3039
-Node: Commands6637
-Node: Options116443
-Node: Lifecycle and persistence148543
-Node: Distribution images150843
-Node: Sessions and recovery155718
-Node: Devices and host permissions162303
-Node: Resource reports164649
-Node: Configuration and environment166760
-Node: Files178141
-Node: Exit status184085
-Node: Examples185493
-Node: Troubleshooting187579
-Node: Installation and manuals198931
-Node: Authors and license208527
-Node: See also209134
+Node: Commands7017
+Node: Options116823
+Node: Lifecycle and persistence148923
+Node: Distribution images151223
+Node: Sessions and recovery156098
+Node: Devices and host permissions162683
+Node: Resource reports165029
+Node: Configuration and environment167140
+Node: Files178521
+Node: Exit status184465
+Node: Examples185873
+Node: Troubleshooting187959
+Node: Installation and manuals199311
+Node: Authors and license208907
+Node: See also209514
 
 End Tag Table
 

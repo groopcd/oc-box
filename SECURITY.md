@@ -1,5 +1,29 @@
 # Security and trust boundary
 
+**Report a security issue privately:** see [Reporting issues](#reporting-issues)
+for the contact and redaction requirements. Do not post live credentials or an
+entire conversation database in a public issue.
+
+[Documentation hub](docs/README.md) · [Getting started](docs/getting-started.md)
+
+**Version scope:** the trust boundary applies to both supported native lines.
+Use [OpenCode 2.x guidance](docs/README.md) for the primary workflow and
+[legacy 1.x guidance](docs/legacy/README.md) for its different defaults.
+Version-specific V1/V2 rules below remain authoritative; “legacy” does not
+weaken the boundary or remove compatibility protections.
+
+**On this page**
+
+| Review | Sections |
+| --- | --- |
+| Default exposure and host-file access | [What is exposed](#what-is-exposed) · [Temporary sharing](#explicit-temporary-host-file-sharing) · [Image attachments](#explicit-host-image-attachments) · [Native TUI host drops](#opt-in-native-tui-host-drops) |
+| Credential delivery and overrides | [Global V2 host credential vault and policy overrides](#global-v2-host-credential-vault-and-policy-overrides) |
+| Host-side actions and saved data | [Host-side operations](#host-side-operations) · [Backup and restore](#backup-and-restore) |
+| Installation and publication trust | [Installation and updates](#installation-and-updates) |
+| Private disclosure | [Reporting issues](#reporting-issues) |
+
+---
+
 oc-box runs the entire OpenCode process and its integrations inside a rootless
 Podman container. It aims to contain routine destructive development commands
 and environment changes. It is not a VM, a hardened hostile-code service, or a

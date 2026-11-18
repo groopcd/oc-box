@@ -1,5 +1,37 @@
 # Contributing
 
+[Documentation hub](docs/README.md) · [Getting started](docs/getting-started.md) ·
+[Test strategy](docs/testing.md)
+
+**Documentation focus:** OpenCode 2.x is the primary reader path; 1.x has a
+[separate legacy guide](docs/legacy/README.md). Legacy compatibility, data-loss,
+permission and secret-lifetime regressions remain supported and required.
+Do not remove 1.x checks merely because the user documentation is separated.
+
+**Quick developer start**
+
+Run from the repository root. These commands use an ephemeral editable
+environment; see [Checks](#checks) for dependencies and additional smoke tests.
+Offline checks do not replace host acceptance. Never run host lifecycle
+fixtures inside oc-box or against real workspaces or credentials.
+
+```sh
+uv run --no-project --with-editable . oc-box --version
+uv run --no-project --with-editable . --with cryptography python -B -m unittest discover -s tests -v
+```
+
+**On this page**
+
+| Task | Start here |
+| --- | --- |
+| Find code and choose a development environment | [Source layout](#source-layout) |
+| Choose checks and understand host-only safety requirements | [Checks](#checks) · [Live backup/restore validation](#live-backuprestore-validation) |
+| Work on host plugins, completion or dependency catalogs | [Plain host plugin migration](#plain-host-plugin-migration) · [Bash completion](#bash-completion) · [Distro dependency checks](#distro-dependency-checks) |
+| Update generated documentation | [Manuals](#manuals) |
+| Review packaging and release requirements | [Source and release hygiene](#source-and-release-hygiene) · [Python packages and PyPI releases](#python-packages-and-pypi-releases) · [Release gate](#release-gate-and-publication-checklist) |
+
+---
+
 Use the full Git history: the development identity is `1.7.N.dev0+gHASH`, with N the
 commit count minus the 1.0.0 baseline (29). Keep the absolute `commit_count` in
 metadata for upgrade compatibility with 0.1/1.0/1.5/1.6 releases. The 1.7 manager

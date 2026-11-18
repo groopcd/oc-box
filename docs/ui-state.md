@@ -1,5 +1,8 @@
 # Native TUI selection reporting
 
+**OpenCode 2.x integration reference.** This reporting protocol is not a legacy
+1.x client mechanism; see the [legacy feature boundary](legacy/README.md#features-that-require-opencode-2x).
+
 This optional V2 integration reports the route and ordered open tabs of the
 container-native TUI to its existing private workspace service. It does not
 launch a host-native TUI, patch OpenCode, write browser state, run tools, grant

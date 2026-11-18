@@ -1,5 +1,48 @@
 # Test strategy and suite audit
 
+[Documentation hub](README.md) · [Contributor checks](../CONTRIBUTING.md#checks) ·
+[Getting started](getting-started.md)
+
+**Version scope:** the main user guides target [OpenCode 2.x](README.md);
+[OpenCode 1.x is documented as legacy](legacy/README.md). This organization
+does not retire supported V1 cases, alter validation gates or relabel historical
+reports. Source/native identities below retain their original wording and scope.
+
+**Start with the test guidance**
+
+- [Layers](#layers): choose unit, process, native, packaging or host checks.
+- [Ownership map](#ownership-map) and [Reviewing future changes](#reviewing-future-changes):
+  find the responsible tests and preserve distinct regressions.
+- [Contributor checks](../CONTRIBUTING.md#checks): standard commands and prerequisites.
+  Host-only acceptance fixtures must not run inside oc-box or against real
+  workspaces or credentials.
+
+**Find feature-specific checks and their limits**
+
+| Area | Sections |
+| --- | --- |
+| Browser clients and selection reports | [Browser attachments](#experimental-browser-attachment-adapter) · [Web sessions](#open-tui-sessions-in-the-web-interface) · [Native TUI selection reports](#cooperative-native-tui-selection-reports) |
+| Host files and dashboard | [Temporary host-file tools](#experimental-temporary-host-file-tools) · [Host-image attachments](#experimental-host-image-attachments) · [Native TUI host drops](#experimental-transparent-native-tui-host-drops) · [Workspace manager](#experimental-workspace-manager) |
+| History and readiness | [V2 history synchronization](#v2-session-history-synchronization) · [Focused host runner](#focused-historyreadiness-host-runner) |
+| Host-only fixture guidance | [Vault edges](#fresh-provider-free-vault-edges-host-only) · [Manual UI observation](#fresh-manual-ui-observation-host-only) · [Home-component ownership](#shared-home-component-ownership-fresh-host-only-image-free) |
+| CI and announcements | [Ubuntu CI bootstrap](#ubuntu-ci-package-bootstrap) · [Optional social announcements](#optional-social-release-announcements) |
+
+**Read historical evidence in its original scope**
+
+The feature sections mix test recipes, limitations and retained reports.
+Evidence is tied to the source/native identities and scope recorded with each
+report, not to the current checkout. Navigation does not promote an unfinished
+check, replace a host gate or authorize replaying retained fixtures.
+
+- [Reviewed 5573965 candidate evidence](#reviewed-5573965-candidate-evidence)
+- [Migrated-history candidate](#next-migrated-history-release-candidate),
+  [published v1.6.58 reconciliation](#published-v1658-evidence-reconciliation) and
+  [reviewed host reports — 2026-11-09](#reviewed-host-reports--2026-11-09)
+- [Suite audit result](#audit-result): the recorded consolidation and coverage
+  comparison, not a current suite pass count.
+
+---
+
 Tests protect behavior, not a target number of methods. A validation table can
 have many necessary negative cases; moving them into one method is consolidation,
 not permission to stop checking those cases. V1 compatibility is supported code,
