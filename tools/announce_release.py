@@ -42,6 +42,7 @@ MAX_POST_UTF16 = 3000
 DEVEL_ANNOUNCEMENT_APPROVAL_POLICY = 1
 POST_START = "<!-- linkedin-post:start -->"
 POST_END = "<!-- linkedin-post:end -->"
+TUI_IMAGE_SOURCE = Path(__file__).resolve().parents[1] / "docs/assets/readme-hero.png"
 CHANNEL_FIELDS = (
     "id name displayName service type isDisconnected isLocked isQueuePaused"
 )
@@ -427,6 +428,34 @@ def content(identity, release):
     return text, features
 
 
+def render_image(output, identity, release, features):
+    """Choose only the generic card or the committed README TUI screenshot."""
+    selectors = [
+        line
+        for line in release["body"].replace("\r\n", "\n").splitlines()
+        if "<!-- linkedin-image:" in line
+    ]
+    if not selectors:
+        release_card.render_card(
+            output,
+            version=identity["distribution_version"],
+            channel=identity["release_channel"],
+            highlights=features,
+        )
+        return
+    require(selectors == ["<!-- linkedin-image:readme-tui -->"], "card-selector")
+    require(
+        TUI_IMAGE_SOURCE.is_file() and not TUI_IMAGE_SOURCE.is_symlink(), "card-image"
+    )
+    with TUI_IMAGE_SOURCE.open("rb") as stream:
+        data = stream.read(MAX_IMAGE + 1)
+    require(
+        0 < len(data) <= MAX_IMAGE and data.startswith(b"\x89PNG\r\n\x1a\n"),
+        "card-image",
+    )
+    output.write_bytes(data)
+
+
 def approved_content(
     identity, text, image, expected_text_sha256, expected_image_sha256
 ):
@@ -664,11 +693,8 @@ def main(argv=None):
                     "new-preview-directory-required",
                 )
                 args.output.mkdir(parents=True)
-                release_card.render_card(
-                    args.output / "linkedin-card.png",
-                    version=identity["distribution_version"],
-                    channel=identity["release_channel"],
-                    highlights=features,
+                render_image(
+                    args.output / "linkedin-card.png", identity, release, features
                 )
                 # The text file hashes the actual Buffer payload (no added newline).
                 (args.output / "linkedin-post.txt").write_bytes(text.encode("utf-8"))
@@ -690,12 +716,7 @@ def main(argv=None):
             else:
                 verify_pypi(identity, work)
                 image = work / "card.png"
-                release_card.render_card(
-                    image,
-                    version=identity["distribution_version"],
-                    channel=identity["release_channel"],
-                    highlights=features,
-                )
+                render_image(image, identity, release, features)
                 result = announce(
                     github,
                     Buffer(os.environ.get("BUFFER_API_KEY")),

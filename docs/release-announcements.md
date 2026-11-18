@@ -131,6 +131,22 @@ experimental; they do not present incomplete acceptance as a stable recommendati
 No generative AI service is involved. Rendering uses Pillow in a throwaway
 Actions virtual environment, not in the ordinary oc-box installation.
 
+To use the existing README TUI screenshot **unchanged** instead of the generic
+card, add this exact standalone line to the release body:
+
+```markdown
+<!-- linkedin-image:readme-tui -->
+```
+
+Preview and announcement then copy the tagged source's
+`docs/assets/readme-hero.png` to the image artifact. The image is the real
+Textual compositor with synthetic read-only data, not a live-host screenshot
+or acceptance result; keep that visible caption. The selected file must be a
+bounded regular PNG, not a symlink. Unknown, malformed or repeated selectors
+refuse; arbitrary file paths and remote image URLs are not accepted. The same
+exact-image approval hashes and durable claim/receipt checks still apply.
+Without a selector, generic card behavior is unchanged.
+
 The text includes the immutable release URL. The PNG is uploaded as a public
 release asset because Buffer fetches images from a public URL. Keep that asset
 available while Buffer delivers the post. Public release text/artwork and

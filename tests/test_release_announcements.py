@@ -93,6 +93,75 @@ class MemoryGitHub:
 
 
 class ReleaseSummaryTests(unittest.TestCase):
+    def test_readme_tui_selector_copies_the_actual_png_without_rendering(self):
+        identity, release = fixture("devel")
+        release["body"] += "\n<!-- linkedin-image:readme-tui -->\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "preview.png"
+            with patch.object(social.release_card, "render_card") as render:
+                social.render_image(output, identity, release, ["feature"])
+            render.assert_not_called()
+            self.assertEqual(output.read_bytes(), social.TUI_IMAGE_SOURCE.read_bytes())
+            self.assertTrue(output.read_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
+
+    def test_image_selection_keeps_default_and_refuses_unknown_or_ambiguous_values(
+        self,
+    ):
+        identity, release = fixture()
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "preview.png"
+            with patch.object(social.release_card, "render_card") as render:
+                social.render_image(output, identity, release, ["feature"])
+            render.assert_called_once_with(
+                output,
+                version=identity["distribution_version"],
+                channel="stable",
+                highlights=["feature"],
+            )
+            marker = "<!-- linkedin-image:readme-tui -->"
+            for value in (
+                "<!-- linkedin-image:../../private.png -->",
+                "<!-- linkedin-image:https://example.invalid/a.png -->",
+                marker + "\n" + marker,
+                "inline " + marker,
+            ):
+                with (
+                    self.subTest(value=value),
+                    self.assertRaisesRegex(social.Refusal, "card-selector"),
+                ):
+                    social.render_image(
+                        output,
+                        identity,
+                        {**release, "body": release["body"] + "\n" + value},
+                        ["feature"],
+                    )
+
+    def test_readme_image_refuses_missing_linked_invalid_or_oversized_inputs(self):
+        identity, release = fixture("devel")
+        release["body"] += "\n<!-- linkedin-image:readme-tui -->\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source, output = root / "source.png", root / "preview.png"
+            source.write_bytes(b"not-a-PNG")
+            link = root / "linked.png"
+            link.symlink_to(source)
+            for candidate in (root / "missing.png", link, source):
+                with (
+                    self.subTest(candidate=candidate.name),
+                    patch.object(social, "TUI_IMAGE_SOURCE", candidate),
+                ):
+                    with self.assertRaisesRegex(social.Refusal, "card-image"):
+                        social.render_image(output, identity, release, ["feature"])
+                self.assertFalse(output.exists())
+            source.write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 8)
+            with (
+                patch.object(social, "TUI_IMAGE_SOURCE", source),
+                patch.object(social, "MAX_IMAGE", 8),
+            ):
+                with self.assertRaisesRegex(social.Refusal, "card-image"):
+                    social.render_image(output, identity, release, ["feature"])
+            self.assertFalse(output.exists())
+
     def test_feature_block_and_continuation_not_tests(self):
         _, release = fixture()
         self.assertEqual(
