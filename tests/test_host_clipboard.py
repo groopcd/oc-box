@@ -210,8 +210,8 @@ class HostClipboardTests(unittest.TestCase):
             patch.object(box, "validate_host_drop", return_value="konsole"),
             patch.object(host_clipboard, "preflight", return_value=reader) as discover,
         ):
-            self.assertIs(box.configure_host_clipboard(args, "2.3.0"), reader)
-            self.assertIs(box.configure_host_clipboard(args, "2.3.0"), reader)
+            self.assertIs(box.configure_host_clipboard(args, "2.3.2"), reader)
+            self.assertIs(box.configure_host_clipboard(args, "2.3.2"), reader)
             discover.assert_called_once()
             reader.read_png.assert_not_called()
             self.assertIs(args.host_drop, False)
@@ -260,6 +260,19 @@ class HostClipboardTests(unittest.TestCase):
             self.assertIs(wrapper.call_args.kwargs["paths_enabled"], False)
             self.assertIs(wrapper.call_args.kwargs["clipboard"], reader)
             run.assert_called_once_with(["native"], file_drops=relay)
+            run.reset_mock()
+            relay.__enter__.side_effect = host_drop.DropError("private-transfer-shape")
+            with self.assertRaises(box.BoxError):
+                box.run_native_tui(
+                    {"opencode_version": "2.3.2"},
+                    ["native"],
+                    {},
+                    host_drop_enabled=False,
+                    host_drop_required=False,
+                    host_clipboard_reader=reader,
+                )
+            run.assert_not_called()  # A changed transfer contract still refuses.
+            reader.read_png.assert_not_called()
         self.assertIn("host_clipboard.py", installation.PROGRAM_FILES)
         self.assertIn("host-clipboard-testing.md", installation.MANUAL_FILES)
 

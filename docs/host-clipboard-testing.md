@@ -8,7 +8,10 @@ desktop contents. No new test harness or broad regression run is needed.
 
 - Use a normal **host** terminal, not a shell inside oc-box.
 - Use direct Konsole or Kitty without tmux/screen/SSH.
-- Use supported native OpenCode 2.2.6, 2.2.7 or 2.3.0.
+- Use native OpenCode 2.x. New minor/patch versions, including 2.3.2, are not
+  rejected solely for their number; the private-client/transfer/terminal
+  contracts must still work. Native composer behavior is a host observation,
+  not something advertised by a public capability endpoint.
 - Wayland: ensure `wl-paste` is installed (`wl-clipboard`).
 - X11: ensure `xclip` is installed.
 - KDE/global shortcuts must not consume Ctrl+Alt+Shift+V.

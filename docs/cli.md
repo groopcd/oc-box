@@ -2114,7 +2114,9 @@ oc-box reset --project ~/devel/demo --image-preview
 ### --host-drop
 
 Experimental and **enabled by default per workspace** for supported native
-OpenCode V2 2.2.6/2.2.7/2.3.0 clients. Plain `start` (including the default command)
+OpenCode V2 clients. Any valid 2.x minor/patch release is eligible; there is no
+exact patch allowlist. V1, malformed versions and other major series refuse.
+Plain `start` (including the default command)
 or `reset` reads the saved host preference. `--host-drop` saves enabled and
 requires a supported client; `--no-host-drop` saves disabled. The flags are
 mutually exclusive. An additional `start` client may attach to an existing owner
@@ -2139,6 +2141,15 @@ only, with no OSC 72 probes/registration and unchanged child output. The Kitty
 profile enables structured OSC 72 drops only after an affirmative capability reply.
 Kitty graphics support, including Konsole's graphics support, is not proof of
 drag-and-drop capability. This is not a guarantee about every emulator/version.
+
+Compatibility is checked through the existing private V2 client connection,
+bounded transfer-helper handshake/replies and terminal framing, rather than
+rejecting a new 2.x version number. These checks fail closed when their observed
+contracts break. Native image composition has no public capability negotiation:
+oc-box cannot automatically prove that every future TUI still converts pathname
+pastes into attachments. A native refusal or literal staged path instead of an
+attachment should be reported, not bypassed by sending automatically. Separate
+history, recovery, browser and attachment-broker version guards are unchanged.
 
 Konsole's default direct URL-drop setting produces the required bracketed paste
 while native OpenCode enables mode 2004. Keep **Disable drag & drop menu for files

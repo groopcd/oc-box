@@ -36,6 +36,12 @@ host shortcut framing and negative opaque/pasted-input cases; reuse of private
 staging without automatic Send or re-enabling file drops; and CLI/client scope
 plus distribution inclusion. No test reads the actual desktop clipboard.
 Existing directly affected input/drop/completion checks remain separate.
+The host-drop eligibility matrix accepts native 2.x minor/patch versions,
+including 2.3.2 and synthetic future 2.x values, while retaining V1/malformed/
+other-major and unsupported-terminal refusals. This is runtime eligibility, not
+a claim that all native releases have been tested. Private transfer handshake
+and framing checks remain authoritative; unrelated version-pinned fixtures and
+history/recovery guards are not broadened by this feature.
 
 The initial implementation deliberately leaves real Spectacle/Wayland/X11,
 Konsole/Kitty shortcut reporting, native composer focus and image attachment

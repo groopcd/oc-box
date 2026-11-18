@@ -22,12 +22,12 @@ import time
 from urllib.parse import unquote, urlsplit
 
 if __package__:
-    from . import host_drop_input, sharing
+    from . import host_drop_input, opencode_compat, sharing
 else:
     import host_drop_input
+    import opencode_compat
     import sharing
 
-SUPPORTED = frozenset(("2.2.6", "2.2.7", "2.3.0"))
 MAX_FILE = 8 * 1024 * 1024
 MAX_BATCH = 4
 MAX_BATCH_BYTES = 16 * 1024 * 1024
@@ -75,10 +75,18 @@ class DropError(ValueError):
 
 
 def preflight(version=None):
-    if version is not None and (
-        not isinstance(version, str) or version not in SUPPORTED
-    ):
-        raise DropError("Host file drops require OpenCode 2.2.6, 2.2.7 or 2.3.0.")
+    if version is not None:
+        try:
+            supported = isinstance(version, str) and opencode_compat.major(version) == 2
+        except ValueError:
+            supported = False
+        if not supported:
+            raise DropError(
+                "Host file drops and clipboard images require native OpenCode 2.x."
+            )
+    # Native pathname paste has no version-specific composer API. Retain the
+    # private-client validation, transfer handshake and terminal framing checks;
+    # a new 2.x minor/patch number is not itself a compatibility failure.
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise DropError("Host file drops require a direct interactive host terminal.")
     if any(os.environ.get(key) for key in ("TMUX", "STY", "SSH_CONNECTION", "SSH_TTY")):

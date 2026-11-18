@@ -209,6 +209,10 @@ their checkout ownership distinct from unrelated source and flat installations.
   text requests, socket mounts, listeners or automatic Send. Preserve ordinary
   Ctrl+V, file-drop opt-outs and the helper's desktop-only environment. Synthetic
   tests are not desktop/native composition acceptance; keep host checks minimal.
+  Host drop/clipboard eligibility covers valid native 2.x releases rather than
+  an exact patch allowlist; retain private-client, transfer and terminal contract
+  refusals. No public API proves future composer attachment behavior. Do not
+  broaden unrelated history/recovery/browser version guards as a shortcut.
 - `ui_state.py` / `ui_state_*.js`: public-SDK container TUI/server/RPC reports,
   installed only during normal supported V2 owning preparation, never on attach.
   Keep exact routed children separate from active root membership and verify all

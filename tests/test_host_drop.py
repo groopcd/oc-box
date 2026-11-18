@@ -412,7 +412,7 @@ class HostDropLaunchTests(unittest.TestCase):
             self.assertEqual(box.run_native_tui({}, ["native-fixture"], None), 7)
             run.assert_called_once_with(["native-fixture"])
 
-    def test_noninteractive_multiplexer_ssh_and_unknown_versions_refuse(self):
+    def test_native_v2_series_and_terminal_contracts_not_patch_allowlist(self):
         with patch.object(host_drop.sys.stdin, "isatty", return_value=False):
             with self.assertRaises(host_drop.DropError):
                 host_drop.preflight("2.3.0")
@@ -421,12 +421,26 @@ class HostDropLaunchTests(unittest.TestCase):
             patch.object(host_drop.sys.stdout, "isatty", return_value=True),
             patch.dict(os.environ, {}, clear=True),
         ):
-            for version in ("1.19.5", "2.9.9", {}):
-                with (
-                    self.subTest(version=version),
-                    self.assertRaises(host_drop.DropError),
+            with patch.dict(os.environ, {"KONSOLE_VERSION": "260803"}):
+                for version in ("1.19.5", "3.0.0", "2.invalid", {}):
+                    with (
+                        self.subTest(version=version),
+                        self.assertRaises(host_drop.DropError),
+                    ):
+                        host_drop.preflight(version)
+                for version in (
+                    "2.0.0",
+                    "2.1.99",
+                    "2.2.6",
+                    "2.2.7",
+                    "2.3.0",
+                    "2.3.2",
+                    "2.9.9",
+                    "2.123.456+fixture",
+                    "opencode v2.3.2",
                 ):
-                    host_drop.preflight(version)
+                    with self.subTest(version=version):
+                        self.assertEqual(host_drop.preflight(version), "konsole")
             for key in ("TMUX", "STY", "SSH_CONNECTION", "SSH_TTY"):
                 with (
                     patch.dict(
