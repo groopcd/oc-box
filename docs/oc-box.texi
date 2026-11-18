@@ -870,6 +870,28 @@ oc-box preferences --project ~/devel/demo --host-drop off
 
 Save host importing disabled for future workspace TUI clients and open this client without the bridge. Mutually exclusive with @code{--host-drop}; neither flag live-toggles existing clients. To change only the preference without opening a TUI, use @code{oc-box preferences --host-drop off}.
 
+@section --host-clipboard
+
+Experimental, **off by default and per native TUI client**. On a supported direct Konsole or Kitty terminal, opt in with @code{start} (the default command) or @code{reset}, then press **Ctrl+Alt+Shift+V** to import one PNG image from the host desktop clipboard. Ordinary Ctrl+V, terminal text paste, clipboard contents and host OpenCode settings are unchanged. The native TUI still runs inside the container; there is no Wayland/X11 socket mount or host clipboard MCP endpoint.
+
+The host relay recognizes only distinct ASCII CSI-u or ModifyOtherKeys reports for this shortcut, not legacy key guesses. A terminal/global shortcut that consumes the chord or reports it indistinguishably will not import an image. The first version uses this dedicated shortcut rather than intercepting normal Ctrl+V. It inherits the direct-TTY, native-version and terminal-profile requirements of @code{--host-drop}; SSH, tmux, screen, unknown/ambiguous profiles and unsupported clients refuse. CSI-u repeat/release reports do not request another image; legacy ModifyOtherKeys repeats cannot be distinguished from new presses.
+
+Clipboard access occurs only in response to the opted-in host input shortcut, never from model output, a plugin/MCP request or background polling. The keyboard report is host input authority, not cryptographic proof of a physical keypress or composer focus. The shortcut authorizes import anywhere in that connection; focus the native prompt before using it. Other workspace tools can read imported bytes, and history, provider systems, backups, copies or crashes may retain them. Read-only import is not confidentiality or recall.
+
+Wayland requires @code{wl-paste} from @code{wl-clipboard} on the host. X11 requires @code{xclip}. If Wayland is selected, a missing helper does not fall back to another clipboard. Preflight only locates the helper; it reads no clipboard data. The shortcut requests @code{image/png} only, with an 8 MiB limit, a bounded helper timeout and a desktop-only helper environment. Text, file lists and other image encodings are not requested or converted. Unsupported/missing image data produces a fixed refusal placeholder, without exposing clipboard text or helper stderr. No packages are installed automatically.
+
+Captured bytes use the existing private drop transfer and staging/cleanup limits. The relay supplies a container pathname as native paste input; it never synthesizes Enter or submits a prompt. Native attachment composition and sending remain native behavior. @code{--image-preview} separately controls image visuals for a qualifying owning launch.
+
+No clipboard setting or data is saved in workspace preferences or the registry. An additional @code{start --host-clipboard} may attach to an existing private V2 owner without restart, credential refresh or unlock. It opts in only that new TUI client; existing clients are unchanged. @code{--no-host-drop --host-clipboard} can enable clipboard images while retaining the explicit file-drop opt-out. V1, web, the manager/embedded terminal, maintenance, sync and informational commands reject the flag. Do not reset a workspace just to enable this feature.
+
+@example
+oc-box --project ~/devel/demo --host-clipboard
+# For a new owning launch when image previews are also wanted:
+oc-box --project ~/devel/demo --host-clipboard --image-preview
+@end example
+
+See the short [host test guide](host-clipboard-testing.md). Focused mocked tests are not acceptance of KDE/Wayland/X11 behavior or native image composition.
+
 @section --credential-mode env|selected|vault
 
 With @code{credentials}, save an explicit forwarding mode for that workspace. @code{env} retains legacy suffix/pass_env forwarding, optionally supplemented with selected vault names. @code{selected} forwards only configured credential names, plus fixed runtime/nonsecret routing settings. @code{vault} uses all current global entries on each new V2 owner, not a frozen name list; nonempty per-name selections are refused. Without a saved policy, V1 defaults to env and V2 to global vault-first. Explicit env/selected policies remain overrides. V1 with saved vault mode uses legacy env forwarding without all-global unlock. Changes apply on the next owner, not to an active client. To replace an existing selection:

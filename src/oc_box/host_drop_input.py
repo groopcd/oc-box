@@ -23,6 +23,25 @@ _ESC_STRINGS = {
 _PASTE_START = b"\x1b[200~"
 _PASTE_END = b"\x1b[201~"
 
+# Explicit Ctrl+Alt+Shift+V only. CSI-u press events grant a clipboard read;
+# repeat/release events consume the reserved shortcut without granting again.
+# ModifyOtherKeys has no separate event type. No legacy Ctrl+V/ESC-v guessing.
+_CLIPBOARD_KEYS = {
+    **{
+        key + b";" + modifiers + suffix: event in (b"", b":1")
+        for key in (b"118", b"86", b"118:86", b"118:86:118")
+        for modifiers in (b"8", b"72", b"136", b"200")  # Optional Caps/Num Lock.
+        for event, suffix in (
+            (b"", b"u"),
+            (b":1", b":1u"),
+            (b":2", b":2u"),
+            (b":3", b":3u"),
+        )
+    },
+    b"27;8;118~": True,
+    b"27;8;86~": True,
+}
+
 # Includes the ASCII "72;" selector, but not the introducer or terminator.
 # The broker must independently validate its protocol/chunk/session limits.
 MAX_OSC72 = 8192
@@ -109,6 +128,7 @@ class _Framing:
         output_filter,
         transform=None,
         on_osc72=None,
+        on_clipboard=None,
         max_paste=0,
         reserve_osc72=False,
     ):
@@ -118,6 +138,7 @@ class _Framing:
         self._reserve_osc72 = reserve_osc72
         self._transform = transform
         self._on_osc72 = on_osc72
+        self._on_clipboard = on_clipboard
         self._max_paste = max_paste
         self._units = _Units()
         self._state = "text"
@@ -368,7 +389,10 @@ class _Framing:
         candidate = None
         if self._csi_candidate is not None:
             candidate = self._csi_candidate + raw
-            if not (b"200~".startswith(candidate) or b"201~".startswith(candidate)):
+            candidates = (b"200~", b"201~")
+            if self._on_clipboard is not None and not self._child_output:
+                candidates += tuple(_CLIPBOARD_KEYS)
+            if not any(value.startswith(candidate) for value in candidates):
                 candidate = None
         self._csi_candidate = candidate
         if candidate is None:
@@ -376,6 +400,29 @@ class _Framing:
         else:
             self._held.extend(raw)
         if not final:
+            return
+        if (
+            not self._framing_only()
+            and self._csi_ascii
+            and self._on_clipboard is not None
+            and candidate in _CLIPBOARD_KEYS
+        ):
+            original = bytes(self._held)
+            self._held.clear()
+            self._state = "text"
+            if not _CLIPBOARD_KEYS[candidate]:
+                return
+            try:
+                replacement = self._on_clipboard()
+            except Exception:
+                self._disable_callbacks()
+                output.extend(original)
+                return
+            if isinstance(replacement, bytes):
+                output.extend(_PASTE_START + replacement + _PASTE_END)
+            elif replacement is not None:
+                self._disable_callbacks()
+                output.extend(original)
             return
         if (
             not self._framing_only()
@@ -572,12 +619,20 @@ class PasteInput(_Framing):
     """
 
     def __init__(
-        self, transform, *, on_osc72=None, max_paste=16384, reserve_osc72=False
+        self,
+        transform,
+        *,
+        on_osc72=None,
+        on_clipboard=None,
+        max_paste=16384,
+        reserve_osc72=False,
     ):
         if not callable(transform):
             raise TypeError("transform must be callable")
         if on_osc72 is not None and not callable(on_osc72):
             raise TypeError("on_osc72 must be callable or None")
+        if on_clipboard is not None and not callable(on_clipboard):
+            raise TypeError("on_clipboard must be callable or None")
         if (
             isinstance(max_paste, bool)
             or not isinstance(max_paste, int)
@@ -590,6 +645,7 @@ class PasteInput(_Framing):
             output_filter=False,
             transform=transform,
             on_osc72=on_osc72,
+            on_clipboard=on_clipboard,
             max_paste=max_paste,
             reserve_osc72=reserve_osc72,
         )

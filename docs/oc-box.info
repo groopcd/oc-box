@@ -2484,7 +2484,71 @@ neither flag live-toggles existing clients.  To change only the
 preference without opening a TUI, use ‘oc-box preferences --host-drop
 off’.
 
-5.32 -credential-mode env|selected|vault
+5.32 -host-clipboard
+====================
+
+Experimental, **off by default and per native TUI client**.  On a
+supported direct Konsole or Kitty terminal, opt in with ‘start’ (the
+default command) or ‘reset’, then press **Ctrl+Alt+Shift+V** to import
+one PNG image from the host desktop clipboard.  Ordinary Ctrl+V,
+terminal text paste, clipboard contents and host OpenCode settings are
+unchanged.  The native TUI still runs inside the container; there is no
+Wayland/X11 socket mount or host clipboard MCP endpoint.
+
+The host relay recognizes only distinct ASCII CSI-u or ModifyOtherKeys
+reports for this shortcut, not legacy key guesses.  A terminal/global
+shortcut that consumes the chord or reports it indistinguishably will
+not import an image.  The first version uses this dedicated shortcut
+rather than intercepting normal Ctrl+V. It inherits the direct-TTY,
+native-version and terminal-profile requirements of ‘--host-drop’; SSH,
+tmux, screen, unknown/ambiguous profiles and unsupported clients refuse.
+CSI-u repeat/release reports do not request another image; legacy
+ModifyOtherKeys repeats cannot be distinguished from new presses.
+
+Clipboard access occurs only in response to the opted-in host input
+shortcut, never from model output, a plugin/MCP request or background
+polling.  The keyboard report is host input authority, not cryptographic
+proof of a physical keypress or composer focus.  The shortcut authorizes
+import anywhere in that connection; focus the native prompt before using
+it.  Other workspace tools can read imported bytes, and history,
+provider systems, backups, copies or crashes may retain them.  Read-only
+import is not confidentiality or recall.
+
+Wayland requires ‘wl-paste’ from ‘wl-clipboard’ on the host.  X11
+requires ‘xclip’.  If Wayland is selected, a missing helper does not
+fall back to another clipboard.  Preflight only locates the helper; it
+reads no clipboard data.  The shortcut requests ‘image/png’ only, with
+an 8 MiB limit, a bounded helper timeout and a desktop-only helper
+environment.  Text, file lists and other image encodings are not
+requested or converted.  Unsupported/missing image data produces a fixed
+refusal placeholder, without exposing clipboard text or helper stderr.
+No packages are installed automatically.
+
+Captured bytes use the existing private drop transfer and
+staging/cleanup limits.  The relay supplies a container pathname as
+native paste input; it never synthesizes Enter or submits a prompt.
+Native attachment composition and sending remain native behavior.
+‘--image-preview’ separately controls image visuals for a qualifying
+owning launch.
+
+No clipboard setting or data is saved in workspace preferences or the
+registry.  An additional ‘start --host-clipboard’ may attach to an
+existing private V2 owner without restart, credential refresh or unlock.
+It opts in only that new TUI client; existing clients are unchanged.
+‘--no-host-drop --host-clipboard’ can enable clipboard images while
+retaining the explicit file-drop opt-out.  V1, web, the manager/embedded
+terminal, maintenance, sync and informational commands reject the flag.
+Do not reset a workspace just to enable this feature.
+
+     oc-box --project ~/devel/demo --host-clipboard
+     # For a new owning launch when image previews are also wanted:
+     oc-box --project ~/devel/demo --host-clipboard --image-preview
+
+See the short [host test guide](host-clipboard-testing.md).  Focused
+mocked tests are not acceptance of KDE/Wayland/X11 behavior or native
+image composition.
+
+5.33 -credential-mode env|selected|vault
 ========================================
 
 With ‘credentials’, save an explicit forwarding mode for that workspace.
@@ -2500,7 +2564,7 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.33 -attachments
+5.34 -attachments
 =================
 
 Web only: explicitly select the visible, source-version-bounded browser
@@ -2508,7 +2572,7 @@ File-drop adapter described under ‘web’.  Keeps the native app and its
 draft/Send controls unchanged.  No automatic prompt admission or
 host-path/URL reading.
 
-5.34 -no-vault
+5.35 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -2527,7 +2591,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.35 -env-secret NAME
+5.36 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -2540,7 +2604,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.36 -vault-secret NAME
+5.37 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -2552,7 +2616,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.37 -clear-credentials
+5.38 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -2564,7 +2628,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.38 -output FILE
+5.39 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -2574,7 +2638,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.39 -portable
+5.40 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -2584,7 +2648,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.40 -recipient AGE_KEY
+5.41 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -2595,7 +2659,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.41 -identity FILE
+5.42 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -2606,7 +2670,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.42 -cpus NUMBER
+5.43 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -2617,7 +2681,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.43 -memory SIZE
+5.44 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -2629,7 +2693,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.44 -pids-limit NUMBER
+5.45 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -2637,7 +2701,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.45 -device MAPPING
+5.46 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -2651,7 +2715,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.46 -podman-arg=-OPTION[=VALUE]
+5.47 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -2678,7 +2742,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.47 -clear-devices
+5.48 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -2689,7 +2753,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.48 -clear-podman-args
+5.49 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -2699,7 +2763,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.49 -delete-sessions
+5.50 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -2708,7 +2772,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.50 -all
+5.51 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -2716,7 +2780,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.51 -y, -yes
+5.52 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -3949,19 +4013,19 @@ Node: Synopsis930
 Node: Description3039
 Node: Commands6637
 Node: Options112146
-Node: Lifecycle and persistence144246
-Node: Distribution images146546
-Node: Sessions and recovery151421
-Node: Devices and host permissions158006
-Node: Resource reports160352
-Node: Configuration and environment162463
-Node: Files173844
-Node: Exit status179788
-Node: Examples180641
-Node: Troubleshooting182727
-Node: Installation and manuals194079
-Node: Authors and license203675
-Node: See also204282
+Node: Lifecycle and persistence147799
+Node: Distribution images150099
+Node: Sessions and recovery154974
+Node: Devices and host permissions161559
+Node: Resource reports163905
+Node: Configuration and environment166016
+Node: Files177397
+Node: Exit status183341
+Node: Examples184194
+Node: Troubleshooting186280
+Node: Installation and manuals197632
+Node: Authors and license207228
+Node: See also207835
 
 End Tag Table
 

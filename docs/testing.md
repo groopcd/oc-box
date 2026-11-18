@@ -28,6 +28,21 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
+### Experimental host clipboard image shortcut
+
+`tests/test_host_clipboard.py` has four focused mock-only groups: read-free helper
+discovery and bounded PNG reads with a desktop-only environment; exact top-level
+host shortcut framing and negative opaque/pasted-input cases; reuse of private
+staging without automatic Send or re-enabling file drops; and CLI/client scope
+plus distribution inclusion. No test reads the actual desktop clipboard.
+Existing directly affected input/drop/completion checks remain separate.
+
+The initial implementation deliberately leaves real Spectacle/Wayland/X11,
+Konsole/Kitty shortcut reporting, native composer focus and image attachment
+behavior to the operator's short [host check](host-clipboard-testing.md).
+These local checks establish no live rootless-Podman or desktop acceptance.
+Do not add a new broad harness or repeat unrelated release gates for this check.
+
 ### Experimental browser attachment adapter
 
 `tests/test_web_attachments.py`, `tests/web_attachments_browser.mjs` and

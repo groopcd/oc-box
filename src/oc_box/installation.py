@@ -43,6 +43,7 @@ RUNTIME_FILES = (
     "attachments.py",
     "attachment_io.py",
     "host_drop.py",
+    "host_clipboard.py",
     "host_drop_io.py",
     "host_drop_input.py",
     "workspace_preferences.py",

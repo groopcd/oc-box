@@ -51,6 +51,15 @@ SUFFIX_MIME = {
     ".pdf": "application/pdf",
 }
 REFUSED = b"[oc-box: host file import refused]"
+CLIPBOARD_REFUSED = b"[oc-box: host clipboard image import refused]"
+CLIPBOARD_WARNING = (
+    "Experimental host clipboard image paste enabled for this TUI client. "
+    "Ctrl+Alt+Shift+V imports one PNG image from the host clipboard into this "
+    "workspace; ordinary Ctrl+V is unchanged. The shortcut authorizes import "
+    "anywhere in this connection, not proof of composer focus. Workspace tools "
+    "can read imported images; history, provider systems or crashes may retain "
+    "copies. Nothing is automatically sent; clipboard text is not requested."
+)
 WARNING = (
     "Experimental host file drops enabled. A supported absolute pathname "
     "pasted anywhere in this native TUI connection authorizes a temporary "
@@ -387,26 +396,36 @@ class Transfer:
 
 
 class Relay:
-    def __init__(self, box, data, connection, *, profile=None):
+    def __init__(
+        self, box, data, connection, *, profile=None, paths_enabled=True, clipboard=None
+    ):
         self.box, self.data, self.connection = box, data, connection
         self.profile = profile or terminal_profile()
         if self.profile not in ("konsole", "kitty"):
             raise DropError("unsupported-terminal-profile")
         self.protected = sharing.protected_paths(box)
+        if type(paths_enabled) is not bool:
+            raise DropError("invalid-path-import-policy")
+        self.paths_enabled = paths_enabled
+        self.clipboard = clipboard
         self.transfer = Transfer(box, data, connection)
         self.refused = 0
+        self.clipboard_refused = 0
         self.protocol = None
         self.ident = None
         self.pending = bytearray()
         self.broken = False
         self.output = (
-            host_drop_input.OutputFilter() if self.profile == "kitty" else None
+            host_drop_input.OutputFilter()
+            if self.profile == "kitty" and self.paths_enabled
+            else None
         )
         self.input = host_drop_input.PasteInput(
             self.paste,
-            on_osc72=self.control if self.profile == "kitty" else None,
+            on_osc72=self.control if self.output is not None else None,
+            on_clipboard=self.paste_clipboard if clipboard is not None else None,
             max_paste=MAX_PATH_PASTE,
-            reserve_osc72=self.profile == "kitty",
+            reserve_osc72=self.output is not None,
         )
 
     def __enter__(self):
@@ -417,6 +436,8 @@ class Relay:
         return self.transfer.put(images)
 
     def paste(self, payload):
+        if not self.paths_enabled:
+            return None
         paths = pasted_paths(payload)
         if paths is None:
             return None
@@ -428,8 +449,28 @@ class Relay:
             self.refused += 1
             return REFUSED
 
+    def paste_clipboard(self):
+        """Only PasteInput's reserved host keyboard action calls this."""
+        try:
+            if self.broken or self.clipboard is None:
+                raise DropError("clipboard-unavailable")
+            if (
+                self.transfer.files >= MAX_FILES
+                or self.transfer.total >= MAX_CLIENT_BYTES
+            ):
+                raise DropError("staging-limit")
+            data = self.clipboard.read_png()
+            if not isinstance(data, bytes) or not 0 < len(data) <= MAX_FILE:
+                raise DropError("clipboard-size")
+            if mime_type(data) != "image/png":
+                raise DropError("clipboard-type")
+            return self.stage([("image/png", data)])
+        except (ValueError, OSError):
+            self.clipboard_refused += 1
+            return CLIPBOARD_REFUSED
+
     def start(self):
-        if self.profile != "kitty":
+        if self.profile != "kitty" or not self.paths_enabled:
             return
         self.protocol = KittyDrop(self, self.emit)
         self.ident = self.protocol.ident
@@ -511,6 +552,12 @@ class Relay:
 
     def __exit__(self, *_):
         self.transfer.__exit__()
+        if self.clipboard_refused:
+            print(
+                f"oc-box: {self.clipboard_refused} host clipboard image paste(s) refused; "
+                "no clipboard text was imported and no automatic retry was made.",
+                file=sys.stderr,
+            )
         if self.refused:
             print(
                 f"oc-box: {self.refused} host file drop(s) refused; no automatic retry was made.",
