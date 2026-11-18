@@ -62,9 +62,19 @@ class HostClipboardTests(unittest.TestCase):
             patch.dict(os.environ, environment, clear=True),
             patch.object(host_clipboard.shutil, "which", return_value=None) as which,
         ):
-            with self.assertRaises(host_clipboard.ClipboardError):
+            with self.assertRaises(host_clipboard.ClipboardError) as error:
                 host_clipboard.preflight()
+            self.assertIn("'wl-paste'", str(error.exception))
+            self.assertIn("'wl-clipboard'", str(error.exception))
+            self.assertIn("on the host, not inside oc-box", str(error.exception))
             which.assert_called_once_with("wl-paste")  # Never read X11 as fallback.
+        with (
+            patch.dict(os.environ, {"DISPLAY": ":0"}, clear=True),
+            patch.object(host_clipboard.shutil, "which", return_value=None),
+            self.assertRaises(host_clipboard.ClipboardError) as error,
+        ):
+            host_clipboard.preflight()
+        self.assertIn("'xclip'", str(error.exception))
         with (
             patch.dict(os.environ, {}, clear=True),
             self.assertRaises(host_clipboard.ClipboardError),
@@ -251,6 +261,7 @@ class HostClipboardTests(unittest.TestCase):
             self.assertIs(wrapper.call_args.kwargs["clipboard"], reader)
             run.assert_called_once_with(["native"], file_drops=relay)
         self.assertIn("host_clipboard.py", installation.PROGRAM_FILES)
+        self.assertIn("host-clipboard-testing.md", installation.MANUAL_FILES)
 
 
 if __name__ == "__main__":

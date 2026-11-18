@@ -382,10 +382,7 @@ def configure_host_clipboard(args, version=None):
         try:
             args._host_clipboard_reader = host_clipboard.preflight()
         except host_clipboard.ClipboardError as error:
-            raise BoxError(
-                str(error)
-                + " Install wl-clipboard (Wayland) or xclip (X11) on the host if needed."
-            ) from None
+            raise BoxError(str(error)) from None
     return args._host_clipboard_reader
 
 

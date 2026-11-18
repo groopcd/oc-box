@@ -32,6 +32,16 @@ class ClipboardError(ValueError):
     """Fixed messages only, never clipboard data, helper errors or paths."""
 
 
+def missing_helper(helper):
+    # These host package names are shared by all seven supported distros.
+    # Guidance only: no package manager or clipboard helper is executed.
+    package = "wl-clipboard" if helper == "wl-paste" else "xclip"
+    return ClipboardError(
+        f"Host clipboard utility '{helper}' is missing or unavailable on PATH. "
+        f"Install the '{package}' package on the host, not inside oc-box."
+    )
+
+
 def preflight() -> "Reader":
     """Discover the selected desktop helper; never execute it or read data."""
     if "WAYLAND_DISPLAY" in os.environ:
@@ -46,7 +56,7 @@ def preflight() -> "Reader":
     try:
         executable = shutil.which(helper)
         if executable is None:
-            raise ClipboardError("Host clipboard helper is unavailable.")
+            raise missing_helper(helper)
         command = (os.path.abspath(executable), *arguments)
         environment = {
             key: value for key, value in os.environ.items() if key in _DESKTOP_ENV
@@ -56,7 +66,7 @@ def preflight() -> "Reader":
     except ClipboardError:
         raise
     except (OSError, ValueError):
-        raise ClipboardError("Host clipboard helper is unavailable.") from None
+        raise missing_helper(helper) from None
 
 
 def _reap(process):

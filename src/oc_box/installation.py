@@ -107,6 +107,7 @@ MANUAL_FILES = (
     "tui.md",
     "update-channels.md",
     "web-shell.md",
+    "host-clipboard-testing.md",
 )
 COMPLETION_FILE = "completions/oc-box"
 

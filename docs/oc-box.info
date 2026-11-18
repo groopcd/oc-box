@@ -2522,7 +2522,11 @@ an 8 MiB limit, a bounded helper timeout and a desktop-only helper
 environment.  Text, file lists and other image encodings are not
 requested or converted.  Unsupported/missing image data produces a fixed
 refusal placeholder, without exposing clipboard text or helper stderr.
-No packages are installed automatically.
+No packages are installed automatically.  Missing helpers name the
+selected utility and its host package explicitly: ‘wl-paste’ is provided
+by ‘wl-clipboard’, and X11 uses ‘xclip’.  These package names are the
+same across the supported distro catalog; see the host test guide for
+package-manager commands and a feature-branch checkout recipe.
 
 Captured bytes use the existing private drop transfer and
 staging/cleanup limits.  The relay supplies a container pathname as
@@ -4013,19 +4017,19 @@ Node: Synopsis930
 Node: Description3039
 Node: Commands6637
 Node: Options112146
-Node: Lifecycle and persistence147799
-Node: Distribution images150099
-Node: Sessions and recovery154974
-Node: Devices and host permissions161559
-Node: Resource reports163905
-Node: Configuration and environment166016
-Node: Files177397
-Node: Exit status183341
-Node: Examples184194
-Node: Troubleshooting186280
-Node: Installation and manuals197632
-Node: Authors and license207228
-Node: See also207835
+Node: Lifecycle and persistence148113
+Node: Distribution images150413
+Node: Sessions and recovery155288
+Node: Devices and host permissions161873
+Node: Resource reports164219
+Node: Configuration and environment166330
+Node: Files177711
+Node: Exit status183655
+Node: Examples184508
+Node: Troubleshooting186594
+Node: Installation and manuals197946
+Node: Authors and license207542
+Node: See also208149
 
 End Tag Table
 

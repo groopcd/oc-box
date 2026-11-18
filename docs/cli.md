@@ -2236,6 +2236,10 @@ desktop-only helper environment. Text, file lists and other image encodings are
 not requested or converted. Unsupported/missing image data produces a fixed
 refusal placeholder, without exposing clipboard text or helper stderr. No
 packages are installed automatically.
+Missing helpers name the selected utility and its host package explicitly:
+`wl-paste` is provided by `wl-clipboard`, and X11 uses `xclip`. These package
+names are the same across the supported distro catalog; see the host test guide
+for package-manager commands and a feature-branch checkout recipe.
 
 Captured bytes use the existing private drop transfer and staging/cleanup
 limits. The relay supplies a container pathname as native paste input; it never

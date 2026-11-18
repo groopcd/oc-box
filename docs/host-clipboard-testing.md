@@ -13,13 +13,32 @@ desktop contents. No new test harness or broad regression run is needed.
 - X11: ensure `xclip` is installed.
 - KDE/global shortcuts must not consume Ctrl+Alt+Shift+V.
 
-Use the branch launcher without replacing your published installation. For
-example, from an isolated checkout of `feature/devel-host-clipboard`:
+`uv --with .` builds the **current checkout**, not a named feature branch.
+An installed release or another checkout will not acquire the new flag from
+that command. Keep your existing checkout/work unchanged and create a separate
+test worktree. From your normal oc-box repository on the host:
 
 ```sh
-uv run --no-project --with '.[vault]' python -I -m oc_box \
+git fetch origin feature/devel-host-clipboard
+git worktree add --detach ../oc-box-host-clipboard-test origin/feature/devel-host-clipboard
+cd ../oc-box-host-clipboard-test
+uv run --no-project --refresh-package oc-box --with '.[vault]' python -I -m oc_box --help
+```
+
+Confirm the help lists `--host-clipboard` **before** launching a workspace.
+If the test directory already exists, do not overwrite or force-remove it;
+use another new directory or verify its revision. `--refresh-package oc-box`
+also avoids reusing an older local package build when testing branch updates.
+
+Now use the branch launcher without replacing your published installation:
+
+```sh
+uv run --no-project --refresh-package oc-box --with '.[vault]' python -I -m oc_box \
   --project ~/devel/demo --host-clipboard
 ```
+
+Replace `~/devel/demo` with the **real existing project** you intend to use.
+Do not pass a literal placeholder such as `/path/to/your/project`.
 
 The package is non-editable and isolated. Omit `[vault]` only if your normal
 workspace does not require the optional crypto dependency. Select your intended
@@ -30,6 +49,37 @@ An existing private owner may stay running: the command opens an additional TUI
 client with its own clipboard opt-in and does not refresh its credentials. For
 a new owning launch, `--image-preview` may be added for inline visuals; it is
 not accepted as a live toggle while another owner is active.
+
+## Host clipboard packages
+
+The correct Wayland utility is **`wl-paste`**, not `wpl-paste`. Its package is
+`wl-clipboard` on every supported distro. Check in your **normal host terminal**:
+
+```sh
+command -v wl-paste
+```
+
+This only looks up the command; it does not read the clipboard. A check inside
+oc-box describes the container, not the host. The feature's startup preflight
+performs this host PATH check and reports the selected utility/package if missing.
+It never installs packages automatically.
+
+| Host distro | Wayland package installation |
+| --- | --- |
+| openSUSE Tumbleweed | `sudo zypper install wl-clipboard` |
+| openSUSE Leap | `sudo zypper install wl-clipboard` |
+| Ubuntu | `sudo apt install wl-clipboard` |
+| Debian | `sudo apt install wl-clipboard` |
+| Fedora | `sudo dnf install wl-clipboard` |
+| Arch | `sudo pacman -Syu --needed wl-clipboard` |
+| Alpine | `sudo apk add wl-clipboard` |
+
+Use your distro's normal privilege helper (`sudo`/`doas`, or a root shell).
+Refresh package indexes first if needed. These are manual suggestions, not
+package-installation tests or new automatic container dependencies.
+For an **X11** session, check `command -v xclip` and use package **`xclip`**
+in the corresponding command instead. Wayland selection does not silently fall
+back to an X11 clipboard if `wl-paste` is missing.
 
 ## Five small observations
 
