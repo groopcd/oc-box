@@ -2154,6 +2154,15 @@ def prepare_runtime(
 
 def run_v2_history(data, action, **settings):
     """Use the owning service when present; never elect a host shared service."""
+    stream = history_reader.EXPORTS.get()
+    if stream is not None:
+        result = stream.run(data, action, settings)
+        if result.returncode:
+            message = opencode_v2_io.fixed_message(result.stderr)
+            if message in opencode_v2_io.PENDING_MESSAGES:
+                raise HistoryPending(message)
+            raise BoxError(message or "OpenCode 2.x history export helper failed.")
+        return result
     live = workspace_service.live_connection()
     endpoint = (
         {key: live[key] for key in ("url", "password")}
@@ -2744,6 +2753,15 @@ def verify_host_archive(path, data, archived):
 
 def sync_sessions(path, data, *, announce=True):
     started = time.monotonic()
+    with history_reader.export_pass(sys.modules[__name__], data):
+        populated = _sync_sessions(path, data, started)
+    if populated and announce:
+        print(
+            "Session history synced to your normal host OpenCode database.", flush=True
+        )
+
+
+def _sync_sessions(path, data, started):
     state = refresh_sessions(path, data)
     archives = path.parent / "history"
     archives.mkdir(exist_ok=True, mode=0o700)
@@ -2823,10 +2841,7 @@ def sync_sessions(path, data, *, announce=True):
             + "; ".join(dict.fromkeys(pending))
             + " Their last archives are retained and other sessions were synchronized."
         )
-    if state.get("sessions") and announce:
-        print(
-            "Session history synced to your normal host OpenCode database.", flush=True
-        )
+    return bool(state.get("sessions"))
 
 
 def parse_jsonc(text):

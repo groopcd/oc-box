@@ -789,6 +789,19 @@ are not acknowledged, cleared or replayed.
 The transition budget is 35 seconds and the snapshot budget 180 seconds, with
 separate bounded cleanup. The container is stopped again before exit.
 
+The guarded post-stop copy reuses one private, pass-local Python export helper
+against the Reader's existing endpoint instead of starting a container/Python
+command for each session. It still reads the complete inventory and performs
+the same serial projected-history/native-export comparisons for every session,
+including unchanged ones. Each request is admitted separately against stop
+intent and the remaining snapshot deadline; session IDs are not sent as a bulk
+work queue. Pending sessions do not prevent verified progress on their neighbors.
+The helper handles one response at a time (at most 1 GiB per response), never
+starts a native service, and is reaped before overall sync success. Malformed or
+failed transport is not automatically restarted or replayed; data and retry
+guidance remain. Destination imports and independent native verification remain
+unchanged. Ordinary live/manual sync and V1 retain their existing transports.
+
 This conservative path requires a passive container entrypoint, no custom Podman
 arguments or automatic health/restart/shell-loader hooks, and validated identity/home mounts.
 It also refuses native scheduler rows (including paused/completed rows), unknown

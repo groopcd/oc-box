@@ -42,6 +42,10 @@ EXPORT = "Invalid OpenCode 2.x history export."
 ACTIVITY = "Invalid OpenCode 2.x activity response."
 UNSETTLED = "OpenCode 2.x history is unsettled; retry sync after completion."
 CHANGED = "OpenCode 2.x history changed or omitted messages; retry sync."
+WORKER = "OpenCode 2.x history worker failed."
+HISTORY_WORKER_PROTOCOL = "oc-box.history/1"
+HISTORY_WORKER_CONTROL = 65536
+HISTORY_WORKER_PAYLOAD = 1073741824
 FIXED_MESSAGES = frozenset(
     (
         ENDPOINT,
@@ -59,6 +63,7 @@ FIXED_MESSAGES = frozenset(
         ACTIVITY,
         UNSETTLED,
         CHANGED,
+        WORKER,
     )
 )
 # Refusals that only mean "not settled right now". The sync loop continues with
@@ -108,7 +113,7 @@ def _deadline_http(parsed, method, path, data, headers, deadline):
                     path, response.status, "Private request failed", {}, None
                 )
             chunks = []
-            while True:
+            while not response.isclosed():
                 stream.settimeout(_deadline_timeout(deadline))
                 chunk = response.read1(65536)
                 if not chunk:
@@ -837,6 +842,130 @@ def history_source_lease(binary):
             raise HistorySourceError("cleanup-failed")
 
 
+def history_worker():
+    """One already-guarded reader pass; this protocol never starts a service."""
+    os.environ.clear()
+    os.environ.update({"PATH": "/usr/bin:/bin", "LANG": "C.UTF-8"})
+    pending, eof = bytearray(), object()
+    deadline = time.monotonic() + 45
+
+    def control():
+        while b"\n" not in pending:
+            if len(pending) >= HISTORY_WORKER_CONTROL:
+                raise FixedError(WORKER)
+            budget = _deadline_timeout(deadline, 180)
+            if not select.select([incoming], [], [], budget)[0]:
+                raise FixedError(NOT_READY)
+            try:
+                capacity = HISTORY_WORKER_CONTROL - len(pending)
+                chunk = os.read(incoming, min(4096, capacity))
+            except BlockingIOError:
+                continue
+            if not chunk:
+                if pending:
+                    raise FixedError(WORKER)
+                return eof
+            pending.extend(chunk)
+        end = pending.index(b"\n")
+        line = bytes(pending[:end])
+        del pending[: end + 1]
+        return json.loads(line.decode("utf-8"))
+
+    def reply(header, body=b""):
+        for content in ((json.dumps(header) + "\n").encode("utf-8"), body):
+            view = memoryview(content)
+            while view:
+                budget = _deadline_timeout(deadline, 180)
+                if not select.select([], [outgoing], [], budget)[1]:
+                    raise FixedError(NOT_READY)
+                try:
+                    count = os.write(outgoing, view[:65536])
+                except BlockingIOError:
+                    continue
+                if count <= 0:
+                    raise FixedError(WORKER)
+                view = view[count:]
+
+    try:
+        incoming, outgoing = sys.stdin.fileno(), sys.stdout.fileno()
+        os.set_blocking(incoming, False)
+        os.set_blocking(outgoing, False)
+        settings = control()
+        if settings is eof:
+            return
+        if not isinstance(settings, dict):
+            raise FixedError(WORKER)
+        if set(settings) != {"endpoint", "directory", "timeout"}:
+            raise FixedError(WORKER)
+        directory, timeout = settings["directory"], settings["timeout"]
+        if (
+            not isinstance(directory, str)
+            or not directory.startswith("/")
+            or len(directory) > 4096
+            or any(char in directory for char in "\0\r\n")
+            or type(timeout) not in (int, float)
+            or not math.isfinite(timeout)
+            or not 0 < timeout <= 180
+        ):
+            raise FixedError(WORKER)
+        deadline = time.monotonic() + timeout
+        endpoint = settings["endpoint"]
+        if not isinstance(endpoint, dict) or set(endpoint) != {"url", "password"}:
+            raise FixedError(ENDPOINT)
+        request = endpoint_request(endpoint)
+        del settings, endpoint, request.endpoint
+        reply({"protocol": HISTORY_WORKER_PROTOCOL})
+
+        def bounded_request(method, path):
+            return request(method, path, deadline=deadline)
+
+        sequence = 1
+        while True:
+            try:
+                message = control()
+                if message is eof:
+                    return
+                if (
+                    not isinstance(message, dict)
+                    or type(message.get("id")) is not int
+                    or message["id"] != sequence
+                ):
+                    raise FixedError(WORKER)
+                action, session = message.get("action"), message.get("session")
+                keys = {"id", "action"}
+                if action == "export":
+                    keys.add("session")
+                if set(message) != keys or action not in ("sessions", "export"):
+                    raise FixedError(WORKER)
+                if action == "export" and (
+                    not isinstance(session, str)
+                    or len(session) > 256
+                    or re.fullmatch(r"ses[A-Za-z0-9_-]+", session) is None
+                ):
+                    raise FixedError(WORKER)
+                value = (
+                    session_inventory(bounded_request, directory)
+                    if action == "sessions"
+                    else checked_export(bounded_request, session)
+                )
+                body = json.dumps(value).encode("utf-8")
+                if len(body) > HISTORY_WORKER_PAYLOAD:
+                    raise FixedError(WORKER)
+            except Exception as error:
+                reason = str(error) if isinstance(error, FixedError) else WORKER
+                reply({"id": sequence, "error": reason})
+                if reason not in PENDING_MESSAGES:
+                    raise FixedError(reason) from None
+            else:
+                reply({"id": sequence, "size": len(body)}, body)
+                del value, body
+            sequence += 1
+    except FixedError:
+        raise
+    except Exception:
+        raise FixedError(WORKER) from None
+
+
 def main(argv):
     action, binary = argv
     if action == "seed":
@@ -879,6 +1008,8 @@ def main(argv):
                     break
     elif action == "history-source":
         history_source_lease(binary)
+    elif action == "history-worker":
+        history_worker()
     elif action == "plugins":
         with server(binary) as request:
             query = "?directory=" + quote(os.getcwd(), safe="")

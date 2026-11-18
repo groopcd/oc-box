@@ -1228,6 +1228,41 @@ pending-neighbor progress and unchanged archive/checkpoint data. Process counts
 and elapsed times are useful measurements, not integrity or host-acceptance
 proofs. Rootless lifecycle acceptance remains host-only.
 
+##### Guarded-reader export transport reuse
+
+The later performance amendment, based on `44b1c14`, targets the remaining
+per-operation container/Python bridge startup in the post-stop Reader path.
+It does not replace the Reader lease, remove native export/projection comparison,
+trust timestamps, reuse destination writers, change the 30-second live grace or
+optimize ordinary standalone/manual sync.
+
+One completed fake-loopback component comparison used 136 exports of 3,072 bytes
+and eight messages each. The old bootstrap/Reader/bridge path took 22.861 seconds;
+one pass-local helper took 0.240 seconds, including its startup and clean exit.
+Both made the same 272 message/export HTTP requests and received 814,368 response
+bytes. These observations exclude Podman, native OpenCode, source preflight,
+inventory and destination work; they do not predict a production-host speedup.
+Earlier timed-out/incomplete measurement attempts remain excluded, not passes.
+Archive-only work was small in that synthetic workload, so archive bytes,
+rewrites and digest/checkpoint semantics are deliberately unchanged.
+
+The new helper accepts only serial inventory/export requests against the existing
+Reader endpoint. Host admission is checked before each bounded request write,
+not only at process creation. Credentials use private stdin, not argv, logs or
+saved config. Sequence/size framing, one-response memory bounds, deadlines,
+pending-neighbor progress, no automatic restart and reaping/EOF checks are
+mandatory. A clean process exit with trailing output is not clean framing.
+Final success is withheld until helper cleanup succeeds.
+
+Focused pipe/loopback tests cover the transport boundaries; existing V1 and
+conflict/no-op verification regressions also passed. The existing native 2.3.2
+retained-subagent fixture passed in its one-child mode in 16.4 seconds: three
+sessions verified, one native Reader, eight source and eight destination
+automation refusals, preserved durable execution/history and original destination
+sessions, and no extra provider/shell/plugin execution. This is local synthetic
+native coverage, not new external-host acceptance or a real-project timing.
+No broad local suite, host-fixture replay or native workload sweep is implied.
+
 #### Native terminal preferences and open tabs
 
 Native terminal preferences and tab membership are not the history inventory.
