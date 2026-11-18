@@ -1,0 +1,127 @@
+{
+  "capture": "Real Textual compositor; synthetic in-memory data only",
+  "read_only": true,
+  "native_connections": 0,
+  "clipboard_access": false,
+  "terminal": "Disconnected; explanatory emulator fixture, not process output",
+  "fonts": "DejaVu Sans Mono / DejaVu Sans; terminal font rendering can differ",
+  "crossmark_font_fallback": true,
+  "dependencies": {
+    "textual": "8.2.8",
+    "rich": "15.0.0",
+    "pyte": "0.8.2",
+    "Pillow": "12.3.0"
+  },
+  "renderer_sha256": "cf9cb1eb75be08eefa801fbcf6f09f2c46ce92bd44ccac5377eb986e192af14c",
+  "font_sha256": {
+    "DejaVuSansMono.ttf": "b4a6c3e4faab8773f4ff761d56451646409f29abedd68f05d38c2df667d3c582",
+    "DejaVuSansMono-Bold.ttf": "bce60f1b4421acd9ea51ba6623d7024ecbe6817a953e3654df62a5e6bdf8f769",
+    "DejaVuSans-Bold.ttf": "e6476c1b80502924294eed40894c5b18e06c181444ca953e5334262df9c27724",
+    "DejaVuSans.ttf": "7da195a74c55bef988d0d48f9508bd5d849425c1770dba5d7bfc6ce9ed848954"
+  },
+  "runtime_sha256": {
+    "tui.py": "f9d3a3e049d747b90d862a1341032af0b6a9bb966d9998aed6529c9f4184a835",
+    "tui_app.py": "b858e4b732b50cc0e705449232cd08ea134f3857476bea60faf06ac1290f3ea6",
+    "tui_status.py": "c63d8cd9413e2745ab63b54687d94edda762077922c9da783f47f3a2e7bb006e",
+    "tui_settings.py": "0b55f35228348c5abea7f5e0ce204c8f6b67397307c0f092812ba1781594fcf9",
+    "tui_management.py": "c16ac222e659cce217ca1316acb5ff22aaf921bbd611d3f280f57d618fbb8e3b",
+    "tui_clipboard.py": "c6e5988253fde2dd628d236de1a8182685cd631196eaea7f926b0e7426af4f11",
+    "tui_terminal.py": "954501b1880faedcf906ac603569c6bb8003f0d75694b86eabc38e6f0c479337",
+    "tui_sessions.py": "26be4e0de804c03c546623b2b2524e6a68b928a6cb5dbaad50ba6657f8e02e6b",
+    "tui_logs.py": "ab0fe3af4fbcf10e10cedbcab0b2df26e33dbe7301b800c1275f9875dff695b0"
+  },
+  "images": {
+    "status": {
+      "file": "tui/status.png",
+      "cells": [
+        144,
+        44
+      ],
+      "pixels": [
+        1920,
+        1256
+      ],
+      "sha256": "17a2d84b65991625c78298048da12aebb99542be6ea268c78e9ca58e27107bde"
+    },
+    "settings": {
+      "file": "tui/settings.png",
+      "cells": [
+        144,
+        82
+      ],
+      "pixels": [
+        1920,
+        2244
+      ],
+      "sha256": "c2d59b8226aa102d9bde8abce311f3cdf85f42158cacbbd32f0d89b41cf03870"
+    },
+    "sessions": {
+      "file": "tui/sessions.png",
+      "cells": [
+        144,
+        38
+      ],
+      "pixels": [
+        1920,
+        1100
+      ],
+      "sha256": "1a19bf6189edd52a403e9d9ba3febb334ec33ed99094674310966332c72f54f9"
+    },
+    "terminals": {
+      "file": "tui/terminals.png",
+      "cells": [
+        144,
+        34
+      ],
+      "pixels": [
+        1920,
+        996
+      ],
+      "sha256": "3f1496ec726f8d731c735a6bbd72400f39c17cb2f3ef0563d8ae2d648c2e9d06"
+    },
+    "logs": {
+      "file": "tui/logs.png",
+      "cells": [
+        144,
+        38
+      ],
+      "pixels": [
+        1920,
+        1100
+      ],
+      "sha256": "bf6c1c9695a89f712c0670cc3207d35b942c49b6b02417ab6674bc48322a8e5c"
+    },
+    "storage": {
+      "file": "tui/storage.png",
+      "cells": [
+        144,
+        42
+      ],
+      "pixels": [
+        1920,
+        1204
+      ],
+      "sha256": "b85421db3c26930b86e0d79ba1c6c899e74994813e6104ae010911a181121561"
+    },
+    "backups": {
+      "file": "tui/backups.png",
+      "cells": [
+        144,
+        52
+      ],
+      "pixels": [
+        1920,
+        1464
+      ],
+      "sha256": "f84562372379a45acedc15b9f248beee288ea415bd73992e148e60f877750813"
+    },
+    "hero": {
+      "file": "readme-hero.png",
+      "pixels": [
+        1984,
+        1394
+      ],
+      "sha256": "b3666b1ac0e134092d065cc8ba06277e044f91be6f925980c6dca9ac1b2d6ead"
+    }
+  }
+}

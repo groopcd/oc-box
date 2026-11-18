@@ -123,6 +123,14 @@ options and devices explicitly extend these defaults.
 3.1 OpenCode versions
 =====================
 
+This is the **stable ‘master’ command reference**, matching the code on
+this branch.  The main guides focus on OpenCode 2.x; retained 1.x
+behavior has [separate legacy guidance](legacy/README.md).  Experimental
+1.7 commands and profiles use the development reference linked from the
+[documentation hub](README.md), not this stable command list.
+Publishing development guides on ‘master’ does not add their commands to
+its runtime.
+
 oc-box 1.5 supports OpenCode 1.x and 2.x, tested with 1.19.5 and 2.2.6.
 The host release selects the exact container package: ‘opencode-ai’ for
 1.x, ‘@opencode/cli’ for 2.x.  V2 uses a workspace-owned private stdio
@@ -2921,21 +2929,21 @@ Node: Top210
 Node: Name769
 Node: Synopsis930
 Node: Description2579
-Node: Commands6084
-Node: Options66394
-Node: Lifecycle and persistence87076
-Node: Distribution images89196
-Node: Sessions and recovery94071
-Node: Devices and host permissions100656
-Node: Resource reports103002
-Node: Configuration and environment105113
-Node: Files116832
-Node: Exit status121685
-Node: Examples122496
-Node: Troubleshooting124582
-Node: Installation and manuals135934
-Node: Authors and license144822
-Node: See also145429
+Node: Commands6524
+Node: Options66834
+Node: Lifecycle and persistence87516
+Node: Distribution images89636
+Node: Sessions and recovery94511
+Node: Devices and host permissions101096
+Node: Resource reports103442
+Node: Configuration and environment105553
+Node: Files117272
+Node: Exit status122125
+Node: Examples122936
+Node: Troubleshooting125022
+Node: Installation and manuals136374
+Node: Authors and license145262
+Node: See also145869
 
 End Tag Table
 

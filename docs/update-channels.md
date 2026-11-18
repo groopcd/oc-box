@@ -1,5 +1,19 @@
 # Update channels
 
+[Documentation hub](README.md) · [Installation](installation.md) ·
+[Development feature setup](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md#enable-the-dashboard-after-a-github-channel-switch)
+
+**Two independent versions:** stable/development select the **oc-box release**,
+not the native OpenCode major. Current guides focus on OpenCode 2.x;
+[1.x operating instructions are legacy](legacy/README.md).
+This page retains the stable channel contract. The dashboard and other 1.7-only
+guides require an appropriate published development release.
+
+**On this page:** [Select/preview](#select-or-preview-a-channel) ·
+[Automatic updates](#automatic-updates) ·
+[Older installations](#bootstrap-and-older-installations) ·
+[Publication policy](#publication-policy)
+
 Stable/devel are **release choices**, not installation methods or version
 series. GitHub/curl and PyPI both remain supported.
 

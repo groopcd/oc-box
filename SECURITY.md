@@ -1,5 +1,14 @@
 # Security and trust boundary
 
+**Stable security reference (`master`).** The original stable trust-boundary
+rules below remain in force. Experimental dashboard, sharing, host-drop and
+browser-attachment boundaries are documented in
+[development security](https://github.com/groopcd/oc-box/blob/devel/SECURITY.md);
+publishing their guides here does not enable them in stable.
+
+[Documentation hub](docs/README.md) · [Legacy 1.x](docs/legacy/README.md) ·
+[Report a security issue privately](#reporting-issues)
+
 oc-box runs the entire OpenCode process and its integrations inside a rootless
 Podman container. It aims to contain routine destructive development commands
 and environment changes. It is not a VM, a hardened hostile-code service, or a

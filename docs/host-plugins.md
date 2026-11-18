@@ -1,5 +1,13 @@
 # Plain host OpenCode 2.x: native plugin migration and audit
 
+[Documentation hub](README.md) ·
+[Legacy 1.x plugins](legacy/README.md#plugins-and-language-servers) ·
+[Development reference](https://github.com/groopcd/oc-box/blob/devel/docs/host-plugins.md)
+
+This is the stable source's **2.x-only host migration utility**, not setup for
+retaining a 1.x plugin profile. Its existing scope and validation below are
+unchanged.
+
 ## Recommended: native V2 in your normal host configuration
 
 If you use only OpenCode 2.x, `tools/port_host_plugins.py` audits the known personal

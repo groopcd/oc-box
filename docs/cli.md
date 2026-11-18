@@ -72,6 +72,13 @@ Additional Podman options and devices explicitly extend these defaults.
 
 ### OpenCode versions
 
+This is the **stable `master` command reference**, matching the code on this
+branch. The main guides focus on OpenCode 2.x; retained 1.x behavior has
+[separate legacy guidance](legacy/README.md). Experimental 1.7 commands and
+profiles use the development reference linked from the
+[documentation hub](README.md), not this stable command list. Publishing
+development guides on `master` does not add their commands to its runtime.
+
 oc-box 1.5 supports OpenCode 1.x and 2.x, tested with 1.19.5 and
 2.2.6. The host release selects the exact container package: `opencode-ai` for
 1.x, `@opencode/cli` for 2.x. V2 uses a workspace-owned private stdio server with

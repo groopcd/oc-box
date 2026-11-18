@@ -1,5 +1,15 @@
 # Contributing
 
+[Documentation hub](docs/README.md) · [Stable checks](#checks) ·
+[Legacy 1.x](docs/legacy/README.md) ·
+[Development contribution guide](https://github.com/groopcd/oc-box/blob/devel/CONTRIBUTING.md)
+
+**Branch scope:** these source commands and release requirements describe stable
+`master`. Use a `devel` checkout for the optional 1.7 dashboard, attachment tools
+and screenshot generator. The new documentation does not merge that runtime
+into stable. OpenCode 2.x is the primary user-documentation path; retained 1.x
+compatibility/security regressions remain required.
+
 Use the full Git history: stable release identity is `1.6.N+gHASH`, development
 identity is `1.7.N.dev0+gHASH`, with N the commit count minus the 1.0.0 baseline
 (29). Keep the absolute `commit_count` in metadata for upgrade compatibility

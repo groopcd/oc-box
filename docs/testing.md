@@ -1,5 +1,16 @@
 # Test strategy and suite audit
 
+[Documentation hub](README.md) · [Contributor checks](../CONTRIBUTING.md#checks) ·
+[Development testing](https://github.com/groopcd/oc-box/blob/devel/docs/testing.md)
+
+**Stable-source record (`master`).** The recipes, source identities and evidence
+below retain their original scope. Development manager/attachments and newer
+history-recovery contracts have a separate linked record, not automatic stable
+acceptance. OpenCode 1.x is legacy coverage, not removed coverage.
+
+**On this page:** [Layers](#layers) · [Audit result](#audit-result) ·
+[Ownership map](#ownership-map) · [Reviewing future changes](#reviewing-future-changes)
+
 Tests protect behavior, not a target number of methods. A validation table can
 have many necessary negative cases; moving them into one method is consolidation,
 not permission to stop checking those cases. V1 compatibility is supported code,

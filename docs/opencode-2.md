@@ -1,4 +1,18 @@
-# OpenCode 1.x and 2.x compatibility
+# OpenCode 2.x compatibility — stable
+
+<a id="opencode-1x-and-2x-compatibility"></a>
+
+[Documentation hub](README.md) · [Legacy 1.x guide](legacy/README.md) ·
+[Development compatibility](https://github.com/groopcd/oc-box/blob/devel/docs/opencode-2.md)
+
+**Stable-source scope (`master`).** This reference preserves stable runtime and
+validation behavior. OpenCode 2.x is the primary reader path; 1.x remains supported
+as legacy. Development-only integrations and newer recovery profiles belong to
+the linked `devel` reference, not this stable contract.
+
+**On this page:** [Service and credentials](#environment-and-service-plan) ·
+[Compatibility map](#compatibility-map) · [History/downgrade](#history-and-downgrade-strategy) ·
+[Verification](#verification)
 
 Available since oc-box 1.5.x, with retained OpenCode 1.x support in 1.6. Validation uses
 unmodified OpenCode 1.19.5 and 2.2.6, plus accepted disposable Linux host/rootless
@@ -283,7 +297,7 @@ interactive TUI permission-prompt/reload pass has been accepted. See the publish
 
 ## Compatibility map
 
-| Feature | 1.x | 2.x behavior |
+| Feature | 1.x (legacy) | 2.x (primary) |
 | --- | --- | --- |
 | Exact runtime | `opencode-ai@VERSION` | `@opencode/cli@VERSION`, decorated version output normalized |
 | TUI | Native 1.x | Native 2.x on the workspace-owned private service |
