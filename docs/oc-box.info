@@ -68,7 +68,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box --status [--project PATH | --workspace ID] [--json]
      oc-box status [--project PATH | --workspace ID] [--json]
      oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
-     oc-box upgrade [--check] [--stable | --devel]
+     oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
      oc-box upgrade --auto-update on|off
      oc-box secrets init|list|passwd
      oc-box secrets set|remove NAME
@@ -1012,23 +1012,27 @@ Open the optional Textual workspace dashboard, separate from the native
 OpenCode conversation TUI launched by ‘start’.  This is a
 development-branch feature, not an accepted stable dashboard release;
 check ‘oc-box tui --help’ for availability in the installed build.  It
-requires the optional ‘tui’ Python extra or GitHub installer
-‘--with-tui’, a regular unprivileged Linux host user, and real TTY
-input/output.  Normal CLI commands retain their stdlib-only baseline.
+requires optional dashboard dependencies, a regular unprivileged Linux
+host user, and real TTY input/output.  Normal CLI commands retain their
+stdlib-only baseline.
 
-For a GitHub installation, ‘oc-box upgrade --devel’ selects the release
-channel but does not enable TUI dependencies for the first time.  If
-‘oc-box tui’ reports “Optional TUI dependencies are missing”, rerun the
-host bootstrap explicitly:
+For an existing installation with a launcher release supporting upgrade
+extras, request the dependencies through the verified existing owner:
 
-     curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-tui --with-vault
+     oc-box upgrade --devel --tui
+     # Or add both independent extras:
+     oc-box upgrade --devel --vault --tui
 
-Keep ‘--with-vault’ if you use the encrypted vault; otherwise omit it.
-This installs optional dependencies privately in the immutable release,
-not system Python, without resetting workspaces or deleting history.
-Later updates to TUI-supporting targets retain the opt-in.  Stay with
-the GitHub method rather than creating a second pipx/uv installation to
-supply its missing dependencies.
+This also fixes “Optional TUI dependencies are missing” without
+rerunning curl.  GitHub installs dependencies privately in an immutable
+release; verified uv/pipx owners use their own manager.  Omitted extras
+are not removed, the same release can gain dependencies, and a repeated
+satisfied request is a no-op.  No workspace reset, history deletion,
+credential-policy change, vault initialization/unlock or dashboard
+launch occurs.  Older launchers must upgrade normally to a supporting
+published release first; genuinely pre-channel builds retain the
+exceptional [bootstrap
+route](update-channels.md#bootstrap-and-older-installations).
 
      oc-box tui
      oc-box tui --project ~/devel/demo
@@ -1595,6 +1599,9 @@ does not save a new preference.
      oc-box upgrade --check
      oc-box upgrade --devel --check
      oc-box upgrade --devel
+     oc-box upgrade --devel --vault  # Add vault dependencies independently
+     oc-box upgrade --devel --tui    # Add dashboard dependencies independently
+     oc-box upgrade --devel --vault --tui
      oc-box upgrade                  # Follow the saved channel
      oc-box upgrade --stable
      oc-box upgrade --auto-update on
@@ -1605,14 +1612,33 @@ membership before running the staged immutable installer.
 Python-package upgrades delegate only to a verified owning pipx, uv tool
 or dedicated virtual-environment manager.  An ambiguous owner or
 editable checkout receives manual guidance rather than a guessed
-installation target.  Supported requested extras are retained; stable
-1.6 does not support the optional ‘tui’ extra.
+installation target.  Verified uv/pipx owners can receive additive
+package-extra requests.  Plain pip cannot prove prior requested extras,
+so ambiguous extras still refuse rather than guessing what to preserve.
 
-Channel selection is not first-time optional-feature installation.  A
-GitHub upgrade with ‘--devel’ does not add TUI dependencies to an
-installation that never opted in.  Use the bootstrap with ‘--devel
---with-tui’, retaining ‘--with-vault’ when used, as shown under ‘tui’.
-No workspace reset is required.
+‘--vault’ and ‘--tui’ independently request optional installer
+dependencies.  They work from stable or development installations and
+can be combined with either channel selection or ‘--check’.  With no
+selector, the saved channel is used: ‘oc-box upgrade --vault’ adds vault
+support without choosing development.  Channel selection alone does not
+request new extras, and optional defaults are unchanged.  These flags do
+not change workspace credential policy, initialize or unlock a vault,
+launch the dashboard or start a workspace.
+
+Requests are additive: omitted extras are not removed.  Only extras
+supported by the target are installed, but inherited requests remain
+saved; a development TUI preference survives a stable interval for a
+later return to development.  Stable 1.6 has no dashboard.  Explicitly
+requesting an unavailable extra, such as ‘--stable --tui’ against that
+target, refuses rather than ignoring it.
+
+The same selected release can gain extras even when no newer release is
+available.  Repeating a satisfied request is a no-op.  ‘--check’
+validates requested support without installing dependencies or
+persisting channel/extra preferences.  The installed launcher must
+support these flags, and a supporting target must be published; a branch
+merge alone supplies neither an installed parser nor a published
+release.  Older channel-aware launchers should upgrade normally first.
 
 Normal updates do not silently downgrade.  An explicit channel switch
 may select an older release and warns first.  **Replacing launcher files
@@ -1620,12 +1646,12 @@ does not roll back workspace/session state.** Stop active clients, keep
 encrypted backups and check compatibility before returning from
 development to stable.
 
-Exact v1.6.60 needs one plain ‘oc-box upgrade’ before these flags.
-Pre-feature 1.7 GitHub installations need the channel-aware bootstrap
-with an explicit channel; their old ahead-of-master check can retain the
-development build.  Older package installations can first update with
-their owning manager.  See [update channels](update-channels.md) for the
-bootstrap and package examples.
+Exact v1.6.60 needs one plain ‘oc-box upgrade’ before channel-selection
+flags.  Genuinely pre-channel 1.7 GitHub installations need the
+channel-aware bootstrap with an explicit channel; their old
+ahead-of-master check can retain the development build.  Older package
+installations can first update with their owning manager.  See [update
+channels](update-channels.md) for the bootstrap and package examples.
 
 The installer stages a complete release under
 ‘~/.local/share/oc-box/releases/’, including license and manuals, before
@@ -1651,7 +1677,7 @@ failures return nonzero.  Package automatic updates remain disabled:
 ‘--auto-update on’ refuses package ownership, while ‘off’ prints
 package-manager guidance without changing the GitHub installation's
 setting.  Automatic-update settings cannot be combined with channel
-selectors or ‘--check’.
+selectors, ‘--check’, ‘--vault’ or ‘--tui’.
 
 Fetch/checkout/install subprocesses have a clean, positive-allowlisted
 environment.  Global/system Git config, helpers, hooks, external
@@ -1736,21 +1762,28 @@ temporary files, and the encrypted vault format is unchanged.
 Optional cryptography support is required only when using vault
 operations:
 
+     # Existing installation, with a launcher supporting upgrade extras:
+     oc-box upgrade --vault
+     # New isolated Python-tool installation:
      pipx install 'oc-box[vault]'
-     # Add support to an existing pipx installation:
-     pipx inject oc-box 'cryptography>=44'
-     # Or install/reinstall the uv tool with its extra:
-     uv tool install --force 'oc-box[vault]'
+     # Or: uv tool install 'oc-box[vault]'
      # In a package installation's activated virtual environment:
      python -m pip install 'oc-box[vault]'
 
+For an existing installation, the upgrade request follows the saved
+channel and verified owner, adds dependencies only and does not
+initialize/unlock the vault or change credential policy.  Use ‘--devel
+--vault’ when development is wanted.  Older channel-aware launchers
+should upgrade normally to a supporting published release first;
+ambiguous plain-pip extras require manual owner guidance.
+
 For a fresh V2 installation, choose the ‘oc-box[vault]’ extra (or the
-curl option below), then run ‘oc-box secrets init’ and ‘oc-box secrets
-set NAME’ **before your first** ‘oc-box --project ~/devel/demo’.  Global
-use needs no per-project registration or selection.  Values are entered
-only in masked prompts; do not put secret values in OpenCode or oc-box
-JSON.  Configuration can reference their names using the published V2
-shapes under Configuration and environment.
+installer option below), then run ‘oc-box secrets init’ and ‘oc-box
+secrets set NAME’ **before your first** ‘oc-box --project ~/devel/demo’.
+Global use needs no per-project registration or selection.  Values are
+entered only in masked prompts; do not put secret values in OpenCode or
+oc-box JSON. Configuration can reference their names using the published
+V2 shapes under Configuration and environment.
 
 For GitHub/source installations, ‘python3 install.py --with-vault’
 stages the optional crypto wheels privately in that release (using a
@@ -2348,11 +2381,13 @@ host packages or snapshot date.  Changing an existing workspace requires
 ===========
 
 With ‘upgrade’, preview the saved or explicitly selected published
-channel without installing or persisting a preference.  Returns success
-when a version is available or the installation is current; it is not an
-update-available exit code.  Network errors return nonzero.  Cannot be
-combined with ‘--auto-update’, workspace selectors or other commands.
-Example: ‘oc-box upgrade --devel --check’.
+channel and validate support for requested ‘--vault’/‘--tui’ extras
+without installing or persisting channel/extra preferences.  Returns
+success when a version is available or the installation is current; it
+is not an update-available exit code.  Network errors or unsupported
+requested extras return nonzero.  Cannot be combined with
+‘--auto-update’, workspace selectors or other commands.  Example:
+‘oc-box upgrade --devel --tui --check’.
 
 5.22 -stable
 ============
@@ -2373,7 +2408,36 @@ Mutually exclusive with ‘--stable’; cannot be combined with
 experimental; selection is not stable acceptance.  Example: ‘oc-box
 upgrade --devel’.
 
-5.24 -auto-update on|off
+5.24 -vault
+===========
+
+With ‘upgrade’ only, add optional vault/cryptography dependencies
+through the verified installation owner.  Independent of ‘--tui’,
+additive to existing extra requests, and compatible with ‘--stable’,
+‘--devel’ or nonmutating ‘--check’.  Without a selector, use the saved
+channel.  The same release can gain support; repeating a satisfied
+request is a no-op.  Does not select a workspace credential policy,
+initialize/unlock a vault, or deliver credentials.  Requires a launcher
+release supporting this flag and a published target supporting the
+extra.  Cannot be combined with ‘--auto-update’ or workspace actions.
+Example: ‘oc-box upgrade --devel --vault’.
+
+5.25 -tui
+=========
+
+With ‘upgrade’ only, add optional dashboard dependencies through the
+verified installation owner.  Independent of ‘--vault’ and additive; may
+be combined with ‘--devel’ and nonmutating ‘--check’.  An explicit
+request against a target without the dashboard, including current stable
+1.6, refuses.  An inherited TUI preference survives a stable interval
+for a later return to development, but does not put the dashboard into
+stable.  The same release can gain dependencies; repeating a satisfied
+request is a no-op.  Does not launch the dashboard or a workspace.
+Requires a launcher release supporting this flag and a published
+supporting target.  Cannot be combined with ‘--auto-update’ or workspace
+actions.  Example: ‘oc-box upgrade --devel --vault --tui’.
+
+5.26 -auto-update on|off
 ========================
 
 With ‘upgrade’, persistently enable or disable automatic updates before
@@ -2381,10 +2445,11 @@ normal installed launches.  The default is off.  This setting itself
 performs no download or installation and preserves other keys in
 ‘~/.config/oc-box/config.json’ (or its XDG equivalent).  GitHub updates
 follow the saved channel; package automatic updates remain disabled.
-Cannot be combined with ‘--check’, ‘--stable’, ‘--devel’ or workspace
-actions.  Example: ‘oc-box upgrade --auto-update on’.
+Cannot be combined with ‘--check’, ‘--stable’, ‘--devel’, ‘--vault’,
+‘--tui’ or workspace actions.  Example: ‘oc-box upgrade --auto-update
+on’.
 
-5.25 -new
+5.27 -new
 =========
 
 Start a new root conversation while retaining the same container and
@@ -2392,7 +2457,7 @@ files.  Use with start (the default) or reset.  Mutually exclusive with
 ‘--resume’ and ‘--import-session’.  Example: ‘oc-box --project
 ~/devel/demo --new’.
 
-5.26 -resume
+5.28 -resume
 ============
 
 Explicitly request the normal resume behavior.  Requires a registered
@@ -2401,7 +2466,7 @@ can start a new conversation.  Use with start/reset.  Mutually exclusive
 with ‘--new’ and ‘--import-session’.  Example: ‘oc-box --project
 ~/devel/demo --resume’.
 
-5.27 -import-session SESSION_ID
+5.29 -import-session SESSION_ID
 ===============================
 
 Copy a host conversation from the selected project into the private
@@ -2415,7 +2480,7 @@ project; the original registry and saved archive verify its project.
 
      oc-box --project ~/devel/demo --import-session ses_HOST_SESSION_ID
 
-5.28 -model PROVIDER/MODEL
+5.30 -model PROVIDER/MODEL
 ==========================
 
 Pass the provider/model choice to the OpenCode TUI on this launch.  It
@@ -2424,7 +2489,7 @@ otherwise normal OpenCode provider/model preferences apply.
 
      oc-box --project ~/devel/demo --model github-copilot/gpt-6.1-sol
 
-5.29 -image-preview
+5.31 -image-preview
 ===================
 
 V2-only, for an **owning** start (the default command) or reset TUI
@@ -2472,7 +2537,7 @@ host.
      oc-box --project ~/devel/demo --image-preview
      oc-box reset --project ~/devel/demo --image-preview
 
-5.30 -host-drop
+5.32 -host-drop
 ===============
 
 Experimental and **enabled by default per workspace** for supported
@@ -2580,7 +2645,7 @@ guarantee, nor a new live-host acceptance result.  See ‘SECURITY.md’ and
      oc-box --project ~/devel/demo --no-host-drop
      oc-box preferences --project ~/devel/demo --host-drop off
 
-5.31 -no-host-drop
+5.33 -no-host-drop
 ==================
 
 Save host importing disabled for future workspace TUI clients and open
@@ -2589,7 +2654,7 @@ neither flag live-toggles existing clients.  To change only the
 preference without opening a TUI, use ‘oc-box preferences --host-drop
 off’.
 
-5.32 -host-clipboard
+5.34 -host-clipboard
 ====================
 
 Experimental, **off by default and per native TUI client**.  On a
@@ -2710,7 +2775,7 @@ See the short [host test guide](host-clipboard-testing.md).  Focused
 mocked tests are not acceptance of KDE/Wayland/X11 behavior or native
 image composition.
 
-5.33 -no-host-clipboard-symlinks
+5.35 -no-host-clipboard-symlinks
 ================================
 
 Restore strict no-symlink clipboard sources for this native TUI client.
@@ -2723,7 +2788,7 @@ changes neither file-drop preferences nor live sharing.
 
      oc-box --project ~/devel/demo --host-clipboard --no-host-clipboard-symlinks
 
-5.34 -credential-mode env|selected|vault
+5.36 -credential-mode env|selected|vault
 ========================================
 
 With ‘credentials’, save an explicit forwarding mode for that workspace.
@@ -2739,7 +2804,7 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.35 -attachments
+5.37 -attachments
 =================
 
 Web only: explicitly select the visible, source-version-bounded browser
@@ -2747,7 +2812,7 @@ File-drop adapter described under ‘web’.  Keeps the native app and its
 draft/Send controls unchanged.  No automatic prompt admission or
 host-path/URL reading.
 
-5.36 -no-vault
+5.38 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -2766,7 +2831,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.37 -env-secret NAME
+5.39 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -2779,7 +2844,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.38 -vault-secret NAME
+5.40 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -2791,7 +2856,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.39 -clear-credentials
+5.41 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -2803,7 +2868,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.40 -output FILE
+5.42 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -2813,7 +2878,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.41 -portable
+5.43 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -2823,7 +2888,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.42 -recipient AGE_KEY
+5.44 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -2834,7 +2899,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.43 -identity FILE
+5.45 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -2845,7 +2910,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.44 -cpus NUMBER
+5.46 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -2856,7 +2921,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.45 -memory SIZE
+5.47 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -2868,7 +2933,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.46 -pids-limit NUMBER
+5.48 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -2876,7 +2941,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.47 -device MAPPING
+5.49 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -2890,7 +2955,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.48 -podman-arg=-OPTION[=VALUE]
+5.50 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -2917,7 +2982,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.49 -clear-devices
+5.51 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -2928,7 +2993,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.50 -clear-podman-args
+5.52 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -2938,7 +3003,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.51 -delete-sessions
+5.53 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -2947,7 +3012,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.52 -all
+5.54 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -2955,7 +3020,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.53 -y, -yes
+5.55 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -3056,11 +3121,12 @@ man (‘man’, ‘man-db’, or Alpine ‘mandoc’) and info (‘info’ or �
 never required to install/use oc-box |
 
 Host OpenCode is not supplied by these mappings; see
-https://opencode.ai/docs/#install.  Use the existing Python installation
-channel for vault support: ‘uv tool install --force 'oc-box[vault]'’,
-‘pipx inject oc-box 'cryptography>=44'’, or GitHub/source
-‘--with-vault’.  Do not install Python dependencies into system Python
-to fix an isolated tool's missing extra.
+https://opencode.ai/docs/#install.  On a supporting launcher release,
+use ‘oc-box upgrade --vault’ for vault dependencies through the verified
+existing owner; upgrade older channel-aware launchers normally first.
+First installations can request the package ‘[vault]’ extra or
+GitHub/source ‘--with-vault’.  Do not install Python dependencies into
+system Python to fix an isolated tool's missing extra.
 
 Inside each workspace, oc-box automatically installs Bash, CA
 certificates, curl, Git, Python, ripgrep, tar/gzip, Node/npm, and PDF
@@ -4129,6 +4195,14 @@ GitHub updates retain these opt-ins while existing launchers remain
 pinned to their earlier release.  Python-package installations instead
 use their extras and owning package manager.
 
+These are first-install/bootstrap options, not a requirement to rerun
+curl when enabling extras later.  On a launcher release supporting
+upgrade extras, use ‘oc-box upgrade --devel --tui’, ‘oc-box upgrade
+--devel --vault’, or both flags through the existing owner.  Older
+channel-aware launchers should upgrade normally to a supporting
+published release first.  The update-channel guide documents pre-channel
+exceptions.
+
 The bootstrap clones full history anonymously into a private temporary
 directory and removes that temporary checkout when finished.  It does
 not configure Git authentication, download credentials, or keep a source
@@ -4193,22 +4267,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description3039
-Node: Commands7017
-Node: Options117773
-Node: Lifecycle and persistence158360
-Node: Distribution images160660
-Node: Sessions and recovery165535
-Node: Devices and host permissions172120
-Node: Resource reports174466
-Node: Configuration and environment176577
-Node: Files187958
-Node: Exit status193902
-Node: Examples195310
-Node: Troubleshooting197396
-Node: Installation and manuals208748
-Node: Authors and license218344
-Node: See also218951
+Node: Description3057
+Node: Commands7035
+Node: Options119687
+Node: Lifecycle and persistence161939
+Node: Distribution images164239
+Node: Sessions and recovery169203
+Node: Devices and host permissions175788
+Node: Resource reports178134
+Node: Configuration and environment180245
+Node: Files191626
+Node: Exit status197570
+Node: Examples198978
+Node: Troubleshooting201064
+Node: Installation and manuals212416
+Node: Authors and license222442
+Node: See also223049
 
 End Tag Table
 

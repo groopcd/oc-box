@@ -121,7 +121,7 @@ _oc_box()
         purge) options="$help $selectors --delete-sessions --all -y --yes" ;;
         credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;
         preferences) options="$help $selectors --host-drop --json" ;;
-        upgrade) options="$help --check --stable --devel --auto-update" ;;
+        upgrade) options="$help --check --stable --devel --vault --tui --auto-update" ;;
         doctor) options="$help --json --feature" ;;
         backup) options="$help $selectors --output --portable --recipient --min-passphrase-length" ;;
         backup-info) options="$help --identity" ;;
@@ -137,7 +137,7 @@ _oc_box()
             options=$help
             (( positional == 0 )) && options+=' bash' ;;
         list|distros) options=$help ;;
-        *) options="$commands $help $selectors $launch --status --about --version --json --check --stable --devel --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --maintenance" ;;
+        *) options="$commands $help $selectors $launch --status --about --version --json --check --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --maintenance" ;;
     esac
     if (( ! ended )); then
         _oc_box_words "$options"

@@ -93,6 +93,12 @@ class ChannelUpdaterTests(unittest.TestCase):
             "dirty": False,
         }
         (self.target / "build-info.json").write_text(json.dumps(self.current))
+        if self.failure != "missing-feature":
+            for name in ("vault", "tui"):
+                if "--with-" + name in command:
+                    (self.target / "current" / (name + "-support.json")).write_text(
+                        "{}"
+                    )
         return subprocess.CompletedProcess(command, 0)
 
     def run_upgrade(self, **kwargs):
@@ -150,6 +156,106 @@ class ChannelUpdaterTests(unittest.TestCase):
             sorted(path.relative_to(self.home) for path in self.home.rglob("*")),
             before,
         )
+
+    def test_explicit_features_are_independent_from_stable_or_development(self):
+        for origin in ("stable", "devel"):
+            for features in (("vault",), ("tui",), ("vault", "tui")):
+                with self.subTest(origin=origin, features=features):
+                    self.chosen = "devel"
+                    self.current.update(
+                        version="1.6.1+gbbbbbbb"
+                        if origin == "stable"
+                        else "1.7.2.dev0+gbbbbbbb",
+                        commit="b" * 40,
+                        commit_count=30,
+                    )
+                    for name in ("vault", "tui"):
+                        (self.target / "current" / (name + "-support.json")).unlink(
+                            missing_ok=True
+                        )
+                    (self.target / "update-features.json").unlink(missing_ok=True)
+                    kwargs = {"with_" + name: True for name in features}
+                    self.run_upgrade(channel="devel", **kwargs)
+                    command = self.installs[-1][0]
+                    self.assertEqual(
+                        {
+                            name
+                            for name in ("vault", "tui")
+                            if "--with-" + name in command
+                        },
+                        set(features),
+                    )
+                    self.assertEqual(channels.selected_channel(), "devel")
+
+    def test_matching_release_adds_missing_features_then_is_idempotent(self):
+        self.chosen = "devel"
+        self.current.update(
+            version="1.7.3.dev0+gccccccc", commit="c" * 40, commit_count=32
+        )
+        # A sticky preference is not proof the current release has TUI support.
+        (self.target / "update-features.json").write_text('{"tui":true}')
+        self.run_upgrade(channel="devel", with_tui=True)
+        self.assertIn("--with-tui", self.installs[-1][0])
+        self.assertTrue(any("merge-base" in args for args in self.commands))
+        self.run_upgrade(with_vault=True)
+        self.assertIn("--with-vault", self.installs[-1][0])
+        self.assertIn("--with-tui", self.installs[-1][0])
+        self.assertEqual(len(self.installs), 2)
+        _, output = self.run_upgrade(with_vault=True, with_tui=True)
+        self.assertIn("up to date", output)
+        self.assertEqual(len(self.installs), 2)
+
+    def test_feature_check_validates_source_without_installing_or_saving(self):
+        self.chosen = "devel"
+        self.current.update(
+            version="1.7.3.dev0+gccccccc", commit="c" * 40, commit_count=32
+        )
+        before = sorted(path.relative_to(self.home) for path in self.home.rglob("*"))
+        _, output = self.run_upgrade(
+            check=True, channel="devel", with_vault=True, with_tui=True
+        )
+        self.assertIn("Optional support available: tui, vault (check only)", output)
+        self.assertTrue(any("merge-base" in args for args in self.commands))
+        self.assertFalse(self.installs)
+        self.assertEqual(
+            sorted(path.relative_to(self.home) for path in self.home.rglob("*")), before
+        )
+
+    def test_explicit_unsupported_feature_refuses_even_on_current_release_or_check(
+        self,
+    ):
+        self.current.update(version="1.6.2+gaaaaaaa", commit="a" * 40, commit_count=31)
+        for check in (False, True):
+            with (
+                self.subTest(check=check),
+                self.assertRaisesRegex(
+                    updater.UpdateError, "does not support requested optional tui"
+                ),
+            ):
+                self.run_upgrade(check=check, channel="stable", with_tui=True)
+        self.assertFalse(self.installs)
+        self.assertFalse(channels.config_path().exists())
+        self.assertFalse((self.target / "update-features.json").exists())
+
+    def test_feature_failure_or_missing_support_never_saves_preferences(self):
+        self.chosen = "devel"
+        channels.remember_channel("stable")
+        previous = channels.config_path().read_bytes()
+        for failure in ("install", "missing-feature"):
+            self.failure = failure
+            with self.subTest(failure=failure), self.assertRaises(updater.UpdateError):
+                self.run_upgrade(channel="devel", with_tui=True, with_vault=True)
+            self.assertEqual(channels.config_path().read_bytes(), previous)
+            self.assertFalse((self.target / "update-features.json").exists())
+
+    def test_explicit_features_do_not_authorize_an_implicit_downgrade(self):
+        self.current.update(
+            version="1.7.4.dev0+gddddddd", commit="d" * 40, commit_count=33
+        )
+        _, output = self.run_upgrade(with_vault=True, with_tui=True)
+        self.assertIn("ahead", output)
+        self.assertFalse(self.commands)
+        self.assertFalse(self.installs)
 
     def test_failed_switch_leaves_preference_unchanged(self):
         channels.remember_channel("stable")

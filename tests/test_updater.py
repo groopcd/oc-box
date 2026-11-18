@@ -10,6 +10,7 @@ import tempfile
 from types import ModuleType
 import unittest
 from unittest.mock import patch
+import zipfile
 
 from oc_box import installation, oc_box as box, updater
 from oc_box.version_info import VERSION_SERIES, get_version_info
@@ -334,7 +335,9 @@ class UpdateTests(unittest.TestCase):
             patch.object(box, "check_backend") as backend,
         ):
             self.assertEqual(box.main(["upgrade", "--check"]), 0)
-        upgrade.assert_called_once_with(box.APP, check=True, channel=None)
+        upgrade.assert_called_once_with(
+            box.APP, check=True, channel=None, with_vault=False, with_tui=False
+        )
         backend.assert_not_called()
         for args in (
             ["--check"],
@@ -349,6 +352,60 @@ class UpdateTests(unittest.TestCase):
         with patch.dict(os.environ, {"OC_BOX_CONTAINER": "1"}):
             with self.assertRaisesRegex(box.BoxError, "on the host"):
                 box.main(["upgrade"])
+
+    def test_upgrade_cli_requests_vault_tui_or_both_without_workspace_actions(self):
+        for flags, vault, tui in (
+            (["--vault"], True, False),
+            (["--tui"], False, True),
+            (["--vault", "--tui"], True, True),
+        ):
+            for selector in ([], ["--devel"], ["--stable"]):
+                with (
+                    self.subTest(flags=flags, selector=selector),
+                    patch.object(updater, "upgrade") as upgrade,
+                    patch.object(box, "check_backend") as backend,
+                ):
+                    self.assertEqual(
+                        box.main(["upgrade", *selector, *flags, "--check"]), 0
+                    )
+                    upgrade.assert_called_once_with(
+                        box.APP,
+                        check=True,
+                        channel=selector[0][2:] if selector else None,
+                        with_vault=vault,
+                        with_tui=tui,
+                    )
+                    backend.assert_not_called()
+        for flag in ("--vault", "--tui"):
+            for arguments in (
+                [flag],
+                ["list", flag],
+                ["credentials", flag],
+                ["--version", flag],
+                ["upgrade", flag, "--auto-update", "off"],
+                ["upgrade", flag, "--auto-update", "on"],
+            ):
+                with (
+                    self.subTest(arguments=arguments),
+                    patch.object(updater, "upgrade") as upgrade,
+                ):
+                    with self.assertRaises(box.BoxError):
+                        box.main(arguments)
+                    upgrade.assert_not_called()
+
+    def test_upgrade_delegates_requested_features_only_to_the_package_owner(self):
+        from oc_box import package_updates
+
+        with (
+            patch.object(updater, "package_managed", return_value=True),
+            patch.object(package_updates, "upgrade") as package,
+            patch.object(updater, "git") as network,
+        ):
+            updater.upgrade(APP, channel="devel", with_vault=True, with_tui=True)
+        package.assert_called_once_with(
+            APP, check=False, channel="devel", with_vault=True, with_tui=True
+        )
+        network.assert_not_called()
 
     def test_package_managed_install_cannot_create_competing_github_launcher(self):
         from oc_box import package_updates
@@ -472,7 +529,14 @@ class UpdateTests(unittest.TestCase):
             src_layout=True, legacy_updater=False, roundtrip=True
         )
 
-    def exercise_real_git_upgrade(self, *, src_layout, legacy_updater, roundtrip=False):
+    def test_real_same_release_upgrade_adds_vault_in_a_new_immutable_release(self):
+        self.exercise_real_git_upgrade(
+            src_layout=True, legacy_updater=False, add_vault=True
+        )
+
+    def exercise_real_git_upgrade(
+        self, *, src_layout, legacy_updater, roundtrip=False, add_vault=False
+    ):
         active = updater
         if legacy_updater:
             retained = (
@@ -517,6 +581,36 @@ class UpdateTests(unittest.TestCase):
             .replace("VERSION_BASE_COMMIT_COUNT = 29", "VERSION_BASE_COMMIT_COUNT = 1")
             .replace('RELEASE_CHANNEL = "devel"', 'RELEASE_CHANNEL = "stable"')
         )
+        if add_vault:
+            wheels = self.root / "offline-wheels"
+            wheels.mkdir()
+            dist = "cryptography-44.0.0.dist-info"
+            files = {
+                "cryptography/__init__.py": "SYNTHETIC_OPTIONAL_DEPENDENCY = True\n",
+                dist
+                + "/METADATA": "Metadata-Version: 2.3\nName: cryptography\nVersion: 44.0.0\n",
+                dist
+                + "/WHEEL": "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
+            }
+            files[dist + "/RECORD"] = "".join(name + ",,\n" for name in files)
+            with zipfile.ZipFile(
+                wheels / "cryptography-44.0.0-py3-none-any.whl", "w"
+            ) as archive:
+                for name, value in files.items():
+                    archive.writestr(name, value)
+            # Change only this fixture source's dependency transport. The real
+            # downloaded installer, venv/pip staging and activation still run.
+            installer = installation.source_file(remote, "installation.py")
+            source = installer.read_text()
+            self.assertIn('"https://pypi.org/simple"', source)
+            installer.write_text(
+                source.replace(
+                    '"--index-url",\n                "https://pypi.org/simple",',
+                    '"--no-index",\n                "--find-links",\n                '
+                    + repr(str(wheels))
+                    + ",",
+                )
+            )
         shutil.copytree(APP / "docs", remote / "docs")
         shutil.copytree(APP / "completions", remote / "completions")
         env = {
@@ -613,6 +707,35 @@ class UpdateTests(unittest.TestCase):
             timeout=10,
         )
         self.assertEqual(output.stdout.strip(), "oc-box " + build["version"])
+        if add_vault:
+            wrapper = (self.home / ".local/bin/oc-box").read_bytes()
+            with (
+                patch.object(active, "git", side_effect=transport),
+                contextlib.redirect_stdout(io.StringIO()),
+            ):
+                self.assertIsNone(active.upgrade(APP, check=True, with_vault=True))
+                self.assertEqual(
+                    (self.home / ".local/bin/oc-box").read_bytes(), wrapper
+                )
+                self.assertEqual((target / "current").resolve(), second)
+                added = active.upgrade(APP, with_vault=True)
+                self.assertNotEqual(added, second)
+                self.assertEqual(get_version_info(added)["commit"], expected)
+                self.assertTrue((added / "vault-support.json").is_file())
+                self.assertIn(
+                    "SYNTHETIC_OPTIONAL_DEPENDENCY",
+                    (added / "vault-deps/cryptography/__init__.py").read_text(),
+                )
+                self.assertFalse((second / "vault-support.json").exists())
+                self.assertTrue(second.is_dir())
+                self.assertTrue(first.is_dir())
+                enabled_wrapper = (self.home / ".local/bin/oc-box").read_bytes()
+                self.assertIsNone(active.upgrade(APP, with_vault=True))
+                self.assertEqual(
+                    (self.home / ".local/bin/oc-box").read_bytes(), enabled_wrapper
+                )
+                self.assertEqual((target / "current").resolve(), added)
+            self.assertEqual(local("status", "--porcelain"), "")
         if roundtrip:
             retained = self.home / ".local/state/oc-box/workspaces/synthetic/history"
             retained.parent.mkdir(parents=True)

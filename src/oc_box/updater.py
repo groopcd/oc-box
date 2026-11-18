@@ -162,7 +162,7 @@ def current_install(root):
     return get_version_info(target if (target / "build-info.json").is_file() else root)
 
 
-def upgrade(root, *, check=False, channel=None):
+def upgrade(root, *, check=False, channel=None, with_vault=False, with_tui=False):
     managed = package_managed(root)
     if managed and editable_source_root() == Path(root).resolve():
         raise UpdateError(package_upgrade_message(root))
@@ -175,9 +175,21 @@ def upgrade(root, *, check=False, channel=None):
             from . import package_updates
         else:
             import package_updates
-        return package_updates.upgrade(root, check=check, channel=channel)
+        return package_updates.upgrade(
+            root,
+            check=check,
+            channel=channel,
+            with_vault=with_vault,
+            with_tui=with_tui,
+        )
     if check:
-        return _github_upgrade(root, check=True, channel=channel)
+        return _github_upgrade(
+            root,
+            check=True,
+            channel=channel,
+            with_vault=with_vault,
+            with_tui=with_tui,
+        )
     try:
         dependencies.require("github-upgrade")
     except dependencies.DependencyError as exc:
@@ -193,16 +205,28 @@ def upgrade(root, *, check=False, channel=None):
             raise UpdateError(
                 "Another oc-box upgrade is in progress; retry later."
             ) from exc
-        return _github_upgrade(root, channel=channel)
+        return _github_upgrade(
+            root, channel=channel, with_vault=with_vault, with_tui=with_tui
+        )
 
 
-def _github_upgrade(root, *, check=False, channel=None):
+def _github_upgrade(
+    root, *, check=False, channel=None, with_vault=False, with_tui=False
+):
     previous_channel = selected_channel()
     chosen = selected_channel(channel)
     # Validate settings before network or installation, including --check.
     requested = channel is not None
     switching = requested and (chosen == "stable" or chosen != previous_channel)
     current = current_install(root)
+    requested_features = {
+        name for name, enabled in (("vault", with_vault), ("tui", with_tui)) if enabled
+    }
+    if requested_features:
+        print(
+            "Requested optional support: " + ", ".join(sorted(requested_features)),
+            flush=True,
+        )
     try:
         dependencies.require("github-upgrade")
     except dependencies.DependencyError as exc:
@@ -249,20 +273,35 @@ def _github_upgrade(root, *, check=False, channel=None):
             timeout=15,
         )
         commit = resolve_tag(remote, tag_ref)
-        if current.get("commit") == commit and not current.get("dirty"):
+        current_root = (Path.home() / ".local/share/oc-box/current").resolve()
+        same_commit = current.get("commit") == commit and not current.get("dirty")
+        missing_features = {
+            name
+            for name in requested_features
+            if not (current_root / (name + "-support.json")).is_file()
+        }
+        if same_commit:
             if current["version"].split("+", 1)[0] != desired:
                 raise UpdateError("Installed commit has a different release identity.")
-            if requested and not check:
-                remember_channel(chosen)
-            print("oc-box is up to date.")
-            return None
+            if not missing_features:
+                if requested and not check:
+                    remember_channel(chosen)
+                print("oc-box is up to date.")
+                return None
         print(
-            "GitHub has a different release at "
+            (
+                "Adding optional support to release "
+                if same_commit
+                else "GitHub has a different release at "
+            )
             + commit[:12]
             + (" (check only)." if check else "; downloading full source history."),
             flush=True,
         )
-        if check:
+        # A feature-aware preview verifies the target installer's capabilities,
+        # using only temporary source files; it never creates installation locks
+        # or saves a channel/feature preference.
+        if check and not requested_features:
             return None
         branch = {"stable": "master", "devel": "devel"}[chosen]
         source = work / "source"
@@ -322,6 +361,35 @@ def _github_upgrade(root, *, check=False, channel=None):
             work,
         )
         verify_release_source(source, count, desired, chosen)
+        features = optional_features(current_root)
+        features.update({name: True for name in requested_features})
+        supported = installer_options(source)
+        unavailable = {
+            name for name in requested_features if "--with-" + name not in supported
+        }
+        if unavailable:
+            raise UpdateError(
+                "The selected release does not support requested optional "
+                + ", ".join(sorted(unavailable))
+                + " support; existing installation retained. Choose a supporting channel."
+            )
+        if features["vault"] and "--with-vault" not in supported:
+            raise UpdateError(
+                "The target release cannot preserve optional vault support; "
+                "existing installation retained."
+            )
+        extra = [
+            "--with-" + name
+            for name, enabled in features.items()
+            if enabled and "--with-" + name in supported
+        ]
+        if check:
+            print(
+                "Optional support available: "
+                + ", ".join(sorted(requested_features))
+                + " (check only)."
+            )
+            return None
         # Version series/baselines belong to the downloaded release, not to
         # this older updater. Its installer embeds the exact source identity.
         print("Installing verified source " + commit[:12], flush=True)
@@ -335,19 +403,6 @@ def _github_upgrade(root, *, check=False, channel=None):
             environment["XDG_CONFIG_HOME"] = os.environ["XDG_CONFIG_HOME"]
         else:
             environment.pop("XDG_CONFIG_HOME", None)
-        current_root = (Path.home() / ".local/share/oc-box/current").resolve()
-        features = optional_features(current_root)
-        supported = installer_options(source)
-        if features["vault"] and "--with-vault" not in supported:
-            raise UpdateError(
-                "The target release cannot preserve optional vault support; "
-                "existing installation retained."
-            )
-        extra = [
-            "--with-" + name
-            for name, enabled in features.items()
-            if enabled and "--with-" + name in supported
-        ]
         try:
             subprocess.run(
                 [sys.executable, "-B", str(source / "install.py"), *extra],
@@ -368,6 +423,17 @@ def _github_upgrade(root, *, check=False, channel=None):
             or actual["version"].split("+", 1)[0] != desired
         ):
             raise UpdateError("Installed version does not match the downloaded commit.")
+        installed_root = (target / "current").resolve(strict=True)
+        if any(
+            not (
+                installed_root / (option.removeprefix("--with-") + "-support.json")
+            ).is_file()
+            for option in extra
+        ):
+            raise UpdateError(
+                "Installed release is missing optional support; inspect the installation "
+                "before retrying. Feature/channel preferences were not saved."
+            )
         try:
             atomic_file(
                 target / "update-features.json",
@@ -380,7 +446,7 @@ def _github_upgrade(root, *, check=False, channel=None):
                 "Release installed, but the channel preference could not be saved; retry with the explicit channel selector."
             ) from exc
         print("Installed oc-box: " + actual["version"], flush=True)
-        return (target / "current").resolve(strict=True)
+        return installed_root
 
 
 def resolve_tag(remote, ref):

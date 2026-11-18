@@ -45,7 +45,7 @@ def cli(box, arguments):
     if any(importlib.util.find_spec(name) is None for name in ("textual", "pyte")):
         raise box.BoxError(
             "Optional TUI dependencies are missing. Install 'oc-box[tui]' with uv/pipx, "
-            "or reinstall the GitHub channel with --with-tui. No packages were installed."
+            "or run 'oc-box upgrade --devel --tui'. No packages were installed."
         )
     try:
         if __package__:
@@ -58,7 +58,7 @@ def cli(box, arguments):
         if exc.name and exc.name.split(".")[0] in ("textual", "rich", "pyte"):
             raise box.BoxError(
                 "Optional TUI dependencies are missing. Install 'oc-box[tui]' with uv/pipx, "
-                "or reinstall the GitHub channel with --with-tui. No packages were installed."
+                "or run 'oc-box upgrade --devel --tui'. No packages were installed."
             ) from None
         raise
     backend = DemoBackend() if args.demo else DashboardBackend(box)

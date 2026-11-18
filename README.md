@@ -62,7 +62,7 @@ networking and delegated CPU/memory/process cgroup controllers. Initial setup
 needs network access. See [installation and prerequisites](docs/installation.md)
 for all methods.
 
-**Recommended for newcomers: install directly from GitHub with vault and TUI.**
+**First installation — recommended GitHub path with vault and TUI:**
 
 ```sh
 curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-vault --with-tui
@@ -71,13 +71,32 @@ oc-box doctor
 ```
 
 This explicitly selects a **published development release**, because stable
-does not yet include the TUI. Vault and dashboard dependencies stay private to
-the GitHub installation; the vault is initialized separately below. The command
-downloads and runs the public installer—review it first if preferred.
+does not yet include the dashboard. Dependencies stay private to the GitHub
+installation. This does not initialize or unlock a vault, change credential
+policy, launch the dashboard or start a workspace. The command downloads and
+runs the public installer; review it first if preferred.
+
+**Already installed?** Use the existing installation, without rerunning curl:
+
+```sh
+oc-box upgrade --devel --vault --tui  # Add both extras and select development
+# Or request either extra independently:
+oc-box upgrade --devel --vault
+oc-box upgrade --devel --tui
+```
+
+These upgrade flags require a launcher release that supports them and a
+published target supporting the requested extras. On an older channel-aware
+launcher, upgrade normally first, then request extras. A source merge does not
+make that release available. Requests are additive: omitted extras are not
+removed, the same release can gain extras, and repeating a satisfied request is
+a no-op. The command uses the verified existing installation owner; it does not
+create a second copy.
 
 Prefer stable without the dashboard, or a Python tool manager? See the
 [installation alternatives](docs/installation.md). Do not install a second copy
-just to enable optional features.
+just to enable optional features. Genuinely pre-channel launchers have a separate
+[bootstrap compatibility route](docs/update-channels.md#bootstrap-and-older-installations).
 
 ### 2. Choose how to supply credentials
 

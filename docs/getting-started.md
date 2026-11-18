@@ -21,29 +21,49 @@ not with sudo or from inside another oc-box workspace.
 
 ### Install oc-box
 
-**The recommended newcomer path is the GitHub one-liner, with vault and TUI:**
+**First installation — recommended GitHub path with vault and TUI:**
 
 ```sh
 curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-vault --with-tui
-```
-
-`--devel` explicitly selects a published development release: stable does not yet
-include the TUI. Optional dependencies stay in the installation's private
-runtime; this does not initialize a vault or start a workspace. The command
-downloads and runs the public installer; review it first if preferred.
-For stable without the dashboard or Python-tool installations, see
-[installation alternatives](installation.md).
-
-Then check prerequisites without starting a workspace:
-
-```sh
-opencode --version
 oc-box --version
 oc-box doctor
 ```
 
-Doctor reports missing dependencies; it does not install them, start Podman or
-unlock credentials.
+This explicitly selects a **published development release**, because stable
+does not yet include the dashboard. Dependencies stay private to the GitHub
+installation. This does not initialize or unlock a vault, change credential
+policy, launch the dashboard or start a workspace. The command downloads and
+runs the public installer; review it first if preferred.
+
+**Already installed?** Use the existing installation, without rerunning curl:
+
+```sh
+oc-box upgrade --devel --vault --tui  # Add both extras and select development
+# Or request either extra independently:
+oc-box upgrade --devel --vault
+oc-box upgrade --devel --tui
+```
+
+These upgrade flags require a launcher release that supports them and a
+published target supporting the requested extras. On an older channel-aware
+launcher, upgrade normally first, then request extras. A source merge does not
+make that release available. Requests are additive: omitted extras are not
+removed, the same release can gain extras, and repeating a satisfied request is
+a no-op. The command uses the verified existing installation owner; it does not
+create a second copy.
+
+For stable without the dashboard or Python-tool installations, see
+[installation alternatives](installation.md). Genuinely pre-channel launchers
+have a separate [bootstrap compatibility route](update-channels.md#bootstrap-and-older-installations).
+
+Check the host OpenCode version too:
+
+```sh
+opencode --version
+```
+
+The doctor command above reports missing dependencies; it does not install them,
+start Podman or unlock credentials.
 
 ## 1. Choose authentication
 
@@ -51,8 +71,9 @@ Native OpenCode saved/OAuth authentication is copied and refreshed independently
 of the vault in every credential mode.
 
 For provider or MCP **environment-variable** credentials, enable the optional
-vault support during installation (`oc-box[vault]` or GitHub `--with-vault`),
-then initialize it **before the first V2 launch**:
+vault support with `oc-box upgrade --vault` on a supporting launcher, or request
+it during first installation (`oc-box[vault]` or GitHub `--with-vault`).
+Then initialize it **before the first V2 launch**:
 
 ```sh
 oc-box secrets init

@@ -87,37 +87,52 @@ select an older release and warns before doing so. This changes program files,
 not workspace/session schemas, private volumes, project files or credentials:
 it is not a data rollback. Stop active clients, keep appropriate encrypted
 backups, and check compatibility before returning from development to stable.
-Only extras supported by the target are retained. Current stable 1.6 has no
-`--with-tui`; selecting stable does not carry the development manager into it.
+Only extras supported by the target are installed. Current stable 1.6 has no
+dashboard; selecting stable does not carry the development manager into it.
+An inherited TUI preference is retained so it can apply on a later return to
+development. An explicit `--tui` request against an unsupported target refuses.
 
 ## Enable the dashboard after a GitHub channel switch
 
-`oc-box upgrade --devel` changes the release channel; it does **not** enable
-the optional TUI dependencies for the first time. A successful channel upgrade
-can therefore be followed by this message from `oc-box tui`:
-
-```text
-Optional TUI dependencies are missing.
-```
-
-For an existing **GitHub/curl installation**, stay with that installation method.
-Rerun the channel-aware bootstrap on the host as your regular user, without sudo:
+On a launcher release supporting upgrade extras, add dependencies through your
+existing installation owner, whether starting from stable or development:
 
 ```sh
-curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-tui --with-vault
-oc-box --version
-oc-box tui
+oc-box upgrade --devel --tui --check  # Validate/preview; change nothing
+oc-box upgrade --devel --tui         # Add dashboard dependencies
+oc-box upgrade --devel --vault       # Add vault dependencies independently
+oc-box upgrade --devel --vault --tui # Add both
 ```
 
-Keep `--with-vault` if you use the encrypted vault; otherwise omit it. This
-installs optional dependencies in the new immutable release's private directory,
-not system or user-site Python. It does not reset workspaces, delete history
-or change credentials. Subsequent upgrades to releases supporting the TUI retain
-the enabled opt-in. Do not mix in a second pipx/uv installation just to supply
-dependencies to a GitHub-installed launcher.
+`--vault` and `--tui` are independent, additive optional dependency requests,
+not workspace credential settings. `upgrade` accepts these canonical names only;
+the bootstrap keeps its separate `--with-vault`/`--with-tui` options. Without
+either flag, channel selection alone does not enable a new extra. Use
+`oc-box upgrade --vault` to add vault support on the saved channel; stable does
+not include the dashboard, so select `--devel` for it.
 
-Python-package owners instead manage optional extras in their owning isolated
-environment; the GitHub bootstrap above is not a package-manager upgrade.
+The selected release can gain extras even when it is already installed.
+Repeating a satisfied request is a no-op. Omitted extras are not removed;
+inherited requests are installed where supported, and the dashboard preference
+survives a stable interval for a later return to development. Explicitly
+requesting an unavailable extra refuses instead of silently ignoring it.
+`--check` validates requested support but changes neither installation nor saved
+channel/extra preferences.
+
+GitHub installations stage dependencies in a private immutable release, not
+system or user-site Python. Verified uv tool and pipx installations delegate
+extra requests to their owning manager. Plain pip cannot prove prior requested
+extras; ambiguous installations refuse with manual guidance rather than
+guessing. Do not create a second installation to supply missing dependencies.
+None of these flags changes credential policy, initializes/unlocks a vault,
+launches the dashboard, starts a workspace, resets it or deletes history.
+
+If `oc-box tui` reports “Optional TUI dependencies are missing”, use
+`oc-box upgrade --devel --tui` on a supporting launcher; curl is not needed.
+If the parser lacks these upgrade flags, upgrade normally to a supporting
+published release first. A merge to a branch is not publication. Genuinely
+pre-channel launchers retain the exceptional
+[bootstrap route](#bootstrap-and-older-installations) below.
 
 ## Automatic updates
 
@@ -132,7 +147,8 @@ oc-box upgrade --auto-update off
 
 They follow the saved GitHub channel and run only before normal installed
 launches, never during an active session. Use separate commands:
-`--auto-update on|off` cannot be combined with a selector or `--check`.
+`--auto-update on|off` cannot be combined with a selector, `--check`, `--vault`
+or `--tui`.
 Network failure leaves the installed version available for the normal launch.
 
 Package automatic updating remains disabled. Package `--auto-update on`
@@ -175,7 +191,9 @@ python -m pip install --pre 'oc-box[tui,vault]'
 ```
 
 Use `[tui]` without `[vault]` if appropriate. For an existing channel-aware
-installation, use `oc-box upgrade --devel` rather than creating another owner.
+installation, use `oc-box upgrade --devel --vault --tui` once its launcher
+supports these extras flags, or request either extra independently. Upgrade
+normally first if necessary; do not create another owner.
 These commands do not claim a particular development version is already public;
 check the [release page](https://github.com/groopcd/oc-box/releases).
 
@@ -195,6 +213,10 @@ preserve. Automatic targets require a compatible, unyanked universal wheel.
 - **Older package copies:** update once with the package manager that owns the
   installation, explicitly allowing prereleases for development, then use the
   new channel-aware command.
+- **Channel-aware launchers without `upgrade --vault`/`--tui`:** upgrade normally
+  to a published release supporting the flags, then request extras through that
+  release. Do not send unknown flags to the old parser or assume an unpublished
+  branch commit is available through `upgrade`.
 
 Do not reset, purge, reimport history, or change credentials merely to acquire
 channel support. Check `command -v oc-box` if multiple installation methods

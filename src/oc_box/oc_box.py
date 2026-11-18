@@ -3602,6 +3602,18 @@ def parser():
         help="with upgrade, select and remember the development release channel",
     )
     result.add_argument(
+        "--vault",
+        dest="upgrade_vault",
+        action="store_true",
+        help="with upgrade, add optional vault dependencies to the selected release",
+    )
+    result.add_argument(
+        "--tui",
+        dest="upgrade_tui",
+        action="store_true",
+        help="with upgrade, add optional dashboard dependencies when the selected release supports them",
+    )
+    result.add_argument(
         "--maintenance",
         action="store_true",
         help="with terminal, open the restricted maintenance shell instead of a V2 live session client",
@@ -3946,6 +3958,8 @@ def main(argv=None):
         workspace_service.preflight_port(web.port)
     else:
         args = parser().parse_args(argv)
+    if (args.upgrade_vault or args.upgrade_tui) and args.command != "upgrade":
+        raise BoxError("--vault and --tui apply only to upgrade.")
     if args.command == "tui":
         raise BoxError(
             "Use 'oc-box tui' first, followed by its workspace selectors/options; see 'oc-box tui --help'."
@@ -4097,13 +4111,16 @@ def main(argv=None):
             )
         ):
             raise BoxError(
-                "Upgrade accepts only --check, --stable/--devel or --auto-update on/off."
+                "Upgrade accepts only --check, --stable/--devel, --vault, --tui or --auto-update on/off."
             )
         if args.auto_update is not None and (
-            args.check or args.update_channel is not None
+            args.check
+            or args.update_channel is not None
+            or args.upgrade_vault
+            or args.upgrade_tui
         ):
             raise BoxError(
-                "--auto-update cannot be combined with --check, --stable or --devel."
+                "--auto-update cannot be combined with --check, --stable, --devel, --vault or --tui."
             )
         if os.environ.get("OC_BOX_CONTAINER") == "1":
             raise BoxError(
@@ -4142,7 +4159,13 @@ def main(argv=None):
             if args.auto_update is not None:
                 update_settings(args.auto_update == "on")
                 return 0
-            upgrade(APP, check=args.check, channel=args.update_channel)
+            upgrade(
+                APP,
+                check=args.check,
+                channel=args.update_channel,
+                with_vault=args.upgrade_vault,
+                with_tui=args.upgrade_tui,
+            )
         except UpdateError as exc:
             raise BoxError(str(exc)) from exc
         return 0

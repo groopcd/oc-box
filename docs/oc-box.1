@@ -27,7 +27,7 @@ oc\-box web [\-\-project PATH | \-\-workspace ID] [\-\-session ID] [\-\-port N] 
 oc\-box \-\-status [\-\-project PATH | \-\-workspace ID] [\-\-json]
 oc\-box status [\-\-project PATH | \-\-workspace ID] [\-\-json]
 oc\-box tui [\-\-project PATH | \-\-workspace ID] [\-\-read\-only] [\-\-demo]
-oc\-box upgrade [\-\-check] [\-\-stable | \-\-devel]
+oc\-box upgrade [\-\-check] [\-\-stable | \-\-devel] [\-\-vault] [\-\-tui]
 oc\-box upgrade \-\-auto\-update on|off
 oc\-box secrets init|list|passwd
 oc\-box secrets set|remove NAME
@@ -306,17 +306,19 @@ Historical job rows can remain running\-looking on the next owner; the same boun
 \fB\-\-no\-vault\fR is accepted only when web becomes a new V2 owner; an attached web client rejects it and never changes the owner's credential snapshot.
 .SS tui — experimental workspace manager
 .PP
-Open the optional Textual workspace dashboard, separate from the native OpenCode conversation TUI launched by \fBstart\fR\&. This is a development\-branch feature, not an accepted stable dashboard release; check \fBoc\-box tui \-\-help\fR for availability in the installed build. It requires the optional \fBtui\fR Python extra or GitHub installer \fB\-\-with\-tui\fR, a regular unprivileged Linux host user, and real TTY input/output. Normal CLI commands retain their stdlib\-only baseline.
+Open the optional Textual workspace dashboard, separate from the native OpenCode conversation TUI launched by \fBstart\fR\&. This is a development\-branch feature, not an accepted stable dashboard release; check \fBoc\-box tui \-\-help\fR for availability in the installed build. It requires optional dashboard dependencies, a regular unprivileged Linux host user, and real TTY input/output. Normal CLI commands retain their stdlib\-only baseline.
 .PP
-For a GitHub installation, \fBoc\-box upgrade \-\-devel\fR selects the release channel but does not enable TUI dependencies for the first time. If \fBoc\-box tui\fR reports “Optional TUI dependencies are missing”, rerun the host bootstrap explicitly:
+For an existing installation with a launcher release supporting upgrade extras, request the dependencies through the verified existing owner:
 .PP
 .nf
 .fam C
-curl \-fsSL \-\-proto '=https' \-\-tlsv1.2 https://raw.githubusercontent.com/groopcd/oc\-box/master/install.sh | sh \-s \-\- \-\-devel \-\-with\-tui \-\-with\-vault
+oc\-box upgrade \-\-devel \-\-tui
+# Or add both independent extras:
+oc\-box upgrade \-\-devel \-\-vault \-\-tui
 .fam T
 .fi
 .PP
-Keep \fB\-\-with\-vault\fR if you use the encrypted vault; otherwise omit it. This installs optional dependencies privately in the immutable release, not system Python, without resetting workspaces or deleting history. Later updates to TUI\-supporting targets retain the opt\-in. Stay with the GitHub method rather than creating a second pipx/uv installation to supply its missing dependencies.
+This also fixes “Optional TUI dependencies are missing” without rerunning curl. GitHub installs dependencies privately in an immutable release; verified uv/pipx owners use their own manager. Omitted extras are not removed, the same release can gain dependencies, and a repeated satisfied request is a no\-op. No workspace reset, history deletion, credential\-policy change, vault initialization/unlock or dashboard launch occurs. Older launchers must upgrade normally to a supporting published release first; genuinely pre\-channel builds retain the exceptional [bootstrap route](update\-channels.md#bootstrap\-and\-older\-installations).
 .PP
 .nf
 .fam C
@@ -511,6 +513,9 @@ Without a saved choice, the channel is stable. A successful explicit \fB\-\-deve
 oc\-box upgrade \-\-check
 oc\-box upgrade \-\-devel \-\-check
 oc\-box upgrade \-\-devel
+oc\-box upgrade \-\-devel \-\-vault  # Add vault dependencies independently
+oc\-box upgrade \-\-devel \-\-tui    # Add dashboard dependencies independently
+oc\-box upgrade \-\-devel \-\-vault \-\-tui
 oc\-box upgrade                  # Follow the saved channel
 oc\-box upgrade \-\-stable
 oc\-box upgrade \-\-auto\-update on
@@ -518,17 +523,21 @@ oc\-box upgrade \-\-auto\-update off
 .fam T
 .fi
 .PP
-GitHub upgrades verify tag/commit identity and selected branch membership before running the staged immutable installer. Python\-package upgrades delegate only to a verified owning pipx, uv tool or dedicated virtual\-environment manager. An ambiguous owner or editable checkout receives manual guidance rather than a guessed installation target. Supported requested extras are retained; stable 1.6 does not support the optional \fBtui\fR extra.
+GitHub upgrades verify tag/commit identity and selected branch membership before running the staged immutable installer. Python\-package upgrades delegate only to a verified owning pipx, uv tool or dedicated virtual\-environment manager. An ambiguous owner or editable checkout receives manual guidance rather than a guessed installation target. Verified uv/pipx owners can receive additive package\-extra requests. Plain pip cannot prove prior requested extras, so ambiguous extras still refuse rather than guessing what to preserve.
 .PP
-Channel selection is not first\-time optional\-feature installation. A GitHub upgrade with \fB\-\-devel\fR does not add TUI dependencies to an installation that never opted in. Use the bootstrap with \fB\-\-devel \-\-with\-tui\fR, retaining \fB\-\-with\-vault\fR when used, as shown under \fBtui\fR\&. No workspace reset is required.
+\fB\-\-vault\fR and \fB\-\-tui\fR independently request optional installer dependencies. They work from stable or development installations and can be combined with either channel selection or \fB\-\-check\fR\&. With no selector, the saved channel is used: \fBoc\-box upgrade \-\-vault\fR adds vault support without choosing development. Channel selection alone does not request new extras, and optional defaults are unchanged. These flags do not change workspace credential policy, initialize or unlock a vault, launch the dashboard or start a workspace.
+.PP
+Requests are additive: omitted extras are not removed. Only extras supported by the target are installed, but inherited requests remain saved; a development TUI preference survives a stable interval for a later return to development. Stable 1.6 has no dashboard. Explicitly requesting an unavailable extra, such as \fB\-\-stable \-\-tui\fR against that target, refuses rather than ignoring it.
+.PP
+The same selected release can gain extras even when no newer release is available. Repeating a satisfied request is a no\-op. \fB\-\-check\fR validates requested support without installing dependencies or persisting channel/extra preferences. The installed launcher must support these flags, and a supporting target must be published; a branch merge alone supplies neither an installed parser nor a published release. Older channel\-aware launchers should upgrade normally first.
 .PP
 Normal updates do not silently downgrade. An explicit channel switch may select an older release and warns first. **Replacing launcher files does not roll back workspace/session state.** Stop active clients, keep encrypted backups and check compatibility before returning from development to stable.
 .PP
-Exact v1.6.60 needs one plain \fBoc\-box upgrade\fR before these flags. Pre\-feature 1.7 GitHub installations need the channel\-aware bootstrap with an explicit channel; their old ahead\-of\-master check can retain the development build. Older package installations can first update with their owning manager. See [update channels](update\-channels.md) for the bootstrap and package examples.
+Exact v1.6.60 needs one plain \fBoc\-box upgrade\fR before channel\-selection flags. Genuinely pre\-channel 1.7 GitHub installations need the channel\-aware bootstrap with an explicit channel; their old ahead\-of\-master check can retain the development build. Older package installations can first update with their owning manager. See [update channels](update\-channels.md) for the bootstrap and package examples.
 .PP
 The installer stages a complete release under \fB~/\:.local/\:share/\:oc\-box/\:releases/\:\fR, including license and manuals, before switching the launcher. New processes use the new version; active launchers keep their original release path and lazy\-load its original modules. Old release directories are retained and have no automatic garbage collection. \fBcurrent\fR and compatible top\-level installed paths point to the activated release. An older flat installation is migrated; its old manuals are preserved as \fBlegacy\-docs\fR\&. No workspaces or credentials are migrated/deleted.
 .PP
-GitHub automatic updates are off by default and follow the saved release channel. \fB\-\-auto\-update on\fR saves \fBauto_update: true\fR in the existing host oc\-box configuration, retaining settings such as \fBpass_env\fR\&. Normal installed \fBstart\fR launches check before Podman/workspace setup and, when updated, continue with the same arguments. No background daemon, active\-session update, or automatic check for list/status/terminal/reset/purge is introduced. Direct source\-checkout launches skip automatic updates. A concurrent check does not block another normal launcher. Network/download failures are reported and the normal launch continues with the installed version; explicit upgrade failures return nonzero. Package automatic updates remain disabled: \fB\-\-auto\-update on\fR refuses package ownership, while \fBoff\fR prints package\-manager guidance without changing the GitHub installation's setting. Automatic\-update settings cannot be combined with channel selectors or \fB\-\-check\fR\&.
+GitHub automatic updates are off by default and follow the saved release channel. \fB\-\-auto\-update on\fR saves \fBauto_update: true\fR in the existing host oc\-box configuration, retaining settings such as \fBpass_env\fR\&. Normal installed \fBstart\fR launches check before Podman/workspace setup and, when updated, continue with the same arguments. No background daemon, active\-session update, or automatic check for list/status/terminal/reset/purge is introduced. Direct source\-checkout launches skip automatic updates. A concurrent check does not block another normal launcher. Network/download failures are reported and the normal launch continues with the installed version; explicit upgrade failures return nonzero. Package automatic updates remain disabled: \fB\-\-auto\-update on\fR refuses package ownership, while \fBoff\fR prints package\-manager guidance without changing the GitHub installation's setting. Automatic\-update settings cannot be combined with channel selectors, \fB\-\-check\fR, \fB\-\-vault\fR or \fB\-\-tui\fR\&.
 .PP
 Fetch/checkout/install subprocesses have a clean, positive\-allowlisted environment. Global/system Git config, helpers, hooks, external protocols, provider tokens, SSH agents, and user proxy variables are not used by the public download. HTTPS is required; shell commands or a custom upstream URL are not accepted. Use manual source installation for a reviewed alternate deployment. Updates inside a container are refused because its private HOME is not the host installation. Git is required for public updates; build tools are not.
 .SS secrets
@@ -562,17 +571,19 @@ Optional cryptography support is required only when using vault operations:
 .PP
 .nf
 .fam C
+# Existing installation, with a launcher supporting upgrade extras:
+oc\-box upgrade \-\-vault
+# New isolated Python\-tool installation:
 pipx install 'oc\-box[vault]'
-# Add support to an existing pipx installation:
-pipx inject oc\-box 'cryptography>=44'
-# Or install/reinstall the uv tool with its extra:
-uv tool install \-\-force 'oc\-box[vault]'
+# Or: uv tool install 'oc\-box[vault]'
 # In a package installation's activated virtual environment:
 python \-m pip install 'oc\-box[vault]'
 .fam T
 .fi
 .PP
-For a fresh V2 installation, choose the \fBoc\-box[vault]\fR extra (or the curl option below), then run \fBoc\-box secrets init\fR and \fBoc\-box secrets set NAME\fR **before your first** \fBoc\-box \-\-project ~/\:devel/\:demo\fR\&. Global use needs no per\-project registration or selection. Values are entered only in masked prompts; do not put secret values in OpenCode or oc\-box JSON. Configuration can reference their names using the published V2 shapes under Configuration and environment.
+For an existing installation, the upgrade request follows the saved channel and verified owner, adds dependencies only and does not initialize/unlock the vault or change credential policy. Use \fB\-\-devel \-\-vault\fR when development is wanted. Older channel\-aware launchers should upgrade normally to a supporting published release first; ambiguous plain\-pip extras require manual owner guidance.
+.PP
+For a fresh V2 installation, choose the \fBoc\-box[vault]\fR extra (or the installer option below), then run \fBoc\-box secrets init\fR and \fBoc\-box secrets set NAME\fR **before your first** \fBoc\-box \-\-project ~/\:devel/\:demo\fR\&. Global use needs no per\-project registration or selection. Values are entered only in masked prompts; do not put secret values in OpenCode or oc\-box JSON. Configuration can reference their names using the published V2 shapes under Configuration and environment.
 .PP
 For GitHub/source installations, \fBpython3 install.py \-\-with\-vault\fR stages the optional crypto wheels privately in that release (using a temporary venv), not in system/user\-site Python. The curl bootstrap accepts \fBsh \-s \-\- \-\-with\-vault\fR when piped to a shell. Future GitHub upgrades preserve that opt\-in. The source can also use a host Python with a distro\-provided cryptography package. A missing dependency yields guidance, not a fallback to weak/custom encryption. No desktop keyring, external password manager, cloud service, or daemon is used. With no host vault, normal default V2 launches retain the env\-file fallback and suggest setup; they never install crypto, initialize a vault, edit config, or import JSON secrets automatically. An initialized empty vault still unlocks but supplies no vault entries; guidance suggests \fBoc\-box secrets set NAME\fR\&. A present corrupt vault, wrong passphrase, or missing crypto support aborts before container setup/reset deletion, with no silent fallback. Native OpenCode saved/OAuth credential refresh and copying remain independent in every credential mode, including global vault mode: env entries do not replace structured OAuth refresh\-token records. A vault containing only \fBBRAVE_API_KEY\fR does not disable existing Copilot OAuth. Configured global mode suppresses legacy ambient token/env overrides, including \fBOPENCODE_AUTH_CONTENT\fR, but keeps ordinary supported native auth integration. No plaintext OpenCode JSON secrets are imported or rewritten into the vault.
 .PP
@@ -792,16 +803,22 @@ oc\-box reset \-\-project ~/devel/demo \-\-distro debian
 .fi
 .SS \-\-check
 .PP
-With \fBupgrade\fR, preview the saved or explicitly selected published channel without installing or persisting a preference. Returns success when a version is available or the installation is current; it is not an update\-available exit code. Network errors return nonzero. Cannot be combined with \fB\-\-auto\-update\fR, workspace selectors or other commands. Example: \fBoc\-box upgrade \-\-devel \-\-check\fR\&.
+With \fBupgrade\fR, preview the saved or explicitly selected published channel and validate support for requested \fB\-\-vault\fR/\fB\-\-tui\fR extras without installing or persisting channel/extra preferences. Returns success when a version is available or the installation is current; it is not an update\-available exit code. Network errors or unsupported requested extras return nonzero. Cannot be combined with \fB\-\-auto\-update\fR, workspace selectors or other commands. Example: \fBoc\-box upgrade \-\-devel \-\-tui \-\-check\fR\&.
 .SS \-\-stable
 .PP
 With \fBupgrade\fR, select and remember the stable channel after a successful verified upgrade. With \fB\-\-check\fR, preview only. Mutually exclusive with \fB\-\-devel\fR; cannot be combined with \fB\-\-auto\-update\fR or workspace actions. An explicit downgrade replaces launcher files, not workspace/session state. Example: \fBoc\-box upgrade \-\-stable\fR\&.
 .SS \-\-devel
 .PP
 With \fBupgrade\fR, select and remember published development prereleases after a successful verified upgrade. With \fB\-\-check\fR, preview only. Mutually exclusive with \fB\-\-stable\fR; cannot be combined with \fB\-\-auto\-update\fR or workspace actions. Development features remain experimental; selection is not stable acceptance. Example: \fBoc\-box upgrade \-\-devel\fR\&.
+.SS \-\-vault
+.PP
+With \fBupgrade\fR only, add optional vault/cryptography dependencies through the verified installation owner. Independent of \fB\-\-tui\fR, additive to existing extra requests, and compatible with \fB\-\-stable\fR, \fB\-\-devel\fR or nonmutating \fB\-\-check\fR\&. Without a selector, use the saved channel. The same release can gain support; repeating a satisfied request is a no\-op. Does not select a workspace credential policy, initialize/unlock a vault, or deliver credentials. Requires a launcher release supporting this flag and a published target supporting the extra. Cannot be combined with \fB\-\-auto\-update\fR or workspace actions. Example: \fBoc\-box upgrade \-\-devel \-\-vault\fR\&.
+.SS \-\-tui
+.PP
+With \fBupgrade\fR only, add optional dashboard dependencies through the verified installation owner. Independent of \fB\-\-vault\fR and additive; may be combined with \fB\-\-devel\fR and nonmutating \fB\-\-check\fR\&. An explicit request against a target without the dashboard, including current stable 1.6, refuses. An inherited TUI preference survives a stable interval for a later return to development, but does not put the dashboard into stable. The same release can gain dependencies; repeating a satisfied request is a no\-op. Does not launch the dashboard or a workspace. Requires a launcher release supporting this flag and a published supporting target. Cannot be combined with \fB\-\-auto\-update\fR or workspace actions. Example: \fBoc\-box upgrade \-\-devel \-\-vault \-\-tui\fR\&.
 .SS \-\-auto\-update on|off
 .PP
-With \fBupgrade\fR, persistently enable or disable automatic updates before normal installed launches. The default is off. This setting itself performs no download or installation and preserves other keys in \fB~/\:.config/\:oc\-box/\:config.json\fR (or its XDG equivalent). GitHub updates follow the saved channel; package automatic updates remain disabled. Cannot be combined with \fB\-\-check\fR, \fB\-\-stable\fR, \fB\-\-devel\fR or workspace actions. Example: \fBoc\-box upgrade \-\-auto\-update on\fR\&.
+With \fBupgrade\fR, persistently enable or disable automatic updates before normal installed launches. The default is off. This setting itself performs no download or installation and preserves other keys in \fB~/\:.config/\:oc\-box/\:config.json\fR (or its XDG equivalent). GitHub updates follow the saved channel; package automatic updates remain disabled. Cannot be combined with \fB\-\-check\fR, \fB\-\-stable\fR, \fB\-\-devel\fR, \fB\-\-vault\fR, \fB\-\-tui\fR or workspace actions. Example: \fBoc\-box upgrade \-\-auto\-update on\fR\&.
 .SS \-\-new
 .PP
 Start a new root conversation while retaining the same container and files. Use with start (the default) or reset. Mutually exclusive with \fB\-\-resume\fR and \fB\-\-import\-session\fR\&. Example: \fBoc\-box \-\-project ~/\:devel/\:demo \-\-new\fR\&.
@@ -1067,7 +1084,7 @@ Installing packages alone does not configure subordinate IDs, cgroups, or make r
 .PP
 | Feature | Host dependencies | | \-\-\- | \-\-\- | | Launch/reset/sync | Linux, running Python 3.10+, Podman, pasta (\fBpasst\fR), newuidmap/newgidmap, catatonit, conmon, crun or runc, host OpenCode 1.x or 2.x | | Maintenance/stop/repair/purge | Linux, Python, Podman and UID helpers; history preservation/deletion additionally uses host OpenCode | | Full/portable backup | Linux, Python, rootless Podman/UID helpers, age/age\-keygen (both from \fBage\fR), memfd support | | Backup inspection | Linux, Python, age/age\-keygen, memfd; no Podman/OpenCode/vault extra | | Restore | Backup prerequisites plus pasta, init/helper/runtime providers for container creation | | Optional vault | \fBcryptography\fR in the same Python environment as oc\-box; no age requirement | | GitHub installation/upgrade | Git and Python; one\-line download also needs curl, mktemp and trusted CA certificates | | Storage reports | GNU \fBdu\fR from \fBcoreutils\fR; BusyBox du is insufficient; other metrics still work if absent | | FUSE overlay driver | \fBfuse\-overlayfs\fR only if selected/needed; kernel overlay does not require it | | Read manuals | man (\fBman\fR, \fBman\-db\fR, or Alpine \fBmandoc\fR) and info (\fBinfo\fR or \fBtexinfo\fR) | | Regenerate manuals | GNU makeinfo (\fBtexinfo\fR); contributor\-only, never required to install/use oc\-box |
 .PP
-Host OpenCode is not supplied by these mappings; see https://opencode.ai/docs/#install. Use the existing Python installation channel for vault support: \fBuv tool install \-\-force 'oc\-box[vault]'\fR, \fBpipx inject oc\-box 'cryptography>=44'\fR, or GitHub/source \fB\-\-with\-vault\fR\&. Do not install Python dependencies into system Python to fix an isolated tool's missing extra.
+Host OpenCode is not supplied by these mappings; see https://opencode.ai/docs/#install. On a supporting launcher release, use \fBoc\-box upgrade \-\-vault\fR for vault dependencies through the verified existing owner; upgrade older channel\-aware launchers normally first. First installations can request the package \fB[vault]\fR extra or GitHub/source \fB\-\-with\-vault\fR\&. Do not install Python dependencies into system Python to fix an isolated tool's missing extra.
 .PP
 Inside each workspace, oc\-box automatically installs Bash, CA certificates, curl, Git, Python, ripgrep, tar/gzip, Node/npm, and PDF tools (\fBpoppler\-tools\fR on openSUSE, \fBpoppler\-utils\fR on Debian/Ubuntu/Fedora/Alpine, \fBpoppler\fR on Arch). uv/uvx and matching OpenCode are bootstrapped inside private storage. MCPs, formatters, language servers, plugins and project libraries may have their own requirements; doctor does not infer those from project configuration.
 .PP
@@ -1629,6 +1646,8 @@ sh install\-oc\-box.sh
 .fi
 .PP
 For a reviewed installer containing the experimental dashboard, enable its optional dependencies with \fBsh install.sh \-\-devel \-\-with\-tui\fR, or \fBsh install.sh \-\-devel \-\-with\-vault \-\-with\-tui\fR to include vault support. Use the actual downloaded filename (\fBinstall\-oc\-box.sh\fR above). A piped bootstrap accepts \fBsh \-s \-\- \-\-devel \-\-with\-tui\fR or \fBsh \-s \-\- \-\-devel \-\-with\-vault \-\-with\-tui\fR\&. Dependencies are installed privately in the immutable release; no system/user\-site pip is used. GitHub updates retain these opt\-ins while existing launchers remain pinned to their earlier release. Python\-package installations instead use their extras and owning package manager.
+.PP
+These are first\-install/bootstrap options, not a requirement to rerun curl when enabling extras later. On a launcher release supporting upgrade extras, use \fBoc\-box upgrade \-\-devel \-\-tui\fR, \fBoc\-box upgrade \-\-devel \-\-vault\fR, or both flags through the existing owner. Older channel\-aware launchers should upgrade normally to a supporting published release first. The update\-channel guide documents pre\-channel exceptions.
 .PP
 The bootstrap clones full history anonymously into a private temporary directory and removes that temporary checkout when finished. It does not configure Git authentication, download credentials, or keep a source checkout in your project. When moving from an older flat installation, exit its active oc\-box launchers first; future versioned installations can coexist with already running versions.
 .PP

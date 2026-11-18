@@ -147,6 +147,8 @@ fi
     def test_channel_options_are_local_to_upgrade_not_tui_or_workspace_actions(self):
         self.assertEqual(self.complete("upgrade", "--st"), ["--stable"])
         self.assertEqual(self.complete("upgrade", "--de"), ["--devel"])
+        self.assertEqual(self.complete("upgrade", "--va"), ["--vault"])
+        self.assertEqual(self.complete("upgrade", "--tu"), ["--tui"])
         for command in (
             "start",
             "stop",
@@ -174,6 +176,8 @@ fi
                 options = self.complete(command, "--")
                 self.assertNotIn("--stable", options)
                 self.assertNotIn("--devel", options)
+                self.assertNotIn("--vault", options)
+                self.assertNotIn("--tui", options)
 
     def test_no_vault_is_offered_only_for_owning_launch_commands(self):
         self.assertEqual(self.complete("--no-v"), ["--no-vault"])

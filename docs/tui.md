@@ -75,11 +75,21 @@ uv tool install --prerelease allow 'oc-box[tui]'
 pipx install --pip-args='--pre' 'oc-box[tui]'
 ```
 
-To include the independent vault extra too, use `'oc-box[tui,vault]'`. A current
-channel-aware installation can select `oc-box upgrade --devel`; package updates
-delegate only to the verified owning tool/environment, never the GitHub installer.
-Unrecognized/custom ownership receives manual guidance. Package automatic
-updating remains off.
+To include the independent vault extra too, use `'oc-box[tui,vault]'`. For an
+existing installation, use a launcher release supporting upgrade extras:
+
+```sh
+oc-box upgrade --devel --tui
+# Or add both independent extras:
+oc-box upgrade --devel --vault --tui
+```
+
+These commands work from stable or development. Verified uv/pipx owners receive
+package-extra requests through their own manager, never the GitHub installer;
+GitHub owners use the immutable private installer. Ambiguous plain-pip extras
+or unrecognized/custom ownership receive manual guidance. Package automatic
+updating remains off. Requests install dependencies only, not a credential policy,
+vault initialization/unlock or dashboard launch.
 
 For the channel-aware GitHub bootstrap:
 
@@ -100,26 +110,30 @@ stdlib-only baseline; the UI dependencies are optional, not prerequisites for
 
 ### Missing TUI dependencies after a GitHub upgrade
 
-Selecting `oc-box upgrade --devel` installs the development launcher but does
-not enable the optional TUI extra for the first time. If `oc-box tui` reports
-“Optional TUI dependencies are missing”, rerun the GitHub bootstrap with the
-explicit feature flag, on the host as your regular user:
+Selecting `oc-box upgrade --devel` alone does not request the TUI extra for the
+first time. If `oc-box tui` reports “Optional TUI dependencies are missing”,
+add it on the host as your regular user with a supporting launcher:
 
 ```sh
-curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-tui --with-vault
+oc-box upgrade --devel --tui
 oc-box tui
 ```
 
-Keep `--with-vault` if you use the encrypted vault; otherwise omit it. Dependencies
-remain private to that immutable GitHub release. No workspace reset, history
-deletion or system-Python installation is needed; do not install a second
-pipx/uv copy to repair this GitHub installation. Subsequent upgrades to a target
-supporting the TUI preserve the opt-in. See the
+Add `--vault` only if you also want to request vault dependencies; an existing
+opt-in is preserved without repeating it. The same selected release can gain
+extras, and repeating a satisfied request is a no-op. Add `--check` to validate
+support without installation or preference changes. Dependencies remain private
+to the immutable GitHub release; no curl, workspace reset, history deletion or
+system-Python installation is needed. Do not create a second pipx/uv copy.
+An explicit TUI request against stable refuses; an inherited TUI preference is
+retained for a later return to a supporting development target. See the
 [channel-switch troubleshooting](update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
 
 These installation examples explicitly select experimental development;
-stable 1.6.94 does not include the manager. Pre-channel 1.7 launchers cannot use
-the new upgrade flags and require the bootstrap; see
+stable 1.6.94 does not include the manager. Older channel-aware launchers must
+upgrade normally to a published release supporting the extras flags first;
+branch HEAD is not automatically published. Genuinely pre-channel 1.7 launchers
+retain their exceptional bootstrap route; see
 [update channels](update-channels.md#bootstrap-and-older-installations).
 For ordinary unrelated projects, use the installed `oc-box tui` normally. The
 self-checkout launch below is specifically for managing oc-box's own source.
