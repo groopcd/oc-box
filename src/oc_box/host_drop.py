@@ -91,9 +91,10 @@ _CLIPBOARD_REFUSALS = {
 }
 CLIPBOARD_WARNING = (
     "Experimental host clipboard paste enabled for this TUI client. "
-    "Ctrl+Alt+Shift+V imports a PNG image or up to four copied local "
+    "Ctrl+Y imports a PNG image or up to four copied local "
     "PNG/JPEG/GIF/WebP/PDF files (8 MiB each, 16 MiB per batch) into this "
-    "workspace; ordinary Ctrl+V is unchanged. Imports always copy, never move. "
+    "workspace; ordinary Ctrl+V is unchanged. Ctrl+Y is reserved throughout this "
+    "client, including shell panes (no shell yank). Imports always copy, never move. "
     "The shortcut authorizes import "
     "anywhere in this connection, not proof of composer focus. Workspace tools "
     "can read imported files; history, provider systems or crashes may retain "

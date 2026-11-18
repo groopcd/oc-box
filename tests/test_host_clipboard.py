@@ -14,7 +14,7 @@ from oc_box import oc_box as box
 
 
 PNG = b"\x89PNG\r\n\x1a\nsynthetic-only"
-KEY = b"\x1b[118;8u"
+KEY = b"\x19"
 PASTE = b"\x1b[200~"
 END = b"\x1b[201~"
 
@@ -296,7 +296,15 @@ class HostClipboardTests(unittest.TestCase):
                 )
 
     def test_only_complete_opted_in_host_shortcuts_grant_a_read(self):
-        for key in (KEY, b"\x1b[118;8:1u", b"\x1b[27;8;86~", b"\x1b[118:86:118;200u"):
+        for key in (
+            KEY,
+            b"\x1b[121;5u",
+            b"\x1b[121;5:1u",
+            b"\x1b[27;5;121~",
+            b"\x1b[121:89;69u",
+            b"\x1b[121;133u",
+            b"\x1b[121:89:121;197u",
+        ):
             with self.subTest(key=key):
                 action = Mock(return_value=b"/tmp/oc-box-drop-test/drop_image.png")
                 parser = host_drop_input.PasteInput(lambda _: None, on_clipboard=action)
@@ -309,11 +317,15 @@ class HostClipboardTests(unittest.TestCase):
                 action.assert_called_once_with()
         parser = host_drop_input.PasteInput(lambda _: None)
         self.assertEqual(parser.feed(KEY), KEY)  # No opt-in: byte-transparent.
-        ordinary = b"\x16\x1b[118;6u\x1b[99;8u"
+        ordinary = (
+            b"yY;\x16\x11\x13"  # Text, Ctrl+V/Q/S stay native controls.
+            b"\x1b[121;3u\x1b[121;6u"  # Alt+Y and Ctrl+Shift+Y are not the shortcut.
+            b"\x1b[118;8u\x1b[27;8;86~"  # Old shortcut no longer grants a read.
+        )
         action = Mock(return_value=b"unexpected")
         parser = host_drop_input.PasteInput(lambda _: None, on_clipboard=action)
         self.assertEqual(parser.feed(ordinary), ordinary)
-        self.assertEqual(parser.feed(b"\x1b[118;8:2u\x1b[118;8:3u"), b"")
+        self.assertEqual(parser.feed(b"\x1b[121;5:2u\x1b[121;5:3u"), b"")
         action.assert_not_called()
         for content in (
             PASTE + KEY + END,
@@ -322,8 +334,10 @@ class HostClipboardTests(unittest.TestCase):
                 for prefix in (b"P", b"X", b"^", b"_")
             ),
             b"\x1b]title;" + KEY + b"\x1b\\",
-            b"\x9b118;8u",
-            b"\xc2\x9b118;8u",
+            b"\x9b121;5u",
+            b"\xc2\x9b121;5u",
+            b"\x1b" + KEY,  # Alt-prefixed controls are not top-level Ctrl+Y.
+            b"\x1b[0" + KEY + b"n",  # No control-byte action inside CSI replies.
             b"\xff" + KEY,
         ):
             with self.subTest(content=content):

@@ -14,7 +14,15 @@ desktop contents. No new test harness or broad regression run is needed.
   not something advertised by a public capability endpoint.
 - Wayland: ensure `wl-paste` is installed (`wl-clipboard`).
 - X11: ensure `xclip` is installed.
-- KDE/global shortcuts must not consume Ctrl+Alt+Shift+V.
+- KDE/global shortcuts and custom native bindings must not consume Ctrl+Y.
+
+The host import shortcut is **Ctrl+Y**, replacing the
+earlier Ctrl+Alt+Shift+V chord. It is unassigned in the
+[current OpenCode 2.x default bindings](https://opencode.ai/docs/cli/keybinds)
+checked on 2026-11-18. Ctrl+V remains ordinary paste and Ctrl+S/Q retain their
+terminal meanings. Ctrl+Y is reserved throughout this opted-in client, including
+shell panes, so it no longer performs shell yank there. Without
+`--host-clipboard`, Ctrl+Y stays native. Printable `y`/`Y` text is not intercepted.
 
 `uv --with .` builds the **current checkout**, not a named feature branch.
 An installed release or another checkout will not acquire the new flag from
@@ -87,7 +95,7 @@ back to an X11 clipboard if `wl-paste` is missing.
 ## Five small observations
 
 1. **Clipboard screenshot and files:** copy the image itself in Spectacle, focus the native
-   prompt and press **Ctrl+Alt+Shift+V**. Look for an attachment/draft, not just
+   prompt and press **Ctrl+Y**. Look for an attachment/draft, not just
    host `/tmp/Spectacle...` text. The bridge must not send automatically.
    Send manually only if you want the model to receive the image.
    Then copy a small PDF **file** in Dolphin (Ctrl+C), rather than selected text
@@ -112,7 +120,8 @@ back to an X11 clipboard if `wl-paste` is missing.
    warning; don't restart or inspect other resources to hide a failure. Cleanup
    is best-effort and does not recall history, provider or copied bytes.
 
-The chord must reach the host relay as a distinct CSI-u/ModifyOtherKeys report.
+The chord must reach the host relay as the legacy Ctrl+Y byte or a distinct
+CSI-u/ModifyOtherKeys report.
 If it does nothing, don't remap ordinary Ctrl+V or enable broad filesystem/socket
 mounts. Report the terminal and native versions so the binding can be adjusted
 on the feature branch.

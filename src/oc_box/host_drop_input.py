@@ -23,14 +23,17 @@ _ESC_STRINGS = {
 _PASTE_START = b"\x1b[200~"
 _PASTE_END = b"\x1b[201~"
 
-# Explicit Ctrl+Alt+Shift+V only. CSI-u press events grant a clipboard read;
+# Explicit Ctrl+Y only. CSI-u press events grant a clipboard read;
 # repeat/release events consume the reserved shortcut without granting again.
-# ModifyOtherKeys has no separate event type. No legacy Ctrl+V/ESC-v guessing.
+# Legacy Ctrl+Y is the C0 byte 0x19, accepted only at top-level host input.
+# Legacy/ModifyOtherKeys have no separate event type. No printable-text guesses
+# or aliases for the earlier Ctrl+Alt+Shift+V shortcut.
+_CLIPBOARD_CONTROL = b"\x19"
 _CLIPBOARD_KEYS = {
     **{
         key + b";" + modifiers + suffix: event in (b"", b":1")
-        for key in (b"118", b"86", b"118:86", b"118:86:118")
-        for modifiers in (b"8", b"72", b"136", b"200")  # Optional Caps/Num Lock.
+        for key in (b"121", b"121:89", b"121:89:121")
+        for modifiers in (b"5", b"69", b"133", b"197")  # Optional Caps/Num Lock.
         for event, suffix in (
             (b"", b"u"),
             (b":1", b":1u"),
@@ -38,8 +41,7 @@ _CLIPBOARD_KEYS = {
             (b":3", b":3u"),
         )
     },
-    b"27;8;118~": True,
-    b"27;8;86~": True,
+    b"27;5;121~": True,
 }
 
 # Includes the ASCII "72;" selector, but not the introducer or terminator.
@@ -330,8 +332,27 @@ class _Framing:
             self._start_csi(raw)
         elif code in _STRINGS:
             self._start_string(_STRINGS[code], raw, output)
+        elif (
+            not self._framing_only()
+            and self._on_clipboard is not None
+            and raw == _CLIPBOARD_CONTROL
+        ):
+            self._clipboard_press(raw, output)
         else:
             output.extend(raw)
+
+    def _clipboard_press(self, original, output):
+        try:
+            replacement = self._on_clipboard()
+        except Exception:
+            self._disable_callbacks()
+            output.extend(original)
+            return
+        if isinstance(replacement, bytes):
+            output.extend(_PASTE_START + replacement + _PASTE_END)
+        elif replacement is not None:
+            self._disable_callbacks()
+            output.extend(original)
 
     def _escape_unit(self, code, raw, output):
         if self._state == "escape":
@@ -412,17 +433,7 @@ class _Framing:
             self._state = "text"
             if not _CLIPBOARD_KEYS[candidate]:
                 return
-            try:
-                replacement = self._on_clipboard()
-            except Exception:
-                self._disable_callbacks()
-                output.extend(original)
-                return
-            if isinstance(replacement, bytes):
-                output.extend(_PASTE_START + replacement + _PASTE_END)
-            elif replacement is not None:
-                self._disable_callbacks()
-                output.extend(original)
+            self._clipboard_press(original, output)
             return
         if (
             not self._framing_only()

@@ -50,9 +50,16 @@ Konsole/Kitty shortcut reporting, native composer focus and image attachment
 behavior to the operator's short [host check](host-clipboard-testing.md).
 These local checks establish no live rootless-Podman or desktop acceptance.
 Do not add a new broad harness or repeat unrelated release gates for this check.
-The owner's earlier "it worked" report covers the PNG workflow on native 2.3.2,
-not the later copied-file extension or every checklist item. Keep those scopes
-separate; no copied-file host pass is established by the synthetic checks.
+The owner's earlier "it worked" report covers the PNG workflow on native 2.3.2.
+On diagnostic revision `af73035d848daa93ca832351564ba9635082568c`, the owner
+reported `source-guard` for the original copied PDF, then a `[PDF 1]` attachment
+after testing an ordinary copy. This narrows the original refusal to host source
+capture but does not identify the exact source restriction or prove provider
+interpretation. Both reports used the older Ctrl+Alt+Shift+V shortcut. The new
+Ctrl+Y binding is absent from the current documented OpenCode 2.x defaults
+(checked 2026-11-18); its terminal delivery remains a separate host observation.
+Keep these scopes separate; no broader checklist or host pass is established
+by the synthetic checks.
 
 ### Experimental browser attachment adapter
 

@@ -3555,7 +3555,7 @@ def parser():
     result.add_argument(
         "--host-clipboard",
         action="store_true",
-        help="opt in this native TUI client to host clipboard images/copied image or PDF files with Ctrl+Alt+Shift+V",
+        help="opt in this native TUI client to host clipboard images/copied image or PDF files with Ctrl+Y (reserved throughout this client)",
     )
     result.add_argument(
         "--credential-mode",
