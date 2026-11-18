@@ -289,8 +289,10 @@ cannot redirect that read, but this does not freeze file contents or prevent all
 same-user filesystem races. `--no-host-clipboard-symlinks` restores strict
 no-symlink clipboard sources for this client. Normal host drops and live sharing
 remain strict. Fixed refusal markers never include paths, raw errors or clipboard
-contents. Local checks and earlier strict-source host observations do not accept
-the new default symlink policy; see [the clipboard test scope](docs/testing.md#experimental-host-clipboard-attachment-shortcut).
+contents. The owner has reported a successful PDF import through a linked folder
+with Ctrl+Y on the merged devel source. That scoped manual observation is not
+verification of every refusal, platform or filesystem race, or a security
+certification; see [the clipboard test scope](docs/testing.md#experimental-host-clipboard-attachment-shortcut).
 
 ## Global V2 host credential vault and policy overrides
 

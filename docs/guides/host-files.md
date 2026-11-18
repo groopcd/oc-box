@@ -150,9 +150,10 @@ An additional client may use these flags without restarting/unlocking the owner.
 The option is not a workspace preference and cannot live-toggle existing
 clients. Imported bytes are readable by workspace tools and may survive in
 history, provider systems or retained copies. See the [full reference](../cli.md#--host-clipboard)
-and [short host check](../host-clipboard-testing.md). Source checks and reported
-host observations have distinct scopes; the default symlink policy still awaits
-its own host observation.
+and [short host check](../host-clipboard-testing.md). The owner has reported a
+successful Ctrl+Y PDF import through a linked folder using the merged devel test
+instructions. This is a scoped manual observation, not a full platform/refusal
+matrix or security certification; see the [recorded evidence scope](../testing.md#experimental-host-clipboard-attachment-shortcut).
 
 ## Require independent host approval for every image
 
