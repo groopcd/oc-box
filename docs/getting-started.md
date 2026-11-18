@@ -14,11 +14,27 @@ not with sudo or from inside another oc-box workspace.
 - Install host OpenCode **2.x**, Python 3.10+ and rootless Podman with pasta
   networking.
 - Ensure CPU, memory and process cgroup controllers are delegated.
-- Install oc-box using the [installation guide](installation.md).
+- Have Git and curl available for the recommended GitHub installation below,
+  or choose another method from the [installation guide](installation.md).
 - Read the [trust boundary](../SECURITY.md): the selected project is writable,
   containers share the host kernel and have network access.
 
-Check prerequisites without starting a workspace:
+### Install oc-box
+
+**The recommended newcomer path is the GitHub one-liner, with vault and TUI:**
+
+```sh
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-vault --with-tui
+```
+
+`--devel` explicitly selects a published development release: stable does not yet
+include the TUI. Optional dependencies stay in the installation's private
+runtime; this does not initialize a vault or start a workspace. The command
+downloads and runs the public installer; review it first if preferred.
+For stable without the dashboard or Python-tool installations, see
+[installation alternatives](installation.md).
+
+Then check prerequisites without starting a workspace:
 
 ```sh
 opencode --version
