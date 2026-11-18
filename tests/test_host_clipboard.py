@@ -19,6 +19,16 @@ PASTE = b"\x1b[200~"
 END = b"\x1b[201~"
 
 
+def refusal(label):
+    return (
+        PASTE
+        + b"[oc-box: host clipboard import refused: "
+        + label.encode()
+        + b"]"
+        + END
+    )
+
+
 class HostClipboardTests(unittest.TestCase):
     def test_helper_discovery_is_read_free_and_reads_are_bounded_and_private(self):
         environment = {
@@ -249,14 +259,14 @@ class HostClipboardTests(unittest.TestCase):
                         self.assertNotIn(str(root).encode(), result)
                         self.assertNotIn(b"\r", result)
                         self.assertNotIn(b"\n", result)
-                for mime, payload in (
-                    ("text/plain", str(pdf).encode()),
-                    ("text/uri-list", b"file://foreign/tmp/a.pdf"),
-                    ("text/uri-list", b"file:///tmp/a.docx"),
-                    ("text/uri-list", link.as_uri().encode()),
-                    ("text/uri-list", protected.as_uri().encode()),
-                    ("text/uri-list", uris * 3),
-                    ("x-special/gnome-copied-files", b"move\n" + uris),
+                for mime, payload, category in (
+                    ("text/plain", str(pdf).encode(), "clipboard-types"),
+                    ("text/uri-list", b"file://foreign/tmp/a.pdf", "file-uri"),
+                    ("text/uri-list", b"file:///tmp/a.docx", "content-type"),
+                    ("text/uri-list", link.as_uri().encode(), "source-guard"),
+                    ("text/uri-list", protected.as_uri().encode(), "source-guard"),
+                    ("text/uri-list", uris * 3, "file-list-limit"),
+                    ("x-special/gnome-copied-files", b"move\n" + uris, "file-list"),
                 ):
                     with self.subTest(mime=mime, payload=payload[:40]):
                         transfer.put.reset_mock()
@@ -264,7 +274,7 @@ class HostClipboardTests(unittest.TestCase):
                         reader.read_selection.return_value = (mime, payload)
                         self.assertEqual(
                             relay.input_bytes(KEY),
-                            PASTE + host_drop.CLIPBOARD_REFUSED + END,
+                            refusal(category),
                         )
                         transfer.put.assert_not_called()
                         reader.read_selection.assert_called_once_with()
@@ -275,7 +285,7 @@ class HostClipboardTests(unittest.TestCase):
                 with patch.object(host_drop.os, "pread") as read:
                     self.assertEqual(
                         relay.input_bytes(KEY),
-                        PASTE + host_drop.CLIPBOARD_REFUSED + END,
+                        refusal("source-guard"),
                     )
                     read.assert_not_called()  # Whole batch admitted before reading any file.
                 self.assertEqual(pdf.read_bytes(), pdf_data)
@@ -362,15 +372,33 @@ class HostClipboardTests(unittest.TestCase):
             transfer.put.reset_mock()
             reader.read_selection.return_value = ("image/png", b"private text")
             refused = relay.input_bytes(KEY)
-            self.assertEqual(refused, PASTE + host_drop.CLIPBOARD_REFUSED + END)
+            self.assertEqual(refused, refusal("content-type"))
             self.assertNotIn(b"private text", refused)
             transfer.put.assert_not_called()
             reader.reset_mock()
             transfer.files = host_drop.MAX_FILES
-            self.assertEqual(
-                relay.input_bytes(KEY), PASTE + host_drop.CLIPBOARD_REFUSED + END
-            )
+            self.assertEqual(relay.input_bytes(KEY), refusal("client-limit"))
             reader.read_selection.assert_not_called()
+            transfer.files = 0
+            for error, category in (
+                (
+                    host_clipboard.ClipboardError("Host clipboard read timed out."),
+                    "clipboard-timeout",
+                ),
+                (
+                    ValueError("/private/host/path must never be shown"),
+                    "clipboard-read",
+                ),
+            ):
+                with self.subTest(category=category):
+                    reader.read_selection.side_effect = error
+                    result = relay.input_bytes(KEY)
+                    self.assertEqual(result, refusal(category))
+                    self.assertNotIn(b"/private/host/path", result)
+            reader.read_selection.side_effect = None
+            reader.read_selection.return_value = ("image/png", PNG)
+            transfer.put.side_effect = host_drop.DropError("private transfer detail")
+            self.assertEqual(relay.input_bytes(KEY), refusal("transfer"))
         transfer.__exit__.assert_called_once()
         self.assertNotIn("private text", errors.getvalue())
 

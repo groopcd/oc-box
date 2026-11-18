@@ -52,6 +52,43 @@ SUFFIX_MIME = {
 }
 REFUSED = b"[oc-box: host file import refused]"
 CLIPBOARD_REFUSED = b"[oc-box: host clipboard import refused]"
+# Only these fixed labels may enter the native prompt. Never interpolate an
+# exception, helper stderr, URI, path, source bytes or clipboard value there.
+_CLIPBOARD_ERROR_CODES = {
+    "Host clipboard read timed out.": "clipboard-timeout",
+    "Host clipboard read failed.": "clipboard-helper",
+    "Host clipboard data exceeds its size limit.": "clipboard-size",
+    "Host clipboard offered invalid content types.": "clipboard-types",
+    "Host clipboard offered too many content types.": "clipboard-types",
+    "Host clipboard contains no supported image or copied files.": "clipboard-types",
+    "Host clipboard does not contain a PNG image.": "content-type",
+    "clipboard-size": "clipboard-size",
+    "clipboard-type": "clipboard-types",
+    "clipboard-file-list": "file-list",
+    "clipboard-file-list-limit": "file-list-limit",
+    "non-local-uri": "file-uri",
+    "invalid-uri-list": "file-list",
+    "uri-list-limit": "file-list-limit",
+    "host-source-refused": "source-guard",
+    "source-changed": "source-changed",
+    "file-limit": "file-limit",
+    "batch-limit": "batch-limit",
+    "extension-content-mismatch": "content-type",
+    "unsupported-content": "content-type",
+    "staging-limit": "client-limit",
+}
+_CLIPBOARD_REFUSALS = {
+    label: CLIPBOARD_REFUSED[:-1] + b": " + label.encode("ascii") + b"]"
+    for label in (
+        *_CLIPBOARD_ERROR_CODES.values(),
+        "client-state",
+        "client-limit",
+        "clipboard-read",
+        "file-list",
+        "source",
+        "transfer",
+    )
+}
 CLIPBOARD_WARNING = (
     "Experimental host clipboard paste enabled for this TUI client. "
     "Ctrl+Alt+Shift+V imports a PNG image or up to four copied local "
@@ -184,6 +221,8 @@ def uri_paths(data):
                 raise DropError("unsupported-content")
             paths.append(path)
         return paths
+    except DropError:
+        raise
     except (ValueError, UnicodeError):
         raise DropError("invalid-uri-list") from None
 
@@ -461,14 +500,17 @@ class Relay:
 
     def paste_clipboard(self):
         """Only PasteInput's reserved host keyboard action calls this."""
+        phase = "client-state"
         try:
             if self.broken or self.clipboard is None:
                 raise DropError("clipboard-unavailable")
+            phase = "client-limit"
             if (
                 self.transfer.files >= MAX_FILES
                 or self.transfer.total >= MAX_CLIENT_BYTES
             ):
                 raise DropError("staging-limit")
+            phase = "clipboard-read"
             mime, data = self.clipboard.read_selection()
             if not isinstance(data, bytes) or not data:
                 raise DropError("clipboard-size")
@@ -477,6 +519,7 @@ class Relay:
                     raise DropError("clipboard-type")
                 images = [(mime, data)]
             else:
+                phase = "file-list"
                 if len(data) > MAX_PATH_PASTE:
                     raise DropError("clipboard-file-list-limit")
                 if mime == "x-special/gnome-copied-files":
@@ -489,13 +532,17 @@ class Relay:
                 elif mime != "text/uri-list":
                     raise DropError("clipboard-type")
                 paths = uri_paths(data)
+                phase = "client-limit"
                 if self.transfer.files + len(paths) > MAX_FILES:
                     raise DropError("staging-limit")
+                phase = "source"
                 images = capture(paths, self.protected)
+            phase = "transfer"
             return self.stage(images)
-        except (ValueError, OSError):
+        except (ValueError, OSError) as error:
             self.clipboard_refused += 1
-            return CLIPBOARD_REFUSED
+            label = _CLIPBOARD_ERROR_CODES.get(str(error), phase)
+            return _CLIPBOARD_REFUSALS.get(label, CLIPBOARD_REFUSED)
 
     def start(self):
         if self.profile != "kitty" or not self.paths_enabled:

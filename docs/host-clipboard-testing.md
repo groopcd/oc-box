@@ -130,6 +130,27 @@ on the feature branch.
 - Any **fixed** refusal/cleanup warning. Do not send clipboard contents, private
   terminal recordings, raw environment dumps or credential-bearing logs.
 
+### If copied files refuse
+
+Report the complete fixed marker, for example
+`[oc-box: host clipboard import refused: source-guard]`. The suffix is deliberately
+not the underlying exception or pathname:
+
+| Category | Meaning |
+| --- | --- |
+| `clipboard-types` | No supported or valid offered clipboard type |
+| `clipboard-helper`, `clipboard-timeout`, `clipboard-size`, `clipboard-read` | Clipboard retrieval/validation failed |
+| `file-uri`, `file-list`, `file-list-limit` | Nonlocal/invalid/unsupported file references or list limits |
+| `source-guard` | Missing, inaccessible, linked or protected host source; deliberately uniform |
+| `source` | Other guarded source-capture refusal |
+| `content-type`, `file-limit`, `batch-limit`, `source-changed` | Unsupported/mismatched content or source/batch checks |
+| `client-state`, `client-limit`, `transfer` | Client lifetime state/quota or private transfer failure |
+
+A portal clipboard target does not itself mean the selected URI uses a portal
+path. Do not remove protections or paste the PDF/URI contents to guess the cause.
+Re-copy the PDF after copying any diagnostic commands, then retry once in a
+fresh client built from the updated branch and report only the marker.
+
 Imported staging is readable by other processes/tools using the same container
 user. It is not per-session isolation. Client crashes, retained references,
 native history/backups and agent-created copies can outlive normal cleanup.

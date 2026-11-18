@@ -2558,8 +2558,10 @@ Arbitrary ‘text/plain’, bare text paths and raw PDF clipboard payloads
 are not requested or reinterpreted.  Copy a PDF **file** in a file
 manager; selected text inside a PDF viewer remains ordinary text paste.
 PNG pixel data is still accepted when no supported copied-file list is
-offered.  Unsupported/missing content produces a fixed refusal
-placeholder without clipboard data or helper stderr.  No packages are
+offered.  Unsupported/missing content produces a refusal placeholder
+with a fixed stage/category, without clipboard data, source paths, raw
+exceptions or helper stderr.  Source-guard failures remain uniform for
+missing, inaccessible, linked or protected sources.  No packages are
 installed automatically.  Missing helpers name the selected utility and
 its host package explicitly: ‘wl-paste’ is provided by ‘wl-clipboard’,
 and X11 uses ‘xclip’.  These package names are the same across the
@@ -4056,19 +4058,19 @@ Node: Synopsis930
 Node: Description3039
 Node: Commands6637
 Node: Options112146
-Node: Lifecycle and persistence150409
-Node: Distribution images152709
-Node: Sessions and recovery157584
-Node: Devices and host permissions164169
-Node: Resource reports166515
-Node: Configuration and environment168626
-Node: Files180007
-Node: Exit status185951
-Node: Examples186804
-Node: Troubleshooting188890
-Node: Installation and manuals200242
-Node: Authors and license209838
-Node: See also210445
+Node: Lifecycle and persistence150556
+Node: Distribution images152856
+Node: Sessions and recovery157731
+Node: Devices and host permissions164316
+Node: Resource reports166662
+Node: Configuration and environment168773
+Node: Files180154
+Node: Exit status186098
+Node: Examples186951
+Node: Troubleshooting189037
+Node: Installation and manuals200389
+Node: Authors and license209985
+Node: See also210592
 
 End Tag Table
 

@@ -212,6 +212,8 @@ their checkout ownership distinct from unrelated source and flat installations.
   unsafe fallback, socket mounts, listeners or automatic Send. Preserve ordinary
   Ctrl+V, file-drop opt-outs and the helper's desktop-only environment. Synthetic
   tests are not desktop/native composition acceptance; keep host checks minimal.
+  Refusal markers may include closed fixed categories only, never raw errors,
+  clipboard data or host paths; missing/linked/private source denials stay uniform.
   Host drop/clipboard eligibility covers valid native 2.x releases rather than
   an exact patch allowlist; retain private-client, transfer and terminal contract
   refusals. No public API proves future composer attachment behavior. Do not

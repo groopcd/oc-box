@@ -2267,7 +2267,9 @@ Arbitrary `text/plain`, bare text paths and raw PDF clipboard payloads are not
 requested or reinterpreted. Copy a PDF **file** in a file manager; selected text
 inside a PDF viewer remains ordinary text paste. PNG pixel data is still accepted
 when no supported copied-file list is offered. Unsupported/missing content
-produces a fixed refusal placeholder without clipboard data or helper stderr.
+produces a refusal placeholder with a fixed stage/category, without clipboard
+data, source paths, raw exceptions or helper stderr. Source-guard failures remain
+uniform for missing, inaccessible, linked or protected sources.
 No packages are installed automatically.
 Missing helpers name the selected utility and its host package explicitly:
 `wl-paste` is provided by `wl-clipboard`, and X11 uses `xclip`. These package
