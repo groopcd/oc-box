@@ -157,7 +157,10 @@ class HistoryRecoveryTests(unittest.TestCase):
         sync.assert_called_once_with(self.path, pinned, announce=False)
         self.assertIn("Execution was interrupted", self.output.getvalue())
         self.assertIn(
-            "original history-wait failure remains nonzero", self.output.getvalue()
+            "completion notices or final results may be missing", self.output.getvalue()
+        )
+        self.assertIn(
+            "Background work is not declared complete", self.output.getvalue()
         )
         self.assertNotIn("normal host OpenCode database", self.output.getvalue())
         workspace_control.require_certain(self.path)
@@ -278,6 +281,7 @@ class HistoryRecoveryTests(unittest.TestCase):
                 self.assertFalse(self.running)
                 self.assertEqual(self.calls.count("start"), 1)
         self.assertNotIn("snapshots were synchronized", self.output.getvalue())
+        self.assertIn("oc-box sync", self.output.getvalue())
         self.assertNotIn("private-sentinel", self.output.getvalue())
 
     def test_reader_exit_failure_cannot_be_reported_as_saved(self):
@@ -287,6 +291,7 @@ class HistoryRecoveryTests(unittest.TestCase):
         sync.assert_called_once()
         self.assertFalse(self.running)
         self.assertNotIn("snapshots were synchronized", self.output.getvalue())
+        self.assertIn("oc-box sync", self.output.getvalue())
         self.assertNotIn("private-sentinel", self.output.getvalue())
 
     def test_stop_intent_between_process_boundaries_suppresses_the_next_process(self):
@@ -338,6 +343,7 @@ class HistoryRecoveryTests(unittest.TestCase):
         result, _lease, _sync = self.recover()
         self.assertFalse(result)
         self.assertIn("cleanup-unverified", self.output.getvalue())
+        self.assertIn("oc-box sync", self.output.getvalue())
         self.assertNotIn("snapshots were synchronized", self.output.getvalue())
 
     def test_capture_is_optional_and_never_uses_new_resource_operations(self):
@@ -452,13 +458,16 @@ class HistoryRecoveryTests(unittest.TestCase):
         self.assertFalse(self.running)
         self.assertEqual(lease.call_args.args[1]["opencode_version"], "2.3.0")
         sync.assert_called_once()
+        self.assertIn("Execution was interrupted", self.output.getvalue())
         self.assertIn(
-            "original history-wait failure remains nonzero", self.output.getvalue()
+            "Background work is not declared complete", self.output.getvalue()
         )
 
     def test_real_exit_routing_distinguishes_identical_timeout_counts(self):
         cases = {
             "eligible-shell": {},
+            "eligible-client-failed": {"client_code": 7},
+            "eligible-client-interrupted": {"client_code": 130},
             "eligible-subagent": {"kind": "subagent"},
             "eligible-native-home-ten-subagents": {
                 "kind": "subagent",
@@ -618,7 +627,9 @@ class HistoryRecoveryTests(unittest.TestCase):
                         )
                     self.assertEqual(
                         box.launch_environment(self.path, data, args),
-                        case.get("client_code", 0) or 1,
+                        (case.get("client_code", 0) or 1)
+                        if "refusal" in case
+                        else case.get("client_code", 0),
                     )
                 self.assertIn(
                     "last complete observation: foreground=0, jobs-running="
@@ -804,6 +815,7 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
                 owner._history_timeout = box.HistoryWaitTimeout(
                     "count-only", recovery_eligible=eligible
                 )
+                owner._client_exit_code = client_code
                 events.append("client-closed")
                 return client_code or 1
 
@@ -832,7 +844,9 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
                 patch.object(
                     recovery,
                     "recover",
-                    side_effect=lambda *_, events=events: events.append("recover"),
+                    side_effect=lambda *_, events=events: (
+                        events.append("recover") or True
+                    ),
                 ) as retry,
                 patch.object(
                     box,
@@ -840,10 +854,11 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
                     side_effect=lambda *_, events=events: events.append("final-stop"),
                 ) as stop,
                 contextlib.redirect_stderr(io.StringIO()),
+                contextlib.redirect_stdout(io.StringIO()),
             ):
                 self.assertEqual(
                     box.launch_environment(self.path, self.data, self.args),
-                    client_code or 1,
+                    client_code if should_retry else client_code or 1,
                 )
             self.assertEqual(
                 events,
@@ -860,6 +875,128 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
                 retry.assert_not_called()
                 self.assertIs(stop.call_args.args[0], self.data)
 
+    def test_recovered_outcome_requires_known_client_status_and_final_cleanup(self):
+        cases = {
+            "clean-recovered": {},
+            "failed-client": {"client_code": 7, "expected": 7},
+            "recovery-pending": {"recovered": False, "expected": 1},
+            "recovery-unconfirmed": {"recovered": None, "expected": 1},
+            "recovery-not-boolean": {"recovered": 1, "expected": 1},
+            "missing-client-status": {"missing_status": True, "expected": 1},
+            "boolean-client-status": {"client_code": False, "expected": 1},
+            "unknown-client-status": {"client_code": None, "expected": 1},
+            "late-cleanup-failure": {"cleanup_failure": True, "expected": 1},
+            "unexpected-cleanup-error": {
+                "cleanup_error": RuntimeError("private-sentinel")
+            },
+            "cleanup-cancel": {"cleanup_error": KeyboardInterrupt()},
+            "unexpected-recovery-error": {
+                "recovery_error": RuntimeError("private-sentinel")
+            },
+            "recovery-cancel": {"recovery_error": KeyboardInterrupt()},
+        }
+        source = recovery.Source("a" * 64, "synthetic-stop-token", ())
+        for name, case in cases.items():
+            with self.subTest(case=name):
+                events = []
+                owner = SimpleNamespace(clients=0, child=SimpleNamespace(returncode=0))
+
+                @contextlib.contextmanager
+                def service(*_args, ui_bridge=False):
+                    self.assertIs(ui_bridge, True)
+                    events.append("owner-open")
+                    try:
+                        yield owner
+                    finally:
+                        events.append("owner-closed")
+
+                def client(*_args):
+                    owner._history_timeout = box.HistoryWaitTimeout(
+                        "count-only", recovery_eligible=True
+                    )
+                    if not case.get("missing_status"):
+                        owner._client_exit_code = case.get("client_code", 0)
+                    events.append("client-closed")
+                    return case.get("client_code") or 1
+
+                def retry(*_args):
+                    self.assertEqual(events[-1], "owner-closed")
+                    events.append("recover")
+                    if "recovery_error" in case:
+                        raise case["recovery_error"]
+                    return case.get("recovered", True)
+
+                def stop(data):
+                    self.assertEqual(data["container"], source.container_id)
+                    events.append("final-stop")
+                    if case.get("cleanup_failure"):
+                        raise box.BoxError("private-sentinel")
+                    if "cleanup_error" in case:
+                        raise case["cleanup_error"]
+
+                class Output(io.StringIO):
+                    def write(self, text):
+                        if text.startswith("Session history synced"):
+                            events.append("success")
+                        return super().write(text)
+
+                output, errors = Output(), io.StringIO()
+                with (
+                    patch.object(box, "check_private_output"),
+                    patch.object(
+                        workspace_control,
+                        "capture",
+                        return_value="synthetic-stop-token",
+                    ),
+                    patch.object(box, "start_container", return_value={}),
+                    patch.object(box, "prepare_runtime"),
+                    patch.object(box.workspace_service, "Owner", side_effect=service),
+                    patch.object(recovery, "capture", return_value=source),
+                    patch.object(box, "launch_client", side_effect=client),
+                    patch.object(recovery, "recover", side_effect=retry) as recover,
+                    patch.object(box, "stop_container", side_effect=stop) as stopped,
+                    contextlib.redirect_stdout(output),
+                    contextlib.redirect_stderr(errors),
+                ):
+                    error = case.get("recovery_error", case.get("cleanup_error"))
+                    if error is not None:
+                        with self.assertRaises(type(error)) as raised:
+                            box.launch_environment(self.path, self.data, self.args)
+                        self.assertIs(raised.exception, error)
+                    else:
+                        result = box.launch_environment(self.path, self.data, self.args)
+                        self.assertIs(type(result), int)
+                        self.assertEqual(result, case.get("expected", 0))
+                recover.assert_called_once()
+                stopped.assert_called_once()
+                saved = (
+                    case.get("recovered", True) is True
+                    and not case.get("cleanup_failure")
+                    and "cleanup_error" not in case
+                    and "recovery_error" not in case
+                )
+                self.assertEqual(
+                    events,
+                    [
+                        "owner-open",
+                        "client-closed",
+                        "owner-closed",
+                        "recover",
+                        "final-stop",
+                    ]
+                    + (["success"] if saved else []),
+                )
+                self.assertEqual("post-stop fallback" in output.getvalue(), saved)
+                if not saved:
+                    self.assertNotIn("Session history synced", output.getvalue())
+                if (
+                    case.get("cleanup_failure")
+                    or "cleanup_error" in case
+                    or "recovery_error" in case
+                ):
+                    self.assertIn("oc-box sync", errors.getvalue())
+                self.assertNotIn("private-sentinel", errors.getvalue())
+
     def test_outer_cleanup_has_its_own_budget_even_after_failed_recovery(self):
         owner = SimpleNamespace(clients=0, child=SimpleNamespace(returncode=0))
         source = recovery.Source("a" * 64, "synthetic-stop-token", ())
@@ -873,6 +1010,7 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
             owner._history_timeout = box.HistoryWaitTimeout(
                 "count-only", recovery_eligible=True
             )
+            owner._client_exit_code = 7
             return 7
 
         def stop(data):
@@ -898,4 +1036,5 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
         ):
             self.assertEqual(box.launch_environment(self.path, self.data, self.args), 7)
         self.assertIn("cleanup could not be verified", output.getvalue())
+        self.assertIn("oc-box sync", output.getvalue())
         self.assertIsNone(recovery.remaining())

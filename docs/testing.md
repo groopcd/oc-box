@@ -883,6 +883,12 @@ CI acceptance, and CI repair is not a new rootless-Podman host pass.
 
 ### V2 session-history synchronization
 
+The investigations, original snapshot/backport descriptions and accepted reports
+below retain their original source-specific nonzero outcome policy. The later
+[focused shutdown-outcome policy](#focused-shutdown-outcome-policy-checks) changes
+only the fully verified clean-client result; it does not rewrite historical exits,
+pass failed gates or extend earlier acceptance to the new source.
+
 #### Exit-timeout investigation (2026-11-12)
 
 A synthetic native investigation reproduced a retained-job exit timeout on
@@ -1041,6 +1047,41 @@ or final-cleanup assertion. Raw fixture evidence remains private.
 These observations belong to the exact source above, not automatically to later
 integrations. They support focused development integration, not the retained
 42/12/six gate identities, stable promotion or security certification.
+
+#### Focused shutdown-outcome policy checks
+
+The approved outcome-only amendment preserves the existing 30-second oc-box
+live-readiness grace and exact-version recovery guards: shell-only on native
+2.2.6/2.2.7, shell/subagent on 2.3.0. That grace is not a native export/import
+timeout. Automatic exit can spend it before checked archive copying; manual sync
+omits the original owner's live wait. Both already use the same checked
+`sync_sessions` implementation. Recovery must not recursively invoke the CLI,
+perform ordinary preparation or refresh vault/configuration/plugins/credentials.
+
+Limit this change's focused validation to a small local fake-boundary matrix,
+with no native processes, Podman, host services or replayed acceptance fixtures:
+
+| Case | Required policy/output assertion |
+| --- | --- |
+| Raw client `0`, eligible live timeout, fully successful recovery | Return `0` only after all checked exports/imports/native verification, recovery cleanup and final stop complete. Keep the explicit interrupted-execution/unconfirmed-background-completion warning; do not conclude that overall history sync failed. Exercise owning TUI and web routing. |
+| Actual client failure or unknown status | Preserve raw failure `7` and cancellation even if archives were saved; unknown raw status stays nonzero. A recovered archive is not proof of client success. |
+| Incomplete or failed recovery | Pending/partial history, failed export/import/verification, recovery failure, or failed/uncertain cleanup/stop remains nonzero and retains the existing retry-`oc-box sync` guidance. No replacement resource, ordinary preparation or extra credential refresh is allowed. |
+| Progress and privacy | Distinguish the live wait from archive copying. Check only aggregate sessions/exported/unchanged/updated/pending counts, elapsed time and fixed `post-stop-reader`/`private-endpoint`/`standalone` modes; exclude IDs, titles, argv, environment values, native errors and model values. |
+
+Eighteen selected local methods covering these routing/output contracts passed
+on the working tree for this change; no native/host gauntlet was run. This is
+local regression coverage, not new external-host acceptance. Source jobs,
+execution claims and queued input remain
+untouched; job age/status does not waive a guard, and no global autoaccept is
+introduced. The summary does not speed source exports or archive writes; further
+performance optimization is deferred.
+
+Keep all earlier source identities, failed/incomplete reports and recorded
+`[0,1]` exits unchanged. In particular, the `631d317` observations above and the
+reviewed historical reports below are not acceptance of this later outcome
+policy. A later release needs separately scoped, source-qualified formal
+acceptance; do not silently reuse the old recovery exit oracle or relabel its
+results. No new external-host, full UI, stable-release or security claim follows.
 
 #### History-sync performance and integrity
 

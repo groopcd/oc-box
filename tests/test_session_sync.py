@@ -238,15 +238,18 @@ class SessionSyncTests(unittest.TestCase):
                 host.pop(command[-2])
             return self.result(None)
 
+        output = io.StringIO()
         with (
-            patch.object(box, "list_container_sessions", return_value=infos),
+            patch.object(
+                box, "list_container_sessions", return_value=infos
+            ) as inventory,
             patch.object(
                 box,
                 "export_container_session",
                 side_effect=lambda _, ident: copy.deepcopy(exports[ident]),
             ) as export,
             patch.object(box, "run", side_effect=host_run) as run,
-            patch("sys.stdout", io.StringIO()),
+            patch("sys.stdout", output),
         ):
             box.sync_sessions(self.path, self.data)
             self.assertEqual(len(imports), 2)
@@ -254,6 +257,23 @@ class SessionSyncTests(unittest.TestCase):
             self.assertEqual(len(imports), 2)
             exports["ses_child"]["info"]["title"] = "Changed child"
             box.sync_sessions(self.path, self.data)
+        self.assertEqual(inventory.call_count, 3)
+        self.assertEqual(export.call_count, 6)
+        self.assertEqual(len(imports), 3)
+        summaries = [
+            line
+            for line in output.getvalue().splitlines()
+            if line.startswith("oc-box: History sync summary:")
+        ]
+        self.assertEqual(len(summaries), 3)
+        for summary, unchanged, updated in zip(summaries, (0, 2, 1), (2, 0, 1)):
+            self.assertRegex(
+                summary,
+                r"^oc-box: History sync summary: source=standalone, "
+                r"sessions=2, exported=2, "
+                rf"unchanged={unchanged}, updated={updated}, pending=0, "
+                r"elapsed=\d+\.\ds\.$",
+            )
         self.assertEqual(dead_archive.read_bytes(), before)
         self.assertNotIn(
             "ses_deleted", [call.args[1] for call in export.call_args_list]
@@ -754,7 +774,23 @@ class SessionSyncTests(unittest.TestCase):
         self.assertIn(v2.UNSETTLED, message)
         self.assertIn("other sessions were synchronized", message)
         self.assertNotIn("ses_stuck", message)
+        summaries = [
+            line
+            for line in output.getvalue().splitlines()
+            if line.startswith("oc-box: History sync summary:")
+        ]
+        self.assertEqual(len(summaries), 1)
+        self.assertRegex(
+            summaries[0],
+            r"^oc-box: History sync summary: source=standalone, "
+            r"sessions=3, exported=2, unchanged=0, updated=2, pending=1, "
+            r"elapsed=\d+\.\ds\.$",
+        )
         self.assertIn("1 session(s) contain interrupted", output.getvalue())
+        self.assertLess(
+            output.getvalue().index(summaries[0]),
+            output.getvalue().index("1 session(s) contain interrupted"),
+        )
         self.assertNotIn("Session history synced", output.getvalue())
         annotation = box.read_json(archive("ses_last"))["info"]["metadata"][
             "oc-box.archive"
@@ -782,6 +818,12 @@ class SessionSyncTests(unittest.TestCase):
             box.sync_sessions(self.path, self.data)
         self.assertEqual(len(imports), 3)
         self.assertEqual(archive("ses_first").read_bytes(), before)
+        self.assertRegex(
+            output.getvalue(),
+            r"oc-box: History sync summary: source=standalone, "
+            r"sessions=3, exported=3, unchanged=2, updated=1, pending=0, "
+            r"elapsed=\d+\.\ds\.",
+        )
         self.assertIn("Session history synced", output.getvalue())
 
     def test_other_history_refusals_still_abort_and_interrupted_count_is_validated(

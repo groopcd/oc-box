@@ -2743,10 +2743,12 @@ def verify_host_archive(path, data, archived):
 
 
 def sync_sessions(path, data, *, announce=True):
+    started = time.monotonic()
     state = refresh_sessions(path, data)
     archives = path.parent / "history"
     archives.mkdir(exist_ok=True, mode=0o700)
     pending, interrupted = [], 0
+    exported_count, unchanged, updated = 0, 0, 0
     for ident in state.get("sessions", []):
         if not valid_session_id(ident):
             raise BoxError("Invalid stored session ID")
@@ -2756,6 +2758,7 @@ def sync_sessions(path, data, *, announce=True):
             # Keep this session's last good archives and continue with the rest.
             pending.append(str(exc))
             continue
+        exported_count += 1
         interrupted += bool(exported.get(opencode_v2_io.INTERRUPTED))
         archived = archive_session(exported, data)
         target = archives / (archived["info"]["id"] + ".json")
@@ -2763,6 +2766,7 @@ def sync_sessions(path, data, *, announce=True):
         digest = hashlib.sha256(target.read_bytes()).hexdigest()
         state.setdefault("synced", {})
         if state["synced"].get(ident) == digest:
+            unchanged += 1
             continue
         if ident in state.get("host_sessions", {}):
             if opencode_compat.native(archived):
@@ -2791,6 +2795,21 @@ def sync_sessions(path, data, *, announce=True):
         state["synced"][ident] = digest
         state.setdefault("host_sessions", {})[ident] = archived["info"]["id"]
         atomic_json(session_file(path), state)
+        updated += 1
+    source_mode = (
+        "post-stop-reader"
+        if history_reader.current() is not None
+        else "private-endpoint"
+        if workspace_service.live_connection() is not None
+        else "standalone"
+    )
+    print(
+        f"oc-box: History sync summary: source={source_mode}, "
+        f"sessions={len(state.get('sessions', []))}, exported={exported_count}, "
+        f"unchanged={unchanged}, updated={updated}, pending={len(pending)}, "
+        f"elapsed={time.monotonic() - started:.1f}s.",
+        flush=True,
+    )
     if interrupted:
         print(
             f"oc-box: {interrupted} session(s) contain interrupted unfinished assistant "
@@ -2910,6 +2929,8 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
         with loading_stage("Exporting host session"):
             exported = export_host_session(path, data, args.import_session)
     code = 1
+    recovered = False
+    history_started = False
     stop_token, source, cleanup_data = None, None, data
     control_refusal = "control-unavailable"
     if (
@@ -2947,6 +2968,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                 ),
             )
         if args.command == "sync":
+            history_started = True
             with loading_stage("Syncing session history"):
                 with (
                     workspace_service.history_source(sys.modules[__name__], data)
@@ -2995,6 +3017,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                     if refusals
                     else "source-unavailable"
                 )
+            history_started = True
             code = launch_client(path, data, args, version, exported, owner)
         timeout = getattr(owner, "_history_timeout", None) if owner else None
         if isinstance(timeout, HistoryWaitTimeout):
@@ -3009,7 +3032,16 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
             and owner.child.returncode == 0
         ):
             cleanup_data = {**data, "container": source.container_id}
-            history_recovery.recover(sys.modules[__name__], path, data, source)
+            recovered = (
+                history_recovery.recover(sys.modules[__name__], path, data, source)
+                is True
+            )
+            if recovered:
+                # The timeout is handled by the verified snapshot. Never clear
+                # a real client failure or infer a missing client's exit status.
+                client_code = getattr(owner, "_client_exit_code", None)
+                if type(client_code) is int:
+                    code = client_code
         elif timeout is not None:
             if isinstance(timeout, HistoryWaitTimeout):
                 history_recovery.report_skipped(
@@ -3020,11 +3052,24 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                 "Container data retained. Retry with 'oc-box sync'.",
                 file=sys.stderr,
             )
-        return code
+    except BaseException:
+        if history_started:
+            print(
+                "oc-box: Container data retained. Retry with 'oc-box sync'.",
+                file=sys.stderr,
+            )
+        raise
     finally:
         if cleanup_data is data:
-            with loading_stage("Stopping container"):
-                stop_container(cleanup_data)
+            try:
+                with loading_stage("Stopping container"):
+                    stop_container(cleanup_data)
+            except BaseException:
+                print(
+                    "oc-box: Container data retained. Retry with 'oc-box sync'.",
+                    file=sys.stderr,
+                )
+                raise
         else:
             try:
                 with (
@@ -3032,13 +3077,28 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                     history_recovery.budget(history_recovery.CLEANUP_BUDGET),
                 ):
                     stop_container(cleanup_data)
-            except (BoxError, OSError, ValueError, subprocess.SubprocessError):
-                # The original failure is already nonzero; do not mask it or
-                # claim stopped state after an unverified bounded final attempt.
+            except BaseException as exc:
+                # A saved snapshot is not a clean launch outcome unless the
+                # final stop also completes. Do not mask an existing exception.
+                code = code or 1
+                recovered = False
                 print(
-                    "oc-box: Final history-recovery cleanup could not be verified; inspect the workspace on the host.",
+                    "oc-box: Final history-recovery cleanup could not be verified; "
+                    "inspect the workspace on the host. Container data retained. "
+                    "Retry with 'oc-box sync' after resolving the cleanup failure.",
                     file=sys.stderr,
                 )
+                if not isinstance(
+                    exc, (BoxError, OSError, ValueError, subprocess.SubprocessError)
+                ):
+                    raise
+    if recovered:
+        print(
+            "Session history synced to your normal host OpenCode database "
+            "using the post-stop fallback.",
+            flush=True,
+        )
+    return code
 
 
 def native_tab_selection(data, last, connection):
@@ -3176,12 +3236,15 @@ def launch_client(path, data, args, version, exported, owner=None):
     finally:
         if owner:
             owner.wait_clients()
+    if owner:
+        owner._client_exit_code = code
     try:
-        with loading_stage("Syncing session history"):
-            if owner:
+        if owner:
+            with loading_stage("Waiting for OpenCode activity to settle"):
                 workspace_service.wait_history(
                     sys.modules[__name__], data, owner.connection
                 )
+        with loading_stage("Syncing session history"):
             sync_sessions(path, data)
     except (BoxError, ValueError, KeyError) as exc:
         if isinstance(exc, HistoryWaitTimeout):
@@ -3192,7 +3255,8 @@ def launch_client(path, data, args, version, exported, owner=None):
             ):
                 owner._history_timeout = exc
                 print(
-                    f"oc-box: {exc} Closing the owner before a bounded, "
+                    "oc-box: Live activity did not settle before the deadline. "
+                    "Closing the owner before a bounded, "
                     "post-stop persisted-history snapshot attempt.",
                     file=sys.stderr,
                 )

@@ -154,7 +154,11 @@ their checkout ownership distinct from unrelated source and flat installations.
   immutable same-resource restart, stop intent/admission and persistent uncertainty
   fences. Readers are unregistered/non-executing, with source/destination scheduler
   metadata and system-config refusals, one endpoint, unchanged checked exports and
-  host verification, separate cleanup and original nonzero/interruption warnings.
+  host verification and separate cleanup. Preserve original client nonzero results
+  and interruption/unconfirmed-completion warnings; only raw client exit 0 plus
+  complete verified archival, recovery cleanup and final stop may return 0 after a
+  live timeout. Unknown client status, partial/failure or uncertain cleanup remains
+  nonzero with retry-sync guidance; historical accepted exit records stay unchanged.
   Never clear an uncertain start without verified transition completion, resume
   work, refresh credentials, create replacement resources or infer host acceptance
   from local native/process fixtures. The focused host recovery gate is additional

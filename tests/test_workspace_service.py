@@ -744,7 +744,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                             events.append("success")
                         return super().write(text)
 
-                output = Output()
+                output, errors = Output(), io.StringIO()
                 with (
                     patch.object(box, "check_private_output"),
                     patch.object(box, "start_container", return_value={}),
@@ -762,7 +762,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                         side_effect=lambda *_a: events.append("container-stop"),
                     ),
                     contextlib.redirect_stdout(output),
-                    contextlib.redirect_stderr(io.StringIO()),
+                    contextlib.redirect_stderr(errors),
                 ):
                     if outcome.endswith("-error"):
                         with self.assertRaises(box.BoxError) as raised:
@@ -781,6 +781,8 @@ class WorkspaceServiceTests(unittest.TestCase):
                     + ["container-stop"],
                 )
                 self.assertIsNone(service.live_connection())
+                if outcome.endswith("-error"):
+                    self.assertIn("oc-box sync", errors.getvalue())
 
     def test_endpoint_validation_refuses_remote_hosts_embedded_credentials_and_bad_passwords(
         self,
@@ -1149,14 +1151,36 @@ class WorkspaceServiceTests(unittest.TestCase):
 
     def test_web_owner_can_start_foreground_and_client_exit_waits_before_sync(self):
         calls = []
+        stages, active = [], []
+
+        @contextlib.contextmanager
+        def stage(label):
+            stages.append(label)
+            active.append(label)
+            try:
+                yield
+            finally:
+                active.pop()
+
         owner = SimpleNamespace(
             connection=self.connection,
             publish=lambda value: calls.append(("publish", value)),
             wait_clients=lambda: calls.append(("wait", None)),
         )
+
+        def ready(*_args):
+            self.assertEqual(active, ["Waiting for OpenCode activity to settle"])
+            self.assertEqual(owner._client_exit_code, 0)
+            calls.append(("ready", None))
+
+        def synchronize(*_args):
+            self.assertEqual(active, ["Syncing session history"])
+            calls.append(("sync", None))
+
         args = box.parser().parse_args(["start"])
         args.command, args.port, args.no_open = "web", 0, True
         with (
+            patch.object(box, "loading_stage", side_effect=stage),
             patch.object(box, "refresh_sessions", return_value={"last": "ses_shared"}),
             patch.object(
                 service,
@@ -1166,12 +1190,12 @@ class WorkspaceServiceTests(unittest.TestCase):
             patch.object(
                 service,
                 "wait_history",
-                side_effect=lambda *_: calls.append(("ready", None)),
+                side_effect=ready,
             ) as readiness,
             patch.object(
                 box,
                 "sync_sessions",
-                side_effect=lambda *_: calls.append(("sync", None)),
+                side_effect=synchronize,
             ),
             contextlib.redirect_stdout(io.StringIO()),
         ):
@@ -1188,6 +1212,15 @@ class WorkspaceServiceTests(unittest.TestCase):
                 ("sync", None),
             ],
         )
+        self.assertEqual(
+            stages,
+            [
+                "Finding workspace session",
+                "Waiting for OpenCode activity to settle",
+                "Syncing session history",
+            ],
+        )
+        self.assertEqual(owner._client_exit_code, 0)
         readiness.assert_called_once_with(box, self.data, owner.connection)
 
     def test_readiness_failure_keeps_sync_pending_without_export_or_success_message(
@@ -1201,7 +1234,7 @@ class WorkspaceServiceTests(unittest.TestCase):
         )
         for code, error in (
             (code, error)
-            for code in (0, 7)
+            for code in (0, 7, 130)
             for error in (
                 box.BoxError("OpenCode 2.x history wait failed (activity-timeout)."),
                 box.HistoryWaitTimeout(diagnostic),
@@ -1236,11 +1269,13 @@ class WorkspaceServiceTests(unittest.TestCase):
                     code or 1,
                 )
             owner.wait_clients.assert_called_once()
+            self.assertEqual(owner._client_exit_code, code)
             readiness.assert_called_once_with(box, self.data, owner.connection)
             sync.assert_not_called()
             self.assertIn("history sync pending", errors.getvalue())
             self.assertIn(str(error), errors.getvalue())
             self.assertIn("Container data retained", errors.getvalue())
+            self.assertIn("oc-box sync", errors.getvalue())
             self.assertNotIn("Session history synced", output.getvalue())
             self.assertEqual(
                 errors.getvalue().count("oc-box: " + diagnostic),
@@ -1248,22 +1283,30 @@ class WorkspaceServiceTests(unittest.TestCase):
             )
 
     def test_failed_active_client_still_waits_for_attached_clients(self):
-        owner = SimpleNamespace(
-            connection=self.connection,
-            publish=lambda value: None,
-            wait_clients=Mock(),
-        )
         args = box.parser().parse_args(["start"])
-        with (
-            patch.object(box, "refresh_sessions", return_value={"last": "ses_shared"}),
-            patch.object(box, "run_tui", side_effect=OSError("terminal failed")),
-            patch.object(service, "wait_history") as readiness,
-            contextlib.redirect_stdout(io.StringIO()),
-            self.assertRaises(OSError),
-        ):
-            box.launch_client(self.path, self.data, args, "2.2.6", None, owner)
-        owner.wait_clients.assert_called_once()
-        readiness.assert_not_called()
+        for error in (OSError("terminal failed"), KeyboardInterrupt()):
+            owner = SimpleNamespace(
+                connection=self.connection,
+                publish=lambda value: None,
+                wait_clients=Mock(),
+            )
+            with (
+                self.subTest(error=type(error).__name__),
+                patch.object(
+                    box, "refresh_sessions", return_value={"last": "ses_shared"}
+                ),
+                patch.object(box, "run_tui", side_effect=error),
+                patch.object(service, "wait_history") as readiness,
+                patch.object(box, "sync_sessions") as sync,
+                contextlib.redirect_stdout(io.StringIO()),
+                self.assertRaises(type(error)) as raised,
+            ):
+                box.launch_client(self.path, self.data, args, "2.2.6", None, owner)
+            self.assertIs(raised.exception, error)
+            owner.wait_clients.assert_called_once()
+            readiness.assert_not_called()
+            sync.assert_not_called()
+            self.assertFalse(hasattr(owner, "_client_exit_code"))
 
     def test_cancelled_job_timeout_is_deferred_only_for_a_captured_source(self):
         args = box.parser().parse_args(["start"])
@@ -1295,6 +1338,9 @@ class WorkspaceServiceTests(unittest.TestCase):
                     )
                 sync.assert_not_called()
                 owner.wait_clients.assert_called_once()
+                self.assertEqual(owner._client_exit_code, 7)
+                if not available:
+                    self.assertIn("oc-box sync", output.getvalue())
                 self.assertEqual(
                     "history sync pending" in output.getvalue(), not available
                 )

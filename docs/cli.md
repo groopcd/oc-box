@@ -203,6 +203,8 @@ Cold startup includes image/package/plugin downloads. Interactive stage feedback
 including history sync, uses one width-bounded spinning line with elapsed time;
 completion or failure replaces that line with one final result. Noninteractive
 or `TERM=dumb` output stays plain, with start/final lines and no periodic repeats.
+The live-readiness wait is labeled separately from actual history archive copying;
+a successful checked post-stop copy is not reported as an overall sync failure.
 A separate loading line covers blank TUI startup frames and disappears when
 OpenCode draws text. Warm launches retain compatible caches.
 The container OpenCode version is verified against the host on every launch;
@@ -437,6 +439,8 @@ host database. It stops the container afterward, even if it had been running.
 Manual `sync` retains ordinary runtime preparation and native service startup,
 including configured integrations and native scheduling behavior. It is not the
 isolated, non-executing post-stop reader used by automatic timeout recovery.
+Both use the same checked `sync_sessions` archival implementation; automatic
+recovery does not recursively launch this command or repeat its preparation.
 
 On V2, discovery reads every native API page at the workspace's internal project
 directory, including archived conversations, forks, and linked child/subagent
@@ -480,6 +484,12 @@ readers, and does not change their readiness/stop guarantees. Destination
 replacement, child guards and fresh-native verification remain serialized and
 unchanged. No metadata timestamp shortcut or parallel database mutation is used.
 Overall success is announced only after the private source lease closes cleanly.
+
+The sync summary reports only aggregate session, exported, unchanged, updated and
+pending counts, elapsed time and a fixed source mode (`post-stop-reader`,
+`private-endpoint` or `standalone`). It does not include session IDs, titles,
+commands/argv, environment values, native errors or model values. This feedback
+does not speed up source exports or archive writes; further optimization is deferred.
 
 V2 exports are checked against the paginated projected transcript. An unfinished
 tail assistant, running user shell/compaction, or changing transcript leaves that
@@ -682,9 +692,11 @@ rootless-Podman acceptance claim.
 After the last client exits, V2 final sync waits up to 30 seconds for the same
 private server's foreground sessions and unconsumed background jobs to settle.
 An idle persistent shell terminal does not block this wait. Timeout or an invalid
-activity response leaves history sync pending and returns nonzero; normal cleanup
-still stops the container, so running work is not promised to continue. This is
-bounded checking, not an atomic freeze of every possible history producer.
+activity response refuses live history export. Unless the guarded post-stop path
+below completes in full, history remains pending and the command returns nonzero.
+Normal cleanup still stops the container, so running work is not promised to
+continue. This is bounded checking, not an atomic freeze of every possible
+history producer.
 On timeout, a separate diagnostic reports the wait phase (`foreground-query`,
 `background-query` or `poll-delay`) and counts from the last complete, validated
 activity/job observation. Job counts distinguish running, completed, error and
@@ -708,10 +720,19 @@ unverified-owner-close refusals are also distinguished. These labels do not waiv
 any guard or establish that a job completed. Do not clear control markers, remove
 job rows or reset a workspace merely to bypass a refusal.
 
-The 30-second readiness budget precedes history export/import; it is not the
-duration limit for the entire synchronization. An explicit `oc-box sync` uses
-the checked-export path without that original owner's readiness wait. Its later
-success does not prove that earlier running work was safe to ignore.
+The 30 seconds are oc-box's live-readiness grace, not a native export/import
+timeout or a duration limit for the entire synchronization. This grace remains
+unchanged. The two paths differ:
+
+* Automatic owner exit waits up to 30 seconds before live export; an eligible
+  timeout may then use the guarded post-stop reader. Checked exports, host
+  imports and native verification take additional time.
+* Explicit `oc-box sync` has no original owner's live-readiness wait. It uses
+  the same checked archival implementation, with ordinary manual-sync
+  preparation and cleanup.
+
+A later successful manual sync does not prove that earlier running work was safe
+to ignore.
 
 Native OpenCode 2.2.6/2.2.7 can retain a cancelled background-shell job after a
 location reload, even with no foreground activity. Such a row still blocks the
@@ -768,12 +789,24 @@ the normal pending-history/manual-sync behavior.
 Snapshots retain the existing complete-inventory, checked-export, pending-session
 and verified-host-import safeguards. Native startup/projection can maintain its
 database; this is not a byte-read-only database backup. No native job is deleted,
-rewritten or declared completed. **The original failure remains nonzero even when
-snapshots are saved**, with a warning that execution was interrupted and completion
-notices/final results may be missing. Historical job rows can remain running-looking
-on the next owner; the same bounded post-stop path may save another snapshot, but
-does not make the underlying native owner healthy. Recovery evidence and
-release-validation requirements are documented in the
+rewritten or declared completed, and no queued input is acknowledged.
+
+**A raw client exit of `0` can return CLI status `0` after a live timeout only
+when the existing guarded reader completes every checked export, import and native
+verification, recovery cleanup succeeds, and the final container stop is
+verified.** The warning still states that execution was interrupted and background
+completion is unconfirmed: completion notices or final results may be missing.
+This policy is the same for owning native TUI and web launches. Actual raw client
+failures, including exit `7` or cancellation, are never converted to success.
+Unknown raw client status, pending/partial history, any sync/recovery failure or
+failed/uncertain cleanup remains nonzero. Whenever history sync, recovery or
+cleanup fails, the guidance to retry `oc-box sync` remains; resolve the refusal
+before retrying, without resetting or purging the workspace.
+
+Historical job rows can remain running-looking on the next owner; the same
+bounded post-stop path may save another snapshot, but does not make the underlying
+native owner healthy. Neither job age nor a terminal-looking status is a recovery
+exemption. Recovery evidence and release-validation requirements are documented in the
 [test strategy](testing.md#reviewed-focused-recovery-host-acceptance).
 
 `--no-vault` is accepted only when web becomes a new V2 owner; an attached web
@@ -3032,6 +3065,13 @@ a successful native TUI followed by failed history
 sync also returns `1` and retains container data. Argument syntax errors return
 `2`. A Python KeyboardInterrupt handled by the launcher returns `130`.
 An exception during final cleanup can also cause a nonzero result.
+For owning V2 TUI/web launches, a live-readiness timeout alone does not force
+failure if the raw client exited `0` and guarded post-stop archival, native
+verification, recovery cleanup and final stop all complete. The interruption and
+unconfirmed-background-completion warning remains. Raw client failures and
+cancellation remain nonzero even if archives were saved; unknown client status,
+pending/partial history or failed/uncertain cleanup cannot become success.
+Failed sync, recovery or cleanup retains the guidance to retry `oc-box sync`.
 
 Warnings about host devices/SELinux do not themselves make creation fail.
 Podman/driver errors still propagate. A nonzero status is not permission to

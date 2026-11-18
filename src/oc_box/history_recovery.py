@@ -365,9 +365,9 @@ def _stop(box, path, data, source):
 
 
 def recover(box, path, data, source):
-    """Save checked persisted history once; never convert the timeout to success.
+    """Return whether checked persisted history and recovery cleanup completed.
 
-    Caller keeps the lifecycle lock and original nonzero result. All mutations
+    Caller keeps the lifecycle lock and original client result. All mutations
     use the captured immutable ID, and no new container or volume is created.
     Cleanup has its own budget even if the snapshot budget has expired.
     """
@@ -443,7 +443,7 @@ def recover(box, path, data, source):
         print(
             "oc-box: Checked persisted history snapshots were synchronized after stopping the workspace. "
             "Execution was interrupted; completion notices or final results may be missing. "
-            "The original history-wait failure remains nonzero.",
+            "Background work is not declared complete.",
             file=sys.stderr,
         )
     else:
