@@ -92,17 +92,22 @@ vault-first. Install optional vault support and populate the encrypted host
 vault **before the first project launch**:
 
 ```sh
-# Choose one installation channel:
-pipx install 'oc-box[vault]'
-# Or: uv tool install 'oc-box[vault]'
-# Or GitHub bootstrap with private crypto support:
-# curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --with-vault
+# Existing installation, with a launcher supporting upgrade extras:
+oc-box upgrade --vault
 oc-box secrets init
 oc-box secrets set ANTHROPIC_API_KEY
 oc-box secrets set MCP_API_KEY
 mkdir -p ~/devel/demo
 oc-box --project ~/devel/demo
 ```
+
+For a first installation, request the package `[vault]` extra or GitHub installer
+`--with-vault`; see [installation](installation.md). Upgrade older channel-aware
+launchers normally to a supporting published release before using
+`oc-box upgrade --vault`; genuinely pre-channel versions retain their
+[bootstrap route](update-channels.md#bootstrap-and-older-installations).
+The upgrade flag only adds dependencies through the verified existing owner,
+without changing credential policy or initializing/unlocking a vault.
 
 Secret values/passphrases are entered only in masked host-terminal prompts,
 never on the command line or in JSON. No per-project registration or frozen

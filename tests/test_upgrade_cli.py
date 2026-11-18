@@ -55,7 +55,11 @@ class UpgradeCliTests(unittest.TestCase):
                             arguments.append("--check")
                         self.assertEqual(box.main(arguments), 0)
                         self.upgrade.assert_called_once_with(
-                            box.APP, check=check, channel=channel
+                            box.APP,
+                            check=check,
+                            channel=channel,
+                            with_vault=False,
+                            with_tui=False,
                         )
                         self.upgrade.reset_mock()
         self.message.assert_not_called()
@@ -97,7 +101,7 @@ class UpgradeCliTests(unittest.TestCase):
 
     def test_automatic_update_settings_cannot_be_combined_with_selectors_or_check(self):
         for value in ("on", "off"):
-            for extra in ("--stable", "--devel", "--check"):
+            for extra in ("--stable", "--devel", "--check", "--vault", "--tui"):
                 with self.subTest(value=value, extra=extra):
                     with self.assertRaisesRegex(box.BoxError, "cannot be combined"):
                         box.main(["upgrade", "--auto-update", value, extra])
@@ -148,6 +152,7 @@ class UpgradeCliTests(unittest.TestCase):
                 ["upgrade", "--devel"],
                 ["upgrade", "--check", "--stable"],
                 ["upgrade", "--auto-update", "on"],
+                ["upgrade", "--devel", "--vault", "--tui"],
                 ["upgrade", "--auto-update", "off"],
             ):
                 with self.subTest(container=container, uid=uid, arguments=arguments):

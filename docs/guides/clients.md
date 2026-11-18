@@ -76,27 +76,32 @@ See the [development web reference](https://github.com/groopcd/oc-box/blob/devel
 
 ## Enable the experimental dashboard
 
-Stable 1.6.94 remains the default and does not include the manager. After a
-development package has been published, explicitly allow prereleases and opt in
-to the dashboard and, optionally, the independent vault extra:
+Stable 1.6.94 remains the default and does not include the manager. For an
+existing installation with a launcher release supporting upgrade extras,
+select a published development release and add the dashboard dependencies:
 
 ```sh
-uv tool install --prerelease allow 'oc-box[tui,vault]'
-# Or: pipx install --pip-args='--pre' 'oc-box[tui,vault]'
+oc-box upgrade --devel --tui
+# Or add the independent vault extra too:
+oc-box upgrade --devel --vault --tui
 oc-box tui --read-only
 ```
 
-A channel-aware GitHub bootstrap accepts
-`sh install.sh --devel --with-vault --with-tui` (piped suffix:
-`sh -s -- --devel --with-vault --with-tui`). Vault support is independent and
-optional. Dependencies stay isolated; GitHub updates retain supported opt-ins
-in private releases. These instructions do not claim that the currently published
-stable PyPI package contains the dashboard.
+This works from stable or development without rerunning curl or creating a
+second installation. GitHub dependencies stay in immutable private releases;
+verified uv/pipx owners use their own manager. Ambiguous plain-pip extras refuse
+with manual guidance. Requests are additive and can update the same selected
+release; repeating a satisfied request is a no-op. Add `--check` to validate
+without changing installation or preferences. The flags do not initialize or
+unlock a vault, change credentials or launch the dashboard.
 
-**Switching to `--devel` does not enable the TUI extra for the first time.**
-If `oc-box tui` reports “Optional TUI dependencies are missing” after a GitHub
-upgrade, follow [first-time GitHub TUI setup](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
-Do not install a second pipx/uv copy merely to repair the GitHub installation.
+For a first installation, follow the [installation guide](../installation.md).
+An older channel-aware launcher must first upgrade normally to a supporting
+published release; genuinely pre-channel builds retain their exceptional
+[bootstrap route](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md#bootstrap-and-older-installations).
+Channel selection alone does not request a new extra. An explicit `--tui` request
+against stable refuses; an inherited preference survives a stable interval.
+See [extras and missing-dependency guidance](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
 
 ```sh
 oc-box tui

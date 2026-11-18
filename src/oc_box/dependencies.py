@@ -329,7 +329,7 @@ def extra_guidance(keys):
             [
                 "uv: uv tool install --force 'oc-box[vault]'",
                 "pipx: pipx inject oc-box 'cryptography>=44'",
-                "GitHub/source: rerun install.py --with-vault (or the curl installer with --with-vault)",
+                "GitHub: oc-box upgrade --vault; source checkout: install.py --with-vault",
             ]
         )
     if "memfd" in keys:

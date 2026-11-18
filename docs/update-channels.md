@@ -10,6 +10,7 @@ This page retains the stable channel contract. The dashboard and other 1.7-only
 guides require an appropriate published development release.
 
 **On this page:** [Select/preview](#select-or-preview-a-channel) ·
+[Optional extras](#enable-the-dashboard-after-a-github-channel-switch) ·
 [Automatic updates](#automatic-updates) ·
 [Older installations](#bootstrap-and-older-installations) ·
 [Publication policy](#publication-policy)
@@ -58,8 +59,52 @@ select an older release and warns before doing so. This changes program files,
 not workspace/session schemas, private volumes, project files or credentials:
 it is not a data rollback. Stop active clients, keep appropriate encrypted
 backups, and check compatibility before returning from development to stable.
-Only extras supported by the target are retained. Current stable 1.6 has no
-`--with-tui`; the development TUI extra is separate.
+Only extras supported by the target are installed. Current stable 1.6 has no
+dashboard; selecting stable does not carry the development manager into it.
+An inherited TUI preference is retained so it can apply on a later return to
+development. An explicit `--tui` request against an unsupported target refuses.
+
+## Enable the dashboard after a GitHub channel switch
+
+On a launcher release supporting upgrade extras, add dependencies through your
+existing installation owner, whether starting from stable or development:
+
+```sh
+oc-box upgrade --devel --tui --check  # Validate/preview; change nothing
+oc-box upgrade --devel --tui         # Add dashboard dependencies
+oc-box upgrade --devel --vault       # Add vault dependencies independently
+oc-box upgrade --devel --vault --tui # Add both
+```
+
+`--vault` and `--tui` are independent, additive optional dependency requests,
+not workspace credential settings. `upgrade` accepts these canonical names only;
+the bootstrap keeps its separate `--with-vault`/`--with-tui` options. Without
+either flag, channel selection alone does not enable a new extra. Use
+`oc-box upgrade --vault` to add vault support on the saved channel; stable does
+not include the dashboard, so select `--devel` for it.
+
+The selected release can gain extras even when it is already installed.
+Repeating a satisfied request is a no-op. Omitted extras are not removed;
+inherited requests are installed where supported, and the dashboard preference
+survives a stable interval for a later return to development. Explicitly
+requesting an unavailable extra refuses instead of silently ignoring it.
+`--check` validates requested support but changes neither installation nor saved
+channel/extra preferences.
+
+GitHub installations stage dependencies in a private immutable release, not
+system or user-site Python. Verified uv tool and pipx installations delegate
+extra requests to their owning manager. Plain pip cannot prove prior requested
+extras; ambiguous installations refuse with manual guidance rather than
+guessing. Do not create a second installation to supply missing dependencies.
+None of these flags changes credential policy, initializes/unlocks a vault,
+launches the dashboard, starts a workspace, resets it or deletes history.
+
+If `oc-box tui` reports “Optional TUI dependencies are missing”, use
+`oc-box upgrade --devel --tui` on a supporting launcher; curl is not needed.
+If the parser lacks these upgrade flags, upgrade normally to a supporting
+published release first. A merge to a branch is not publication. Genuinely
+pre-channel launchers retain the exceptional
+[bootstrap route](#bootstrap-and-older-installations) below.
 
 ## Automatic updates
 
@@ -74,7 +119,8 @@ oc-box upgrade --auto-update off
 
 They follow the saved GitHub channel and run only before normal installed
 launches, never during an active session. Use separate commands:
-`--auto-update on|off` cannot be combined with a selector or `--check`.
+`--auto-update on|off` cannot be combined with a selector, `--check`, `--vault`
+or `--tui`.
 Network failure leaves the installed version available for the normal launch.
 
 Package automatic updating remains disabled. Package `--auto-update on`
@@ -114,6 +160,10 @@ preserve. Automatic targets require a compatible, unyanked universal wheel.
   so a plain upgrade is not a reliable bridge.
 - **Older package copies:** update once with the package manager that owns the
   installation, then use the new channel-aware command.
+- **Channel-aware launchers without `upgrade --vault`/`--tui`:** upgrade normally
+  to a published release supporting the flags, then request extras through that
+  release. Do not send unknown flags to the old parser or assume an unpublished
+  branch commit is available through `upgrade`.
 
 Do not reset, purge, reimport history, or change credentials merely to acquire
 channel support. Check `command -v oc-box` if multiple installation methods

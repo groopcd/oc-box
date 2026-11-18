@@ -145,8 +145,18 @@ fi
         self.assertEqual(self.complete("upgrade", "--de"), ["--devel"])
         self.assertEqual(
             set(self.complete("upgrade", "--")),
-            {"--help", "--check", "--stable", "--devel", "--auto-update"},
+            {
+                "--help",
+                "--check",
+                "--stable",
+                "--devel",
+                "--vault",
+                "--tui",
+                "--auto-update",
+            },
         )
+        self.assertEqual(self.complete("upgrade", "--va"), ["--vault"])
+        self.assertEqual(self.complete("upgrade", "--tu"), ["--tui"])
         for command in (
             "start",
             "stop",
@@ -171,6 +181,8 @@ fi
                 options = self.complete(command, "--")
                 self.assertNotIn("--stable", options)
                 self.assertNotIn("--devel", options)
+                self.assertNotIn("--vault", options)
+                self.assertNotIn("--tui", options)
 
     def test_no_vault_is_offered_only_for_owning_launch_commands(self):
         self.assertEqual(self.complete("--no-v"), ["--no-vault"])

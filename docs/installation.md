@@ -61,7 +61,7 @@ see [private-output troubleshooting](cli.md#private-output-capture-and-uv-python
 
 ## Recommended first install
 
-For newcomers, **install directly from GitHub with vault and TUI enabled**:
+**First installation — recommended GitHub path with vault and TUI:**
 
 ```sh
 curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-vault --with-tui
@@ -69,11 +69,32 @@ oc-box --version
 oc-box doctor
 ```
 
-This explicitly opts in to a **published development release**, because stable
-does not yet include the TUI. It does not install moving branch HEAD, initialize
-the vault or start a workspace. Dependencies are private to the GitHub
-installation. The command downloads and runs the public installer; inspect it
-first if preferred. Continue with [credentials and first launch](getting-started.md).
+This explicitly selects a **published development release**, because stable
+does not yet include the dashboard. Dependencies stay private to the GitHub
+installation. This does not initialize or unlock a vault, change credential
+policy, launch the dashboard or start a workspace. The command downloads and
+runs the public installer; review it first if preferred.
+
+**Already installed?** Use the existing installation, without rerunning curl:
+
+```sh
+oc-box upgrade --devel --vault --tui  # Add both extras and select development
+# Or request either extra independently:
+oc-box upgrade --devel --vault
+oc-box upgrade --devel --tui
+```
+
+These upgrade flags require a launcher release that supports them and a
+published target supporting the requested extras. On an older channel-aware
+launcher, upgrade normally first, then request extras. A source merge does not
+make that release available. Requests are additive: omitted extras are not
+removed, the same release can gain extras, and repeating a satisfied request is
+a no-op. The command uses the verified existing installation owner; it does not
+create a second copy.
+
+Continue with [credentials and first launch](getting-started.md). Genuinely
+pre-channel launchers have a separate
+[bootstrap compatibility route](update-channels.md#bootstrap-and-older-installations).
 
 ## Choose an installation method
 
@@ -241,26 +262,34 @@ new flags; exact v1.6.60 needs one plain upgrade first. See
 
 ## Enable optional development features
 
-After a supporting development package is published:
+On a launcher release supporting the extras flags, add optional dependencies to
+the existing GitHub, verified uv tool or verified pipx installation:
 
 ```sh
-uv tool install --prerelease allow 'oc-box[tui,vault]'
-# Or: pipx install --pip-args='--pre' 'oc-box[tui,vault]'
-oc-box tui --read-only
+oc-box upgrade --devel --vault --check  # Validate/preview; change nothing
+oc-box upgrade --devel --vault         # Vault dependencies only
+oc-box upgrade --devel --tui           # Dashboard dependencies only
+oc-box upgrade --devel --vault --tui   # Both
 ```
 
-For GitHub installations, switching to `--devel` does **not** enable the TUI
-extra for the first time. Rerun the bootstrap as your regular host user:
+These work from stable or development installations without switching owners.
+Use `oc-box upgrade --vault` to follow the saved channel when only vault support
+is wanted; stable does not include the dashboard, so requesting `--tui` against
+that target refuses. Selecting a channel alone does not request new extras.
+Existing extras remain requested, including a dashboard preference across a
+stable interval, but only supported extras are installed in each target.
 
-```sh
-curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-tui --with-vault
-```
+No newer release is required to add an extra to the selected release. A repeated
+satisfied request is a no-op; `--check` validates support without installing or
+saving requests. GitHub dependencies remain in immutable private releases;
+verified uv/pipx owners receive package-extra requests through their own manager.
+Plain pip installations with ambiguous extras receive manual guidance rather
+than a guessed update. No flags change credentials, initialize/unlock the vault
+or launch the dashboard.
 
-Keep `--with-vault` if used; otherwise omit it. Dependencies stay private to the
-installed release, without resetting workspaces or deleting history. Later
-upgrades retain supported opt-ins. Do not install a second pipx/uv copy just to
-repair a GitHub installation. See
-[first-time development TUI setup](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
+If the installed parser does not recognize these flags, upgrade normally to a
+supporting published release first. Do not install a second copy or assume
+branch HEAD is already published. See [extras and channel-switch guidance](https://github.com/groopcd/oc-box/blob/devel/docs/update-channels.md#enable-the-dashboard-after-a-github-channel-switch).
 
 ## Bash completion
 

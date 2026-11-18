@@ -50,23 +50,31 @@ the container. See [security](../../SECURITY.md).
 
 ## Enable vault support and store secrets
 
+For an existing installation with a launcher release supporting upgrade extras:
+
 ```sh
-# New isolated Python-tool installation:
-pipx install 'oc-box[vault]'
-# Existing pipx installation:
-pipx inject oc-box 'cryptography>=44'
-# Or uv (install/reinstall with the extra):
-uv tool install --force 'oc-box[vault]'
-# GitHub/source installer:
-python3 install.py --with-vault
-# Or one-line GitHub installer:
-curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --with-vault
+oc-box upgrade --vault
+# Or explicitly select a published development release:
+oc-box upgrade --devel --vault
 ```
 
-Choose the recipe for your installation owner; these examples do not select
-the development channel. The GitHub option installs cryptography in the versioned
-launcher's private runtime directory using a temporary virtual environment,
-never system Python or user site-packages. GitHub upgrades preserve this opt-in.
+The first command follows the saved release channel; `--vault` does not require
+development or `--tui`. Requests are additive, can add dependencies to the same
+selected release, and are a no-op once satisfied. Add `--check` to validate support
+without installation or preference changes. This installs dependencies only:
+it does not initialize/unlock the vault or change any workspace credential policy.
+
+GitHub installations keep cryptography in the immutable launcher's private
+runtime, never system Python or user site-packages. Verified uv/pipx owners use
+their own manager; ambiguous plain-pip extras receive manual guidance rather
+than a guessed upgrade. Do not rerun curl or create a second installation just
+to enable vault support. Older channel-aware launchers should upgrade normally
+to a supporting published release first; genuinely pre-channel copies retain
+their [exceptional bootstrap route](../update-channels.md#bootstrap-and-older-installations).
+
+For a first installation, request `oc-box[vault]` with the chosen Python tool
+manager or GitHub installer `--with-vault`; see the
+[installation guide](../installation.md). GitHub upgrades preserve this opt-in.
 There is no password-manager daemon or desktop keyring requirement. The host
 needs a controlling terminal and normal private Unix file permissions, including
 under WSL. Do not put the vault on an exposed project mount or a Windows-shared

@@ -28,6 +28,13 @@ def public_file(version, **changes):
     return value
 
 
+EXTRA_REQUESTS = (
+    ("vault", {"with_vault": True}, ["vault"]),
+    ("tui", {"with_tui": True}, ["tui"]),
+    ("both", {"with_vault": True, "with_tui": True}, ["tui", "vault"]),
+)
+
+
 class PackageUpdateTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="oc-box-packages-test-")
@@ -55,6 +62,7 @@ class PackageUpdateTests(unittest.TestCase):
             "extras": [],
         }
         self.extras = ["vault", "tui"]
+        self.kind = "uv"
         self.calls = []
         self.files = [
             public_file("1.6.1"),
@@ -102,13 +110,25 @@ class PackageUpdateTests(unittest.TestCase):
         return dict(self.before)
 
     def manager(self, *args):
-        return "uv", Path("/verified/uv"), self.extras
+        if self.kind == "pipx":
+            args[-1]["PIPX_DEFAULT_PYTHON"] = str(self.prefix / "bin/python")
+        return self.kind, Path("/verified/" + self.kind), self.extras
 
     def run_manager(self, argv, work, env, **kwargs):
         self.calls.append((argv, dict(env), kwargs))
         pin = next(x for x in map(str, argv) if x.startswith("oc-box") and "==" in x)
         self.before["version"] = pin.split("==")[1]
+        self.extras = updates._requirement(pin)
         return ""
+
+    def installed(self, version, extras=()):
+        self.before["version"] = version
+        self.dist.version = version
+        self.extras = list(extras)
+        (self.root / "distribution.json").write_text(
+            json.dumps({"installer": "python-package", "version": version})
+        )
+        self.calls.clear()
 
     def fetch(self, url):
         if url == updates.SIMPLE:
@@ -159,6 +179,240 @@ class PackageUpdateTests(unittest.TestCase):
         self.assertFalse(self.calls)
         self.assertEqual(self.settings(), {})
         self.assertFalse((self.prefix / ".oc-box-upgrade.lock").exists())
+
+    def test_explicit_extra_channel_upgrade_matrix(self):
+        for origin, version in (
+            ("stable-to-devel", "1.6.1"),
+            ("existing-devel", "1.6.2.dev0"),
+        ):
+            for kind in ("uv", "pipx"):
+                for feature, flags, expected in EXTRA_REQUESTS:
+                    case = f"{origin}-{kind}-{feature}"
+                    with (
+                        self.subTest(case=case),
+                        patch.dict(
+                            os.environ,
+                            {"XDG_CONFIG_HOME": str(self.work / case)},
+                        ),
+                    ):
+                        self.kind = kind
+                        self.installed(version)
+                        output = self.upgrade(channel="devel", **flags)
+                        self.assertEqual(len(self.calls), 1)
+                        self.assertIn(
+                            "oc-box[" + ",".join(expected) + "]==1.6.3.dev0",
+                            self.calls[0][0],
+                        )
+                        self.assertIn(
+                            "Requested extras: " + ", ".join(expected), output
+                        )
+                        self.assertEqual(
+                            list(self.settings()["package_update_extras"].values()),
+                            [expected],
+                        )
+
+    def test_same_version_extra_addition_and_idempotence_matrix(self):
+        targets = [
+            ("devel", "1.6.3.dev0", feature, flags, expected)
+            for feature, flags, expected in EXTRA_REQUESTS
+        ] + [("stable", "1.6.2", *EXTRA_REQUESTS[0])]
+        for kind in ("uv", "pipx"):
+            for selected, version, feature, flags, expected in targets:
+                case = f"{kind}-{selected}-{feature}"
+                with (
+                    self.subTest(case=case),
+                    patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.work / case)}),
+                ):
+                    self.kind = kind
+                    self.installed(version)
+                    output = self.upgrade(channel=selected, **flags)
+                    self.assertNotIn("up to date", output)
+                    self.assertEqual(len(self.calls), 1)
+                    self.assertIn(
+                        "oc-box[" + ",".join(expected) + "]==" + version,
+                        self.calls[0][0],
+                    )
+                    self.installed(version, expected)
+                    previous = channels.config_path().read_bytes()
+                    with patch.object(channels, "mutate_settings") as write:
+                        for channel in (None, selected):
+                            self.assertIn(
+                                "up to date", self.upgrade(channel=channel, **flags)
+                            )
+                    self.assertFalse(self.calls)
+                    write.assert_not_called()
+                    self.assertEqual(channels.config_path().read_bytes(), previous)
+
+    def test_check_explicit_extra_matrix_has_no_install_or_preferences(self):
+        for origin, version in (
+            ("stable-to-devel", "1.6.1"),
+            ("existing-devel", "1.6.2.dev0"),
+            ("same-version", "1.6.3.dev0"),
+        ):
+            for feature, flags, expected in EXTRA_REQUESTS:
+                case = f"{origin}-{feature}"
+                with (
+                    self.subTest(case=case),
+                    patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.work / case)}),
+                    patch.object(channels, "mutate_settings") as write,
+                ):
+                    self.installed(version)
+                    output = self.upgrade(check=True, channel="devel", **flags)
+                    self.assertIn("(check only)", output)
+                    self.assertIn("Requested extras: " + ", ".join(expected), output)
+                    self.assertFalse(self.calls)
+                    write.assert_not_called()
+                    self.assertFalse(channels.config_path().exists())
+                    self.assertFalse(
+                        list(self.prefix.parent.glob(".oc-box-upgrade-*.lock"))
+                    )
+
+    def test_explicit_unavailable_extra_refusal_matrix_including_checks(self):
+        for case, selected, version, offered, flags in (
+            ("stable-tui", "stable", "1.6.2", ["vault"], {"with_tui": True}),
+            (
+                "stable-both",
+                "stable",
+                "1.6.2",
+                ["vault"],
+                {"with_vault": True, "with_tui": True},
+            ),
+            ("same-stable-tui", "stable", "1.6.1", ["vault"], {"with_tui": True}),
+            ("devel-no-vault", "devel", "1.6.3.dev0", ["tui"], {"with_vault": True}),
+        ):
+            for check in (False, True):
+                with (
+                    self.subTest(case=case, check=check),
+                    patch.object(updates, "_target", return_value=(version, offered)),
+                    patch.object(channels, "mutate_settings") as write,
+                ):
+                    self.installed("1.6.1", ("tui", "vault"))
+                    with self.assertRaisesRegex(
+                        channels.ChannelError, "explicitly requested extras"
+                    ):
+                        self.upgrade(channel=selected, check=check, **flags)
+                    self.assertFalse(self.calls)
+                    write.assert_not_called()
+                    self.assertEqual(self.settings(), {})
+
+    def test_extra_requests_preserve_recorded_extras_and_sticky_tui_matrix(self):
+        for case, recorded, sticky, selected, flags, expected, remembered in (
+            (
+                "add-vault-retain-tui",
+                ["tui"],
+                [],
+                "devel",
+                {"with_vault": True},
+                ["tui", "vault"],
+                ["tui", "vault"],
+            ),
+            (
+                "add-tui-retain-vault",
+                ["vault"],
+                [],
+                "devel",
+                {"with_tui": True},
+                ["tui", "vault"],
+                ["tui", "vault"],
+            ),
+            (
+                "restore-sticky-tui",
+                [],
+                ["tui"],
+                "devel",
+                {"with_vault": True},
+                ["tui", "vault"],
+                ["tui", "vault"],
+            ),
+            (
+                "stable-retain-sticky-tui",
+                [],
+                ["tui"],
+                "stable",
+                {"with_vault": True},
+                ["vault"],
+                ["tui", "vault"],
+            ),
+            (
+                "do-not-resurrect-stale-vault",
+                [],
+                ["vault"],
+                "devel",
+                {"with_tui": True},
+                ["tui"],
+                ["tui"],
+            ),
+        ):
+            with (
+                self.subTest(case=case),
+                patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.work / case)}),
+                patch.object(updates, "_saved_extras", return_value=sticky),
+            ):
+                self.installed("1.6.1", recorded)
+                self.upgrade(channel=selected, **flags)
+                version = "1.6.3.dev0" if selected == "devel" else "1.6.2"
+                self.assertIn(
+                    "oc-box[" + ",".join(expected) + "]==" + version,
+                    self.calls[0][0],
+                )
+                self.assertEqual(
+                    list(self.settings()["package_update_extras"].values()),
+                    [remembered],
+                )
+
+    def test_same_version_extra_failure_never_changes_preferences_matrix(self):
+        for feature, flags, expected in EXTRA_REQUESTS:
+            with (
+                self.subTest(feature=feature),
+                patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.work / feature)}),
+                patch.object(
+                    updates, "_run", side_effect=channels.ChannelError("fixed failure")
+                ),
+            ):
+                self.installed("1.6.3.dev0")
+                channels.save_settings({"pass_env": ["PUBLIC_SETTING"]})
+                previous = channels.config_path().read_bytes()
+                with self.assertRaisesRegex(channels.ChannelError, "fixed failure"):
+                    self.upgrade(channel="devel", **flags)
+                self.assertEqual(channels.config_path().read_bytes(), previous)
+
+    def test_added_extras_require_fresh_receipt_not_advertised_support_matrix(self):
+        for case, after in (
+            ("missing-extras", ("uv", Path("/verified/uv"), [])),
+            ("partial-extras", ("uv", Path("/verified/uv"), ["vault"])),
+            ("different-manager", ("pipx", Path("/verified/uv"), ["tui", "vault"])),
+            ("different-executable", ("uv", Path("/foreign/uv"), ["tui", "vault"])),
+            ("invalid-receipt", channels.ChannelError("private receipt failure")),
+        ):
+            with (
+                self.subTest(case=case),
+                patch.object(
+                    updates,
+                    "_manager",
+                    side_effect=[("uv", Path("/verified/uv"), []), after],
+                ),
+                patch.object(channels, "mutate_settings") as write,
+            ):
+                self.installed("1.6.3.dev0")
+                self.before["extras"] = ["tui", "vault"]
+                with self.assertRaisesRegex(
+                    channels.ChannelError, "Preferences were not saved"
+                ) as error:
+                    self.upgrade(channel="devel", with_vault=True, with_tui=True)
+                self.assertNotIn("private receipt failure", str(error.exception))
+                self.assertEqual(len(self.calls), 1)
+                write.assert_not_called()
+                self.assertEqual(self.settings(), {})
+
+    def test_plain_pip_new_extras_cannot_establish_receipt_ownership(self):
+        self.kind = "pip"
+        self.installed("1.6.1")
+        for check in (False, True):
+            with self.subTest(check=check):
+                with self.assertRaisesRegex(channels.ChannelError, "Plain pip"):
+                    self.upgrade(channel="devel", check=check, with_vault=True)
+                self.assertFalse(self.calls)
+                self.assertEqual(self.settings(), {})
 
     def test_current_stable_still_warns_and_explicit_flag_saves_verified_preference(
         self,
@@ -648,10 +902,12 @@ class IsolatedManagerTests(unittest.TestCase):
         self.env = updates._environment(self.work)
         self.env["UV_TOOL_DIR"] = str(self.work / "tools")
         self.env["UV_TOOL_BIN_DIR"] = str(self.work / "bin")
+        self.offered_extras = {}
         for version in ("1.6.1", "1.6.2", "1.6.3.dev0"):
             self.wheel(version)
 
-    def wheel(self, version):
+    def wheel(self, version, extras=()):
+        self.offered_extras[version] = sorted(extras)
         dist = f"oc_box-{version}.dist-info"
         files = {
             "oc_box/__init__.py": "",
@@ -659,7 +915,15 @@ class IsolatedManagerTests(unittest.TestCase):
             "oc_box/distribution.json": json.dumps(
                 {"installer": "python-package", "version": version}
             ),
-            f"{dist}/METADATA": f"Metadata-Version: 2.3\nName: oc-box\nVersion: {version}\nRequires-Python: >=3.10\n",
+            f"{dist}/METADATA": (
+                f"Metadata-Version: 2.3\nName: oc-box\nVersion: {version}\n"
+                "Requires-Python: >=3.10\n"
+                + "".join(f"Provides-Extra: {extra}\n" for extra in sorted(extras))
+                + "".join(
+                    f'Requires-Dist: oc-box-fixture-{extra}==1.0; extra == "{extra}"\n'
+                    for extra in sorted(extras)
+                )
+            ),
             f"{dist}/WHEEL": "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
             f"{dist}/entry_points.txt": "[console_scripts]\noc-box = oc_box.fixture:main\n",
             f"{dist}/RECORD": "",
@@ -670,6 +934,26 @@ class IsolatedManagerTests(unittest.TestCase):
         ) as archive:
             for name, value in files.items():
                 archive.writestr(name, value)
+        for extra in extras:
+            name = "oc_box_fixture_" + extra
+            dist = name + "-1.0.dist-info"
+            files = {
+                f"{name}/__init__.py": f"FEATURE = {extra!r}\n",
+                f"{dist}/METADATA": (
+                    "Metadata-Version: 2.3\n"
+                    f"Name: oc-box-fixture-{extra}\nVersion: 1.0\n"
+                ),
+                f"{dist}/WHEEL": (
+                    "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n"
+                ),
+                f"{dist}/RECORD": "",
+            }
+            files[f"{dist}/RECORD"] = "".join(name + ",,\n" for name in files)
+            with zipfile.ZipFile(
+                self.wheels / f"{name}-1.0-py3-none-any.whl", "w"
+            ) as archive:
+                for name, value in files.items():
+                    archive.writestr(name, value)
 
     def command(self, argv, env=None):
         result = subprocess.run(
@@ -695,7 +979,11 @@ class IsolatedManagerTests(unittest.TestCase):
             }
         version = url.split("/")[-2]
         return {
-            "info": {"name": "oc-box", "version": version, "provides_extra": []},
+            "info": {
+                "name": "oc-box",
+                "version": version,
+                "provides_extra": self.offered_extras[version],
+            },
             "urls": [public_file(version)],
         }
 
@@ -756,7 +1044,7 @@ class IsolatedManagerTests(unittest.TestCase):
             normalized_options["find-links"] = [self.wheels.as_uri()]
             self.assertEqual(normalized, before)
 
-    def exercise(self, prefix, *, kind):
+    def exercise(self, prefix, *, kind, extras=(), add_extras=False):
         python = prefix / "bin/python"
         package = Path(
             self.command(
@@ -780,6 +1068,22 @@ class IsolatedManagerTests(unittest.TestCase):
 
         original = updates._run
         mutations = []
+
+        def dependency_modules():
+            return json.loads(
+                original(
+                    [
+                        python,
+                        "-I",
+                        "-c",
+                        "import importlib.util as u, json; print(json.dumps({"
+                        "x: u.find_spec('oc_box_fixture_' + x) is not None "
+                        "for x in ('vault', 'tui')}))",
+                    ],
+                    self.work,
+                    self.env,
+                )
+            )
 
         def offline(argv, work, env, **kwargs):
             argv = list(map(str, argv))
@@ -809,7 +1113,12 @@ class IsolatedManagerTests(unittest.TestCase):
                     "--find-links",
                     str(self.wheels),
                 ]
-            return original(argv, work, env, **kwargs)
+            result = original(argv, work, env, **kwargs)
+            if "install" in argv and kind in ("pipx", "uv"):
+                # Production verifies newly requested extras immediately after
+                # install. Remove only our offline transport before that check.
+                self.normalize_receipt_transport(prefix, kind)
+            return result
 
         patches = [
             patch.object(updates.os, "geteuid", return_value=1000),
@@ -832,14 +1141,46 @@ class IsolatedManagerTests(unittest.TestCase):
         with contextlib.ExitStack() as stack:
             for condition in patches:
                 stack.enter_context(condition)
-            for channel, version, count in (
-                (None, "1.6.2", 1),
-                ("devel", "1.6.3.dev0", 2),
-                (None, "1.6.3.dev0", 2),
-                ("stable", "1.6.2", 3),
-            ):
+            steps = [
+                (None, "1.6.2", 1, {}),
+                ("devel", "1.6.3.dev0", 2, {}),
+            ]
+            if add_extras:
+                self.assertEqual(dependency_modules(), {"vault": False, "tui": False})
+                steps.extend(
+                    [
+                        (None, "1.6.3.dev0", 3, {"with_vault": True}),
+                        (None, "1.6.3.dev0", 4, {"with_tui": True}),
+                    ]
+                )
+            offset = 2 if add_extras else 0
+            steps.extend(
+                [
+                    (None, "1.6.3.dev0", 2 + offset, {}),
+                    ("stable", "1.6.2", 3 + offset, {}),
+                ]
+            )
+            remembered_extras = set(extras)
+            fresh = None
+            for channel, version, count, requested in steps:
+                previous_count = len(mutations)
+                previous_version = fresh["version"] if fresh else None
+                if requested:
+                    self.assertEqual(
+                        dependency_modules(),
+                        {
+                            extra: extra in remembered_extras
+                            for extra in ("vault", "tui")
+                        },
+                    )
+                if requested.get("with_vault"):
+                    remembered_extras.add("vault")
+                if requested.get("with_tui"):
+                    remembered_extras.add("tui")
                 with contextlib.redirect_stdout(io.StringIO()) as output:
-                    self.assertIsNone(updates.upgrade(package, channel=channel))
+                    self.assertIsNone(
+                        updates.upgrade(package, channel=channel, **requested)
+                    )
                 self.assertEqual(len(mutations), count)
                 fresh = json.loads(
                     original([python, "-I", "-c", updates.PROBE], self.work, self.env)
@@ -847,6 +1188,7 @@ class IsolatedManagerTests(unittest.TestCase):
                 self.assertEqual(fresh["version"], version)
                 self.assertEqual(fresh["prefix"], str(prefix))
                 self.assertFalse(fresh["direct"])
+                self.assertEqual(fresh["extras"], self.offered_extras[version])
                 selected = "devel" if version.endswith(".dev0") else "stable"
                 self.assertIn(f"PyPI {selected}: {version}", output.getvalue())
                 if channel == "stable":
@@ -859,13 +1201,23 @@ class IsolatedManagerTests(unittest.TestCase):
                 self.assertEqual(
                     list(settings["package_update_channels"].values()), [selected]
                 )
-                if channel is None and selected == "devel":
+                self.assertEqual(
+                    list(settings["package_update_extras"].values()),
+                    [sorted(remembered_extras)],
+                )
+                self.assertNotIn("update_channel", settings)
+                if len(mutations) == previous_count:
                     self.assertIn("up to date", output.getvalue())
                     if kind in ("pipx", "uv"):
                         self.assertEqual(receipt.read_bytes(), previous_receipt)
                 else:
-                    self.assertIn("oc-box==" + version, mutations[-1])
-                    self.normalize_receipt_transport(prefix, kind)
+                    target_extras = sorted(
+                        remembered_extras & set(self.offered_extras[version])
+                    )
+                    suffix = (
+                        "[" + ",".join(target_extras) + "]" if target_extras else ""
+                    )
+                    self.assertIn("oc-box" + suffix + "==" + version, mutations[-1])
                     if kind == "pipx":
                         flags = json.loads((prefix / "pipx_metadata.json").read_text())[
                             "main_package"
@@ -881,6 +1233,16 @@ class IsolatedManagerTests(unittest.TestCase):
                         )["tool"]["options"]
                         self.assertEqual(options["keyring-provider"], "disabled")
                         self.assertIs(options["no-build"], True)
+                    if requested:
+                        self.assertEqual(previous_version, version)
+                        self.assertNotIn("up to date", output.getvalue())
+                        self.assertEqual(
+                            dependency_modules(),
+                            {
+                                extra: extra in remembered_extras
+                                for extra in ("vault", "tui")
+                            },
+                        )
                 if kind in ("pipx", "uv"):
                     receipt = prefix / (
                         "pipx_metadata.json" if kind == "pipx" else "uv-receipt.toml"
@@ -888,7 +1250,7 @@ class IsolatedManagerTests(unittest.TestCase):
                     previous_receipt = receipt.read_bytes()
         self.assertEqual(
             observed_versions,
-            ["1.6.1", "1.6.2", "1.6.3.dev0", "1.6.3.dev0"],
+            ["1.6.1"] + ["1.6.2"] + ["1.6.3.dev0"] * (4 if add_extras else 2),
         )
         return package, fresh
 
@@ -964,6 +1326,8 @@ class IsolatedManagerTests(unittest.TestCase):
         sys.version_info < (3, 11), "uv receipt parsing needs stdlib tomllib"
     )
     def test_real_uv_owner_receipt_launcher_channel_roundtrip(self):
+        self.wheel("1.6.2", extras=("vault",))
+        self.wheel("1.6.3.dev0", extras=("tui", "vault"))
         self.command(
             [
                 self.uv,
@@ -980,9 +1344,10 @@ class IsolatedManagerTests(unittest.TestCase):
         receipt = prefix / "uv-receipt.toml"
         self.normalize_receipt_transport(prefix, "uv")
         with patch.object(updates.shutil, "which", return_value=str(self.uv)):
-            _, fresh = self.exercise(prefix, kind="uv")
+            _, fresh = self.exercise(prefix, kind="uv", add_extras=True)
         self.assertEqual(fresh["version"], "1.6.2")
         self.assertIn('specifier = "==1.6.2"', receipt.read_text())
+        self.assertIn('extras = ["vault"]', receipt.read_text())
         self.assertTrue((self.work / "bin/oc-box").is_symlink())
 
 

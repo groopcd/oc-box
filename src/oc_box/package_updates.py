@@ -534,6 +534,14 @@ def _uv_options(options):
 
 
 def _remember(owner, channel, extras):
+    settings = channels.load_settings()
+    saved = settings.get("package_update_extras", {})
+    packages = settings.get("package_update_channels", {})
+    if not isinstance(saved, dict) or not isinstance(packages, dict):
+        raise PackageUpdateError("Invalid Python-package update preferences.")
+    if saved.get(owner) == extras and packages.get(owner) == channel:
+        return
+
     def change(settings):
         saved = settings.setdefault("package_update_extras", {})
         packages = settings.setdefault("package_update_channels", {})
@@ -584,7 +592,7 @@ def _operation_lock(prefix, check):
         ) from exc
 
 
-def upgrade(root, *, check=False, channel=None):
+def upgrade(root, *, check=False, channel=None, with_vault=False, with_tui=False):
     """Update only a positively verified package owner; never create a launcher."""
     if os.geteuid() == 0:
         raise PackageUpdateError(
@@ -647,13 +655,41 @@ def upgrade(root, *, check=False, channel=None):
         before = _probe(python, work, env)
         _validate_probe(before, prefix, root, dist.version)
         kind, executable, extras = _manager(prefix, before, work, env)
+        recorded_extras = set(extras)
+        requested = set()
+        if with_vault:
+            requested.add("vault")
+        if with_tui:
+            requested.add("tui")
         # The receipt remains authoritative for current extras. Only tui needs a
         # sticky preference because older stable releases cannot record it.
-        extras = sorted(set(extras) | (set(_saved_extras(owner)) & {"tui"}))
+        extras = sorted(
+            recorded_extras | (set(_saved_extras(owner)) & {"tui"}) | requested
+        )
         previous = channels.selected_channel(owner=owner)
         selected = channels.selected_channel(channel, owner=owner)
         versions = _inventory()
         version, offered_extras = _target(versions, selected)
+        unavailable = requested - set(offered_extras)
+        if unavailable:
+            _refuse(
+                "The target release does not provide explicitly requested extras: "
+                + ", ".join(sorted(unavailable))
+                + "."
+            )
+        # An inherited tui preference can survive a stable release without tui;
+        # an explicit request above must never silently omit it, even in a check.
+        missing = set(extras) - set(offered_extras)
+        if missing - {"tui"}:
+            _refuse(
+                "The target release does not provide all originally requested extras."
+            )
+        target_extras = sorted(set(extras) & set(offered_extras))
+        adding_extras = set(target_extras) - recorded_extras
+        if adding_extras and kind == "pip":
+            _refuse(
+                "Plain pip cannot record and verify the requested extras automatically."
+            )
         current_order = channels.parse_version(before["version"])
         target_order = channels.parse_version(version)
         print("Installed oc-box: " + before["version"], flush=True)
@@ -661,6 +697,12 @@ def upgrade(root, *, check=False, channel=None):
             f"PyPI {selected}: {version}" + (" (check only)." if check else "."),
             flush=True,
         )
+        if requested:
+            print("Requested extras: " + ", ".join(sorted(requested)) + ".", flush=True)
+            print(
+                "Target package extras: " + ", ".join(target_extras) + ".",
+                flush=True,
+            )
         if selected == "stable":
             try:
                 development = _target(versions, "devel", required=False)
@@ -689,19 +731,11 @@ def upgrade(root, *, check=False, channel=None):
         if target_order < current_order and not switched:
             print("Installed build is ahead of this channel; leaving it installed.")
             return None
-        if target_order == current_order:
+        if target_order == current_order and not adding_extras:
             print("oc-box is up to date.")
             if channel is not None:
                 _remember(owner, selected, extras)
             return None
-        # tui was a development-only extra. Retain the user's preference while
-        # omitting it from a stable target that does not advertise it.
-        missing = set(extras) - set(offered_extras)
-        if missing - {"tui"}:
-            _refuse(
-                "The target release does not provide all originally requested extras."
-            )
-        target_extras = sorted(set(extras) & set(offered_extras))
         suffix = "[" + ",".join(target_extras) + "]" if target_extras else ""
         requirement = "oc-box" + suffix + "==" + version
         # A constraint is defense in depth and never becomes a recorded manager
@@ -759,6 +793,28 @@ def upgrade(root, *, check=False, channel=None):
             raise PackageUpdateError(
                 "Updated environment ownership changed; preferences were not saved."
             )
+        if adding_extras:
+            # Provides-Extra is only advertised capability, not evidence that an
+            # equal-version manager operation honored the added requirements.
+            try:
+                updated_kind, updated_executable, updated_extras = _manager(
+                    prefix, after, work, env
+                )
+            except channels.ChannelError as exc:
+                raise PackageUpdateError(
+                    "Updated package-manager extras could not be verified; inspect "
+                    "the environment before retrying. Preferences were not saved."
+                ) from exc
+            if (
+                updated_kind != kind
+                or updated_executable != executable
+                or set(updated_extras) != set(target_extras)
+            ):
+                raise PackageUpdateError(
+                    "Updated package-manager receipt did not record the intended "
+                    "extras; inspect the environment before retrying. Preferences "
+                    "were not saved."
+                )
         _remember(owner, selected, extras)
         print("Installed oc-box: " + version, flush=True)
     return None

@@ -21,7 +21,7 @@ oc-box completion bash
 oc-box web [--project PATH | --workspace ID] [--port N] [--no-open] [--no-vault]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
-oc-box upgrade [--stable | --devel] [--check]
+oc-box upgrade [--stable | --devel] [--check] [--vault] [--tui]
 oc-box upgrade --auto-update on|off
 oc-box secrets init|list|passwd
 oc-box secrets set|remove NAME
@@ -633,6 +633,10 @@ oc-box upgrade --check
 oc-box upgrade
 oc-box upgrade --devel --check
 oc-box upgrade --devel
+oc-box upgrade --devel --vault  # Add vault dependencies independently
+oc-box upgrade --devel --tui    # Add dashboard dependencies independently
+oc-box upgrade --devel --vault --tui
+oc-box upgrade                  # Follow the saved channel
 oc-box upgrade --stable
 oc-box upgrade --auto-update on
 oc-box upgrade --auto-update off
@@ -650,8 +654,28 @@ Source-checkout updates remain a separate `git pull`/review task.
 Stable public versions currently use `1.6.N`; development versions use
 `1.7.N.dev0` with GitHub prerelease tags `v1.7.N.dev0`. Both retain full source
 identity in `oc-box --version`. Channel and version series are independent;
-stable can later move to 1.7 without becoming devel. Only extras supported by
-the selected target are retained; current stable 1.6 does not support `--with-tui`.
+stable can later move to 1.7 without becoming devel.
+
+`--vault` and `--tui` independently request optional installer dependencies.
+They work from stable or development installations and can be combined with
+either channel selection or `--check`. With no selector, the saved channel is
+used: `oc-box upgrade --vault` adds vault support without choosing development.
+Channel selection alone does not request new extras, and optional defaults are
+unchanged. These flags do not change workspace credential policy, initialize or
+unlock a vault, launch the dashboard or start a workspace.
+
+Requests are additive: omitted extras are not removed. Only extras supported
+by the target are installed, but inherited requests remain saved; a development
+TUI preference survives a stable interval for a later return to development.
+Stable 1.6 has no dashboard. Explicitly requesting an unavailable extra, such
+as `--stable --tui` against that target, refuses rather than ignoring it.
+
+The same selected release can gain extras even when no newer release is
+available. Repeating a satisfied request is a no-op. `--check` validates requested
+support without installing dependencies or persisting channel/extra preferences.
+The installed launcher must support these flags, and a supporting target must
+be published; a branch merge alone supplies neither an installed parser nor a
+published release. Older channel-aware launchers should upgrade normally first.
 
 The installer stages a complete release under `~/.local/share/oc-box/releases/`,
 including license and manuals, before switching the launcher. New processes use
@@ -671,9 +695,9 @@ Direct source-checkout launches skip automatic updates. A concurrent check does
 not block another normal launcher. Network/download failures are reported and
 the normal launch continues with the installed version; explicit upgrade failures
 return nonzero. `--auto-update on|off` cannot be combined with either channel
-selector or `--check`; select a channel and enable automatic updates in separate
-commands. Enabling them trusts future releases on that channel, not signed
-release artifacts.
+selector, `--check`, `--vault` or `--tui`; select a channel and enable automatic
+updates in separate commands. Enabling them trusts future releases on that
+channel, not signed release artifacts.
 
 Fetch/checkout/install subprocesses have a clean, positive-allowlisted
 environment. Global/system Git config, helpers, hooks, external protocols,
@@ -756,18 +780,24 @@ or plaintext temporary files, and the encrypted vault format is unchanged.
 Optional cryptography support is required only when using vault operations:
 
 ```sh
+# Existing installation, with a launcher supporting upgrade extras:
+oc-box upgrade --vault
+# New isolated Python-tool installation:
 pipx install 'oc-box[vault]'
-# Add support to an existing pipx installation:
-pipx inject oc-box 'cryptography>=44'
-# Or install/reinstall the uv tool with its extra:
-uv tool install --force 'oc-box[vault]'
+# Or: uv tool install 'oc-box[vault]'
 # In a package installation's activated virtual environment:
 python -m pip install 'oc-box[vault]'
 ```
 
-For a fresh V2 installation, choose the `oc-box[vault]` extra (or the curl option
-below), then run `oc-box secrets init` and `oc-box secrets set NAME` **before your
-first** `oc-box --project ~/devel/demo`. Global use needs no per-project
+For an existing installation, the upgrade request follows the saved channel and
+verified owner, adds dependencies only and does not initialize/unlock the vault
+or change credential policy. Use `--devel --vault` when development is wanted.
+Older channel-aware launchers should upgrade normally to a supporting published
+release first; ambiguous plain-pip extras require manual owner guidance.
+
+For a fresh V2 installation, choose the `oc-box[vault]` extra (or the installer
+option below), then run `oc-box secrets init` and `oc-box secrets set NAME`
+**before your first** `oc-box --project ~/devel/demo`. Global use needs no per-project
 registration or selection. Values are entered only in masked prompts; do not
 put secret values in OpenCode or oc-box JSON. Configuration can reference their
 names using the published V2 shapes under Configuration and environment.
@@ -1247,12 +1277,13 @@ oc-box reset --project ~/devel/demo --distro debian
 
 ### --check
 
-With `upgrade`, preview the selected published release without installing it
-or changing the saved channel. May be combined with `--stable` or `--devel`.
-Returns success when a version is available or the installation is current;
-it is not an update-available exit
-code. Network errors return nonzero. Cannot be combined with `--auto-update`,
-workspace selectors, or other commands. Example: `oc-box upgrade --check`.
+With `upgrade`, preview the saved or explicitly selected published channel
+and validate support for requested `--vault`/`--tui` extras without installing
+or persisting channel/extra preferences. Returns success when a version is
+available or the installation is current; it is not an update-available exit
+code. Network errors or unsupported requested extras return nonzero. Cannot be
+combined with `--auto-update`, workspace selectors or other commands.
+Example: `oc-box upgrade --devel --tui --check`.
 
 ### --stable
 
@@ -1272,13 +1303,39 @@ package-managed installations. Mutually exclusive with `--stable` and
 `--auto-update on|off`; rejected on every other command, including implicit start.
 Example: `oc-box upgrade --devel --check`.
 
+### --vault
+
+With `upgrade` only, add optional vault/cryptography dependencies through the
+verified installation owner. Independent of `--tui`, additive to existing extra
+requests, and compatible with `--stable`, `--devel` or nonmutating `--check`.
+Without a selector, use the saved channel. The same release can gain support;
+repeating a satisfied request is a no-op. Does not select a workspace credential
+policy, initialize/unlock a vault, or deliver credentials. Requires a launcher
+release supporting this flag and a published target supporting the extra.
+Cannot be combined with `--auto-update` or workspace actions.
+Example: `oc-box upgrade --devel --vault`.
+
+### --tui
+
+With `upgrade` only, add optional dashboard dependencies through the verified
+installation owner. Independent of `--vault` and additive; may be combined with
+`--devel` and nonmutating `--check`. An explicit request against a target without
+the dashboard, including current stable 1.6, refuses. An inherited TUI preference
+survives a stable interval for a later return to development, but does not put
+the dashboard into stable. The same release can gain dependencies; repeating a
+satisfied request is a no-op. Does not launch the dashboard or a workspace.
+Requires a launcher release supporting this flag and a published supporting
+target. Cannot be combined with `--auto-update` or workspace actions.
+Example: `oc-box upgrade --devel --vault --tui`.
+
 ### --auto-update on|off
 
 With `upgrade`, persistently enable or disable automatic updates before normal
 installed launches. The default is off. This setting itself performs no download
 or installation and preserves other keys in `~/.config/oc-box/config.json` (or
 its XDG equivalent). Follows the saved GitHub release channel; it does not select
-one. Cannot be combined with `--check`, `--stable`, `--devel` or workspace actions.
+one. Cannot be combined with `--check`, `--stable`, `--devel`, `--vault`, `--tui`
+or workspace actions.
 Package-managed installations reject `on`; `off` gives manager guidance without
 changing GitHub settings.
 Example: `oc-box upgrade --auto-update on`.
@@ -1601,9 +1658,10 @@ Python combination may need an OS upgrade rather than a package reinstall.
 | Regenerate manuals | GNU makeinfo (`texinfo`); contributor-only, never required to install/use oc-box |
 
 Host OpenCode is not supplied by these mappings; see
-https://opencode.ai/docs/#install. Use the existing Python installation channel
-for vault support: `uv tool install --force 'oc-box[vault]'`,
-`pipx inject oc-box 'cryptography>=44'`, or GitHub/source `--with-vault`.
+https://opencode.ai/docs/#install. On a supporting launcher release, use
+`oc-box upgrade --vault` for vault dependencies through the verified existing
+owner; upgrade older channel-aware launchers normally first. First installations
+can request the package `[vault]` extra or GitHub/source `--with-vault`.
 Do not install Python dependencies into system Python to fix an isolated tool's
 missing extra.
 
@@ -2563,6 +2621,13 @@ curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/
 # Review install-oc-box.sh, then:
 sh install-oc-box.sh
 ```
+
+These are first-install/bootstrap options, not a requirement to rerun curl when
+enabling extras later. On a launcher release supporting upgrade extras, use
+`oc-box upgrade --devel --tui`, `oc-box upgrade --devel --vault`, or both flags
+through the existing owner. Older channel-aware launchers should upgrade normally
+to a supporting published release first. The update-channel guide documents
+pre-channel exceptions.
 
 The bootstrap clones full history anonymously into a private temporary directory
 and removes that temporary checkout when finished. It does not configure Git
