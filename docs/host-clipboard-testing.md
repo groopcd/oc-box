@@ -1,6 +1,6 @@
 # Host clipboard images and copied files — short manual check
 
-This is an experimental feature-branch check, not a software release or a
+This is an experimental development-source check, not a software release or a
 security certification. Use an innocuous screenshot, not credentials or private
 desktop contents. No new test harness or broad regression run is needed.
 
@@ -32,14 +32,14 @@ Use `--host-clipboard --no-host-clipboard-symlinks` on a fresh client to restore
 strict no-symlink imports. This is per-client, not a saved workspace preference.
 Normal file drops and live sharing remain strict.
 
-`uv --with .` builds the **current checkout**, not a named feature branch.
+`uv --with .` builds the **current checkout**, not a named development branch.
 An installed release or another checkout will not acquire the new flag from
 that command. Keep your existing checkout/work unchanged and create a separate
 test worktree. From your normal oc-box repository on the host:
 
 ```sh
-git fetch origin feature/devel-host-clipboard
-git worktree add --detach ../oc-box-host-clipboard-test origin/feature/devel-host-clipboard
+git fetch origin devel
+git worktree add --detach ../oc-box-host-clipboard-test origin/devel
 cd ../oc-box-host-clipboard-test
 uv run --no-project --refresh-package oc-box --with '.[vault]' python -I -m oc_box --help
 ```
@@ -48,6 +48,11 @@ Confirm the help lists `--host-clipboard` **before** launching a workspace.
 If the test directory already exists, do not overwrite or force-remove it;
 use another new directory or verify its revision. `--refresh-package oc-box`
 also avoids reusing an older local package build when testing branch updates.
+
+If you deliberately deleted this exact test worktree directory but Git still
+remembers it, repeat its `git worktree add --detach` command with `--force` to
+reuse that missing path's registration. Do not use this to replace an existing
+checkout or prune unrelated worktrees; a nonempty directory is not overwritten.
 
 Now use the branch launcher without replacing your published installation:
 
@@ -132,7 +137,7 @@ The chord must reach the host relay as the legacy Ctrl+Y byte or a distinct
 CSI-u/ModifyOtherKeys report.
 If it does nothing, don't remap ordinary Ctrl+V or enable broad filesystem/socket
 mounts. Report the terminal and native versions so the binding can be adjusted
-on the feature branch.
+in development.
 
 ## What to report
 
@@ -166,7 +171,7 @@ not the underlying exception or pathname:
 A portal clipboard target does not itself mean the selected URI uses a portal
 path. Do not remove protections or paste the PDF/URI contents to guess the cause.
 Re-copy the PDF after copying any diagnostic commands, then retry once in a
-fresh client built from the updated branch and report only the marker.
+fresh client built from the intended source revision and report only the marker.
 
 Imported staging is readable by other processes/tools using the same container
 user. It is not per-session isolation. Client crashes, retained references,

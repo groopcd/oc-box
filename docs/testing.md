@@ -103,10 +103,18 @@ shortcut. The Ctrl+Y binding is absent from the current documented OpenCode 2.x 
 (checked 2026-11-18). On `f9be952e281007e345af35b0de38df6b037c709d`,
 the owner confirmed Ctrl+Y delivery, identified a symlinked parent folder as
 the cause of the source refusal, and reported success through the real folder
-destination. This does not establish linked-path support or provider
-interpretation. Default clipboard symlink following and its strict opt-out are
-new behavior awaiting a focused host observation; do not relabel the earlier
-strict-source reports as acceptance of it.
+destination. That strict-source report does not establish linked-path support or
+provider interpretation.
+
+On 2026-11-18, after recreating the host test checkout using instructions pinned
+to merged devel `c23897a10598c00797c4b4399a77ed6689d15eae`, the owner reported
+"yes it worked" for copying a PDF through the linked folder and importing it
+with Ctrl+Y under the default symlink policy. This is a scoped owner-reported
+manual observation; source identity follows the provided commands, not an
+independently collected host attestation. It does not separately verify the
+strict opt-out, every supported format/terminal/platform, provider interpretation,
+or exhaustive filesystem races. Earlier PNG and strict-source observations
+retain their own revisions and scope.
 Keep these scopes separate; no broader checklist or host pass is established
 by the synthetic checks.
 
