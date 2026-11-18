@@ -39,10 +39,14 @@ The development CLI/resource identity is `1.7.N.dev0+gHASH`.
 1.7 development releases, not stable 1.6.94.** Development publication is approved
 with explicit [acceptance limitations](releases/1.7.md#known-acceptance-limitations).
 It does not declare the unfinished dashboard restore/storage sequence passed
-or promote the manager to stable. The narrowly backported native OpenCode
-**2.3.0** persisted-history recovery extension has focused native/offline
-coverage, not new integrated external-host or dashboard acceptance. Other
-unaudited native versions remain refused by this recovery path.
+or promote the manager to stable. The original native OpenCode **2.3.0**
+persisted-history recovery extension and later guarded **stable 2.3.x**
+compatibility amendment have focused native/offline coverage, not new integrated
+external-host or dashboard acceptance. The shell/subagent storage profile still
+requires exact captured-patch agreement and compatible contracts; it does not
+certify untested future native behavior or waive refusals. Other integrations
+retain their independently documented version limits. See the
+[recovery reference](cli.md#web--browser-interface).
 
 The combined development update also includes the card dashboard, saved
 per-workspace native host importing (enabled by default on supported clients),

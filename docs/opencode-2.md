@@ -418,8 +418,12 @@ explicit sync is not evidence that the row cleared: that path checks native
 exports without the original owner's activity wait. Retained jobs remain blocking
 in the live owner; neither diagnostics nor snapshots repair native job cleanup.
 
-Eligible shell-only timeouts can trigger one bounded post-stop snapshot with
-supported native 2.2.6/2.2.7 owners. The last validated pairs are routing hints, not
+Eligible timeouts can trigger one bounded post-stop snapshot: native 2.2.6/2.2.7
+uses the shell-only profile, and canonical stable 2.3.x uses the guarded
+shell/subagent profile. Host and container binaries must match the captured exact
+patch; a shared series does not waive contract/schema checks or certify untested
+future native behavior. Unsupported identities and incompatible contracts refuse.
+The last validated pairs are routing hints, not
 quiescence proof. The original owner must close normally with no attached clients;
 the actual old-producer boundary is a verified whole-container stop, not the exit
 of its host-side Podman wrapper. Stop intent can suppress the same-ID history-only
@@ -429,14 +433,18 @@ is performed by recovery.
 
 One non-executing private reader then supplies every inventory/export operation;
 no controller or managed-service recovery is published. Source and host destination
-guards refuse any native schedule row, unknown scheduler schemas and nonempty
+guards refuse any native scheduler row, unknown scheduler schemas and nonempty
 system configuration before service construction. Scheduler flags alone do not
 disable native pending-input rewakes. Isolated configuration, provider/tool/plugin
 denials and disabled warming supplement those guards. Foreground activity remains
 a before/after refusal tripwire. Existing projection/export checks and verified
 archive import remain unchanged. The reader may maintain native metadata; it is
-not a byte-read-only backup. Final cleanup stops the container, and even successful
-snapshots retain the original nonzero result and interrupted-work warning.
+not a byte-read-only backup. Final cleanup stops the container. A raw client exit
+of `0` may return `0` after a live timeout only after complete checked archival,
+native verification, successful recovery cleanup and a verified final stop.
+Interruption/unconfirmed-completion warnings remain. Raw failures, cancellation,
+unknown status, partial history and failed/uncertain cleanup stay nonzero and
+retain retry-sync guidance. This does not declare native jobs completed.
 Reviewed scripted host acceptance covers native 2.2.6 on the recorded runtime;
 native 2.2.7 reader coverage is offline-only. See the
 [test strategy](testing.md#reviewed-focused-recovery-host-acceptance) for exact

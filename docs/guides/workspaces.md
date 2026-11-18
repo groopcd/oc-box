@@ -199,15 +199,19 @@ full backups of pending input and live execution. See [sync](../cli.md#sync).
 
 In experimental 1.7, eligible V2 timeouts can trigger one bounded persisted-history
 snapshot after the old owner closes and a whole-container stop is verified.
-The audited native 2.2.6/2.2.7 profile is shell-only; exact 2.3.0 also permits
-retained shell/subagent cases. This is version-specific eligibility, not a
-blanket compatibility or host-acceptance claim. The same existing container
-restarts temporarily for an isolated
-history reader, without normal runtime preparation, credential refresh or
+The native 2.2.6/2.2.7 profile is shell-only; canonical stable 2.3.x uses the
+guarded shell/subagent profile. Host and container binaries must match the captured
+exact patch, not merely the same series. Unsupported identities and incompatible contracts
+refuse; series recognition is not acceptance of untested future native behavior.
+The same existing container restarts temporarily for an isolated history reader,
+without normal runtime preparation, credential refresh or
 requested model/tool execution, then stops again. Explicit stop intent suppresses
-recovery. Even when snapshots are saved, the original timeout remains nonzero and
-warns that work or completion notices may be missing; native job rows are not
-repaired. Unsafe or unsupported cases remain pending. See the
+recovery. A raw client exit of `0` may return `0` after a live timeout only when
+checked archival/native verification, recovery cleanup and the final verified
+stop all succeed. The interrupted-work/unconfirmed-completion warning remains;
+native job rows are not repaired. Client failure/cancellation, unknown status,
+partial history or failed/uncertain cleanup remain nonzero with retry-sync
+guidance. Unsafe or unsupported cases remain pending. See the
 [recovery notes and validation scope](../releases/1.7.md#exit-history-recovery).
 
 An interrupted legacy 1.x assistant can remain unfinished after migration to 2.x
