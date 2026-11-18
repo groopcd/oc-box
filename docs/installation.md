@@ -11,6 +11,7 @@ installation owner; installing a second copy is not a repair for a missing
 optional feature.
 
 **On this page:** [Prerequisites](#prerequisites) ·
+[Recommended install](#recommended-first-install) ·
 [Installation methods](#choose-an-installation-method) ·
 [Python tools](#install-from-pypi) · [GitHub/source](#install-from-github-or-source) ·
 [Updates](#update-an-existing-installation) · [Completion](#bash-completion) ·
@@ -54,18 +55,36 @@ V2 needs Linux anonymous-memory file support even with `--no-vault`. Older
 uv-managed Python builds without `os.memfd_create` use a compatible libc fallback;
 see [private-output troubleshooting](cli.md#private-output-capture-and-uv-python).
 
+## Recommended first install
+
+For newcomers, **install directly from GitHub with vault and TUI enabled**:
+
+```sh
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-vault --with-tui
+oc-box --version
+oc-box doctor
+```
+
+This explicitly opts in to a **published development release**, because stable
+does not yet include the TUI. It does not install moving branch HEAD, initialize
+the vault or start a workspace. Dependencies are private to the GitHub
+installation. The command downloads and runs the public installer; inspect it
+first if preferred. Continue with [credentials and first launch](getting-started.md).
+
 ## Choose an installation method
 
 | Method | Install | Ordinary update |
 | --- | --- | --- |
+| **GitHub — recommended for newcomers** | One-line installer above, including vault and TUI | `oc-box upgrade` |
 | pipx: isolated CLI from [PyPI](https://pypi.org/project/oc-box/) | `pipx install oc-box` | `pipx upgrade oc-box` |
 | uv: isolated CLI from PyPI | `uv tool install oc-box` | `uv tool upgrade oc-box` |
 | pip: activated dedicated virtual environment | `python -m pip install oc-box` | `python -m pip install --upgrade oc-box` |
-| GitHub: published stable/development release | Installer below | `oc-box upgrade` |
 
 **Installation method and release channel are separate choices.** New installs
 default to stable; development is an explicit opt-in to a published release,
-not moving branch HEAD. Existing saved channel choices are retained.
+not moving branch HEAD. The recommended command above makes that opt-in explicit;
+it does not change the installer's no-selector default. Existing saved channel
+choices are retained.
 Read [update channels](update-channels.md) for selections, nonmutating previews
 and older-launcher bootstrap.
 The oc-box release number/channel is also separate from the host OpenCode major
@@ -116,6 +135,10 @@ for sudo pip or a system/user-site pip installation.
 ## Install from GitHub or source
 
 ### Published GitHub release
+
+For vault and the dashboard together, use the
+[recommended first-install command](#recommended-first-install) above.
+The alternative below omits the TUI:
 
 The one-line installer selects stable by default, or reuses the saved GitHub
 channel:

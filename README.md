@@ -57,22 +57,27 @@ oc-box and not with sudo.
 
 ### 1. Install
 
-You need Python 3.10+, host OpenCode **2.x**, rootless Podman with pasta networking
-and delegated CPU/memory/process cgroup controllers. Initial setup needs network
-access. See [installation and prerequisites](docs/installation.md) for all methods.
+You need Python 3.10+, host OpenCode **2.x**, Git, curl, rootless Podman with pasta
+networking and delegated CPU/memory/process cgroup controllers. Initial setup
+needs network access. See [installation and prerequisites](docs/installation.md)
+for all methods.
 
-For an isolated CLI with optional vault support:
+**Recommended for newcomers: install directly from GitHub with vault and TUI.**
 
 ```sh
-uv tool install 'oc-box[vault]'
-uv tool update-shell
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-vault --with-tui
+oc-box --version
 oc-box doctor
 ```
 
-Prefer pipx? Use `pipx install 'oc-box[vault]'` and `pipx ensurepath` instead.
-There is also a [GitHub installer](docs/installation.md#install-from-github-or-source).
-The vault extra is optional; the ordinary CLI has no third-party Python
-dependencies.
+This explicitly selects a **published development release**, because stable
+does not yet include the TUI. Vault and dashboard dependencies stay private to
+the GitHub installation; the vault is initialized separately below. The command
+downloads and runs the public installer—review it first if preferred.
+
+Prefer stable without the dashboard, or a Python tool manager? See the
+[installation alternatives](docs/installation.md). Do not install a second copy
+just to enable optional features.
 
 ### 2. Choose how to supply credentials
 
