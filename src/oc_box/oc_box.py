@@ -369,15 +369,42 @@ def effective_host_drop(args):
     return bool(getattr(args, "_host_drop_enabled", getattr(args, "host_drop", False)))
 
 
+def configure_host_clipboard(args, version=None):
+    """Discover the host helper before unlock/reset, never read its clipboard."""
+    if not getattr(args, "host_clipboard", False):
+        if not getattr(args, "host_clipboard_symlinks", True):
+            raise BoxError("--no-host-clipboard-symlinks requires --host-clipboard.")
+        return None
+    validate_host_drop(version)
+    if not hasattr(args, "_host_clipboard_reader"):
+        if __package__:
+            from . import host_clipboard
+        else:
+            import host_clipboard
+        try:
+            args._host_clipboard_reader = host_clipboard.preflight()
+        except host_clipboard.ClipboardError as error:
+            raise BoxError(str(error)) from None
+    return args._host_clipboard_reader
+
+
 def run_native_tui(
-    data, command, connection, *, host_drop_enabled=False, host_drop_required=True
+    data,
+    command,
+    connection,
+    *,
+    host_drop_enabled=False,
+    host_drop_required=True,
+    host_clipboard_reader=None,
+    host_clipboard_symlinks=True,
 ):
-    if not host_drop_enabled:
+    if not host_drop_enabled and host_clipboard_reader is None:
         return run_tui(command)
+    required = host_drop_required or host_clipboard_reader is not None
     try:
         profile = validate_host_drop(str(data.get("opencode_version", "")))
     except BoxError:
-        if host_drop_required:
+        if required:
             raise
         print(
             "oc-box: Host importing is unavailable; opening the ordinary native TUI.",
@@ -390,16 +417,40 @@ def run_native_tui(
         from . import host_drop
     else:
         import host_drop
-    print("oc-box: " + host_drop.WARNING, flush=True)
+    if host_drop_enabled:
+        print("oc-box: " + host_drop.WARNING, flush=True)
+    if host_clipboard_reader is not None:
+        print("oc-box: " + host_drop.CLIPBOARD_WARNING, flush=True)
+        print(
+            "oc-box: "
+            + (
+                host_drop.CLIPBOARD_SYMLINKS_WARNING
+                if host_clipboard_symlinks
+                else host_drop.CLIPBOARD_STRICT_WARNING
+            ),
+            flush=True,
+        )
     client_started = False
     try:
         with host_drop.Relay(
-            sys.modules[__name__], data, connection, profile=profile
+            sys.modules[__name__],
+            data,
+            connection,
+            profile=profile,
+            **(
+                {
+                    "paths_enabled": host_drop_enabled,
+                    "clipboard": host_clipboard_reader,
+                    "clipboard_symlinks": host_clipboard_symlinks,
+                }
+                if host_clipboard_reader is not None
+                else {}
+            ),
         ) as drops:
             client_started = True
             return run_tui(command, file_drops=drops)
     except host_drop.DropError:
-        if not client_started and not host_drop_required:
+        if not client_started and not required:
             print(
                 "oc-box: Host importing could not start; opening the ordinary native TUI. "
                 "The workspace preference is unchanged.",
@@ -2888,9 +2939,13 @@ def launch(path, data, args, *, image_preview_snapshot=None):
         if image_preview_snapshot is not None
         else {}
     )
-    if getattr(args, "host_drop", None) is True:
+    if getattr(args, "host_drop", None) is True or getattr(
+        args, "host_clipboard", False
+    ):
         release = getattr(args, "_opencode_release", None) or detect_opencode_release()
-        validate_host_drop(release)
+        if getattr(args, "host_drop", None) is True:
+            validate_host_drop(release)
+        configure_host_clipboard(args, release)
         args._opencode_release = release
     try:
         if args.command == "sync":
@@ -2910,6 +2965,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
             version = detect_opencode_release()
     if getattr(args, "host_drop", None) is True:
         validate_host_drop(version)
+    configure_host_clipboard(args, version)
     if getattr(args, "image_preview", False):
         if args.command not in ("start", "reset"):
             raise BoxError(
@@ -3234,6 +3290,16 @@ def launch_client(path, data, args, version, exported, owner=None):
                 owner.connection if owner else None,
                 host_drop_enabled=effective_host_drop(args),
                 host_drop_required=getattr(args, "host_drop", None) is True,
+                **(
+                    {
+                        "host_clipboard_reader": args._host_clipboard_reader,
+                        "host_clipboard_symlinks": getattr(
+                            args, "host_clipboard_symlinks", True
+                        ),
+                    }
+                    if getattr(args, "host_clipboard", False)
+                    else {}
+                ),
             )
     finally:
         if owner:
@@ -3577,6 +3643,17 @@ def parser():
         help="save host file importing disabled for this workspace",
     )
     result.add_argument(
+        "--host-clipboard",
+        action="store_true",
+        help="opt in this native TUI client to host clipboard images/copied image or PDF files with Ctrl+Y (reserved throughout this client)",
+    )
+    result.add_argument(
+        "--no-host-clipboard-symlinks",
+        dest="host_clipboard_symlinks",
+        action="store_false",
+        help="reject symlinks in clipboard file sources for this client (requires --host-clipboard; default follows them)",
+    )
+    result.add_argument(
         "--credential-mode",
         choices=("env", "selected", "vault"),
         help="with credentials, select env forwarding, explicit names, or the V2 global vault",
@@ -3898,6 +3975,17 @@ def main(argv=None):
         )
     if args.host_drop is True:
         validate_host_drop()
+    if args.host_clipboard and (
+        args.command not in ("start", "reset")
+        or args.status
+        or args.about
+        or args.version
+        or args.json
+    ):
+        raise BoxError(
+            "--host-clipboard applies only to native start/reset TUI clients."
+        )
+    configure_host_clipboard(args)
     if args.no_vault and (
         args.command not in ("start", "reset", "web")
         or args.status
@@ -4250,6 +4338,7 @@ def main(argv=None):
             image_preview_snapshot = validate_image_preview(version)
         if args.host_drop is True:
             validate_host_drop(version)
+        configure_host_clipboard(args, version)
         if opencode_compat.major(version) == 2:
             check_private_output()
         args._opencode_release = version
@@ -4342,6 +4431,7 @@ def main(argv=None):
                     "An active V2 workspace accepts additional TUI clients with selectors/--resume only; change session/configuration after the owner exits."
                 )
             configure_host_drop(path, data, args, data.get("opencode_version"))
+            configure_host_clipboard(args, data.get("opencode_version"))
             with workspace_service.attach(
                 sys.modules[__name__], path, data
             ) as connection:
@@ -4368,6 +4458,14 @@ def main(argv=None):
                     connection,
                     host_drop_enabled=effective_host_drop(args),
                     host_drop_required=args.host_drop is True,
+                    **(
+                        {
+                            "host_clipboard_reader": args._host_clipboard_reader,
+                            "host_clipboard_symlinks": args.host_clipboard_symlinks,
+                        }
+                        if args.host_clipboard
+                        else {}
+                    ),
                 )
         if args.command == "web" and workspace_service.controller_running(
             sys.modules[__name__], data
@@ -4382,11 +4480,12 @@ def main(argv=None):
                 return workspace_service.web_session(
                     sys.modules[__name__], data, connection, args
                 )
-    if args.image_preview or args.host_drop is True:
+    if args.image_preview or args.host_drop is True or args.host_clipboard:
         version = getattr(args, "_opencode_release", None) or detect_opencode_release()
         if args.image_preview and image_preview_snapshot is None:
             image_preview_snapshot = validate_image_preview(version)
         args._opencode_release = version
+        configure_host_clipboard(args, version)
     if args.command in ("start", "reset"):
         configure_host_drop(path, data, args, getattr(args, "_opencode_release", None))
     with workspace_lock(path), contextlib.ExitStack() as launch_context:

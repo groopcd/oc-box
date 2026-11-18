@@ -43,7 +43,7 @@ reference stay with the relevant commands.
 | Configure the vault or limit credentials per project | [Credentials](guides/credentials.md) |
 | Create, inspect or restore encrypted workspace archives | [Backup and restore](guides/backups.md) |
 | Use the dashboard, browser and persistent session shell | [Interfaces and concurrent clients](guides/clients.md) |
-| Choose between host drops, snapshots and live file tools | [Host files and attachments](guides/host-files.md) |
+| Choose between host drops, clipboard imports, snapshots and live file tools | [Host files and attachments](guides/host-files.md) |
 | Port optional plain-host plugins to V2 | [Host plugin migration](host-plugins.md) |
 | Enable Bash completion or locate installed manuals | [Installation](installation.md) |
 

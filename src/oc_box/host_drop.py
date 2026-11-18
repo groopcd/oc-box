@@ -22,12 +22,12 @@ import time
 from urllib.parse import unquote, urlsplit
 
 if __package__:
-    from . import host_drop_input, sharing
+    from . import host_drop_input, opencode_compat, sharing
 else:
     import host_drop_input
+    import opencode_compat
     import sharing
 
-SUPPORTED = frozenset(("2.2.6", "2.2.7", "2.3.0"))
 MAX_FILE = 8 * 1024 * 1024
 MAX_BATCH = 4
 MAX_BATCH_BYTES = 16 * 1024 * 1024
@@ -51,6 +51,63 @@ SUFFIX_MIME = {
     ".pdf": "application/pdf",
 }
 REFUSED = b"[oc-box: host file import refused]"
+CLIPBOARD_REFUSED = b"[oc-box: host clipboard import refused]"
+# Only these fixed labels may enter the native prompt. Never interpolate an
+# exception, helper stderr, URI, path, source bytes or clipboard value there.
+_CLIPBOARD_ERROR_CODES = {
+    "Host clipboard read timed out.": "clipboard-timeout",
+    "Host clipboard read failed.": "clipboard-helper",
+    "Host clipboard data exceeds its size limit.": "clipboard-size",
+    "Host clipboard offered invalid content types.": "clipboard-types",
+    "Host clipboard offered too many content types.": "clipboard-types",
+    "Host clipboard contains no supported image or copied files.": "clipboard-types",
+    "Host clipboard does not contain a PNG image.": "content-type",
+    "clipboard-size": "clipboard-size",
+    "clipboard-type": "clipboard-types",
+    "clipboard-file-list": "file-list",
+    "clipboard-file-list-limit": "file-list-limit",
+    "non-local-uri": "file-uri",
+    "invalid-uri-list": "file-list",
+    "uri-list-limit": "file-list-limit",
+    "host-source-refused": "source-guard",
+    "source-changed": "source-changed",
+    "file-limit": "file-limit",
+    "batch-limit": "batch-limit",
+    "extension-content-mismatch": "content-type",
+    "unsupported-content": "content-type",
+    "staging-limit": "client-limit",
+}
+_CLIPBOARD_REFUSALS = {
+    label: CLIPBOARD_REFUSED[:-1] + b": " + label.encode("ascii") + b"]"
+    for label in (
+        *_CLIPBOARD_ERROR_CODES.values(),
+        "client-state",
+        "client-limit",
+        "clipboard-read",
+        "file-list",
+        "source",
+        "transfer",
+    )
+}
+CLIPBOARD_WARNING = (
+    "Experimental host clipboard paste enabled for this TUI client. "
+    "Ctrl+Y imports a PNG image or up to four copied local "
+    "PNG/JPEG/GIF/WebP/PDF files (8 MiB each, 16 MiB per batch) into this "
+    "workspace; ordinary Ctrl+V is unchanged. Ctrl+Y is reserved throughout this "
+    "client, including shell panes (no shell yank). Imports always copy, never move. "
+    "The shortcut authorizes import "
+    "anywhere in this connection, not proof of composer focus. Workspace tools "
+    "can read imported files; history, provider systems or crashes may retain "
+    "copies. Nothing is automatically sent; arbitrary clipboard text is not requested."
+)
+CLIPBOARD_SYMLINKS_WARNING = (
+    "Clipboard file imports follow symlinks by default. Link targets may change "
+    "between copying and Ctrl+Y; protected targets remain refused. Use "
+    "--no-host-clipboard-symlinks to reject linked sources in this client."
+)
+CLIPBOARD_STRICT_WARNING = (
+    "Strict clipboard sources: symlinks in files or parent folders are refused."
+)
 WARNING = (
     "Experimental host file drops enabled. A supported absolute pathname "
     "pasted anywhere in this native TUI connection authorizes a temporary "
@@ -66,10 +123,18 @@ class DropError(ValueError):
 
 
 def preflight(version=None):
-    if version is not None and (
-        not isinstance(version, str) or version not in SUPPORTED
-    ):
-        raise DropError("Host file drops require OpenCode 2.2.6, 2.2.7 or 2.3.0.")
+    if version is not None:
+        try:
+            supported = isinstance(version, str) and opencode_compat.major(version) == 2
+        except ValueError:
+            supported = False
+        if not supported:
+            raise DropError(
+                "Host file drops and clipboard images require native OpenCode 2.x."
+            )
+    # Native pathname paste has no version-specific composer API. Retain the
+    # private-client validation, transfer handshake and terminal framing checks;
+    # a new 2.x minor/patch number is not itself a compatibility failure.
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise DropError("Host file drops require a direct interactive host terminal.")
     if any(os.environ.get(key) for key in ("TMUX", "STY", "SSH_CONNECTION", "SSH_TTY")):
@@ -165,22 +230,65 @@ def uri_paths(data):
                 raise DropError("unsupported-content")
             paths.append(path)
         return paths
+    except DropError:
+        raise
     except (ValueError, UnicodeError):
         raise DropError("invalid-uri-list") from None
 
 
-def capture(paths, protected):
+@contextlib.contextmanager
+def _clipboard_export(path, protected):
+    """Follow a clipboard selection once, then use an ordinary strict export.
+
+    Open only O_PATH with kernel NO_MAGICLINKS. Never resolve a proc magic link
+    or activate a device/FIFO. The canonical pathname is not authority: match
+    the strict export against the still-pinned selection before reading bytes.
+    """
+    try:
+        selected = valid_path(str(path))
+    except (ValueError, UnicodeError):
+        raise sharing.ShareError("Host source path is unavailable.") from None
+    selected = sharing._export_path(selected, protected=protected)
+    root = os.open("/", os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        pinned = sharing._open_path(root, str(selected), resolve=0x02)
+    finally:
+        os.close(root)
+    try:
+        before = os.fstat(pinned)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise DropError("host-source-refused")
+        try:
+            target = valid_path(os.readlink(f"/proc/self/fd/{pinned}"))
+        except (ValueError, UnicodeError):
+            raise sharing.ShareError("Host source path is unavailable.") from None
+        with sharing.Export(target, protected=protected) as export:
+            if sharing._identity(os.fstat(export.fd)) != sharing._identity(before):
+                raise DropError("host-source-refused")
+            yield export
+    finally:
+        os.close(pinned)
+
+
+def capture(paths, protected, *, follow_symlinks=False):
     """Pin every source first; validate/read bounded snapshots before staging."""
     try:
+        if type(follow_symlinks) is not bool:
+            raise DropError("host-source-refused")
         if not 1 <= len(paths) <= MAX_BATCH:
             raise DropError("batch-limit")
+        paths = [Path(path) for path in paths]
         images, total = [], 0
         with contextlib.ExitStack() as stack:
             exports = [
-                stack.enter_context(sharing.Export(path, protected=protected))
+                stack.enter_context(
+                    _clipboard_export(path, protected)
+                    if follow_symlinks
+                    else sharing.Export(path, protected=protected)
+                )
                 for path in paths
             ]
-            for export in exports:
+            for path, export in zip(paths, exports):
                 with export.open(".") as (fd, before):
                     if (
                         not stat.S_ISREG(before.st_mode)
@@ -210,7 +318,10 @@ def capture(paths, protected):
                         raise DropError("source-changed")
                 content = bytes(data)
                 mime = mime_type(content)
-                if SUFFIX_MIME.get(export.path.suffix.lower()) != mime:
+                if (
+                    SUFFIX_MIME.get(path.suffix.lower()) != mime
+                    or SUFFIX_MIME.get(export.path.suffix.lower()) != mime
+                ):
                     raise DropError("extension-content-mismatch")
                 total += len(content)
                 if total > MAX_BATCH_BYTES:
@@ -387,26 +498,47 @@ class Transfer:
 
 
 class Relay:
-    def __init__(self, box, data, connection, *, profile=None):
+    def __init__(
+        self,
+        box,
+        data,
+        connection,
+        *,
+        profile=None,
+        paths_enabled=True,
+        clipboard=None,
+        clipboard_symlinks=True,
+    ):
         self.box, self.data, self.connection = box, data, connection
         self.profile = profile or terminal_profile()
         if self.profile not in ("konsole", "kitty"):
             raise DropError("unsupported-terminal-profile")
         self.protected = sharing.protected_paths(box)
+        if type(paths_enabled) is not bool:
+            raise DropError("invalid-path-import-policy")
+        self.paths_enabled = paths_enabled
+        self.clipboard = clipboard
+        if type(clipboard_symlinks) is not bool:
+            raise DropError("invalid-clipboard-source-policy")
+        self.clipboard_symlinks = clipboard_symlinks
         self.transfer = Transfer(box, data, connection)
         self.refused = 0
+        self.clipboard_refused = 0
         self.protocol = None
         self.ident = None
         self.pending = bytearray()
         self.broken = False
         self.output = (
-            host_drop_input.OutputFilter() if self.profile == "kitty" else None
+            host_drop_input.OutputFilter()
+            if self.profile == "kitty" and self.paths_enabled
+            else None
         )
         self.input = host_drop_input.PasteInput(
             self.paste,
-            on_osc72=self.control if self.profile == "kitty" else None,
+            on_osc72=self.control if self.output is not None else None,
+            on_clipboard=self.paste_clipboard if clipboard is not None else None,
             max_paste=MAX_PATH_PASTE,
-            reserve_osc72=self.profile == "kitty",
+            reserve_osc72=self.output is not None,
         )
 
     def __enter__(self):
@@ -417,6 +549,8 @@ class Relay:
         return self.transfer.put(images)
 
     def paste(self, payload):
+        if not self.paths_enabled:
+            return None
         paths = pasted_paths(payload)
         if paths is None:
             return None
@@ -428,8 +562,56 @@ class Relay:
             self.refused += 1
             return REFUSED
 
+    def paste_clipboard(self):
+        """Only PasteInput's reserved host keyboard action calls this."""
+        phase = "client-state"
+        try:
+            if self.broken or self.clipboard is None:
+                raise DropError("clipboard-unavailable")
+            phase = "client-limit"
+            if (
+                self.transfer.files >= MAX_FILES
+                or self.transfer.total >= MAX_CLIENT_BYTES
+            ):
+                raise DropError("staging-limit")
+            phase = "clipboard-read"
+            mime, data = self.clipboard.read_selection()
+            if not isinstance(data, bytes) or not data:
+                raise DropError("clipboard-size")
+            if mime == "image/png":
+                if len(data) > MAX_FILE or mime_type(data) != mime:
+                    raise DropError("clipboard-type")
+                images = [(mime, data)]
+            else:
+                phase = "file-list"
+                if len(data) > MAX_PATH_PASTE:
+                    raise DropError("clipboard-file-list-limit")
+                if mime == "x-special/gnome-copied-files":
+                    operation, separator, data = data.partition(b"\n")
+                    if not separator or operation.rstrip(b"\r") not in (
+                        b"copy",
+                        b"cut",
+                    ):
+                        raise DropError("clipboard-file-list")
+                elif mime != "text/uri-list":
+                    raise DropError("clipboard-type")
+                paths = uri_paths(data)
+                phase = "client-limit"
+                if self.transfer.files + len(paths) > MAX_FILES:
+                    raise DropError("staging-limit")
+                phase = "source"
+                images = capture(
+                    paths, self.protected, follow_symlinks=self.clipboard_symlinks
+                )
+            phase = "transfer"
+            return self.stage(images)
+        except (ValueError, OSError) as error:
+            self.clipboard_refused += 1
+            label = _CLIPBOARD_ERROR_CODES.get(str(error), phase)
+            return _CLIPBOARD_REFUSALS.get(label, CLIPBOARD_REFUSED)
+
     def start(self):
-        if self.profile != "kitty":
+        if self.profile != "kitty" or not self.paths_enabled:
             return
         self.protocol = KittyDrop(self, self.emit)
         self.ident = self.protocol.ident
@@ -511,6 +693,12 @@ class Relay:
 
     def __exit__(self, *_):
         self.transfer.__exit__()
+        if self.clipboard_refused:
+            print(
+                f"oc-box: {self.clipboard_refused} host clipboard paste(s) refused; "
+                "no clipboard text was imported and no automatic retry was made.",
+                file=sys.stderr,
+            )
         if self.refused:
             print(
                 f"oc-box: {self.refused} host file drop(s) refused; no automatic retry was made.",

@@ -74,6 +74,11 @@ def _open_beneath(root, path):
     Refuse unsupported kernels/architectures rather than silently weakening the
     resolution policy. Source-root selection itself may cross host mountpoints.
     """
+    return _open_path(root, path, resolve=0x01 | 0x02 | 0x04 | 0x08)
+
+
+def _open_path(root, path, *, resolve):
+    """O_PATH lookup only; callers explicitly select kernel resolution policy."""
     if platform.system() != "Linux" or platform.machine() not in (
         "x86_64",
         "aarch64",
@@ -93,7 +98,7 @@ def _open_beneath(root, path):
             ("resolve", ctypes.c_uint64),
         ]
 
-    how = OpenHow(os.O_PATH | os.O_CLOEXEC, 0, 0x01 | 0x02 | 0x04 | 0x08)
+    how = OpenHow(os.O_PATH | os.O_CLOEXEC, 0, resolve)
     libc = ctypes.CDLL(None, use_errno=True)
     result = libc.syscall(
         ctypes.c_long(437),
@@ -130,31 +135,33 @@ def protected_paths(box):
     )
 
 
+def _export_path(path, *, protected=()):
+    """Common path policy, independent of how the caller pins its source."""
+    path = Path(os.path.abspath(Path(path).expanduser()))
+    if path.anchor != "/":
+        raise ShareError("Double-leading-slash host paths cannot be shared.")
+    broad = {Path(p) for p in ("/", "/home", "/tmp", "/var", "/etc", "/usr", "/opt")}
+    if path in broad | {Path.home().resolve()}:
+        raise ShareError("Choose a specific file/folder, not a broad host directory.")
+    if any(path.is_relative_to(Path(p)) for p in ("/proc", "/sys", "/dev", "/run")):
+        raise ShareError("Host runtime, device and kernel paths cannot be shared.")
+    for private in protected:
+        # A trusted alias remains protected even if it redirects outside its
+        # usual location; its actual destination is protected independently.
+        for root in (Path(private).absolute(), Path(private).resolve()):
+            if path.is_relative_to(root) or root.is_relative_to(path):
+                raise ShareError(
+                    "Refusing access to trusted application, credential or state paths."
+                )
+    return path
+
+
 class Export:
     """Pinned root; every subsequent lookup is confined by the kernel."""
 
     def __init__(self, path, *, protected=()):
         self.fd = None
-        self.path = Path(os.path.abspath(Path(path).expanduser()))
-        if self.path.anchor != "/":
-            raise ShareError("Double-leading-slash host paths cannot be shared.")
-        broad = {
-            Path(p) for p in ("/", "/home", "/tmp", "/var", "/etc", "/usr", "/opt")
-        }
-        if self.path in broad | {Path.home().resolve()}:
-            raise ShareError(
-                "Choose a specific file/folder, not a broad host directory."
-            )
-        if any(
-            self.path.is_relative_to(Path(p)) for p in ("/proc", "/sys", "/dev", "/run")
-        ):
-            raise ShareError("Host runtime, device and kernel paths cannot be shared.")
-        for private in protected:
-            private = Path(private).resolve()
-            if self.path.is_relative_to(private) or private.is_relative_to(self.path):
-                raise ShareError(
-                    "Refusing access to trusted application, credential or state paths."
-                )
+        self.path = _export_path(path, protected=protected)
         # Reject symlinks in *every* source ancestor, not just the final name.
         parent = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
         try:

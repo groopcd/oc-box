@@ -43,6 +43,7 @@ RUNTIME_FILES = (
     "attachments.py",
     "attachment_io.py",
     "host_drop.py",
+    "host_clipboard.py",
     "host_drop_io.py",
     "host_drop_input.py",
     "workspace_preferences.py",
@@ -106,6 +107,7 @@ MANUAL_FILES = (
     "tui.md",
     "update-channels.md",
     "web-shell.md",
+    "host-clipboard-testing.md",
 )
 COMPLETION_FILE = "completions/oc-box"
 
