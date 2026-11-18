@@ -1,4 +1,4 @@
-# Host clipboard image paste — short manual check
+# Host clipboard images and copied files — short manual check
 
 This is an experimental feature-branch check, not a software release or a
 security certification. Use an innocuous screenshot, not credentials or private
@@ -86,10 +86,14 @@ back to an X11 clipboard if `wl-paste` is missing.
 
 ## Five small observations
 
-1. **Clipboard screenshot:** copy the image itself in Spectacle, focus the native
+1. **Clipboard screenshot and files:** copy the image itself in Spectacle, focus the native
    prompt and press **Ctrl+Alt+Shift+V**. Look for an attachment/draft, not just
    host `/tmp/Spectacle...` text. The bridge must not send automatically.
    Send manually only if you want the model to receive the image.
+   Then copy a small PDF **file** in Dolphin (Ctrl+C), rather than selected text
+   inside a PDF viewer, and use the same shortcut. Also try a small PDF plus an
+   image with spaces in their names. Supported clipboard file lists should
+   produce native attachments without changing/moving the original files.
 2. **Existing drops:** directly drag a supported image with spaces in its name,
    or a small PDF, into a file-importing-enabled TUI. Existing behavior should
    remain. In Konsole keep **Disable drag & drop menu for files & URLs** enabled;
@@ -101,8 +105,9 @@ back to an X11 clipboard if `wl-paste` is missing.
 4. **No image / opt-out:** with plain text copied, the dedicated shortcut should
    show only a fixed refusal, never the text. A client launched without
    `--host-clipboard` must not read the desktop clipboard through this feature.
-   `--no-host-drop --host-clipboard` should still allow clipboard PNGs while
-   leaving file-drop importing disabled (that explicit file preference persists).
+   `--no-host-drop --host-clipboard` should still allow clipboard PNGs and copied
+   supported files while leaving drag/path-paste imports disabled (that explicit
+   file preference persists).
 5. **Exit:** quit the test client normally. Observe any fixed refusal/cleanup
    warning; don't restart or inspect other resources to hide a failure. Cleanup
    is best-effort and does not recall history, provider or copied bytes.
@@ -120,9 +125,18 @@ on the feature branch.
   placeholder, or no visible action.
 - Whether anything was sent without Enter (must not happen).
 - Whether ordinary Ctrl+V/text paste and existing supported file drops changed.
+- Whether copied PDF/image files worked, how many were selected and their rough
+  sizes; don't paste the raw clipboard's URI list or private filenames.
 - Any **fixed** refusal/cleanup warning. Do not send clipboard contents, private
   terminal recordings, raw environment dumps or credential-bearing logs.
 
 Imported staging is readable by other processes/tools using the same container
 user. It is not per-session isolation. Client crashes, retained references,
 native history/backups and agent-created copies can outlive normal cleanup.
+
+Copied files are read through typed local URI lists, not arbitrary clipboard
+text. Limits are four supported files, 8 MiB/file and 16 MiB/batch. URI lists are
+preferred over optional PNG thumbnails, and failures do not silently fall back.
+A clipboard offering only plain text or raw PDF bytes is not a copied-file list.
+Cut selections are copied only; their sources and the clipboard remain unchanged.
+Native/model support for reading PDF content is separate from file transfer.

@@ -1,4 +1,4 @@
-"""Host-only PNG snapshots, read solely on an explicit host input gesture.
+"""Host clipboard images/file references, read only on a host input gesture.
 
 Preflight discovers a local helper without reading the clipboard. PNG signature
 checks identify a format only; they do not decode or sanitize image content.
@@ -11,6 +11,9 @@ import subprocess
 import time
 
 MAX_BYTES = 8 * 1024 * 1024
+MAX_METADATA_BYTES = 16384
+MAX_TARGETS = 128
+FILE_TYPES = ("text/uri-list", "x-special/gnome-copied-files")
 READ_TIMEOUT = 2.0
 REAP_TIMEOUT = 0.25
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
@@ -62,7 +65,7 @@ def preflight() -> "Reader":
             key: value for key, value in os.environ.items() if key in _DESKTOP_ENV
         }
         environment["PATH"] = os.defpath
-        return Reader(command, environment)
+        return Reader(command, environment, helper=helper)
     except ClipboardError:
         raise
     except (OSError, ValueError):
@@ -90,19 +93,76 @@ def _reap(process):
 class Reader:
     """A discovered command and sanitized environment, not a clipboard cache."""
 
-    __slots__ = ("command", "env")
+    __slots__ = ("command", "env", "helper")
 
-    def __init__(self, command, environment):
+    def __init__(self, command, environment, *, helper):
+        if helper not in ("wl-paste", "xclip"):
+            raise ClipboardError("Host clipboard helper is unsupported.")
         self.command = tuple(command)
         self.env = dict(environment)
+        self.helper = helper
+
+    def _command(self, mime=None):
+        if self.helper == "wl-paste":
+            arguments = (
+                ("--list-types",)
+                if mime is None
+                else (
+                    "--no-newline",
+                    "--type",
+                    mime,
+                )
+            )
+        else:
+            arguments = (
+                "-selection",
+                "clipboard",
+                "-target",
+                mime or "TARGETS",
+                "-out",
+            )
+        return (self.command[0], *arguments)
+
+    def read_selection(self):
+        """One bounded type negotiation and selected payload read; no retries."""
+        deadline = time.monotonic() + READ_TIMEOUT
+        offered = self._read(self._command(), MAX_METADATA_BYTES, deadline)
+        try:
+            targets = offered.decode("ascii").split()
+        except UnicodeError:
+            raise ClipboardError(
+                "Host clipboard offered invalid content types."
+            ) from None
+        if len(targets) > MAX_TARGETS:
+            raise ClipboardError("Host clipboard offered too many content types.")
+        # Explicit copied files win over an application's optional PNG thumbnail.
+        mime = next(
+            (kind for kind in (*FILE_TYPES, "image/png") if kind in targets), None
+        )
+        if mime is None:
+            raise ClipboardError(
+                "Host clipboard contains no supported image or copied files."
+            )
+        limit = MAX_BYTES if mime == "image/png" else MAX_METADATA_BYTES
+        data = self._read(self._command(mime), limit, deadline)
+        if mime == "image/png" and not data.startswith(_PNG_SIGNATURE):
+            raise ClipboardError("Host clipboard does not contain a PNG image.")
+        return mime, data
 
     def read_png(self) -> bytes:
-        """Read one bounded snapshot after the caller's explicit user gesture."""
+        """Explicit PNG-only read, retained for the bounded image reader."""
+        data = self._read(self.command, MAX_BYTES, time.monotonic() + READ_TIMEOUT)
+        if not data.startswith(_PNG_SIGNATURE):
+            raise ClipboardError("Host clipboard does not contain a PNG image.")
+        return data
+
+    def _read(self, command, limit, deadline):
         process = None
         try:
-            deadline = time.monotonic() + READ_TIMEOUT
+            if time.monotonic() >= deadline:
+                raise ClipboardError("Host clipboard read timed out.")
             process = subprocess.Popen(
-                self.command,
+                command,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
@@ -122,18 +182,16 @@ class Reader:
                     ready, _, _ = select.select([descriptor], [], [], remaining)
                     if not ready:
                         raise ClipboardError("Host clipboard read timed out.")
-                    chunk = os.read(descriptor, min(65536, MAX_BYTES + 1 - len(output)))
+                    chunk = os.read(descriptor, min(65536, limit + 1 - len(output)))
                 except (BlockingIOError, InterruptedError):
                     continue
                 if not chunk:
                     break
                 output.extend(chunk)
-                if len(output) > MAX_BYTES:
-                    raise ClipboardError("Host clipboard image exceeds 8 MiB.")
+                if len(output) > limit:
+                    raise ClipboardError("Host clipboard data exceeds its size limit.")
             if process.wait(timeout=max(0, deadline - time.monotonic())) != 0:
                 raise ClipboardError("Host clipboard read failed.")
-            if not output.startswith(_PNG_SIGNATURE):
-                raise ClipboardError("Host clipboard does not contain a PNG image.")
             return bytes(output)
         except ClipboardError:
             raise

@@ -28,13 +28,15 @@ not a deprecated feature that can be removed from the regression suite.
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
 
-### Experimental host clipboard image shortcut
+### Experimental host clipboard attachment shortcut
 
-`tests/test_host_clipboard.py` has four focused mock-only groups: read-free helper
+`tests/test_host_clipboard.py` has six focused groups: read-free helper
 discovery and bounded PNG reads with a desktop-only environment; exact top-level
 host shortcut framing and negative opaque/pasted-input cases; reuse of private
 staging without automatic Send or re-enabling file drops; and CLI/client scope
-plus distribution inclusion. No test reads the actual desktop clipboard.
+plus distribution inclusion; bounded target negotiation without plain-text
+requests/retries; and copied PDF/image batches through real synthetic-file
+capture guards. No test reads the actual desktop clipboard or starts Podman.
 Existing directly affected input/drop/completion checks remain separate.
 The host-drop eligibility matrix accepts native 2.x minor/patch versions,
 including 2.3.2 and synthetic future 2.x values, while retaining V1/malformed/
@@ -43,11 +45,14 @@ a claim that all native releases have been tested. Private transfer handshake
 and framing checks remain authoritative; unrelated version-pinned fixtures and
 history/recovery guards are not broadened by this feature.
 
-The initial implementation deliberately leaves real Spectacle/Wayland/X11,
+The implementation deliberately leaves real Spectacle/Dolphin/Wayland/X11,
 Konsole/Kitty shortcut reporting, native composer focus and image attachment
 behavior to the operator's short [host check](host-clipboard-testing.md).
 These local checks establish no live rootless-Podman or desktop acceptance.
 Do not add a new broad harness or repeat unrelated release gates for this check.
+The owner's earlier "it worked" report covers the PNG workflow on native 2.3.2,
+not the later copied-file extension or every checklist item. Keep those scopes
+separate; no copied-file host pass is established by the synthetic checks.
 
 ### Experimental browser attachment adapter
 

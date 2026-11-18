@@ -1,9 +1,10 @@
-"""Four focused mock-only checks; never read the real desktop clipboard."""
+"""Focused clipboard/file checks; never read the real desktop clipboard."""
 
 import contextlib
 import io
 import os
 from pathlib import Path
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, Mock, patch
@@ -113,6 +114,177 @@ class HostClipboardTests(unittest.TestCase):
                     if case in ("oversize", "timeout"):
                         process.kill.assert_called_once()
 
+    def test_selected_targets_never_request_plaintext_or_retry_another_format(self):
+        examples = (
+            (
+                b"text/plain\nimage/png\ntext/uri-list\n",
+                b"file:///tmp/a.pdf\r\n",
+                "text/uri-list",
+            ),
+            (
+                b"TARGETS x-special/gnome-copied-files",
+                b"copy\nfile:///tmp/a.pdf",
+                "x-special/gnome-copied-files",
+            ),
+            (b"image/png\n", PNG, "image/png"),
+        )
+        for desktop, helper in (
+            ({"WAYLAND_DISPLAY": "wayland-0"}, "wl-paste"),
+            ({"DISPLAY": ":0"}, "xclip"),
+        ):
+            with (
+                patch.dict(os.environ, desktop, clear=True),
+                patch.object(
+                    host_clipboard.shutil, "which", return_value="/usr/bin/" + helper
+                ),
+            ):
+                reader = host_clipboard.preflight()
+            for offered, payload, mime in examples:
+                with (
+                    self.subTest(helper=helper, mime=mime),
+                    patch.object(
+                        host_clipboard.Reader, "_read", side_effect=[offered, payload]
+                    ) as read,
+                ):
+                    self.assertEqual(reader.read_selection(), (mime, payload))
+                    self.assertEqual(read.call_count, 2)
+                    metadata, selected = read.call_args_list
+                    self.assertIn(
+                        "--list-types" if helper == "wl-paste" else "TARGETS",
+                        metadata.args[0],
+                    )
+                    self.assertIn(mime, selected.args[0])
+                    self.assertNotIn("text/plain", selected.args[0])
+                    self.assertEqual(
+                        metadata.args[-1], selected.args[-1]
+                    )  # One deadline.
+                    self.assertEqual(
+                        selected.args[1],
+                        host_clipboard.MAX_BYTES
+                        if mime == "image/png"
+                        else host_clipboard.MAX_METADATA_BYTES,
+                    )
+            for offered in (b"text/plain", b"\xff", b" ".join([b"unknown"] * 129)):
+                with (
+                    self.subTest(offered=offered[:40]),
+                    patch.object(
+                        host_clipboard.Reader, "_read", return_value=offered
+                    ) as read,
+                ):
+                    with self.assertRaises(host_clipboard.ClipboardError):
+                        reader.read_selection()
+                    self.assertEqual(read.call_count, 1)
+            with patch.object(
+                host_clipboard.Reader,
+                "_read",
+                side_effect=[
+                    b"text/uri-list\nimage/png\n",
+                    host_clipboard.ClipboardError("fixture"),
+                ],
+            ) as read:
+                with self.assertRaises(host_clipboard.ClipboardError):
+                    reader.read_selection()
+                self.assertEqual(
+                    read.call_count, 2
+                )  # No PNG fallback after file-list refusal.
+
+    def test_copied_pdf_and_image_files_use_guarded_capture_and_never_move(self):
+        with tempfile.TemporaryDirectory(prefix="host-clipboard-files-") as work:
+            root = Path(work)
+            pdf = root / "report with spaces.pdf"
+            pdf_data = b"%PDF-1.4\nsynthetic-only\n%%EOF\n"
+            pdf.write_bytes(pdf_data)
+            image = root / "picture.png"
+            image.write_bytes(PNG)
+            link = root / "linked.pdf"
+            link.symlink_to(pdf)
+            application = root / "application"
+            application.mkdir()
+            protected = application / "private.pdf"
+            protected.write_bytes(pdf_data)
+            facade = SimpleNamespace(
+                APP=application,
+                state_root=lambda: root / "state",
+                vault=SimpleNamespace(vault_path=lambda: root / "vault/vault.age"),
+            )
+            transfer = MagicMock(files=0, total=0, cleanup_verified=True)
+            transfer.put.return_value = (
+                b"/tmp/oc-box-drop-test/drop_one.pdf /tmp/oc-box-drop-test/drop_two.png"
+            )
+            reader = Mock()
+            uris = (pdf.as_uri() + "\r\n" + image.as_uri() + "\r\n").encode()
+            before = {
+                p: (p.stat().st_mtime_ns, p.stat().st_ctime_ns) for p in (pdf, image)
+            }
+            with (
+                patch.object(host_drop, "Transfer", return_value=transfer),
+                contextlib.redirect_stderr(io.StringIO()),
+                host_drop.Relay(
+                    facade,
+                    {"opencode_version": "2.3.2"},
+                    {},
+                    profile="konsole",
+                    paths_enabled=False,
+                    clipboard=reader,
+                ) as relay,
+            ):
+                for mime, payload in (
+                    ("text/uri-list", uris),
+                    ("x-special/gnome-copied-files", b"copy\n" + uris),
+                    ("x-special/gnome-copied-files", b"cut\r\n" + uris),
+                ):
+                    with self.subTest(mime=mime, operation=payload[:4]):
+                        transfer.put.reset_mock()
+                        reader.read_selection.return_value = (mime, payload)
+                        result = relay.input_bytes(KEY)
+                        self.assertEqual(
+                            result, PASTE + transfer.put.return_value + END
+                        )
+                        transfer.put.assert_called_once_with(
+                            [
+                                ("application/pdf", pdf_data),
+                                ("image/png", PNG),
+                            ]
+                        )
+                        self.assertNotIn(str(root).encode(), result)
+                        self.assertNotIn(b"\r", result)
+                        self.assertNotIn(b"\n", result)
+                for mime, payload in (
+                    ("text/plain", str(pdf).encode()),
+                    ("text/uri-list", b"file://foreign/tmp/a.pdf"),
+                    ("text/uri-list", b"file:///tmp/a.docx"),
+                    ("text/uri-list", link.as_uri().encode()),
+                    ("text/uri-list", protected.as_uri().encode()),
+                    ("text/uri-list", uris * 3),
+                    ("x-special/gnome-copied-files", b"move\n" + uris),
+                ):
+                    with self.subTest(mime=mime, payload=payload[:40]):
+                        transfer.put.reset_mock()
+                        reader.reset_mock()
+                        reader.read_selection.return_value = (mime, payload)
+                        self.assertEqual(
+                            relay.input_bytes(KEY),
+                            PASTE + host_drop.CLIPBOARD_REFUSED + END,
+                        )
+                        transfer.put.assert_not_called()
+                        reader.read_selection.assert_called_once_with()
+                reader.read_selection.return_value = (
+                    "text/uri-list",
+                    (pdf.as_uri() + "\n" + (root / "missing.pdf").as_uri()).encode(),
+                )
+                with patch.object(host_drop.os, "pread") as read:
+                    self.assertEqual(
+                        relay.input_bytes(KEY),
+                        PASTE + host_drop.CLIPBOARD_REFUSED + END,
+                    )
+                    read.assert_not_called()  # Whole batch admitted before reading any file.
+                self.assertEqual(pdf.read_bytes(), pdf_data)
+                self.assertEqual(image.read_bytes(), PNG)
+                self.assertEqual(
+                    before,
+                    {p: (p.stat().st_mtime_ns, p.stat().st_ctime_ns) for p in before},
+                )
+
     def test_only_complete_opted_in_host_shortcuts_grant_a_read(self):
         for key in (KEY, b"\x1b[118;8:1u", b"\x1b[27;8;86~", b"\x1b[118:86:118;200u"):
             with self.subTest(key=key):
@@ -160,7 +332,7 @@ class HostClipboardTests(unittest.TestCase):
         transfer = MagicMock(files=0, total=0, cleanup_verified=True)
         transfer.put.return_value = b"/tmp/oc-box-drop-test/drop_image.png"
         reader = Mock()
-        reader.read_png.return_value = PNG
+        reader.read_selection.return_value = ("image/png", PNG)
         errors = io.StringIO()
         with (
             patch.object(host_drop, "Transfer", return_value=transfer),
@@ -174,9 +346,9 @@ class HostClipboardTests(unittest.TestCase):
                 clipboard=reader,
             ) as relay,
         ):
-            reader.read_png.assert_not_called()
+            reader.read_selection.assert_not_called()
             self.assertEqual(relay.output_bytes(KEY), KEY)
-            reader.read_png.assert_not_called()
+            reader.read_selection.assert_not_called()
             path = PASTE + b"/tmp/host-image.png" + END
             with patch.object(host_drop.sharing, "Export") as export:
                 self.assertEqual(relay.input_bytes(path), path)
@@ -184,11 +356,11 @@ class HostClipboardTests(unittest.TestCase):
             self.assertEqual(
                 relay.input_bytes(KEY), PASTE + transfer.put.return_value + END
             )
-            reader.read_png.assert_called_once_with()
+            reader.read_selection.assert_called_once_with()
             transfer.put.assert_called_once_with([("image/png", PNG)])
             reader.reset_mock()
             transfer.put.reset_mock()
-            reader.read_png.return_value = b"private text"
+            reader.read_selection.return_value = ("image/png", b"private text")
             refused = relay.input_bytes(KEY)
             self.assertEqual(refused, PASTE + host_drop.CLIPBOARD_REFUSED + END)
             self.assertNotIn(b"private text", refused)
@@ -198,7 +370,7 @@ class HostClipboardTests(unittest.TestCase):
             self.assertEqual(
                 relay.input_bytes(KEY), PASTE + host_drop.CLIPBOARD_REFUSED + END
             )
-            reader.read_png.assert_not_called()
+            reader.read_selection.assert_not_called()
         transfer.__exit__.assert_called_once()
         self.assertNotIn("private text", errors.getvalue())
 
@@ -213,7 +385,7 @@ class HostClipboardTests(unittest.TestCase):
             self.assertIs(box.configure_host_clipboard(args, "2.3.2"), reader)
             self.assertIs(box.configure_host_clipboard(args, "2.3.2"), reader)
             discover.assert_called_once()
-            reader.read_png.assert_not_called()
+            reader.read_selection.assert_not_called()
             self.assertIs(args.host_drop, False)
         with (
             patch.object(host_clipboard, "preflight") as discover,
@@ -272,7 +444,7 @@ class HostClipboardTests(unittest.TestCase):
                     host_clipboard_reader=reader,
                 )
             run.assert_not_called()  # A changed transfer contract still refuses.
-            reader.read_png.assert_not_called()
+            reader.read_selection.assert_not_called()
         self.assertIn("host_clipboard.py", installation.PROGRAM_FILES)
         self.assertIn("host-clipboard-testing.md", installation.MANUAL_FILES)
 

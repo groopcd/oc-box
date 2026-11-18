@@ -203,10 +203,13 @@ their checkout ownership distinct from unrelated source and flat installations.
   can retain staging/history/provider/backup copies. Default relay behavior and
   the independent-confirmation broker remain unchanged. No host acceptance is
   established by synthetic parser/process/native checks.
-- `host_clipboard.py`: opt-in, per-client host PNG clipboard reader. Discovery
+- `host_clipboard.py`: opt-in, per-client host PNG/copied-file clipboard reader. Discovery
   never reads; only the dedicated top-level host shortcut may call the bounded
-  desktop helper. No background polling, model/output/MCP triggers, clipboard
-  text requests, socket mounts, listeners or automatic Send. Preserve ordinary
+  desktop helper. Typed local URI lists reuse the existing pinned host-drop
+  source guards; type discovery is not proof of file-manager provenance.
+  Imports always copy, never move/cut or modify the source/clipboard. No
+  background polling, model/output/MCP triggers, arbitrary text/plain requests,
+  unsafe fallback, socket mounts, listeners or automatic Send. Preserve ordinary
   Ctrl+V, file-drop opt-outs and the helper's desktop-only environment. Synthetic
   tests are not desktop/native composition acceptance; keep host checks minimal.
   Host drop/clipboard eligibility covers valid native 2.x releases rather than

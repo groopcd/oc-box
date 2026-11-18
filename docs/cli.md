@@ -2217,19 +2217,19 @@ TUI, use `oc-box preferences --host-drop off`.
 
 Experimental, **off by default and per native TUI client**. On a supported
 direct Konsole or Kitty terminal, opt in with `start` (the default command) or
-`reset`, then press **Ctrl+Alt+Shift+V** to import one PNG image from the host
-desktop clipboard. Ordinary Ctrl+V, terminal text paste, clipboard contents and
+`reset`, then press **Ctrl+Alt+Shift+V** to import a PNG clipboard image or copied
+local PNG/JPEG/GIF/WebP/PDF files. Ordinary Ctrl+V, terminal text paste, clipboard contents and
 host OpenCode settings are unchanged. The native TUI still runs inside the
 container; there is no Wayland/X11 socket mount or host clipboard MCP endpoint.
 
 The host relay recognizes only distinct ASCII CSI-u or ModifyOtherKeys reports
 for this shortcut, not legacy key guesses. A terminal/global shortcut that
-consumes the chord or reports it indistinguishably will not import an image.
+consumes the chord or reports it indistinguishably will not import content.
 The first version uses this dedicated shortcut rather than intercepting normal
 Ctrl+V. It inherits the direct-TTY, native-version and terminal-profile
 requirements of `--host-drop`; SSH, tmux, screen, unknown/ambiguous profiles and
 unsupported clients refuse. CSI-u repeat/release reports do not request another
-image; legacy ModifyOtherKeys repeats cannot be distinguished from new presses.
+import; legacy ModifyOtherKeys repeats cannot be distinguished from new presses.
 
 Clipboard access occurs only in response to the opted-in host input shortcut,
 never from model output, a plugin/MCP request or background polling. The keyboard
@@ -2241,12 +2241,34 @@ Read-only import is not confidentiality or recall.
 
 Wayland requires `wl-paste` from `wl-clipboard` on the host. X11 requires `xclip`.
 If Wayland is selected, a missing helper does not fall back to another clipboard.
-Preflight only locates the helper; it reads no clipboard data. The shortcut
-requests `image/png` only, with an 8 MiB limit, a bounded helper timeout and a
-desktop-only helper environment. Text, file lists and other image encodings are
-not requested or converted. Unsupported/missing image data produces a fixed
-refusal placeholder, without exposing clipboard text or helper stderr. No
-packages are installed automatically.
+Preflight only locates the helper; it reads no clipboard data. On the shortcut,
+one bounded content-type query selects `text/uri-list`,
+`x-special/gnome-copied-files`, or `image/png`, in that order. There is one payload
+read under the same helper deadline and desktop-only environment. File lists
+take precedence over an optional PNG thumbnail; refused/invalid file lists do
+not fall back to another format. Type lists and file-list payloads are limited
+to 16 KiB, with at most 128 offered targets.
+
+Only local `file:` references are accepted. They use the existing descriptor-pinned
+host-drop capture: no remote URL fetch, symlink, hard-link, special/protected file,
+directory or unsupported extension; signatures must match extensions. Up to four
+files may be imported, at most 8 MiB each and 16 MiB per batch, within existing
+per-client quotas. A batch is validated before staging. Import always snapshots
+copies, even for a cut selection: it never moves/deletes the source, clears the
+clipboard or acknowledges a file-manager move.
+
+These MIME targets describe data, not proof it came from a file manager. The
+shortcut authorizes their local file references without a per-file confirmation;
+do not use it to discuss untrusted copied file URLs. Clipboard selection may
+change between type discovery and payload retrieval; no atomic desktop snapshot
+is promised. For independent per-image host confirmation, use `attach --broker`.
+
+Arbitrary `text/plain`, bare text paths and raw PDF clipboard payloads are not
+requested or reinterpreted. Copy a PDF **file** in a file manager; selected text
+inside a PDF viewer remains ordinary text paste. PNG pixel data is still accepted
+when no supported copied-file list is offered. Unsupported/missing content
+produces a fixed refusal placeholder without clipboard data or helper stderr.
+No packages are installed automatically.
 Missing helpers name the selected utility and its host package explicitly:
 `wl-paste` is provided by `wl-clipboard`, and X11 uses `xclip`. These package
 names are the same across the supported distro catalog; see the host test guide
@@ -2262,7 +2284,8 @@ No clipboard setting or data is saved in workspace preferences or the registry.
 An additional `start --host-clipboard` may attach to an existing private V2 owner
 without restart, credential refresh or unlock. It opts in only that new TUI
 client; existing clients are unchanged. `--no-host-drop --host-clipboard` can
-enable clipboard images while retaining the explicit file-drop opt-out.
+enable clipboard imports (including copied files) while retaining the explicit
+drag/pathname-paste file-drop opt-out.
 V1, web, the manager/embedded terminal, maintenance, sync and informational
 commands reject the flag. Do not reset a workspace just to enable this feature.
 

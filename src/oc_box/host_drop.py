@@ -51,14 +51,16 @@ SUFFIX_MIME = {
     ".pdf": "application/pdf",
 }
 REFUSED = b"[oc-box: host file import refused]"
-CLIPBOARD_REFUSED = b"[oc-box: host clipboard image import refused]"
+CLIPBOARD_REFUSED = b"[oc-box: host clipboard import refused]"
 CLIPBOARD_WARNING = (
-    "Experimental host clipboard image paste enabled for this TUI client. "
-    "Ctrl+Alt+Shift+V imports one PNG image from the host clipboard into this "
-    "workspace; ordinary Ctrl+V is unchanged. The shortcut authorizes import "
+    "Experimental host clipboard paste enabled for this TUI client. "
+    "Ctrl+Alt+Shift+V imports a PNG image or up to four copied local "
+    "PNG/JPEG/GIF/WebP/PDF files (8 MiB each, 16 MiB per batch) into this "
+    "workspace; ordinary Ctrl+V is unchanged. Imports always copy, never move. "
+    "The shortcut authorizes import "
     "anywhere in this connection, not proof of composer focus. Workspace tools "
-    "can read imported images; history, provider systems or crashes may retain "
-    "copies. Nothing is automatically sent; clipboard text is not requested."
+    "can read imported files; history, provider systems or crashes may retain "
+    "copies. Nothing is automatically sent; arbitrary clipboard text is not requested."
 )
 WARNING = (
     "Experimental host file drops enabled. A supported absolute pathname "
@@ -467,12 +469,30 @@ class Relay:
                 or self.transfer.total >= MAX_CLIENT_BYTES
             ):
                 raise DropError("staging-limit")
-            data = self.clipboard.read_png()
-            if not isinstance(data, bytes) or not 0 < len(data) <= MAX_FILE:
+            mime, data = self.clipboard.read_selection()
+            if not isinstance(data, bytes) or not data:
                 raise DropError("clipboard-size")
-            if mime_type(data) != "image/png":
-                raise DropError("clipboard-type")
-            return self.stage([("image/png", data)])
+            if mime == "image/png":
+                if len(data) > MAX_FILE or mime_type(data) != mime:
+                    raise DropError("clipboard-type")
+                images = [(mime, data)]
+            else:
+                if len(data) > MAX_PATH_PASTE:
+                    raise DropError("clipboard-file-list-limit")
+                if mime == "x-special/gnome-copied-files":
+                    operation, separator, data = data.partition(b"\n")
+                    if not separator or operation.rstrip(b"\r") not in (
+                        b"copy",
+                        b"cut",
+                    ):
+                        raise DropError("clipboard-file-list")
+                elif mime != "text/uri-list":
+                    raise DropError("clipboard-type")
+                paths = uri_paths(data)
+                if self.transfer.files + len(paths) > MAX_FILES:
+                    raise DropError("staging-limit")
+                images = capture(paths, self.protected)
+            return self.stage(images)
         except (ValueError, OSError):
             self.clipboard_refused += 1
             return CLIPBOARD_REFUSED
@@ -562,7 +582,7 @@ class Relay:
         self.transfer.__exit__()
         if self.clipboard_refused:
             print(
-                f"oc-box: {self.clipboard_refused} host clipboard image paste(s) refused; "
+                f"oc-box: {self.clipboard_refused} host clipboard paste(s) refused; "
                 "no clipboard text was imported and no automatic retry was made.",
                 file=sys.stderr,
             )
