@@ -208,6 +208,8 @@ class HostClipboardTests(unittest.TestCase):
             image.write_bytes(PNG)
             link = root / "linked.pdf"
             link.symlink_to(pdf)
+            directory_link = root / "folder shortcut"
+            directory_link.symlink_to(".", target_is_directory=True)
             application = root / "application"
             application.mkdir()
             protected = application / "private.pdf"
@@ -242,6 +244,15 @@ class HostClipboardTests(unittest.TestCase):
                     ("text/uri-list", uris),
                     ("x-special/gnome-copied-files", b"copy\n" + uris),
                     ("x-special/gnome-copied-files", b"cut\r\n" + uris),
+                    ("text/uri-list", (link.as_uri() + "\n" + image.as_uri()).encode()),
+                    (
+                        "text/uri-list",
+                        (
+                            (directory_link / pdf.name).as_uri()
+                            + "\n"
+                            + (directory_link / image.name).as_uri()
+                        ).encode(),
+                    ),
                 ):
                     with self.subTest(mime=mime, operation=payload[:4]):
                         transfer.put.reset_mock()
@@ -263,7 +274,6 @@ class HostClipboardTests(unittest.TestCase):
                     ("text/plain", str(pdf).encode(), "clipboard-types"),
                     ("text/uri-list", b"file://foreign/tmp/a.pdf", "file-uri"),
                     ("text/uri-list", b"file:///tmp/a.docx", "content-type"),
-                    ("text/uri-list", link.as_uri().encode(), "source-guard"),
                     ("text/uri-list", protected.as_uri().encode(), "source-guard"),
                     ("text/uri-list", uris * 3, "file-list-limit"),
                     ("x-special/gnome-copied-files", b"move\n" + uris, "file-list"),
@@ -294,6 +304,163 @@ class HostClipboardTests(unittest.TestCase):
                     before,
                     {p: (p.stat().st_mtime_ns, p.stat().st_ctime_ns) for p in before},
                 )
+
+    def test_redirected_sources_keep_strict_optout_protection_and_descriptor_binding(
+        self,
+    ):
+        with tempfile.TemporaryDirectory(prefix="host-clipboard-links-") as work:
+            root = Path(work)
+            pdf_data = b"%PDF-1.4\nsynthetic-only\n%%EOF\n"
+            pdf = root / "source.pdf"
+            pdf.write_bytes(pdf_data)
+            private = root / "private"
+            private.mkdir()
+            secret = private / "secret.pdf"
+            secret.write_bytes(b"%PDF-1.4\nsynthetic-private\n")
+            alias = root / "linked.pdf"
+            alias.symlink_to(pdf)
+            directory = root / "linked folder"
+            directory.symlink_to(root, target_is_directory=True)
+            facade = SimpleNamespace(
+                APP=private,
+                state_root=lambda: root / "state",
+                vault=SimpleNamespace(vault_path=lambda: root / "vault/vault.age"),
+            )
+            transfer = MagicMock(files=0, total=0, cleanup_verified=True)
+            transfer.put.return_value = b"/tmp/oc-box-drop-test/drop_one.pdf"
+            reader = Mock()
+            with (
+                patch.object(host_drop, "Transfer", return_value=transfer),
+                contextlib.redirect_stderr(io.StringIO()),
+                host_drop.Relay(
+                    facade,
+                    {},
+                    {},
+                    profile="konsole",
+                    clipboard=reader,
+                    clipboard_symlinks=False,
+                ) as strict,
+            ):
+                for path in (alias, directory / pdf.name, secret, root / "absent.pdf"):
+                    reader.read_selection.return_value = (
+                        "text/uri-list",
+                        path.as_uri().encode(),
+                    )
+                    with (
+                        self.subTest(strict=path.name),
+                        patch.object(host_drop.os, "pread") as read,
+                    ):
+                        self.assertEqual(
+                            strict.input_bytes(KEY), refusal("source-guard")
+                        )
+                        read.assert_not_called()
+                transfer.put.assert_not_called()
+            protected_alias = root / "protected-alias.pdf"
+            protected_alias.symlink_to(secret)
+            private_alias = private / "public-alias.pdf"
+            private_alias.symlink_to(pdf)
+            dangling = root / "dangling.pdf"
+            dangling.symlink_to(root / "absent.pdf")
+            loop = root / "loop.pdf"
+            loop.symlink_to(loop)
+            hard_source = root / "hard-source.pdf"
+            hard_source.write_bytes(pdf_data)
+            hard_link = root / "hard-link.pdf"
+            os.link(hard_source, hard_link)
+            fifo = root / "pipe.pdf"
+            os.mkfifo(fifo)
+            with (
+                patch.object(host_drop, "Transfer", return_value=transfer),
+                contextlib.redirect_stderr(io.StringIO()),
+                host_drop.Relay(
+                    facade, {}, {}, profile="konsole", clipboard=reader
+                ) as relay,
+                pdf.open("rb") as descriptor,
+            ):
+                magic = root / "magic.pdf"
+                magic.symlink_to(f"/proc/self/fd/{descriptor.fileno()}")
+                for path in (
+                    protected_alias,
+                    private_alias,
+                    dangling,
+                    loop,
+                    hard_link,
+                    fifo,
+                    magic,
+                ):
+                    reader.read_selection.return_value = (
+                        "text/uri-list",
+                        path.as_uri().encode(),
+                    )
+                    with (
+                        self.subTest(source=path.name),
+                        patch.object(host_drop.os, "pread") as read,
+                    ):
+                        self.assertEqual(
+                            relay.input_bytes(KEY), refusal("source-guard")
+                        )
+                        read.assert_not_called()
+                transfer.put.assert_not_called()
+                for name, target in (
+                    ("mismatched.png", pdf),
+                    ("unsupported-target.pdf", root / "payload.bin"),
+                ):
+                    if not target.exists():
+                        target.write_bytes(pdf_data)
+                    mismatch = root / name
+                    mismatch.symlink_to(target)
+                    reader.read_selection.return_value = (
+                        "text/uri-list",
+                        mismatch.as_uri().encode(),
+                    )
+                    self.assertEqual(relay.input_bytes(KEY), refusal("content-type"))
+                transfer.put.assert_not_called()
+                reader.read_selection.return_value = (
+                    "text/uri-list",
+                    alias.as_uri().encode(),
+                )
+                with patch.object(
+                    host_drop.sharing.platform, "machine", return_value="unsupported"
+                ):
+                    self.assertEqual(relay.input_bytes(KEY), refusal("source-guard"))
+                # Retargeting the alias after kernel selection cannot redirect reads.
+                open_path = host_drop.sharing._open_path
+
+                def retarget(*args, **kwargs):
+                    fd = open_path(*args, **kwargs)
+                    alias.unlink()
+                    alias.symlink_to(secret)
+                    return fd
+
+                reader.read_selection.return_value = (
+                    "text/uri-list",
+                    alias.as_uri().encode(),
+                )
+                with patch.object(
+                    host_drop.sharing, "_open_path", side_effect=retarget
+                ):
+                    relay.input_bytes(KEY)
+                transfer.put.assert_called_once_with([("application/pdf", pdf_data)])
+                transfer.put.reset_mock()
+                # Reopening a replaced canonical pathname must not switch objects.
+                export = host_drop.sharing.Export
+
+                def replace(target, **kwargs):
+                    pdf.rename(root / "displaced.pdf")
+                    pdf.write_bytes(pdf_data + b"replacement")
+                    return export(target, **kwargs)
+
+                reader.read_selection.return_value = (
+                    "text/uri-list",
+                    pdf.as_uri().encode(),
+                )
+                with (
+                    patch.object(host_drop.sharing, "Export", side_effect=replace),
+                    patch.object(host_drop.os, "pread") as read,
+                ):
+                    self.assertEqual(relay.input_bytes(KEY), refusal("source-guard"))
+                    read.assert_not_called()
+                transfer.put.assert_not_called()
 
     def test_only_complete_opted_in_host_shortcuts_grant_a_read(self):
         for key in (
@@ -418,6 +585,12 @@ class HostClipboardTests(unittest.TestCase):
 
     def test_cli_client_scope_preflight_and_shipping(self):
         self.assertFalse(box.parser().parse_args([]).host_clipboard)
+        self.assertTrue(box.parser().parse_args([]).host_clipboard_symlinks)
+        self.assertFalse(
+            box.parser()
+            .parse_args(["--host-clipboard", "--no-host-clipboard-symlinks"])
+            .host_clipboard_symlinks
+        )
         args = box.parser().parse_args(["--host-clipboard", "--no-host-drop"])
         reader = Mock()
         with (
@@ -438,6 +611,8 @@ class HostClipboardTests(unittest.TestCase):
             )
         discover.assert_not_called()
         for arguments in (
+            ["--no-host-clipboard-symlinks"],
+            ["--no-host-clipboard-symlinks", "--status"],
             ["--host-clipboard", "sync"],
             ["--host-clipboard", "web"],
             ["--host-clipboard", "terminal"],
@@ -468,11 +643,13 @@ class HostClipboardTests(unittest.TestCase):
                     host_drop_enabled=False,
                     host_drop_required=False,
                     host_clipboard_reader=reader,
+                    host_clipboard_symlinks=False,
                 ),
                 0,
             )
             self.assertIs(wrapper.call_args.kwargs["paths_enabled"], False)
             self.assertIs(wrapper.call_args.kwargs["clipboard"], reader)
+            self.assertIs(wrapper.call_args.kwargs["clipboard_symlinks"], False)
             run.assert_called_once_with(["native"], file_drops=relay)
             run.reset_mock()
             relay.__enter__.side_effect = host_drop.DropError("private-transfer-shape")

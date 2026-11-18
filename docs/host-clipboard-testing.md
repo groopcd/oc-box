@@ -24,6 +24,14 @@ terminal meanings. Ctrl+Y is reserved throughout this opted-in client, including
 shell panes, so it no longer performs shell yank there. Without
 `--host-clipboard`, Ctrl+Y stays native. Printable `y`/`Y` text is not intercepted.
 
+Clipboard file sources now follow symlinks by default, including linked folders.
+There is no approval popup or folder setup. Copy the file in Dolphin and use
+Ctrl+Y as usual. A link changed after Copy can select a different target at
+import time; protected targets and kernel magic links remain refused.
+Use `--host-clipboard --no-host-clipboard-symlinks` on a fresh client to restore
+strict no-symlink imports. This is per-client, not a saved workspace preference.
+Normal file drops and live sharing remain strict.
+
 `uv --with .` builds the **current checkout**, not a named feature branch.
 An installed release or another checkout will not acquire the new flag from
 that command. Keep your existing checkout/work unchanged and create a separate
@@ -150,7 +158,7 @@ not the underlying exception or pathname:
 | `clipboard-types` | No supported or valid offered clipboard type |
 | `clipboard-helper`, `clipboard-timeout`, `clipboard-size`, `clipboard-read` | Clipboard retrieval/validation failed |
 | `file-uri`, `file-list`, `file-list-limit` | Nonlocal/invalid/unsupported file references or list limits |
-| `source-guard` | Missing, inaccessible, linked or protected host source; deliberately uniform |
+| `source-guard` | Missing, inaccessible or protected source, or a link refused in strict mode; deliberately uniform |
 | `source` | Other guarded source-capture refusal |
 | `content-type`, `file-limit`, `batch-limit`, `source-changed` | Unsupported/mismatched content or source/batch checks |
 | `client-state`, `client-limit`, `transfer` | Client lifetime state/quota or private transfer failure |

@@ -372,6 +372,8 @@ def effective_host_drop(args):
 def configure_host_clipboard(args, version=None):
     """Discover the host helper before unlock/reset, never read its clipboard."""
     if not getattr(args, "host_clipboard", False):
+        if not getattr(args, "host_clipboard_symlinks", True):
+            raise BoxError("--no-host-clipboard-symlinks requires --host-clipboard.")
         return None
     validate_host_drop(version)
     if not hasattr(args, "_host_clipboard_reader"):
@@ -394,6 +396,7 @@ def run_native_tui(
     host_drop_enabled=False,
     host_drop_required=True,
     host_clipboard_reader=None,
+    host_clipboard_symlinks=True,
 ):
     if not host_drop_enabled and host_clipboard_reader is None:
         return run_tui(command)
@@ -418,6 +421,15 @@ def run_native_tui(
         print("oc-box: " + host_drop.WARNING, flush=True)
     if host_clipboard_reader is not None:
         print("oc-box: " + host_drop.CLIPBOARD_WARNING, flush=True)
+        print(
+            "oc-box: "
+            + (
+                host_drop.CLIPBOARD_SYMLINKS_WARNING
+                if host_clipboard_symlinks
+                else host_drop.CLIPBOARD_STRICT_WARNING
+            ),
+            flush=True,
+        )
     client_started = False
     try:
         with host_drop.Relay(
@@ -426,7 +438,11 @@ def run_native_tui(
             connection,
             profile=profile,
             **(
-                {"paths_enabled": host_drop_enabled, "clipboard": host_clipboard_reader}
+                {
+                    "paths_enabled": host_drop_enabled,
+                    "clipboard": host_clipboard_reader,
+                    "clipboard_symlinks": host_clipboard_symlinks,
+                }
                 if host_clipboard_reader is not None
                 else {}
             ),
@@ -3213,7 +3229,12 @@ def launch_client(path, data, args, version, exported, owner=None):
                 host_drop_enabled=effective_host_drop(args),
                 host_drop_required=getattr(args, "host_drop", None) is True,
                 **(
-                    {"host_clipboard_reader": args._host_clipboard_reader}
+                    {
+                        "host_clipboard_reader": args._host_clipboard_reader,
+                        "host_clipboard_symlinks": getattr(
+                            args, "host_clipboard_symlinks", True
+                        ),
+                    }
                     if getattr(args, "host_clipboard", False)
                     else {}
                 ),
@@ -3556,6 +3577,12 @@ def parser():
         "--host-clipboard",
         action="store_true",
         help="opt in this native TUI client to host clipboard images/copied image or PDF files with Ctrl+Y (reserved throughout this client)",
+    )
+    result.add_argument(
+        "--no-host-clipboard-symlinks",
+        dest="host_clipboard_symlinks",
+        action="store_false",
+        help="reject symlinks in clipboard file sources for this client (requires --host-clipboard; default follows them)",
     )
     result.add_argument(
         "--credential-mode",
@@ -4363,7 +4390,10 @@ def main(argv=None):
                     host_drop_enabled=effective_host_drop(args),
                     host_drop_required=args.host_drop is True,
                     **(
-                        {"host_clipboard_reader": args._host_clipboard_reader}
+                        {
+                            "host_clipboard_reader": args._host_clipboard_reader,
+                            "host_clipboard_symlinks": args.host_clipboard_symlinks,
+                        }
                         if args.host_clipboard
                         else {}
                     ),

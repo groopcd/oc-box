@@ -207,13 +207,20 @@ their checkout ownership distinct from unrelated source and flat installations.
   never reads; only the dedicated top-level host shortcut may call the bounded
   desktop helper. Typed local URI lists reuse the existing pinned host-drop
   source guards; type discovery is not proof of file-manager provenance.
+  Clipboard file sources follow ordinary symlinks by default; the per-client
+  --no-host-clipboard-symlinks opt-out restores strict capture. Keep that exception
+  out of normal drops and live sharing. Validate selected and canonical protected
+  paths; use kernel NO_MAGICLINKS O_PATH selection and match the strict export
+  against its still-pinned descriptor before reading. Never use Path.resolve
+  followed by an unbound reopen as source authority. Copy-to-shortcut link
+  retargeting is an accepted disclosed tradeoff, not immutable source consent.
   Imports always copy, never move/cut or modify the source/clipboard. No
   background polling, model/output/MCP triggers, arbitrary text/plain requests,
   unsafe fallback, socket mounts, listeners or automatic Send. Preserve ordinary
   Ctrl+V, file-drop opt-outs and the helper's desktop-only environment. Synthetic
   tests are not desktop/native composition acceptance; keep host checks minimal.
   Refusal markers may include closed fixed categories only, never raw errors,
-  clipboard data or host paths; missing/linked/private source denials stay uniform.
+  clipboard data or host paths; missing/strict-linked/private denials stay uniform.
   Host drop/clipboard eligibility covers valid native 2.x releases rather than
   an exact patch allowlist; retain private-client, transfer and terminal contract
   refusals. No public API proves future composer attachment behavior. Do not

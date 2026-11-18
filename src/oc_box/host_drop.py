@@ -100,6 +100,14 @@ CLIPBOARD_WARNING = (
     "can read imported files; history, provider systems or crashes may retain "
     "copies. Nothing is automatically sent; arbitrary clipboard text is not requested."
 )
+CLIPBOARD_SYMLINKS_WARNING = (
+    "Clipboard file imports follow symlinks by default. Link targets may change "
+    "between copying and Ctrl+Y; protected targets remain refused. Use "
+    "--no-host-clipboard-symlinks to reject linked sources in this client."
+)
+CLIPBOARD_STRICT_WARNING = (
+    "Strict clipboard sources: symlinks in files or parent folders are refused."
+)
 WARNING = (
     "Experimental host file drops enabled. A supported absolute pathname "
     "pasted anywhere in this native TUI connection authorizes a temporary "
@@ -228,18 +236,59 @@ def uri_paths(data):
         raise DropError("invalid-uri-list") from None
 
 
-def capture(paths, protected):
+@contextlib.contextmanager
+def _clipboard_export(path, protected):
+    """Follow a clipboard selection once, then use an ordinary strict export.
+
+    Open only O_PATH with kernel NO_MAGICLINKS. Never resolve a proc magic link
+    or activate a device/FIFO. The canonical pathname is not authority: match
+    the strict export against the still-pinned selection before reading bytes.
+    """
+    try:
+        selected = valid_path(str(path))
+    except (ValueError, UnicodeError):
+        raise sharing.ShareError("Host source path is unavailable.") from None
+    selected = sharing._export_path(selected, protected=protected)
+    root = os.open("/", os.O_PATH | os.O_DIRECTORY | os.O_CLOEXEC)
+    try:
+        pinned = sharing._open_path(root, str(selected), resolve=0x02)
+    finally:
+        os.close(root)
+    try:
+        before = os.fstat(pinned)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise DropError("host-source-refused")
+        try:
+            target = valid_path(os.readlink(f"/proc/self/fd/{pinned}"))
+        except (ValueError, UnicodeError):
+            raise sharing.ShareError("Host source path is unavailable.") from None
+        with sharing.Export(target, protected=protected) as export:
+            if sharing._identity(os.fstat(export.fd)) != sharing._identity(before):
+                raise DropError("host-source-refused")
+            yield export
+    finally:
+        os.close(pinned)
+
+
+def capture(paths, protected, *, follow_symlinks=False):
     """Pin every source first; validate/read bounded snapshots before staging."""
     try:
+        if type(follow_symlinks) is not bool:
+            raise DropError("host-source-refused")
         if not 1 <= len(paths) <= MAX_BATCH:
             raise DropError("batch-limit")
+        paths = [Path(path) for path in paths]
         images, total = [], 0
         with contextlib.ExitStack() as stack:
             exports = [
-                stack.enter_context(sharing.Export(path, protected=protected))
+                stack.enter_context(
+                    _clipboard_export(path, protected)
+                    if follow_symlinks
+                    else sharing.Export(path, protected=protected)
+                )
                 for path in paths
             ]
-            for export in exports:
+            for path, export in zip(paths, exports):
                 with export.open(".") as (fd, before):
                     if (
                         not stat.S_ISREG(before.st_mode)
@@ -269,7 +318,10 @@ def capture(paths, protected):
                         raise DropError("source-changed")
                 content = bytes(data)
                 mime = mime_type(content)
-                if SUFFIX_MIME.get(export.path.suffix.lower()) != mime:
+                if (
+                    SUFFIX_MIME.get(path.suffix.lower()) != mime
+                    or SUFFIX_MIME.get(export.path.suffix.lower()) != mime
+                ):
                     raise DropError("extension-content-mismatch")
                 total += len(content)
                 if total > MAX_BATCH_BYTES:
@@ -447,7 +499,15 @@ class Transfer:
 
 class Relay:
     def __init__(
-        self, box, data, connection, *, profile=None, paths_enabled=True, clipboard=None
+        self,
+        box,
+        data,
+        connection,
+        *,
+        profile=None,
+        paths_enabled=True,
+        clipboard=None,
+        clipboard_symlinks=True,
     ):
         self.box, self.data, self.connection = box, data, connection
         self.profile = profile or terminal_profile()
@@ -458,6 +518,9 @@ class Relay:
             raise DropError("invalid-path-import-policy")
         self.paths_enabled = paths_enabled
         self.clipboard = clipboard
+        if type(clipboard_symlinks) is not bool:
+            raise DropError("invalid-clipboard-source-policy")
+        self.clipboard_symlinks = clipboard_symlinks
         self.transfer = Transfer(box, data, connection)
         self.refused = 0
         self.clipboard_refused = 0
@@ -537,7 +600,9 @@ class Relay:
                 if self.transfer.files + len(paths) > MAX_FILES:
                     raise DropError("staging-limit")
                 phase = "source"
-                images = capture(paths, self.protected)
+                images = capture(
+                    paths, self.protected, follow_symlinks=self.clipboard_symlinks
+                )
             phase = "transfer"
             return self.stage(images)
         except (ValueError, OSError) as error:

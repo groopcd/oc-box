@@ -882,11 +882,15 @@ Clipboard access occurs only in response to the opted-in host input shortcut, ne
 
 Wayland requires @code{wl-paste} from @code{wl-clipboard} on the host. X11 requires @code{xclip}. If Wayland is selected, a missing helper does not fall back to another clipboard. Preflight only locates the helper; it reads no clipboard data. On the shortcut, one bounded content-type query selects @code{text/uri-list}, @code{x-special/gnome-copied-files}, or @code{image/png}, in that order. There is one payload read under the same helper deadline and desktop-only environment. File lists take precedence over an optional PNG thumbnail; refused/invalid file lists do not fall back to another format. Type lists and file-list payloads are limited to 16 KiB, with at most 128 offered targets.
 
-Only local @code{file:} references are accepted. They use the existing descriptor-pinned host-drop capture: no remote URL fetch, symlink, hard-link, special/protected file, directory or unsupported extension; signatures must match extensions. Up to four files may be imported, at most 8 MiB each and 16 MiB per batch, within existing per-client quotas. A batch is validated before staging. Import always snapshots copies, even for a cut selection: it never moves/deletes the source, clears the clipboard or acknowledges a file-manager move.
+Only local @code{file:} references are accepted. **Clipboard file imports follow ordinary symlinks by default**, including links in parent folders. No folder approval or extra prompt is required. Add @code{--no-host-clipboard-symlinks} to reject linked sources for this client instead. This changes clipboard imports only: normal pathname/file drops and live sharing still refuse symlinks.
+
+The selected alias and its actual target are checked against protected-path rules. Kernel magic links, runtime/device paths, hard links, special/protected files, directories and unsupported extensions remain refused. Both the selected and target filename extensions must match the captured content. The target is pinned without reading source bytes, then matched by identity to the existing strict host-drop capture before any file bytes are read. Unsupported kernel resolution contracts refuse rather than fall back to ordinary link following.
+
+**A link may change between file-manager Copy and Ctrl+Y, so the file imported may be the new target.** There is no folder allowlist or remembered target. Once pinned, retargeting the symlink cannot redirect that read, but the file's contents remain mutable; existing capture-time mutation checks still apply. Up to four files may be imported, at most 8 MiB each and 16 MiB per batch, within existing per-client quotas. A batch is validated before staging. Import always snapshots copies, even for a cut selection: it never moves/deletes the source, clears the clipboard or acknowledges a file-manager move. No remote URL fetch is performed.
 
 These MIME targets describe data, not proof it came from a file manager. The shortcut authorizes their local file references without a per-file confirmation; do not use it to discuss untrusted copied file URLs. Clipboard selection may change between type discovery and payload retrieval; no atomic desktop snapshot is promised. For independent per-image host confirmation, use @code{attach --broker}.
 
-Arbitrary @code{text/plain}, bare text paths and raw PDF clipboard payloads are not requested or reinterpreted. Copy a PDF **file** in a file manager; selected text inside a PDF viewer remains ordinary text paste. PNG pixel data is still accepted when no supported copied-file list is offered. Unsupported/missing content produces a refusal placeholder with a fixed stage/category, without clipboard data, source paths, raw exceptions or helper stderr. Source-guard failures remain uniform for missing, inaccessible, linked or protected sources. No packages are installed automatically. Missing helpers name the selected utility and its host package explicitly: @code{wl-paste} is provided by @code{wl-clipboard}, and X11 uses @code{xclip}. These package names are the same across the supported distro catalog; see the host test guide for package-manager commands and a feature-branch checkout recipe.
+Arbitrary @code{text/plain}, bare text paths and raw PDF clipboard payloads are not requested or reinterpreted. Copy a PDF **file** in a file manager; selected text inside a PDF viewer remains ordinary text paste. PNG pixel data is still accepted when no supported copied-file list is offered. Unsupported/missing content produces a refusal placeholder with a fixed stage/category, without clipboard data, source paths, raw exceptions or helper stderr. Source-guard failures remain uniform for missing, inaccessible or protected sources and links refused by strict mode. No packages are installed automatically. Missing helpers name the selected utility and its host package explicitly: @code{wl-paste} is provided by @code{wl-clipboard}, and X11 uses @code{xclip}. These package names are the same across the supported distro catalog; see the host test guide for package-manager commands and a feature-branch checkout recipe.
 
 Captured bytes use the existing private drop transfer and staging/cleanup limits. The relay supplies a container pathname as native paste input; it never synthesizes Enter or submits a prompt. Native attachment composition and sending remain native behavior. @code{--image-preview} separately controls image visuals for a qualifying owning launch.
 
@@ -899,6 +903,14 @@ oc-box --project ~/devel/demo --host-clipboard --image-preview
 @end example
 
 See the short [host test guide](host-clipboard-testing.md). Focused mocked tests are not acceptance of KDE/Wayland/X11 behavior or native image composition.
+
+@section --no-host-clipboard-symlinks
+
+Restore strict no-symlink clipboard sources for this native TUI client. Requires @code{--host-clipboard} on @code{start} or @code{reset}; a symlink in the selected file or any parent folder produces the same fixed source refusal as other denied sources. PNG pixel imports are unchanged. This option is not persisted and cannot live-toggle an existing client; an additional client can use it without restarting the workspace owner. It changes neither file-drop preferences nor live sharing.
+
+@example
+oc-box --project ~/devel/demo --host-clipboard --no-host-clipboard-symlinks
+@end example
 
 @section --credential-mode env|selected|vault
 

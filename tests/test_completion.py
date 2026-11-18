@@ -238,11 +238,16 @@ fi
     def test_host_drop_is_offered_only_for_start_and_reset_tui_clients(self):
         self.assertEqual(self.complete("--host-d"), ["--host-drop"])
         self.assertEqual(self.complete("--no-host-d"), ["--no-host-drop"])
+        self.assertEqual(self.complete("--no-host-c"), ["--no-host-clipboard-symlinks"])
         for command in ("start", "reset"):
             with self.subTest(command=command):
                 self.assertEqual(self.complete(command, "--host-d"), ["--host-drop"])
                 self.assertEqual(
                     self.complete(command, "--no-host-d"), ["--no-host-drop"]
+                )
+                self.assertEqual(
+                    self.complete(command, "--no-host-c"),
+                    ["--no-host-clipboard-symlinks"],
                 )
         for command in (
             "web",
@@ -270,6 +275,7 @@ fi
             with self.subTest(command=command):
                 self.assertEqual(self.complete(command, "--host-d"), [])
                 self.assertEqual(self.complete(command, "--no-host-d"), [])
+                self.assertEqual(self.complete(command, "--no-host-c"), [])
 
     def test_workspace_preferences_have_context_specific_values(self):
         self.assertEqual(self.complete("preferences", "--host-drop", ""), ["on", "off"])

@@ -2544,14 +2544,32 @@ precedence over an optional PNG thumbnail; refused/invalid file lists do
 not fall back to another format.  Type lists and file-list payloads are
 limited to 16 KiB, with at most 128 offered targets.
 
-Only local ‘file:’ references are accepted.  They use the existing
-descriptor-pinned host-drop capture: no remote URL fetch, symlink,
-hard-link, special/protected file, directory or unsupported extension;
-signatures must match extensions.  Up to four files may be imported, at
-most 8 MiB each and 16 MiB per batch, within existing per-client quotas.
-A batch is validated before staging.  Import always snapshots copies,
-even for a cut selection: it never moves/deletes the source, clears the
-clipboard or acknowledges a file-manager move.
+Only local ‘file:’ references are accepted.  **Clipboard file imports
+follow ordinary symlinks by default**, including links in parent
+folders.  No folder approval or extra prompt is required.  Add
+‘--no-host-clipboard-symlinks’ to reject linked sources for this client
+instead.  This changes clipboard imports only: normal pathname/file
+drops and live sharing still refuse symlinks.
+
+The selected alias and its actual target are checked against
+protected-path rules.  Kernel magic links, runtime/device paths, hard
+links, special/protected files, directories and unsupported extensions
+remain refused.  Both the selected and target filename extensions must
+match the captured content.  The target is pinned without reading source
+bytes, then matched by identity to the existing strict host-drop capture
+before any file bytes are read.  Unsupported kernel resolution contracts
+refuse rather than fall back to ordinary link following.
+
+**A link may change between file-manager Copy and Ctrl+Y, so the file
+imported may be the new target.** There is no folder allowlist or
+remembered target.  Once pinned, retargeting the symlink cannot redirect
+that read, but the file's contents remain mutable; existing capture-time
+mutation checks still apply.  Up to four files may be imported, at most
+8 MiB each and 16 MiB per batch, within existing per-client quotas.  A
+batch is validated before staging.  Import always snapshots copies, even
+for a cut selection: it never moves/deletes the source, clears the
+clipboard or acknowledges a file-manager move.  No remote URL fetch is
+performed.
 
 These MIME targets describe data, not proof it came from a file manager.
 The shortcut authorizes their local file references without a per-file
@@ -2567,12 +2585,12 @@ PNG pixel data is still accepted when no supported copied-file list is
 offered.  Unsupported/missing content produces a refusal placeholder
 with a fixed stage/category, without clipboard data, source paths, raw
 exceptions or helper stderr.  Source-guard failures remain uniform for
-missing, inaccessible, linked or protected sources.  No packages are
-installed automatically.  Missing helpers name the selected utility and
-its host package explicitly: ‘wl-paste’ is provided by ‘wl-clipboard’,
-and X11 uses ‘xclip’.  These package names are the same across the
-supported distro catalog; see the host test guide for package-manager
-commands and a feature-branch checkout recipe.
+missing, inaccessible or protected sources and links refused by strict
+mode.  No packages are installed automatically.  Missing helpers name
+the selected utility and its host package explicitly: ‘wl-paste’ is
+provided by ‘wl-clipboard’, and X11 uses ‘xclip’.  These package names
+are the same across the supported distro catalog; see the host test
+guide for package-manager commands and a feature-branch checkout recipe.
 
 Captured bytes use the existing private drop transfer and
 staging/cleanup limits.  The relay supplies a container pathname as
@@ -2599,7 +2617,20 @@ See the short [host test guide](host-clipboard-testing.md).  Focused
 mocked tests are not acceptance of KDE/Wayland/X11 behavior or native
 image composition.
 
-5.33 -credential-mode env|selected|vault
+5.33 -no-host-clipboard-symlinks
+================================
+
+Restore strict no-symlink clipboard sources for this native TUI client.
+Requires ‘--host-clipboard’ on ‘start’ or ‘reset’; a symlink in the
+selected file or any parent folder produces the same fixed source
+refusal as other denied sources.  PNG pixel imports are unchanged.  This
+option is not persisted and cannot live-toggle an existing client; an
+additional client can use it without restarting the workspace owner.  It
+changes neither file-drop preferences nor live sharing.
+
+     oc-box --project ~/devel/demo --host-clipboard --no-host-clipboard-symlinks
+
+5.34 -credential-mode env|selected|vault
 ========================================
 
 With ‘credentials’, save an explicit forwarding mode for that workspace.
@@ -2615,7 +2646,7 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.34 -attachments
+5.35 -attachments
 =================
 
 Web only: explicitly select the visible, source-version-bounded browser
@@ -2623,7 +2654,7 @@ File-drop adapter described under ‘web’.  Keeps the native app and its
 draft/Send controls unchanged.  No automatic prompt admission or
 host-path/URL reading.
 
-5.35 -no-vault
+5.36 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -2642,7 +2673,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.36 -env-secret NAME
+5.37 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -2655,7 +2686,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.37 -vault-secret NAME
+5.38 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -2667,7 +2698,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.38 -clear-credentials
+5.39 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -2679,7 +2710,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.39 -output FILE
+5.40 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -2689,7 +2720,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.40 -portable
+5.41 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -2699,7 +2730,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.41 -recipient AGE_KEY
+5.42 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -2710,7 +2741,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.42 -identity FILE
+5.43 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -2721,7 +2752,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.43 -cpus NUMBER
+5.44 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -2732,7 +2763,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.44 -memory SIZE
+5.45 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -2744,7 +2775,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.45 -pids-limit NUMBER
+5.46 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -2752,7 +2783,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.46 -device MAPPING
+5.47 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -2766,7 +2797,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.47 -podman-arg=-OPTION[=VALUE]
+5.48 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -2793,7 +2824,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.48 -clear-devices
+5.49 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -2804,7 +2835,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.49 -clear-podman-args
+5.50 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -2814,7 +2845,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.50 -delete-sessions
+5.51 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -2823,7 +2854,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.51 -all
+5.52 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -2831,7 +2862,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.52 -y, -yes
+5.53 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -4064,19 +4095,19 @@ Node: Synopsis930
 Node: Description3039
 Node: Commands6637
 Node: Options112146
-Node: Lifecycle and persistence151021
-Node: Distribution images153321
-Node: Sessions and recovery158196
-Node: Devices and host permissions164781
-Node: Resource reports167127
-Node: Configuration and environment169238
-Node: Files180619
-Node: Exit status186563
-Node: Examples187416
-Node: Troubleshooting189502
-Node: Installation and manuals200854
-Node: Authors and license210450
-Node: See also211057
+Node: Lifecycle and persistence152733
+Node: Distribution images155033
+Node: Sessions and recovery159908
+Node: Devices and host permissions166493
+Node: Resource reports168839
+Node: Configuration and environment170950
+Node: Files182331
+Node: Exit status188275
+Node: Examples189128
+Node: Troubleshooting191214
+Node: Installation and manuals202566
+Node: Authors and license212162
+Node: See also212769
 
 End Tag Table
 

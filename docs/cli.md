@@ -2256,13 +2256,29 @@ take precedence over an optional PNG thumbnail; refused/invalid file lists do
 not fall back to another format. Type lists and file-list payloads are limited
 to 16 KiB, with at most 128 offered targets.
 
-Only local `file:` references are accepted. They use the existing descriptor-pinned
-host-drop capture: no remote URL fetch, symlink, hard-link, special/protected file,
-directory or unsupported extension; signatures must match extensions. Up to four
-files may be imported, at most 8 MiB each and 16 MiB per batch, within existing
-per-client quotas. A batch is validated before staging. Import always snapshots
-copies, even for a cut selection: it never moves/deletes the source, clears the
-clipboard or acknowledges a file-manager move.
+Only local `file:` references are accepted. **Clipboard file imports follow
+ordinary symlinks by default**, including links in parent folders. No folder
+approval or extra prompt is required. Add `--no-host-clipboard-symlinks` to reject
+linked sources for this client instead. This changes clipboard imports only:
+normal pathname/file drops and live sharing still refuse symlinks.
+
+The selected alias and its actual target are checked against protected-path
+rules. Kernel magic links, runtime/device paths, hard links, special/protected
+files, directories and unsupported extensions remain refused. Both the selected
+and target filename extensions must match the captured content. The target is
+pinned without reading source bytes, then matched by identity to the existing
+strict host-drop capture before any file bytes are read. Unsupported kernel
+resolution contracts refuse rather than fall back to ordinary link following.
+
+**A link may change between file-manager Copy and Ctrl+Y, so the file imported
+may be the new target.** There is no folder allowlist or remembered target.
+Once pinned, retargeting the symlink cannot redirect that read, but the file's
+contents remain mutable; existing capture-time mutation checks still apply.
+Up to four files may be imported, at most 8 MiB each and 16 MiB per batch, within
+existing per-client quotas. A batch is validated before staging. Import always
+snapshots copies, even for a cut selection: it never moves/deletes the source,
+clears the clipboard or acknowledges a file-manager move. No remote URL fetch is
+performed.
 
 These MIME targets describe data, not proof it came from a file manager. The
 shortcut authorizes their local file references without a per-file confirmation;
@@ -2276,7 +2292,8 @@ inside a PDF viewer remains ordinary text paste. PNG pixel data is still accepte
 when no supported copied-file list is offered. Unsupported/missing content
 produces a refusal placeholder with a fixed stage/category, without clipboard
 data, source paths, raw exceptions or helper stderr. Source-guard failures remain
-uniform for missing, inaccessible, linked or protected sources.
+uniform for missing, inaccessible or protected sources and links refused by
+strict mode.
 No packages are installed automatically.
 Missing helpers name the selected utility and its host package explicitly:
 `wl-paste` is provided by `wl-clipboard`, and X11 uses `xclip`. These package
@@ -2306,6 +2323,20 @@ oc-box --project ~/devel/demo --host-clipboard --image-preview
 
 See the short [host test guide](host-clipboard-testing.md). Focused mocked tests
 are not acceptance of KDE/Wayland/X11 behavior or native image composition.
+
+### --no-host-clipboard-symlinks
+
+Restore strict no-symlink clipboard sources for this native TUI client.
+Requires `--host-clipboard` on `start` or `reset`; a symlink in the selected file
+or any parent folder produces the same fixed source refusal as other denied
+sources. PNG pixel imports are unchanged. This option is not persisted and
+cannot live-toggle an existing client; an additional client can use it without
+restarting the workspace owner. It changes neither file-drop preferences nor
+live sharing.
+
+```sh
+oc-box --project ~/devel/demo --host-clipboard --no-host-clipboard-symlinks
+```
 
 ### --credential-mode env|selected|vault
 
