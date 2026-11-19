@@ -18,7 +18,9 @@ from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 
-SUPPORTED = frozenset(("2.2.6", "2.2.7", "2.3.0"))
+# Opening a browser is explicit browsing. Using saved membership to choose an
+# automatic startup/default session retains its separately audited versions.
+AUTO_RESUME_RELEASES = frozenset(("2.2.6", "2.2.7", "2.3.0"))
 MAX_PREFERENCES = 256 * 1024
 MAX_STATE = 1024 * 1024
 MAX_TABS = 4096
@@ -51,6 +53,15 @@ class Snapshot:
 
 class TabError(ValueError):
     """Fixed refusal, without private paths, titles, data or native errors."""
+
+
+def supports_web_tabs(release):
+    """Eligibility only: saved state and native replies must still validate."""
+    return (
+        isinstance(release, str)
+        and re.fullmatch(r"2\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", release)
+        is not None
+    )
 
 
 def _id(value):
@@ -163,7 +174,7 @@ def read_snapshot(home, directory, release):
     unverified releases are ``invalid``, never an excuse to reopen history.
     The calling transport supplies the standard private HOME/XDG layout.
     """
-    if release not in SUPPORTED:
+    if not supports_web_tabs(release):
         return _bad("unsupported-version")
     if not isinstance(directory, str) or not directory.startswith("/"):
         return _bad("unsafe-path")
@@ -271,7 +282,7 @@ def inspect(box, data, *, connection, timeout=2):
     release = data.get("opencode_version")
     if isinstance(release, str) and release.startswith("1."):
         return Snapshot("missing", reason="legacy")
-    if release not in SUPPORTED:
+    if not supports_web_tabs(release):
         return _bad("unsupported-version")
     if (
         type(timeout) not in (int, float)

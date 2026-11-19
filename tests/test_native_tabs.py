@@ -53,17 +53,42 @@ class NativeTabsTests(unittest.TestCase):
             "time": {"updated": 900, "archived": archived},
         }
 
-    def test_supported_source_contract_matrix_and_missing_scope(self):
-        for release in sorted(tabs.SUPPORTED):
+    def test_stable_v2_source_contract_matrix_and_missing_scope(self):
+        for release in (
+            "2.0.0",
+            "2.2.5",
+            "2.2.6",
+            "2.2.7",
+            "2.3.0",
+            "2.3.2",
+            "2.4.0",
+            "2.99.123",
+        ):
             with self.subTest(release=release):
                 self.assertEqual(self.read(release).status, "missing")
                 self.write(self.state, self.saved(["ses_keep"]))
                 self.assertEqual(self.read(release).tabs, ("ses_keep",))
+                self.write(self.state, {"schema": 2, "tabSets": []})
+                self.assertEqual(self.read(release).reason, "invalid-state")
                 self.write(self.state, self.saved([], directory="/other"))
                 self.assertEqual(self.read(release).reason, "scope-absent")
                 self.state.unlink()
-        for release in ("2.4.0", "2.3.0-preview", "2.2.5", "invalid"):
-            self.assertEqual(self.read(release).reason, "unsupported-version")
+        for release in (
+            "1.19.5",
+            "3.0.0",
+            "2.3",
+            "2.03.2",
+            "2.3.02",
+            "2.3.٢",
+            "2.3.2-preview",
+            "2.3.2+custom",
+            "2.3.2\n",
+            "invalid",
+            None,
+            [],
+        ):
+            with self.subTest(release=release):
+                self.assertEqual(self.read(release).reason, "unsupported-version")
 
     def test_native_empty_scope_is_valid_not_missing_and_preserves_input(self):
         self.write(self.state, self.saved([]))
@@ -329,7 +354,7 @@ class NativeTabsTests(unittest.TestCase):
         data = {
             "id": connection["workspace"],
             "home": str(self.home),
-            "opencode_version": "2.3.0",
+            "opencode_version": "2.3.2",
         }
         snapshot = tabs.Snapshot("valid", ("ses_open",))
         box = SimpleNamespace(
@@ -352,6 +377,7 @@ class NativeTabsTests(unittest.TestCase):
         self.assertEqual(command[:5], ["python3", "-I", "-S", "-B", "-c"])
         self.assertNotIn(connection["password"], " ".join(command))
         self.assertEqual(json.loads(command[-1])["home"], str(self.home))
+        self.assertEqual(json.loads(command[-1])["release"], "2.3.2")
         self.assertEqual(
             box.workspace_service.client_command.call_args.args[2], connection
         )
@@ -381,7 +407,7 @@ class NativeTabsTests(unittest.TestCase):
                 tabs.inspect(box, data, connection=connection, timeout=timeout).reason,
                 "transport",
             )
-        for release, status in (("1.19.5", "missing"), ("2.4.0", "invalid")):
+        for release, status in (("1.19.5", "missing"), ("3.0.0", "invalid")):
             self.assertEqual(
                 tabs.inspect(
                     box, {**data, "opencode_version": release}, connection=connection

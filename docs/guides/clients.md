@@ -47,23 +47,29 @@ enforcement have separate documented acceptance checks.
 
 ## Choose a web session and add browser files
 
-In experimental 1.7, the web shell shows all verified open TUI tabs, including
-idle conversations, around one unmodified native web view. On a normally prepared
-supported V2 owner, a fresh TUI report opens the current conversation and
-highlights its root tab; child conversations keep their exact route.
-Explicit selection wins:
+In experimental 1.7, the web shell shows verified open TUI tabs, including idle
+conversations, around one unmodified native web view. Any canonical stable
+native `2.x.y` release, including `2.3.2`, is eligible. oc-box checks the native
+responses or saved state rather than treating the version number as proof of
+compatibility. A fresh verified TUI report opens the current conversation and
+highlights its root tab; a child conversation keeps its exact route. Explicit
+selection wins:
 
 ```sh
-oc-box web --project ~/devel/demo --session ses_example --attachments
+oc-box web --project ~/devel/demo --session ses_example
 ```
 
-`--attachments` adds browser-selected PNG/JPEG/GIF/WebP/PDF drops and a file chooser
-to that same view. Verify native thumbnails/cards before pressing native Send;
-the adapter never submits a prompt automatically. Browser/native history and
-provider retention still apply. Older running owners cannot acquire the reporting
-helper on attach: choose a displayed tab or use `--session` without restarting
-them. Missing, stale or ambiguous reports are not guessed from activity or tab
-order. Native browser tabs remain separate from mirrored TUI membership.
+Attach never installs the reporting helper. If there is no usable fresh report,
+compatible saved TUI tabs can still appear immediately without a restart; the
+shell never infers focus from saved order or activity. Choose a displayed tab,
+use `--session`, or follow **Open native OpenCode Home** if membership cannot be
+verified. Native browser tabs remain separate from mirrored TUI membership.
+
+On native **2.2.6 and 2.3.0 only**, `--attachments` adds browser-selected
+PNG/JPEG/GIF/WebP/PDF drops and a file chooser to that same view. Omit the flag
+on `2.3.2` and other versions outside that attachment allowlist. Verify native
+thumbnails/cards before pressing native Send; the adapter never submits a
+prompt automatically. Browser/native history and provider retention still apply.
 See the [web reference](../cli.md#web--browser-interface) for limits and privacy.
 
 ## Enable the experimental dashboard

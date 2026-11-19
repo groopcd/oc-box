@@ -88,9 +88,21 @@ class NativeTabRoutingTests(unittest.TestCase):
             ),
             "explicit-new": (native_tabs.Snapshot("valid"), ["--new"], "ses_new"),
             "explicit-import": (native_tabs.Snapshot("valid"), [], "ses_c"),
+            "newer-patch-no-auto-tab-selection": (
+                native_tabs.Snapshot("valid", ("ses_a",)),
+                [],
+                "ses_c",
+            ),
         }
         for name, (snapshot, options, expected) in cases.items():
             with self.subTest(case=name):
+                newer_patch = name == "newer-patch-no-auto-tab-selection"
+                release = "2.3.2" if newer_patch else "2.3.0"
+                data = (
+                    {**self.data, "opencode_version": release}
+                    if newer_patch
+                    else self.data
+                )
                 args = box.parser().parse_args(["start", *options])
                 state = {
                     "last": "ses_c",
@@ -131,7 +143,7 @@ class NativeTabRoutingTests(unittest.TestCase):
                 ):
                     self.assertEqual(
                         box.launch_client(
-                            self.path, self.data, args, "2.3.0", imported, owner
+                            self.path, data, args, release, imported, owner
                         ),
                         0,
                     )
@@ -148,9 +160,9 @@ class NativeTabRoutingTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     inspect.call_count,
-                    int(not options and name != "explicit-import"),
+                    int(not options and name != "explicit-import" and not newer_patch),
                 )
-                sync.assert_called_once_with(self.path, self.data)
+                sync.assert_called_once_with(self.path, data)
                 self.assertEqual(state, before)
 
     def test_controller_rechecks_membership_in_its_own_bound_thread_context(self):
@@ -268,6 +280,19 @@ class NativeTabRoutingTests(unittest.TestCase):
         ):
             self.assertEqual(owner.default_session(), "ses_a")
         self.assertEqual(len(observed), 1)
+
+    def test_newer_web_eligible_patch_does_not_change_owner_default_session(self):
+        data = {**self.data, "opencode_version": "2.3.2"}
+        owner = service.Owner(box, self.path, data)
+        owner.connection = self.connection
+        owner.publish("ses_c")
+        with (
+            patch.object(native_tabs, "inspect") as inspect,
+            patch.object(service, "tab_inventory") as catalog,
+        ):
+            self.assertEqual(owner.default_session(), "ses_c")
+        inspect.assert_not_called()
+        catalog.assert_not_called()
 
 
 if __name__ == "__main__":

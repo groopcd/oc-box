@@ -39,6 +39,7 @@ from urllib.parse import quote, urlsplit
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
+from oc_box import native_tabs
 from oc_box import oc_box as box, opencode_compat, opencode_v2_io as bridge
 from oc_box import ui_state, workspace_service as service
 from smoke_native_preferences_v2 import Client as PreferencesClient
@@ -46,6 +47,7 @@ from smoke_session_sync_v2 import bounded, private_environment
 from smoke_sharing_v2 import Failure, require
 
 SOURCES = (
+    "src/oc_box/native_tabs.py",
     "src/oc_box/ui_state.py",
     *("src/oc_box/" + name for name in ui_state.RESOURCES),
     "src/oc_box/oc_box.py",
@@ -434,7 +436,7 @@ def exercise(binary, root):
         env["XDG_" + kind + "_HOME"] = str(home / relative)
     env.update({"TERM": "xterm-256color", "COLORTERM": "truecolor"})
     release = opencode_compat.version(bounded([binary, "--version"], env, project))
-    require(release in ui_state.SUPPORTED, "native-version")
+    require(native_tabs.supports_web_tabs(release), "native-version")
     print("NATIVE version=" + release, flush=True)
     config = Path(env["XDG_CONFIG_HOME"]) / "opencode"
     package = config / "plugins/oc-box-ui-state"

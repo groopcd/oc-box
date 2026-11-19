@@ -23,7 +23,6 @@ import sys
 import time
 from urllib.parse import quote, urlsplit
 
-SUPPORTED = frozenset(("2.2.6", "2.2.7", "2.3.0"))
 MAX_TABS = 4096
 MAX_REPLY = 1024 * 1024
 MAX_ANCESTRY = 32
@@ -105,9 +104,19 @@ def _target(method, directory):
     return RPC + method + "?location%5Bdirectory%5D=" + quote(directory, safe="")
 
 
+def _supported(release):
+    # Only the host entrypoints use this; the in-container stdin reader is
+    # sent as standalone Python source without local package imports.
+    if __package__:
+        from . import native_tabs
+    else:
+        import native_tabs
+    return native_tabs.supports_web_tabs(release)
+
+
 def available(box, data, connection, *, timeout=4):
     """Owning-start-only, read-only readiness probe; no retry or installation."""
-    if data.get("opencode_version") not in SUPPORTED:
+    if not _supported(data.get("opencode_version")):
         return False
     try:
         deadline = time.monotonic() + timeout
@@ -126,7 +135,7 @@ def available(box, data, connection, *, timeout=4):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             return False
-        return _output(
+        ping = _output(
             box.workspace_service.api(
                 box,
                 data,
@@ -136,7 +145,13 @@ def available(box, data, connection, *, timeout=4):
                 {"input": {}},
                 timeout=remaining,
             )
-        ) == {"protocol": 1}
+        )
+        return (
+            isinstance(ping, dict)
+            and set(ping) == {"protocol"}
+            and type(ping["protocol"]) is int
+            and ping["protocol"] == 1
+        )
     except (
         box.BoxError,
         StateError,
@@ -299,7 +314,7 @@ def read_snapshot(box, data, connection, *, timeout=4):
         metadata = _metadata(connection)
         if metadata is None:
             return Snapshot("missing", reason="unavailable")
-        if data.get("opencode_version") not in SUPPORTED:
+        if not _supported(data.get("opencode_version")):
             return Snapshot("missing", reason="unsupported-version")
         if connection.get("workspace") != data.get("id"):
             raise StateError("invalid-binding")

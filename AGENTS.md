@@ -265,13 +265,17 @@ their checkout ownership distinct from unrelated source and flat installations.
   Host drop/clipboard eligibility covers valid native 2.x releases rather than
   an exact patch allowlist; retain private-client, transfer and terminal contract
   refusals. No public API proves future composer attachment behavior. Do not
-  broaden unrelated history/recovery/browser version guards as a shortcut.
+  reuse this eligibility policy as a shortcut for unrelated compatibility guards.
 - `ui_state.py` / `ui_state_*.js`: public-SDK container TUI/server/RPC reports,
-  installed only during normal supported V2 owning preparation, never on attach.
-  Keep exact routed children separate from active root membership and verify all
-  IDs through the same private service. Custom client IDs are cooperative
-  metadata, not attestation or host authority. Prefer the fresh owner even when
-  blurred; missing/expired/ambiguous reports never justify focus guesses.
+  installed only during normal eligible V2 owning preparation, never on attach.
+  Canonical stable native `2.x.y` is eligible, not proof of SDK compatibility.
+  Require a compatible protocol handshake, matching generation, identity
+  verification through the same private service and a snapshot recheck.
+  Incompatible responses leave reports unavailable, without refreshing an
+  attached owner. Keep exact routed children separate from active root
+  membership. Custom client IDs are cooperative metadata, not attestation or
+  host authority. Prefer the fresh owner even when blurred; missing, expired
+  or ambiguous reports never justify focus guesses.
   Bound receipt freshness, retain sequence/release high-water history through
   expiry, and fail closed at capacity without evicting replay protection.
 - `web_sessions.py` / `web_sessions.js` / `web_attachments.py` /
@@ -279,7 +283,14 @@ their checkout ownership distinct from unrelated source and flat installations.
   iframe, never private native-store seeding, asset patches or nested wrappers.
   Preserve authenticated `/auth/` routing and native cookie/Origin checks.
   Explicit session selection wins; fresh reports supply ordered membership and
-  exact selection, with saved membership only a non-focus fallback.
+  exact selection. The web-only saved fallback attempts the pinned private
+  native `tabs.json` layout on canonical stable `2.x.y`, rechecks state and
+  verifies displayed IDs through the same private service. It never indicates
+  focus, guesses a path/session, or substitutes history. Refusals retain the
+  existing unavailable/index behavior and native Home option. Keep the exact
+  automatic owner startup/default-session allowlist and the separate history,
+  recovery, browser attachment, sharing and authentication guards unchanged.
+  Public SDK and private layout compatibility are not established for all 2.x.
   Browser attachments remain explicitly enabled, trusted File-only and manually
   sent. Recheck exact live URL, document, original target and selection generation
   after asynchronous reads, including explicit away/back changes. Silent SPA

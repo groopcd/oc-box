@@ -1,6 +1,6 @@
 """Provider-free native TUI membership -> authenticated web index regression.
 
-Run once per binary with --opencode PATH (2.2.6 or 2.3.0). Uses fresh synthetic
+Run once per stable OpenCode 2.x binary with --opencode PATH. Uses fresh synthetic
 HOME/XDG stores, native PTYs, native cookie pairing and actual paginated HTTP.
 Only the outer Podman exec boundary is replaced with local processes. No
 browser rendering, shared host service, Podman or host-acceptance claim.
@@ -203,7 +203,10 @@ def exercise(binary, root, *, home_only=False):
         )
     )
     release = opencode_compat.version(bounded([binary, "--version"], env, project))
-    require(release in ("2.2.6", "2.3.0"), "Web fixture requires 2.2.6 or 2.3.0.")
+    require(
+        native_tabs.supports_web_tabs(release),
+        "Web fixture requires stable OpenCode 2.x.",
+    )
     data = {
         "id": "a" * 32,
         "project": str(root / "host-restored-location"),

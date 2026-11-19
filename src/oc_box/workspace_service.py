@@ -1056,7 +1056,7 @@ class Owner:
 
         with self.condition:
             previous = self.session
-        if self.data.get("opencode_version") not in native_tabs.SUPPORTED:
+        if self.data.get("opencode_version") not in native_tabs.AUTO_RESUME_RELEASES:
             return previous
         try:
             with history_recovery.budget(4):

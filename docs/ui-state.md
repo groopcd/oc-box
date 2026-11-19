@@ -1,7 +1,11 @@
 # Native TUI selection reporting
 
-**OpenCode 2.x integration reference.** This reporting protocol is not a legacy
-1.x client mechanism; see the [legacy feature boundary](legacy/README.md#features-that-require-opencode-2x).
+**OpenCode 2.x integration reference.** Canonical stable native `2.x.y` releases,
+including `2.3.2`, are eligible to attempt reporting; prereleases, noncanonical
+versions and other major versions are not. Public SDK contracts can change
+within 2.x. Eligibility is not proof of compatibility or a claim that every
+release was tested. This is not a legacy 1.x client mechanism; see the
+[legacy feature boundary](legacy/README.md#features-that-require-opencode-2x).
 
 This optional V2 integration reports the route and ordered open tabs of the
 container-native TUI to its existing private workspace service. It does not
@@ -40,24 +44,28 @@ verified `activeRoot` and full membership separately. Missing, invalid and
 no-selection snapshots must not become an automatic legacy/default selection.
 Explicit user selection remains a separate consumer policy.
 
-The reader requests only the helper's snapshot RPC and native session GETs in
-the same private service. It compares a second UI snapshot after verification;
-changed route/membership/client/service epoch yields `missing/changed`. A
+The reader requests only the helper's snapshot RPC and identity-matching native
+session GETs in the same private service. It validates the protocol and the
+owner's generation and compares a second UI snapshot after verification.
+Changed route/membership/client/service epoch yields `missing/changed`. A
 heartbeat's sequence increment alone does not invalidate identical UI state.
+Incompatible RPC or native session responses do not produce a verified report.
 There is an unavoidable interval between a verified snapshot and browser launch:
 this is selection at snapshot time, not continuous cross-client focus mirroring.
 
 ## Ownership and lifetime
 
-The normal owning V2 preparation copies a generated package with public server,
-TUI and RPC exports into the private container configuration. V1 and original
-host configuration are unchanged. Existing project/managed policy may disable
-the helper. Unlike the Build permissions helper, UI reporting is not reenabled
-by the final mandatory configuration overlay.
+Normal owning preparation on an eligible native release copies a generated
+package with public server, TUI and RPC exports into the private container
+configuration. V1 and original host configuration are unchanged. Existing
+project/managed policy may disable the helper. Unlike the Build permissions
+helper, UI reporting is not reenabled by the final mandatory configuration
+overlay.
 
 After owning startup, a bounded read-only default-model catalog lookup resolves
-native location/plugin readiness; it performs no inference. A ping then
-determines helper availability.
+native location/plugin readiness; it performs no inference. A ping then checks
+the helper's RPC protocol version. An absent or incompatible response leaves
+reporting unavailable.
 The owner's in-memory UDS connection metadata then contains either:
 
 ```json
@@ -97,10 +105,13 @@ requests suspend reporting until a public reconnect/config/plugin event. Release
 is best-effort; expiry remains authoritative. Reload clears the service epoch
 and memory; no timers or persisted selection survive server disposal.
 
-Older running owners do not install or refresh anything on attach. Without
+Already running owners do not install or refresh anything on attach. Without
 availability metadata the reader returns `missing/unavailable` without issuing
-native requests. Start a new owner normally to enable reporting; do not unlock,
-refresh credentials, force a restart, or infer current selection to retrofit one.
+native requests. A subsequent normal owning startup can enable reporting; do
+not unlock, refresh credentials, force a restart, or infer current selection to
+retrofit one. The web shell can use
+[compatible saved membership](web-shell.md#saved-membership-fallback) without
+the helper, but saved membership never establishes focus.
 
 ## Validation scope
 

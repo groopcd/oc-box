@@ -1,8 +1,10 @@
 # Common web shell v1
 
 **Version scope:** “v1” names this web-shell contract, not OpenCode 1.x.
-The integration targets OpenCode **2.x**. For the native 1.x line, use the
-[legacy guide](legacy/README.md#features-that-require-opencode-2x).
+Mirroring is eligible on canonical stable OpenCode **`2.x.y`** releases such as
+`2.3.2`, with no leading zeroes or version suffixes. Eligibility is not a claim
+that every release has been tested or that its contracts cannot change.
+For native 1.x, see the [legacy guide](legacy/README.md#features-that-require-opencode-2x).
 
 The first-party shell at `/auth/oc-box-sessions` mirrors verified native TUI tab
 membership from one existing private workspace service. It owns exactly one
@@ -37,10 +39,32 @@ Explicit CLI/URL selections still win without discarding reported membership.
 The original trusted dictionary seam
 `{"status": "verified", "selectedSessionID": ID, "source": LABEL}` remains supported
 for direct catalog members only. Unavailable/malformed/error reports leave
-selection explicit, without falling back to an old owner's declaration. Saved
-membership may still be displayed when no report is available. Helper installation
-and client binding are described in [ui-state.md](ui-state.md). Their native-only
+selection explicit, without falling back to an old owner's declaration. Fresh
+reporting requires the public-SDK helper's protocol handshake, matching owner
+generation, native identity checks and a snapshot recheck as described in
+[ui-state.md](ui-state.md). Public APIs can change within a major release.
+
+## Saved membership fallback
+
+Without a usable fresh report, the shell can show saved tab order but cannot
+infer focus, even from a single saved tab. It reads native tab preferences and
+the known private `.local/state/opencode/latest/tui/tabs.json` layout through
+pinned, validated paths in the container home. This file layout is not a public
+API. The reader verifies displayed IDs through native session GETs on that same
+private service and rechecks the saved snapshot after those lookups. A missing
+file, unavailable scope or incompatible response does not authorize searching
+alternate paths, opening history or guessing a session. A valid empty scope
+stays empty. If neither source yields a usable catalog, the shell keeps its
+unavailable/index behavior and offers **Open native OpenCode Home**.
+An explicitly requested session still requires its own identity verification.
+
+Compatible saved membership works without the reporting helper, including when
+attaching to an existing owner. This browsing policy does not widen the separate
+automatic owner startup/default-session allowlist, history sync/recovery,
+attachment or sharing support, or native pairing and authentication. Native-only
 checks do not by themselves establish composed-browser or host acceptance.
+
+## Navigation and refresh
 
 An explicit TUI-tab click selects the native ID route, updates the shell query
 and ARIA highlight, and does not send prompts or change permissions/location.
@@ -66,7 +90,8 @@ The default fix has no addon enabled or imported. Trusted launcher code may set
 `("/auth/oc-box-attachments.js",)`. That separately implemented feature owns and
 authenticates its script route. Browser input/query parameters cannot set this
 hook. Do not introduce a wrapper around this shell, another iframe, or another
-outer TUI tabstrip.
+outer TUI tabstrip. The browser attachment addon retains its separate native
+`2.2.6`/`2.3.0` allowlist.
 
 After common script initialization:
 

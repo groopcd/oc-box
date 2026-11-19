@@ -1831,7 +1831,9 @@ def validate_image_preview(version):
     return image_preview_cli_config()
 
 
-def config_archive(data, *, image_preview=False, image_preview_snapshot=None):
+def config_archive(
+    data, *, image_preview=False, image_preview_snapshot=None, history_only=False
+):
     """Snapshot user config as bytes. Extracted only inside the container."""
     source = (
         Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
@@ -1839,6 +1841,11 @@ def config_archive(data, *, image_preview=False, image_preview_snapshot=None):
     )
     release = data.get("opencode_version", "1.0.0")
     v2 = opencode_compat.major(release) == 2
+    # Manual sync uses normal config transport but never needs the broader
+    # reporting helper. Retain the pre-existing archive for its legacy releases.
+    ui_reporting = native_tabs.supports_web_tabs(release) and (
+        not history_only or release in native_tabs.AUTO_RESUME_RELEASES
+    )
     preview_config = None
     if image_preview:
         if not v2:
@@ -1852,15 +1859,14 @@ def config_archive(data, *, image_preview=False, image_preview_snapshot=None):
     replacements = {}
     sandbox_version = None
     config_home = data["home"] + "/.config/opencode"
-    if v2:
+    if ui_reporting:
         if __package__:
             from . import ui_state
         else:
             import ui_state
-        if release in ui_state.SUPPORTED and (
-            (source / "plugins/oc-box-ui-state").exists()
-            or (source / "plugins/oc-box-ui-state").is_symlink()
-        ):
+        if (source / "plugins/oc-box-ui-state").exists() or (
+            source / "plugins/oc-box-ui-state"
+        ).is_symlink():
             raise BoxError(
                 "Generated UI-state helper conflicts with an existing host plugin."
             )
@@ -2074,8 +2080,8 @@ def config_archive(data, *, image_preview=False, image_preview_snapshot=None):
                 "plugins/oc-box-build-permissions/package.json",
                 b'{"type":"module","main":"index.js"}',
             )
-            if release in ui_state.SUPPORTED:
-                # Only normal owning configuration preparation installs this.
+            if ui_reporting:
+                # Only normal configuration preparation installs this.
                 # Native/project/managed plugin policy remains authoritative:
                 # unlike the Build helper it gets no final mandatory overlay.
                 for name, content in ui_state.package_sources(PACKAGE).items():
@@ -2122,15 +2128,25 @@ def ensure_opencode_version(data, version):
 
 
 def prepare_runtime(
-    path, data, version, *, image_preview=False, image_preview_snapshot=None
+    path,
+    data,
+    version,
+    *,
+    image_preview=False,
+    image_preview_snapshot=None,
+    history_only=False,
 ):
     # Owning launches carry the preflight bytes past credential prompts/reset;
     # never reopen that CLI input after resource removal.
     if image_preview and opencode_compat.major(version) != 2:
         raise BoxError("--image-preview requires native OpenCode 2.x.")
+    archive_options = {"history_only": True} if history_only else {}
     archive = (
         config_archive(
-            data, image_preview=True, image_preview_snapshot=image_preview_snapshot
+            data,
+            image_preview=True,
+            image_preview_snapshot=image_preview_snapshot,
+            **archive_options,
         )
         if image_preview
         else None
@@ -2149,7 +2165,7 @@ def prepare_runtime(
             timeout=120,
         )
     if archive is None:
-        archive = config_archive(data)
+        archive = config_archive(data, **archive_options)
     unpack = (PACKAGE / "sync_config.py").read_text()
     copy_command = exec_command(data, ["python3", "-c", unpack, version])
     # binary input requires the binary subprocess mode here.
@@ -3128,6 +3144,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                 path,
                 data,
                 version,
+                **({"history_only": True} if args.command == "sync" else {}),
                 **(
                     {
                         "image_preview": True,
@@ -3159,7 +3176,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                         sys.modules[__name__],
                         path,
                         data,
-                        ui_bridge=version in native_tabs.SUPPORTED,
+                        ui_bridge=native_tabs.supports_web_tabs(version),
                         **(
                             {"image_preview": args.image_preview}
                             if getattr(args, "image_preview", False)
@@ -3324,7 +3341,7 @@ def launch_client(path, data, args, version, exported, owner=None):
     if (
         owner
         and explicit_web is None
-        and version in native_tabs.SUPPORTED
+        and version in native_tabs.AUTO_RESUME_RELEASES
         and not any(
             (args.new, exported is not None, getattr(args, "resume", False), args.model)
         )

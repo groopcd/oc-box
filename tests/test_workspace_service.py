@@ -1068,7 +1068,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                 with (
                     patch.object(box, "check_private_output"),
                     patch.object(box, "start_container", return_value={}),
-                    patch.object(box, "prepare_runtime"),
+                    patch.object(box, "prepare_runtime") as prepare,
                     patch.object(
                         service,
                         "history_source",
@@ -1092,6 +1092,9 @@ class WorkspaceServiceTests(unittest.TestCase):
                         self.assertEqual(
                             box.launch_environment(self.path, self.data, args), 0
                         )
+                prepare.assert_called_once_with(
+                    self.path, self.data, args._opencode_release, history_only=True
+                )
                 source.assert_called_once_with(box, self.data)
                 owner.assert_not_called()
                 self.assertEqual(

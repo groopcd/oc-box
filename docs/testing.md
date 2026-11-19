@@ -407,6 +407,12 @@ reload/epoch changes, expiry and replay after both ordinary and release expiry.
 Registration capacity must refuse new IDs rather than evict sequence history.
 Informational commands stay stdlib-only; attach must not install a helper,
 refresh credentials/configuration or infer focus from saved tab order/activity.
+Exercise both the live reporting and saved-membership contracts on the latest
+stable OpenCode 2.x in CI, while retaining the original native regression.
+Unit matrices cover eligible stable patch/minor versions, refusal of
+noncanonical identities and incompatible protocol/state, and unchanged
+automatic owner session selection. Eligibility to check a contract is not
+confirmation that every 2.x release implements it.
 
 Run the bounded provider-free native fixture separately against retained and
 current unmodified supported V2 binaries:

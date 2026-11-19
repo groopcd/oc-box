@@ -388,6 +388,70 @@ class WiringTests(unittest.TestCase):
         self.native.workspace_service.api.side_effect = box.BoxError("private-sentinel")
         self.assertFalse(ui.available(self.native, self.data, self.connection))
 
+    def test_new_stable_patches_still_require_the_exact_reporting_protocol(self):
+        api = self.native.workspace_service.api
+        for release in ("2.3.2", "2.4.0", "2.99.123"):
+            data = {**self.data, "opencode_version": release}
+            with self.subTest(release=release):
+                api.return_value = {"output": {"protocol": 1}}
+                self.assertTrue(ui.available(self.native, data, self.connection))
+                self.assertEqual(
+                    ui.read_snapshot(self.native, data, self.connection).selected,
+                    "ses_root",
+                )
+                for ping in (
+                    {"output": {"protocol": 2}},
+                    {"output": {"protocol": True}},
+                    {"output": {"protocol": 1.0}},
+                    {"output": {"protocol": 1, "other": 1}},
+                    {"result": {"protocol": 1}},
+                ):
+                    api.return_value = ping
+                    self.assertFalse(ui.available(self.native, data, self.connection))
+
+    def test_nonrelease_versions_do_not_probe_private_native_service(self):
+        for release in ("1.19.5", "2.3.2-preview", "2.3.2+modified", "3.0.0", None):
+            with self.subTest(release=release):
+                data = {**self.data, "opencode_version": release}
+                self.assertFalse(ui.available(self.native, data, self.connection))
+                self.assertEqual(
+                    ui.read_snapshot(self.native, data, self.connection),
+                    ui.Snapshot("missing", reason="unsupported-version"),
+                )
+        self.native.workspace_service.api.assert_not_called()
+        self.native.run.assert_not_called()
+
+    def test_flat_launcher_can_probe_newer_native_v2_without_package_imports(self):
+        source = Path(ui.__file__).resolve().parent
+        probe = """
+import sys
+from types import SimpleNamespace
+
+sys.path.insert(0, sys.argv[1])
+import ui_state
+
+requests = []
+def api(box, data, connection, method, route, *args, **kwargs):
+    requests.append((method, route))
+    return {"output": {"protocol": 1}}
+
+box = SimpleNamespace(
+    BoxError=RuntimeError,
+    workspace_service=SimpleNamespace(api=api),
+    container_project=lambda data: "/synthetic/project",
+)
+assert ui_state.available(box, {"opencode_version": "2.3.2"}, {})
+assert [method for method, _ in requests] == ["GET", "POST"]
+assert "oc_box" not in sys.modules
+"""
+        result = subprocess.run(
+            [os.sys.executable, "-I", "-S", "-B", "-c", probe, str(source)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_owner_ui_bridge_is_opt_in_memory_only_and_probed_once(self):
         program = (
             "import json,sys;"
@@ -459,7 +523,14 @@ class WiringTests(unittest.TestCase):
             tempfile.TemporaryDirectory() as temporary,
             patch.dict(os.environ, {"XDG_CONFIG_HOME": temporary}),
         ):
-            for release in ("1.19.5", "2.2.6", "2.3.0"):
+            for release, expected in (
+                ("1.19.5", False),
+                ("2.2.6", True),
+                ("2.3.0", True),
+                ("2.3.2", True),
+                ("2.4.0", True),
+                ("2.3.2-preview", False),
+            ):
                 with tarfile.open(
                     fileobj=io.BytesIO(
                         box.config_archive(
@@ -475,7 +546,7 @@ class WiringTests(unittest.TestCase):
                     profile = json.load(archive.extractfile("oc-box-profile.json"))
                     self.assertNotIn("oc-box-ui-state", json.dumps(profile))
                     found = "plugins/oc-box-ui-state/package.json" in names
-                    self.assertEqual(found, release.startswith("2."))
+                    self.assertEqual(found, expected)
                     if found:
                         self.assertTrue(
                             all(
@@ -488,6 +559,33 @@ class WiringTests(unittest.TestCase):
             with self.assertRaisesRegex(box.BoxError, "conflicts"):
                 box.config_archive(self.data)
             self.assertTrue(original.is_dir())
+
+    def test_history_only_archive_keeps_old_ui_policy_for_newer_native_v2(self):
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": temporary}),
+        ):
+            helper = "plugins/oc-box-ui-state/package.json"
+            for release, was_included in (
+                ("2.2.6", True),
+                ("2.3.0", True),
+                ("2.3.2", False),
+            ):
+                data = {**self.data, "opencode_version": release}
+                archive = box.config_archive(data, history_only=True)
+                with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as opened:
+                    self.assertIs(helper in opened.getnames(), was_included)
+            host_plugin = Path(temporary) / "opencode/plugins/oc-box-ui-state"
+            host_plugin.mkdir(parents=True)
+            manifest = host_plugin / "package.json"
+            content = b'{"name":"synthetic-user-plugin"}'
+            manifest.write_bytes(content)
+            with self.assertRaisesRegex(box.BoxError, "conflicts"):
+                box.config_archive(data)
+            archive = box.config_archive(data, history_only=True)
+            with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as opened:
+                self.assertEqual(opened.extractfile(helper).read(), content)
+            self.assertEqual(manifest.read_bytes(), content)
 
     def test_javascript_memory_and_serialized_reporter_contract(self):
         result = subprocess.run(

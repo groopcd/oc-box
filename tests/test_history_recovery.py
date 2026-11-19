@@ -694,7 +694,7 @@ class HistoryRecoveryTests(unittest.TestCase):
 
                 @contextlib.contextmanager
                 def service(*_args, ui_bridge=False):
-                    self.assertIs(ui_bridge, release in box.native_tabs.SUPPORTED)
+                    self.assertTrue(ui_bridge)  # All matrix releases are stable V2.
                     events.append("owner-open")
                     try:
                         yield owner
@@ -1164,7 +1164,7 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
 
                 @contextlib.contextmanager
                 def service(*_args, ui_bridge=False):
-                    self.assertIs(ui_bridge, release in box.native_tabs.SUPPORTED)
+                    self.assertTrue(ui_bridge)  # All matrix releases are stable V2.
                     events.append("owner-open")
                     try:
                         yield owner
