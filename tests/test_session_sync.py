@@ -8,7 +8,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from oc_box import oc_box as box, opencode_v2_io as v2, workspace_service
 
@@ -720,6 +720,65 @@ class SessionSyncTests(unittest.TestCase):
         ok = subprocess.CompletedProcess([], 0, "[]", "")
         with patch.object(box, "run", return_value=ok):
             self.assertIs(box.run_v2_history(self.data, "sessions"), ok)
+
+    def test_boxed_bridge_contract_refusals_never_authorize_generic_automatic_retry(
+        self,
+    ):
+        data = {**self.data, "opencode_version": "2.3.2"}
+        for streaming in (False, True):
+            for message in v2.FIXED_MESSAGES:
+                with self.subTest(streaming=streaming, message=message):
+                    result = subprocess.CompletedProcess([], 2, "", v2.MARKER + message)
+                    worker = Mock()
+                    worker.run.return_value = result
+                    token = box.history_reader.EXPORTS.set(
+                        worker if streaming else None
+                    )
+                    try:
+                        with patch.object(box, "run", return_value=result):
+                            with self.assertRaises(box.BoxError) as raised:
+                                box.run_v2_history(data, "sessions")
+                    finally:
+                        box.history_reader.EXPORTS.reset(token)
+                    self.assertEqual(str(raised.exception), message)
+                    self.assertEqual(
+                        box.history_recovery.exit_retry_eligible(
+                            box, data, raised.exception
+                        ),
+                        message in v2.PENDING_MESSAGES or message == v2.NOT_READY,
+                    )
+
+    def test_successful_bridge_output_rejected_by_host_validators_never_enables_retry(
+        self,
+    ):
+        data = {**self.data, "opencode_version": "2.3.2"}
+        cases = (
+            (
+                [self.session("ses_root", updated="private-invalid-time")],
+                lambda: box.list_container_sessions(data),
+            ),
+            (
+                {"info": self.session("ses_other"), "messages": []},
+                lambda: box.export_container_session(data, "ses_root"),
+            ),
+            (
+                {
+                    "info": self.session("ses_root"),
+                    "messages": ["private-invalid-message"],
+                },
+                lambda: box.export_container_session(data, "ses_root"),
+            ),
+        )
+        for value, validate in cases:
+            with (
+                self.subTest(value=value),
+                patch.object(box, "run", return_value=self.result(value)),
+            ):
+                with self.assertRaises(box.BoxError) as raised:
+                    validate()
+            self.assertFalse(
+                box.history_recovery.exit_retry_eligible(box, data, raised.exception)
+            )
 
     def test_pending_session_does_not_block_other_sessions_and_is_reported(self):
         infos = [

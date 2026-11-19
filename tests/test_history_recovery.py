@@ -266,25 +266,32 @@ class HistoryRecoveryTests(unittest.TestCase):
         sync.assert_not_called()
 
     def test_pending_export_or_activity_failure_is_not_reported_as_saved(self):
-        for phase in ("sync", "idle"):
-            with self.subTest(phase=phase):
+        for phase, pending in (("sync", False), ("idle", False), ("sync", True)):
+            with self.subTest(phase=phase, pending=pending):
                 self.running = True
                 self.calls.clear()
+                self.output.seek(0)
+                self.output.truncate(0)
 
                 def fail(event, phase=phase):
                     if event == phase:
-                        raise box.BoxError("private-sentinel")
+                        kind = box.HistoryPending if pending else box.BoxError
+                        raise kind("private-sentinel")
 
                 self.inject = fail
                 result, _lease, _sync = self.recover()
                 self.assertFalse(result)
                 self.assertFalse(self.running)
                 self.assertEqual(self.calls.count("start"), 1)
-        self.assertNotIn("snapshots were synchronized", self.output.getvalue())
-        self.assertIn("oc-box sync", self.output.getvalue())
-        self.assertNotIn("private-sentinel", self.output.getvalue())
-        self.assertNotIn("Check for an oc-box update", self.output.getvalue())
-        self.assertNotIn("upgrade OpenCode", self.output.getvalue())
+                self.assertEqual(
+                    "snapshot-incomplete" in self.output.getvalue(), pending
+                )
+                self.assertEqual("prior archives" in self.output.getvalue(), pending)
+                self.assertNotIn("snapshots were synchronized", self.output.getvalue())
+                self.assertIn("oc-box sync", self.output.getvalue())
+                self.assertNotIn("private-sentinel", self.output.getvalue())
+                self.assertNotIn("Check for an oc-box update", self.output.getvalue())
+                self.assertNotIn("upgrade OpenCode", self.output.getvalue())
 
     def test_reader_exit_failure_cannot_be_reported_as_saved(self):
         self.reader.__exit__.side_effect = box.BoxError("private-sentinel")
@@ -573,6 +580,42 @@ class HistoryRecoveryTests(unittest.TestCase):
             "eligible-shell": {},
             "eligible-shell-232": {"release": "2.3.2"},
             "eligible-subagent-232": {"release": "2.3.2", "kind": "subagent"},
+            "interrupted-foreground-232": {
+                "release": "2.3.2",
+                "foreground": 2,
+                "count": 14,
+                "mixed": True,
+                "expected": 1,
+            },
+            "interrupted-foreground-only-232": {
+                "release": "2.3.2",
+                "foreground": 2,
+                "count": 0,
+                "expected": 1,
+            },
+            "interrupted-foreground-api-failed-232": {
+                "release": "2.3.2",
+                "foreground": 2,
+                "api_failure": 5,
+                "expected": 1,
+            },
+            "foreground-malformed-query-232": {
+                "release": "2.3.2",
+                "foreground": 2,
+                "api_failure": 5,
+                "json_failure": True,
+                "refusal": "invalid-active-response",
+            },
+            "legacy-foreground-refused": {
+                "release": "2.2.7",
+                "foreground": 2,
+                "refusal": "foreground-active",
+            },
+            "foreground-one-pair-refused": {
+                "foreground": 2,
+                "slow_query": True,
+                "refusal": "foreground-active",
+            },
             "eligible-future-subagent": {
                 "release": "2.3.9999",
                 "kind": "subagent",
@@ -651,7 +694,7 @@ class HistoryRecoveryTests(unittest.TestCase):
 
                 @contextlib.contextmanager
                 def service(*_args, ui_bridge=False):
-                    self.assertIs(ui_bridge, release == "2.3.0")
+                    self.assertIs(ui_bridge, release in box.native_tabs.SUPPORTED)
                     events.append("owner-open")
                     try:
                         yield owner
@@ -673,14 +716,22 @@ class HistoryRecoveryTests(unittest.TestCase):
                     )
                     if target == case.get("api_refusal"):
                         return {"data": "private-sentinel"}
+                    if len(requests) == case.get("api_failure"):
+                        error = ValueError if case.get("json_failure") else box.BoxError
+                        raise error("private-sentinel")
                     return {
-                        "data": {}
+                        "data": {
+                            "ses_foreground_" + str(index): {"type": "running"}
+                            for index in range(case.get("foreground", 0))
+                        }
                         if target == "/api/session/active"
                         else [
                             {
                                 "id": "job_synthetic_" + str(index),
                                 "sessionID": "ses_synthetic",
-                                "kind": case.get("kind", "shell"),
+                                "kind": "subagent"
+                                if case.get("mixed") and index >= 3
+                                else case.get("kind", "shell"),
                                 "status": "running",
                             }
                             for index in range(case.get("count", 1))
@@ -783,13 +834,15 @@ class HistoryRecoveryTests(unittest.TestCase):
                         result,
                         (case.get("client_code", 0) or 1)
                         if "refusal" in case
-                        else case.get("client_code", 0),
+                        else case.get("expected", case.get("client_code", 0)),
                     )
-                if case.get("api_refusal"):
+                if case.get("api_refusal") or case.get("api_failure"):
                     self.assertNotIn("last complete observation", output.getvalue())
                 else:
                     self.assertIn(
-                        "last complete observation: foreground=0, jobs-running="
+                        "last complete observation: foreground="
+                        + str(case.get("foreground", 0))
+                        + ", jobs-running="
                         + str(case.get("count", 1))
                         + ", "
                         "jobs-completed=0, jobs-error=0, jobs-cancelled=0.",
@@ -801,7 +854,9 @@ class HistoryRecoveryTests(unittest.TestCase):
                 self.assertEqual(
                     output.getvalue().count(early_warning), int(unsupported)
                 )
-                guidance = unsupported or bool(case.get("api_refusal"))
+                guidance = unsupported or bool(
+                    case.get("api_refusal") or case.get("json_failure")
+                )
                 self.assertEqual(
                     "Check for an oc-box update first" in output.getvalue(), guidance
                 )
@@ -823,6 +878,11 @@ class HistoryRecoveryTests(unittest.TestCase):
                     self.assertIn("shell=0, subagent=10, image=0", output.getvalue())
                 if "refusal" not in case:
                     recover.assert_called_once()
+                    if case.get("foreground"):
+                        self.assertTrue(owner._history_failure.interrupted_foreground)
+                        self.assertIn(
+                            "will not complete interrupted work", output.getvalue()
+                        )
                     self.assertEqual(
                         events,
                         [
@@ -843,7 +903,7 @@ class HistoryRecoveryTests(unittest.TestCase):
                     self.assertEqual(
                         "Automatic persisted-history snapshot not attempted"
                         in output.getvalue(),
-                        not bool(case.get("api_refusal")),
+                        not bool(case.get("api_refusal") or case.get("api_failure")),
                     )
                     self.assertIn(case["refusal"], output.getvalue())
                     self.assertEqual(
@@ -1060,6 +1120,18 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
     def test_recovered_outcome_requires_known_client_status_and_final_cleanup(self):
         cases = {
             "clean-recovered": {},
+            "interrupted-foreground": {"foreground": True, "expected": 1},
+            "failed-foreground-client": {
+                "foreground": True,
+                "client_code": 7,
+                "expected": 7,
+            },
+            "ordinary-sync-failure": {"live_failure": True},
+            "ordinary-sync-failed-client": {
+                "live_failure": True,
+                "client_code": 7,
+                "expected": 7,
+            },
             "failed-client": {"client_code": 7, "expected": 7},
             "recovery-pending": {"recovered": False, "expected": 1},
             "recovery-unconfirmed": {"recovered": None, "expected": 1},
@@ -1081,11 +1153,18 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
         for name, case in cases.items():
             with self.subTest(case=name):
                 events = []
+                release = (
+                    "2.3.2"
+                    if case.get("live_failure") or case.get("foreground")
+                    else "2.2.7"
+                )
+                self.data["opencode_version"] = release
+                self.args._opencode_release = release
                 owner = SimpleNamespace(clients=0, child=SimpleNamespace(returncode=0))
 
                 @contextlib.contextmanager
                 def service(*_args, ui_bridge=False):
-                    self.assertIs(ui_bridge, True)
+                    self.assertIs(ui_bridge, release in box.native_tabs.SUPPORTED)
                     events.append("owner-open")
                     try:
                         yield owner
@@ -1093,9 +1172,15 @@ class RecoveryExitCoordinatorTests(unittest.TestCase):
                         events.append("owner-closed")
 
                 def client(*_args):
-                    owner._history_timeout = box.HistoryWaitTimeout(
-                        "count-only", recovery_eligible=True
-                    )
+                    if case.get("live_failure"):
+                        owner._history_failure = box.BoxError("fixed-live-error")
+                        owner._history_failure.history_retryable = True
+                    else:
+                        owner._history_timeout = box.HistoryWaitTimeout(
+                            "count-only",
+                            recovery_eligible=True,
+                            interrupted_foreground=case.get("foreground", False),
+                        )
                     if not case.get("missing_status"):
                         owner._client_exit_code = case.get("client_code", 0)
                     events.append("client-closed")

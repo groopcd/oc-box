@@ -109,7 +109,7 @@ class HistoryPending(BoxError):
 
 
 class HistoryWaitTimeout(BoxError):
-    """Keep the fixed refusal separate from count-only readiness diagnostics."""
+    """Keep the fixed refusal separate from aggregate readiness diagnostics."""
 
     def __init__(
         self,
@@ -117,11 +117,15 @@ class HistoryWaitTimeout(BoxError):
         *,
         recovery_eligible=False,
         recovery_reason="readiness-unverified",
+        timing_diagnostic=None,
+        interrupted_foreground=False,
     ):
         super().__init__("OpenCode 2.x history wait failed (activity-timeout).")
         self.diagnostic = diagnostic
         self.recovery_eligible = recovery_eligible
         self.recovery_reason = recovery_reason
+        self.timing_diagnostic = timing_diagnostic
+        self.interrupted_foreground = interrupted_foreground
 
 
 @contextlib.contextmanager
@@ -2205,14 +2209,23 @@ def prepare_runtime(
 
 def run_v2_history(data, action, **settings):
     """Use the owning service when present; never elect a host shared service."""
+
+    def failed(result, fallback):
+        message = opencode_v2_io.fixed_message(result.stderr)
+        if message in opencode_v2_io.PENDING_MESSAGES:
+            raise HistoryPending(message)
+        error = BoxError(message or fallback)
+        if message is not None and message != opencode_v2_io.NOT_READY:
+            error.history_contract_refusal = True
+        else:
+            error.history_retryable = True
+        raise error
+
     stream = history_reader.EXPORTS.get()
     if stream is not None:
         result = stream.run(data, action, settings)
         if result.returncode:
-            message = opencode_v2_io.fixed_message(result.stderr)
-            if message in opencode_v2_io.PENDING_MESSAGES:
-                raise HistoryPending(message)
-            raise BoxError(message or "OpenCode 2.x history export helper failed.")
+            failed(result, "OpenCode 2.x history export helper failed.")
         return result
     live = workspace_service.live_connection()
     endpoint = (
@@ -2247,10 +2260,7 @@ def run_v2_history(data, action, **settings):
     if result.returncode:
         # Only a whitelisted constant explanation is ever shown; native errors
         # and private output stay hidden behind the generic exit status.
-        message = opencode_v2_io.fixed_message(result.stderr)
-        if message in opencode_v2_io.PENDING_MESSAGES:
-            raise HistoryPending(message)
-        raise BoxError(message or f"podman failed (exit {result.returncode})")
+        failed(result, f"podman failed (exit {result.returncode})")
     return result
 
 
@@ -2887,7 +2897,7 @@ def _sync_sessions(path, data, started):
             flush=True,
         )
     if pending:
-        raise BoxError(
+        raise HistoryPending(
             f"{len(pending)} session(s) not settled yet: "
             + "; ".join(dict.fromkeys(pending))
             + " Their last archives are retained and other sessions were synchronized."
@@ -3092,13 +3102,18 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                     history_recovery.report_compatibility_refusal("unsupported-version")
             history_started = True
             code = launch_client(path, data, args, version, exported, owner)
-        timeout = getattr(owner, "_history_timeout", None) if owner else None
-        if isinstance(timeout, HistoryWaitTimeout):
+        failure = None
+        if owner:
+            failure = getattr(owner, "_history_failure", None) or getattr(
+                owner, "_history_timeout", None
+            )
+        if failure is not None:
             code = code or 1
         if (
             source is not None
-            and isinstance(timeout, HistoryWaitTimeout)
-            and timeout.recovery_eligible
+            and history_recovery.exit_retry_eligible(
+                sys.modules[__name__], data, failure
+            )
             and type(owner.clients) is int
             and owner.clients == 0
             and type(owner.child.returncode) is int
@@ -3110,18 +3125,21 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                 is True
             )
             if recovered:
-                # The timeout is handled by the verified snapshot. Never clear
-                # a real client failure or infer a missing client's exit status.
+                # Archival can recover without completing interrupted execution.
+                # Never clear a real client failure or an observed foreground
+                # interruption, or infer a missing client's exit status.
                 client_code = getattr(owner, "_client_exit_code", None)
                 if type(client_code) is int:
-                    code = client_code
-        elif timeout is not None:
-            if isinstance(timeout, HistoryWaitTimeout):
+                    code = client_code or int(
+                        getattr(failure, "interrupted_foreground", False)
+                    )
+        elif failure is not None:
+            if isinstance(failure, HistoryWaitTimeout):
                 history_recovery.report_skipped(
-                    history_recovery.skip_reasons(owner, timeout, closed=True)
+                    history_recovery.skip_reasons(owner, failure, closed=True)
                 )
             print(
-                f"oc-box: history sync pending: {timeout}\n"
+                f"oc-box: history sync pending: {failure}\n"
                 "Container data retained. Retry with 'oc-box sync'.",
                 file=sys.stderr,
             )
@@ -3332,18 +3350,30 @@ def launch_client(path, data, args, version, exported, owner=None):
     except (BoxError, ValueError, KeyError) as exc:
         if isinstance(exc, HistoryWaitTimeout):
             print(f"oc-box: {exc.diagnostic}", file=sys.stderr)
-            if (
-                exc.recovery_eligible
-                and getattr(owner, "_history_source", None) is not None
-            ):
+            if exc.timing_diagnostic is not None:
+                print(f"oc-box: {exc.timing_diagnostic}", file=sys.stderr)
+        if (
+            owner
+            and getattr(owner, "_history_source", None) is not None
+            and history_recovery.exit_retry_eligible(sys.modules[__name__], data, exc)
+        ):
+            owner._history_failure = exc
+            if isinstance(exc, HistoryWaitTimeout):
                 owner._history_timeout = exc
+            print(
+                "oc-box: Live history synchronization did not finish. "
+                "Closing the owner before one automatic, bounded "
+                "post-stop persisted-history snapshot attempt.",
+                file=sys.stderr,
+            )
+            if getattr(exc, "interrupted_foreground", False):
                 print(
-                    "oc-box: Live activity did not settle before the deadline. "
-                    "Closing the owner before a bounded, "
-                    "post-stop persisted-history snapshot attempt.",
+                    "oc-box: Foreground execution was still active. "
+                    "Saving persisted history will not complete interrupted work.",
                     file=sys.stderr,
                 )
-                return code or 1
+            return code or 1
+        if isinstance(exc, HistoryWaitTimeout):
             history_recovery.report_skipped(history_recovery.skip_reasons(owner, exc))
         history_recovery.report_compatibility_refusal(
             getattr(exc, "history_compatibility_category", None)

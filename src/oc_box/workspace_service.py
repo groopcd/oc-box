@@ -678,8 +678,10 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
     accepting a single observation across that handoff. This does not certify
     transcript completeness: user shell fibers and unsettled projected messages
     need a separate check in the export path. Persistent PTYs are not activity.
-    Timeout diagnostics contain only the phase and the last fully validated pair
-    of status/kind counts, never native identifiers, commands, responses or errors.
+    Timeout diagnostics contain the phase, the last fully validated status/kind
+    counts and aggregate timings of existing queries, never native identifiers,
+    commands, responses or errors. Timings include native CLI transport overhead;
+    they do not distinguish live jobs from retained native records.
     Stable native 2.3.x may route retained shell/subagent jobs to a guarded
     unregistered post-stop reader; older/unknown versions retain shell-only hints.
     """
@@ -691,17 +693,58 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
     phase = "foreground-query"
     observation = "unavailable"
     kind_observation = "unavailable"
-    kinds = history_reader.SNAPSHOT_JOB_KINDS.get(
-        history_reader.snapshot_profile(data.get("opencode_version")),
-        frozenset(("shell",)),
-    )
+    profile = history_reader.snapshot_profile(data.get("opencode_version"))
+    kinds = history_reader.SNAPSHOT_JOB_KINDS.get(profile, frozenset(("shell",)))
     insufficient = (
         "insufficient-job-observations"
         if "subagent" in kinds
         else "insufficient-shell-observations"
     )
     job_pairs = 0
+    foreground_pairs = 0
+    foreground_observed = False
+    compatibility_reason = None
     recovery_reason = insufficient
+    complete_pairs = 0
+    last_complete = None
+    last_query = "unavailable"
+    last_query_budget = None
+    last_query_outcome = "unavailable"
+    queries = {
+        name: {"count": 0, "total": 0.0, "max": 0.0}
+        for name in ("foreground-query", "background-query")
+    }
+
+    def timing_diagnostic():
+        def count(value):
+            return str(value) if value < 10000 else "9999+"
+
+        def duration(value):
+            if value is None:
+                return "unavailable"
+            return f"{max(0, value):.3f}s" if value < 10000 else "9999+s"
+
+        summary = "; ".join(
+            f"{name}-queries={count(query['count'])}, "
+            f"total={duration(query['total'])}, max={duration(query['max'])}"
+            for name in ("foreground", "background")
+            for query in (queries[name + "-query"],)
+        )
+        age = None if last_complete is None else time.monotonic() - last_complete
+        return (
+            f"History wait timing: complete-pairs={count(complete_pairs)}; {summary}; "
+            f"last-query={last_query}, remaining-at-start={duration(last_query_budget)}, "
+            f"outcome={last_query_outcome}; last-complete-age={duration(age)}."
+        )
+
+    def record_query(started, outcome):
+        nonlocal last_query_outcome
+        elapsed = max(0, time.monotonic() - started)
+        query = queries[last_query]
+        query["count"] += 1
+        query["total"] += elapsed
+        query["max"] = max(query["max"], elapsed)
+        last_query_outcome = outcome
 
     def fail(category):
         if category == "activity-timeout":
@@ -709,12 +752,20 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
                 f"History wait timeout: phase={phase}; "
                 f"last complete job kinds: {kind_observation}; "
                 f"last complete observation: {observation}.",
-                recovery_eligible=job_pairs >= 2,
+                recovery_eligible=job_pairs >= 2 or foreground_pairs >= 2,
                 recovery_reason=recovery_reason,
+                timing_diagnostic=timing_diagnostic(),
+                interrupted_foreground=foreground_observed,
             ) from None
         error = box.BoxError(f"OpenCode 2.x history wait failed ({category}).")
+        error.interrupted_foreground = foreground_observed
+        error.history_retryable = (
+            category == "activity-api-failed" and compatibility_reason is None
+        )
         if category in ("invalid-active-response", "invalid-jobs-response"):
             error.history_compatibility_category = category
+        elif compatibility_reason is not None:
+            error.history_compatibility_category = compatibility_reason
         raise error from None
 
     if (
@@ -760,13 +811,17 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
         return value
 
     def request(target):
-        nonlocal phase, job_pairs, recovery_reason
+        nonlocal phase, job_pairs, foreground_pairs, recovery_reason
+        nonlocal last_query, last_query_budget
+        nonlocal foreground_observed, compatibility_reason
         budget = remaining()
         phase = (
             "foreground-query"
             if target == "/api/session/active"
             else "background-query"
         )
+        last_query, last_query_budget = phase, budget
+        started = time.monotonic()
         try:
             result = api(
                 box,
@@ -782,18 +837,40 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             # deadline category, but a known non-timeout failure invalidates the
             # optional snapshot hint even when the clock also expired. run()
             # retains subprocess.TimeoutExpired as the private BoxError cause.
-            if not isinstance(error, subprocess.TimeoutExpired) and not isinstance(
+            timed_out = isinstance(error, subprocess.TimeoutExpired) or isinstance(
                 error.__cause__, subprocess.TimeoutExpired
-            ):
+            )
+            record_query(started, "subprocess-timeout" if timed_out else "failed")
+            if isinstance(error, ValueError):
+                compatibility_reason = (
+                    "invalid-active-response"
+                    if target == "/api/session/active"
+                    else "invalid-jobs-response"
+                )
+            if not timed_out:
                 job_pairs = 0
+                foreground_pairs = 0
                 recovery_reason = "activity-api-failed"
             remaining()
             fail("activity-api-failed")
+        record_query(started, "returned")
         value = (
             active_items(result)
             if target == "/api/session/active"
             else job_items(result)
         )
+        if target == "/api/session/active" and value is not None:
+            # Keep execution outcome separate from authorization counters. A
+            # later API error cannot prove previously observed work completed.
+            foreground_observed = bool(value)
+        if value is None or (
+            not value
+            if target == "/api/session/active"
+            else any(job["kind"] not in kinds for job in value)
+        ):
+            # A foreground-interruption hint also needs consecutive complete
+            # observations, and must not survive contradictory partial replies.
+            foreground_pairs = 0
         if value is None or (
             bool(value)
             if target == "/api/session/active"
@@ -841,6 +918,8 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             for kind in ("shell", "subagent", "image")
             for count in (sum(job["kind"] == kind for job in jobs),)
         )
+        complete_pairs += 1
+        last_complete = time.monotonic()
         # This requests only a post-STOP snapshot, never a live readiness waiver.
         # Durable shell rows can hydrate as running on the next owner. The
         # ordinary timeout already stops genuine pending work too; recovery must
@@ -848,6 +927,11 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
         job_pairs = (
             job_pairs + 1
             if not active and jobs and all(job["kind"] in kinds for job in jobs)
+            else 0
+        )
+        foreground_pairs = (
+            foreground_pairs + 1
+            if profile == "2.3" and active and all(job["kind"] in kinds for job in jobs)
             else 0
         )
         if job_pairs:

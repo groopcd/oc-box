@@ -116,3 +116,13 @@ jobs:
         run: >-
           python3 -B tests/smoke_history_subagent_recovery_v2.py
           --opencode "$RUNNER_TEMP/opencode-v23/node_modules/.bin/opencode"
+      - name: Native foreground interruption and queued-input preservation
+        run: >-
+          python3 -B tests/smoke_history_subagent_recovery_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v23/node_modules/.bin/opencode"
+          --foreground
+      - name: Native abrupt foreground loss and partial archival preservation
+        run: >-
+          python3 -B tests/smoke_history_subagent_recovery_v2.py
+          --opencode "$RUNNER_TEMP/opencode-v23/node_modules/.bin/opencode"
+          --foreground --producer-close abrupt

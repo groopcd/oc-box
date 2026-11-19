@@ -978,6 +978,9 @@ below retain their original source-specific nonzero outcome policy. The later
 [focused shutdown-outcome policy](#focused-shutdown-outcome-policy-checks) changes
 only the fully verified clean-client result; it does not rewrite historical exits,
 pass failed gates or extend earlier acceptance to the new source.
+The one-attempt automatic archival amendment below has separate preparation and
+validation requirements; it does not extend historical acceptance to foreground
+timeouts or ordinary live-sync failures.
 
 #### Exit-timeout investigation (2026-11-12)
 
@@ -1004,6 +1007,96 @@ fixtures are offline/process evidence, not a live rootless-Podman pass, an all-d
 soak or acceptance of a repair. Native job cleanup remains open; the subsequent
 snapshot candidate below establishes a stronger teardown boundary rather than
 assuming a reaped host-side Podman wrapper proves the remote service stopped.
+
+#### Timeout-only wait timing diagnostics (preparation)
+
+The diagnostic-only amendment adds a separate `History wait timing:` line on
+`activity-timeout`; the existing `History wait timeout:` line must remain
+byte-compatible, with no normal-success chatter. Prepare focused local coverage
+for all validated complete pairs versus recovery-eligible pairs, per-kind query
+counts/totals/maxima (including failed and timed-out attempts), the last attempt's
+kind/outcome and remaining whole grace at its start, and the last complete pair's
+age. The remaining-grace field is not the individual request cap. Check zero
+budget as zero query counts with unavailable last-attempt/observation-age fields,
+`9999+`/`9999+s` caps, and no fabricated pair from late or partial responses.
+`returned` describes transport/API-helper return, not successful validation.
+
+These are wall-clock timings around the existing native API helper, including
+Podman/Python/native CLI startup and JSON decoding, not pure server latency.
+Timing itself must retain the existing deadline, 30-second grace, polling interval,
+60-second request cap, recovery eligibility and exit policy, without extra
+probes or native job cleanup. Output must exclude IDs, paths, commands, payloads,
+raw errors, environment values and credentials. Aggregate timing does not track
+job identity, distinguish live from durable jobs or prove stuck/orphan jobs.
+
+A reported Ctrl-D exit during an active turn retained a `foreground-active`
+recovery refusal; a later successful standalone manual sync does not invalidate
+that genuine active-work observation or authorize live export.
+Ordinary manual sync remains separate from the guarded post-stop transport
+fast path and is not optimized by this amendment. This preparation note records
+no new test pass, replayed historical gate or external-host acceptance; earlier
+evidence and its exact source/native identities remain unchanged.
+
+#### One-attempt automatic archival (preparation)
+
+The later routing amendment requests one bounded post-stop Reader attempt
+instead of immediately asking for manual sync after an eligible owning-client
+live failure. It never requests a second unrestricted manual-sync attempt if
+the guarded reader refuses or fails. Keep the 30-second live grace, 60-second
+request cap, 35-second transition and 180-second snapshot budgets unchanged.
+
+Prepare focused coverage for the supported 2.3.x foreground-timeout route:
+two consecutive full validated pairs must show nonempty foreground activity
+and only shell/subagent jobs, including an empty job list. A later empty
+foreground response resets this hint; malformed/unsupported responses and
+known non-timeout API errors invalidate it. Actual query timeouts may retain
+previous qualifying pairs without inventing observations. No hint authorizes
+live export. Retain the 2.2.6/2.2.7 foreground refusal and unknown-version,
+contract, image-job and incompatible-metadata refusals.
+
+Positively classified transport and unsettled-history failures during live
+wait/sync may route once only on the known 2.3.x profile with a captured safe
+source. Unmarked `BoxError` validation failures do not enable a retry.
+Explicit compatibility and
+Reader refusals or uncertain source cleanup must not retry; `KeyError` and
+`ValueError` must not become broad automatic-retry triggers. Require clean owner
+closure, all clients detached, actual verified whole-container stop, the same
+passive container and immutable identity, stop-intent/admission checks, guarded
+Reader checks, native export/import verification and independently bounded
+cleanup. No normal launch or runtime/config/auth/vault refresh, new resources,
+job replay/completion or queued-input acknowledgement is permitted.
+
+Check owning TUI/web outcomes separately from archival: foreground-interruption
+recovery remains nonzero even with raw client `0` and complete saved history;
+raw nonzero and unknown client results remain failures. Report archive success
+only after verified cleanup/final stops, never as work completion. Pending
+sessions must preserve their prior archives/checkpoints while settled neighbors
+make verified progress. The `HistoryPending` aggregate must report the fixed
+`snapshot-incomplete` category and progress/interruption warning, not all-history
+success. Manual-sync guidance is for unsafe or unfinished automatic archival.
+
+The native foreground fixture options (`--foreground` and
+`--producer-close graceful|abrupt`) retain the original default regression and
+are separate CI steps for the original 2.3.0 baseline and selected stable 2.3 patch.
+Source-bound local native 2.3.2 checks passed the default, graceful-foreground and
+abrupt-foreground cases. Both foreground cases preserved genuine queued input and
+execution claims in source and destination, with no additional provider, shell
+or plugin execution and one Reader lease. Graceful close archived all 13 source
+sessions. Abrupt loss verified 12 while retaining the interrupted session's prior
+archive/checkpoint and honestly reporting one pending session. Neither outcome
+declares the interrupted work complete.
+
+The earlier foreground fixture attempts remain failed setup evidence: a held
+provider request or a flushed streaming delta does not guarantee a durable
+unfinished assistant projection, and a nonempty native message page may carry
+an empty-tail cursor. The corrected fixture requires actual foreground activity,
+native queued admission and checked exports, rather than fabricating a pending
+row or weakening history validation.
+
+These are synthetic local native checks, not whole-container process-death or
+external-host acceptance. The final candidate still requires focused host proof;
+do not relabel earlier history/recovery reports or infer a new host pass from
+these checks.
 
 #### Post-stop persisted-history snapshot candidate
 

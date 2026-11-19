@@ -61,7 +61,7 @@ class HistoryWaitTests(unittest.TestCase):
         self.assertGreaterEqual(seconds, 0)
         self.now += seconds
 
-    def assert_wait_error(self, category, **options):
+    def assert_wait_error(self, category, *, contract_category=None, **options):
         with self.assertRaises(box.BoxError) as raised:
             service.wait_history(box, self.data, self.connection, **options)
         self.assertEqual(
@@ -70,7 +70,11 @@ class HistoryWaitTests(unittest.TestCase):
         )
         self.assertTrue(raised.exception.__suppress_context__)
         if category in ("invalid-active-response", "invalid-jobs-response"):
-            self.assertEqual(raised.exception.history_compatibility_category, category)
+            contract_category = category
+        if contract_category is not None:
+            self.assertEqual(
+                raised.exception.history_compatibility_category, contract_category
+            )
         else:
             self.assertFalse(
                 hasattr(raised.exception, "history_compatibility_category")
@@ -78,6 +82,17 @@ class HistoryWaitTests(unittest.TestCase):
         if category == "activity-timeout":
             self.assertIsInstance(raised.exception, box.HistoryWaitTimeout)
             self.assertNotIn("private-sentinel", raised.exception.diagnostic)
+            timing = raised.exception.timing_diagnostic
+            self.assertTrue(timing.startswith("History wait timing: "))
+            self.assertLess(len(timing), 600)
+            for private in (
+                "private-sentinel",
+                self.connection["password"],
+                self.connection["url"],
+                self.job["id"],
+                self.job["sessionID"],
+            ):
+                self.assertNotIn(private, timing)
         else:
             self.assertFalse(hasattr(raised.exception, "diagnostic"))
         return raised.exception
@@ -93,7 +108,11 @@ class HistoryWaitTests(unittest.TestCase):
             self.idle,
             self.no_jobs,
         ]
-        service.wait_history(box, self.data, self.connection)
+        output, errors = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(output), contextlib.redirect_stderr(errors):
+            service.wait_history(box, self.data, self.connection)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(errors.getvalue(), "")
         self.assertEqual(self.api.call_count, 6)
         self.assertEqual(self.sleep.call_count, 2)
         for index, call in enumerate(self.api.call_args_list):
@@ -202,7 +221,16 @@ class HistoryWaitTests(unittest.TestCase):
                     self.api.side_effect = (
                         [error] if target == "active" else [self.idle, error]
                     )
-                    self.assert_wait_error("activity-api-failed")
+                    self.assert_wait_error(
+                        "activity-api-failed",
+                        contract_category=(
+                            "invalid-active-response"
+                            if target == "active"
+                            else "invalid-jobs-response"
+                        )
+                        if isinstance(error, ValueError)
+                        else None,
+                    )
                     self.assertEqual(
                         self.api.call_count, 1 if target == "active" else 2
                     )
@@ -661,6 +689,279 @@ class HistoryWaitTests(unittest.TestCase):
             "last complete observation: foreground=9999+, jobs-running=0, "
             "jobs-completed=9999+, jobs-error=0, jobs-cancelled=0.",
         )
+
+    def test_query_timings_separate_completed_polls_from_poll_delay(self):
+        def request(*args, **kwargs):
+            self.advance(0.125)
+            return (
+                self.idle if args[4] == "/api/session/active" else {"data": [self.job]}
+            )
+
+        self.api.side_effect = request
+        error = self.assert_wait_error("activity-timeout", timeout=1, interval=0.25)
+        self.assertEqual(self.api.call_count, 4)
+        self.assertEqual(self.sleep.call_count, 2)
+        self.assertEqual(self.now, 101)
+        timing = error.timing_diagnostic
+        self.assertIn("complete-pairs=2;", timing)
+        for name in ("foreground", "background"):
+            self.assertIn(f"{name}-queries=2, total=0.250s, max=0.125s;", timing)
+        self.assertIn(
+            "last-query=background-query, remaining-at-start=0.375s, outcome=returned;",
+            timing,
+        )
+        self.assertIn("last-complete-age=0.250s.", timing)
+        self.assertTrue(error.recovery_eligible)
+
+    def test_final_query_timing_outcomes_do_not_change_deadline_or_recovery_routing(
+        self,
+    ):
+        for expired_call in (5, 6):
+            for outcome in (
+                "returned",
+                "subprocess-timeout",
+                "wrapped-timeout",
+                "failed",
+            ):
+                with self.subTest(expired_call=expired_call, outcome=outcome):
+                    self.now = 100.0
+                    self.api.reset_mock()
+                    self.sleep.reset_mock()
+
+                    def request(*args, **kwargs):
+                        if self.api.call_count == expired_call:
+                            self.advance(kwargs["timeout"])
+                            if outcome in ("subprocess-timeout", "wrapped-timeout"):
+                                error = subprocess.TimeoutExpired(
+                                    "private-sentinel", kwargs["timeout"]
+                                )
+                                if outcome == "wrapped-timeout":
+                                    raise box.BoxError("private-sentinel") from error
+                                raise error
+                            if outcome == "failed":
+                                raise ValueError("private-sentinel")
+                        else:
+                            self.advance(0.125)
+                        return (
+                            self.idle
+                            if args[4] == "/api/session/active"
+                            else {"data": [self.job]}
+                        )
+
+                    self.api.side_effect = request
+                    error = self.assert_wait_error(
+                        "activity-timeout", timeout=1, interval=0.125
+                    )
+                    self.assertEqual(self.api.call_count, expired_call)
+                    self.assertEqual(self.now, 101)
+                    self.assertEqual(error.recovery_eligible, outcome != "failed")
+                    timing = error.timing_diagnostic
+                    self.assertIn("complete-pairs=2;", timing)
+                    self.assertIn("last-complete-age=0.375s.", timing)
+                    expected_outcome = (
+                        "subprocess-timeout"
+                        if outcome == "wrapped-timeout"
+                        else outcome
+                    )
+                    if expired_call == 5:
+                        self.assertIn(
+                            "foreground-queries=3, total=0.500s, max=0.250s;", timing
+                        )
+                        self.assertIn(
+                            "background-queries=2, total=0.250s, max=0.125s;", timing
+                        )
+                        self.assertIn(
+                            "last-query=foreground-query, remaining-at-start=0.250s, "
+                            f"outcome={expected_outcome};",
+                            timing,
+                        )
+                    else:
+                        for name in ("foreground", "background"):
+                            self.assertIn(
+                                f"{name}-queries=3, total=0.375s, max=0.125s;", timing
+                            )
+                        self.assertIn(
+                            "last-query=background-query, remaining-at-start=0.125s, "
+                            f"outcome={expected_outcome};",
+                            timing,
+                        )
+
+    def test_initial_query_and_zero_budget_timings_keep_complete_pairs_unavailable(
+        self,
+    ):
+        for target in ("/api/session/active", "/api/experimental/job", None):
+            with self.subTest(target=target):
+                self.now = 100.0
+                self.api.reset_mock()
+
+                def request(*args, **kwargs):
+                    if args[4] == target:
+                        self.advance(kwargs["timeout"])
+                    return (
+                        self.idle if args[4] == "/api/session/active" else self.no_jobs
+                    )
+
+                self.api.side_effect = request
+                error = self.assert_wait_error(
+                    "activity-timeout", timeout=0 if target is None else 1
+                )
+                timing = error.timing_diagnostic
+                self.assertIn("complete-pairs=0;", timing)
+                self.assertIn("last-complete-age=unavailable.", timing)
+                self.assertFalse(error.recovery_eligible)
+                if target is None:
+                    self.api.assert_not_called()
+                    self.assertIn(
+                        "last-query=unavailable, remaining-at-start=unavailable, "
+                        "outcome=unavailable;",
+                        timing,
+                    )
+                else:
+                    self.assertIn(
+                        f"last-query={'foreground' if 'active' in target else 'background'}"
+                        "-query, remaining-at-start=1.000s, outcome=returned;",
+                        timing,
+                    )
+
+    def test_busy_pairs_only_authorize_post_stop_23_archival_never_live_success(self):
+        active = {
+            "ses_foreground_one": {"type": "running"},
+            "ses_foreground_two": {"type": "running"},
+        }
+        jobs = [
+            {**self.job, "kind": kind, "status": "running"}
+            for kind in ("shell",) * 3 + ("subagent",) * 11
+        ]
+        self.api.side_effect = lambda *args, **kwargs: (
+            {"data": active} if args[4] == "/api/session/active" else {"data": jobs}
+        )
+        with self.assertRaises(box.HistoryWaitTimeout) as raised:
+            service.wait_history(
+                box,
+                {**self.data, "opencode_version": "2.3.2"},
+                self.connection,
+                timeout=1,
+                interval=0.25,
+            )
+        error = raised.exception
+        self.assertIn("foreground=2, jobs-running=14", error.diagnostic)
+        self.assertIn("shell=3, subagent=11, image=0", error.diagnostic)
+        self.assertIn("complete-pairs=4;", error.timing_diagnostic)
+        self.assertIn(
+            "foreground-queries=4, total=0.000s, max=0.000s;", error.timing_diagnostic
+        )
+        self.assertIn(
+            "background-queries=4, total=0.000s, max=0.000s;", error.timing_diagnostic
+        )
+        self.assertTrue(error.recovery_eligible)
+        self.assertTrue(error.interrupted_foreground)
+        self.assertEqual(error.recovery_reason, "foreground-active")
+        self.assertEqual(self.api.call_count, 8)
+        self.assertEqual(self.now, 101)
+
+    def test_foreground_snapshot_hint_needs_consecutive_validated_23_pairs(self):
+        jobs = {"data": [{**self.job, "kind": "subagent", "status": "running"}]}
+        cases = (
+            ("2.3.2", [self.busy, jobs] * 2, True),
+            ("2.3.0", [self.busy, self.no_jobs] * 2, True),
+            ("2.2.7", [self.busy, {"data": [self.job]}] * 2, False),
+            ("2.4.0", [self.busy, jobs] * 2, False),
+            ("2.3.2", [self.idle, jobs, self.busy, jobs], False),
+            ("2.3.2", [self.busy, jobs, self.idle, jobs], False),
+            (
+                "2.3.2",
+                [self.busy, jobs, self.busy, {"data": [{**self.job, "kind": "image"}]}],
+                False,
+            ),
+        )
+        for release, replies, eligible in cases:
+            with self.subTest(release=release, replies=replies):
+                self.now = 100.0
+                self.api.reset_mock()
+                self.api.side_effect = replies
+                with self.assertRaises(box.HistoryWaitTimeout) as raised:
+                    service.wait_history(
+                        box,
+                        {**self.data, "opencode_version": release},
+                        self.connection,
+                        timeout=0.5,
+                        interval=0.25,
+                    )
+                self.assertEqual(raised.exception.recovery_eligible, eligible)
+                self.assertEqual(
+                    raised.exception.interrupted_foreground,
+                    bool(replies[-2]["data"]),
+                )
+                self.assertEqual(self.api.call_count, 4)
+
+    def test_late_foreground_hint_replies_preserve_only_known_complete_pairs(self):
+        for call, reply, eligible in (
+            (5, self.idle, False),
+            (5, {"data": []}, False),
+            (6, {"data": {}}, False),
+            (6, {"data": [{**self.job, "kind": "image"}]}, False),
+            (5, subprocess.TimeoutExpired("private-sentinel", 1), True),
+            (6, subprocess.TimeoutExpired("private-sentinel", 1), True),
+            (5, box.BoxError("private-sentinel"), False),
+        ):
+            with self.subTest(call=call, reply=reply):
+                self.now = 100.0
+                self.api.reset_mock()
+
+                def request(*args, **kwargs):
+                    if self.api.call_count == call:
+                        self.advance(kwargs["timeout"])
+                        if isinstance(reply, BaseException):
+                            raise reply
+                        return reply
+                    return (
+                        self.busy if args[4] == "/api/session/active" else self.no_jobs
+                    )
+
+                self.api.side_effect = request
+                with self.assertRaises(box.HistoryWaitTimeout) as raised:
+                    service.wait_history(
+                        box,
+                        {**self.data, "opencode_version": "2.3.2"},
+                        self.connection,
+                        timeout=1,
+                        interval=0.25,
+                    )
+                self.assertEqual(raised.exception.recovery_eligible, eligible)
+                self.assertEqual(
+                    raised.exception.interrupted_foreground,
+                    not (call == 5 and reply is self.idle),
+                )
+                self.assertEqual(self.api.call_count, call)
+
+    def test_timing_counts_and_durations_are_bounded(self):
+        self.api.side_effect = lambda *args, **kwargs: (
+            self.idle if args[4] == "/api/session/active" else {"data": [self.job]}
+        )
+        error = self.assert_wait_error("activity-timeout", timeout=10001, interval=1)
+        self.assertIn("complete-pairs=9999+;", error.timing_diagnostic)
+        for name in ("foreground", "background"):
+            self.assertIn(f"{name}-queries=9999+,", error.timing_diagnostic)
+        self.assertEqual(self.api.call_count, 20002)
+
+        self.now = 100.0
+        self.api.reset_mock()
+
+        def request(*args, **kwargs):
+            self.assertEqual(kwargs["timeout"], 60)
+            # Include an overdue helper's cleanup/clock jump, not just its cap.
+            self.advance(20001)
+            return self.idle
+
+        self.api.side_effect = request
+        error = self.assert_wait_error("activity-timeout", timeout=20001)
+        self.assertIn(
+            "foreground-queries=1, total=9999+s, max=9999+s;", error.timing_diagnostic
+        )
+        self.assertIn(
+            "remaining-at-start=9999+s, outcome=returned;", error.timing_diagnostic
+        )
+        self.api.assert_called_once()
 
     def test_zero_budget_and_invalid_wait_options_never_call_native_api(self):
         self.assert_wait_error("activity-timeout", timeout=0)
@@ -1257,6 +1558,10 @@ class WorkspaceServiceTests(unittest.TestCase):
             for error in (
                 box.BoxError("OpenCode 2.x history wait failed (activity-timeout)."),
                 box.HistoryWaitTimeout(diagnostic),
+                box.HistoryWaitTimeout(
+                    diagnostic,
+                    timing_diagnostic="History wait timing: complete-pairs=0.",
+                ),
                 box.BoxError("OpenCode 2.x history wait failed (activity-api-failed)."),
             )
         ):
@@ -1300,6 +1605,16 @@ class WorkspaceServiceTests(unittest.TestCase):
                 errors.getvalue().count("oc-box: " + diagnostic),
                 int(isinstance(error, box.HistoryWaitTimeout)),
             )
+            timing = getattr(error, "timing_diagnostic", None)
+            self.assertEqual(
+                errors.getvalue().count("oc-box: History wait timing:"),
+                int(timing is not None),
+            )
+            if timing is not None:
+                self.assertLess(
+                    errors.getvalue().index(timing),
+                    errors.getvalue().index("history sync pending"),
+                )
 
     def test_failed_active_client_still_waits_for_attached_clients(self):
         args = box.parser().parse_args(["start"])
@@ -1327,6 +1642,113 @@ class WorkspaceServiceTests(unittest.TestCase):
             sync.assert_not_called()
             self.assertFalse(hasattr(owner, "_client_exit_code"))
 
+    def test_23_expected_live_failures_defer_one_retry_only_for_safe_captured_source(
+        self,
+    ):
+        args = box.parser().parse_args(["start"])
+        retryable = box.BoxError("fixed-live-error")
+        retryable.history_retryable = True
+        cases = [
+            (retryable, True),
+            (box.BoxError("unclassified-error"), False),
+            (box.HistoryPending("fixed-pending-error"), True),
+            (box.HistoryWaitTimeout("count-only"), False),
+            (ValueError("fixed-invalid-response"), False),
+            (KeyError("fixed-invalid-field"), False),
+        ]
+        for attribute in (
+            "history_compatibility_category",
+            "history_reader_category",
+            "history_contract_refusal",
+            "history_source_cleanup_failed",
+        ):
+            error = box.BoxError("fixed-refusal")
+            error.history_retryable = True
+            setattr(error, attribute, True)
+            cases.append((error, False))
+        for release in ("2.2.7", "2.3.2", "2.4.0"):
+            for available in (False, True):
+                for stage in ("wait", "sync"):
+                    for error, eligible in cases:
+                        with self.subTest(
+                            release=release, source=available, stage=stage, error=error
+                        ):
+                            owner = SimpleNamespace(
+                                connection=self.connection,
+                                publish=Mock(),
+                                wait_clients=Mock(),
+                                _history_source=SimpleNamespace()
+                                if available
+                                else None,
+                            )
+                            output = io.StringIO()
+                            with (
+                                patch.object(
+                                    box,
+                                    "refresh_sessions",
+                                    return_value={"last": "ses_shared"},
+                                ),
+                                patch.object(box, "run_tui", return_value=7),
+                                patch.object(
+                                    service,
+                                    "wait_history",
+                                    side_effect=error if stage == "wait" else None,
+                                ),
+                                patch.object(
+                                    box,
+                                    "sync_sessions",
+                                    side_effect=error if stage == "sync" else None,
+                                ) as sync,
+                                contextlib.redirect_stderr(output),
+                                contextlib.redirect_stdout(io.StringIO()),
+                            ):
+                                result = box.launch_client(
+                                    self.path,
+                                    {**self.data, "opencode_version": release},
+                                    args,
+                                    release,
+                                    None,
+                                    owner,
+                                )
+                            self.assertEqual(result, 7)
+                            deferred = eligible and available and release == "2.3.2"
+                            self.assertEqual(
+                                getattr(owner, "_history_failure", None) is error,
+                                deferred,
+                            )
+                            self.assertEqual(
+                                "oc-box sync" in output.getvalue(), not deferred
+                            )
+                            self.assertEqual(sync.call_count, int(stage == "sync"))
+                            owner.wait_clients.assert_called_once()
+
+    def test_malformed_api_json_retains_contract_refusal_through_wait_normalization(
+        self,
+    ):
+        data = {**self.data, "opencode_version": "2.3.2"}
+        for target in ("active", "jobs"):
+            responses = [subprocess.CompletedProcess([], 0, "private-invalid-json", "")]
+            if target == "jobs":
+                responses.insert(
+                    0, subprocess.CompletedProcess([], 0, '{"data":{}}', "")
+                )
+            with (
+                self.subTest(target=target),
+                patch.object(box, "run", side_effect=responses),
+            ):
+                with self.assertRaises(box.BoxError) as raised:
+                    service.wait_history(box, data, self.connection)
+            error = raised.exception
+            self.assertNotIsInstance(error, box.HistoryWaitTimeout)
+            self.assertEqual(
+                error.history_compatibility_category,
+                "invalid-active-response"
+                if target == "active"
+                else "invalid-jobs-response",
+            )
+            self.assertFalse(box.history_recovery.exit_retry_eligible(box, data, error))
+            self.assertNotIn("private-invalid-json", str(error))
+
     def test_cancelled_job_timeout_is_deferred_only_for_a_captured_source(self):
         args = box.parser().parse_args(["start"])
         for available in (False, True):
@@ -1337,7 +1759,10 @@ class WorkspaceServiceTests(unittest.TestCase):
                     wait_clients=Mock(),
                     _history_source=SimpleNamespace() if available else None,
                 )
-                error = box.HistoryWaitTimeout("count-only", recovery_eligible=True)
+                timing = "History wait timing: complete-pairs=2."
+                error = box.HistoryWaitTimeout(
+                    "count-only", recovery_eligible=True, timing_diagnostic=timing
+                )
                 output = io.StringIO()
                 with (
                     patch.object(
@@ -1358,6 +1783,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                 sync.assert_not_called()
                 owner.wait_clients.assert_called_once()
                 self.assertEqual(owner._client_exit_code, 7)
+                self.assertEqual(output.getvalue().count("oc-box: " + timing), 1)
                 if not available:
                     self.assertIn("oc-box sync", output.getvalue())
                 self.assertEqual(

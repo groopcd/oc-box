@@ -170,6 +170,15 @@ their checkout ownership distinct from unrelated source and flat installations.
   complete verified archival, recovery cleanup and final stop may return 0 after a
   live timeout. Unknown client status, partial/failure or uncertain cleanup remains
   nonzero with retry-sync guidance; historical accepted exit records stay unchanged.
+  The new 2.3 foreground-interruption hint requires two complete validated busy
+  pairs and only supported job kinds; it authorizes post-stop archival, never live
+  export or job completion. Observed foreground interruption stays nonzero even
+  when its persisted history saves. Ordinary expected 2.3 live-sync failures may
+  route one guarded Reader attempt, not a second unrestricted manual launch.
+  Preserve explicit compatibility/cleanup refusals and legacy routing. Require
+  native queued-input/execution-claim non-consumption evidence and fresh focused
+  external-host validation before publishing this extension; earlier idle-owner
+  recovery evidence does not establish that acceptance.
   Never clear an uncertain start without verified transition completion, resume
   work, refresh credentials, create replacement resources or infer host acceptance
   from local native/process fixtures. The focused host recovery gate is additional

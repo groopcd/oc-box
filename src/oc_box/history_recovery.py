@@ -305,6 +305,31 @@ def capture(box, data, info, token, *, refusal=None):
     return Source(info["Id"], token, signature)
 
 
+def exit_retry_eligible(box, data, failure):
+    """Route one archival attempt, never authorize live reads or normal startup.
+
+    Timeout observations retain their version-scoped hints. Positively classified
+    transport or pending-history failures on 2.3 may retry through the same Reader, whose
+    source/destination metadata, exact binaries and idle checks remain mandatory.
+    Explicit compatibility and cleanup refusals are not automatically retried.
+    """
+    if isinstance(failure, box.HistoryWaitTimeout):
+        return failure.recovery_eligible
+    return (
+        isinstance(failure, box.BoxError)
+        and (
+            isinstance(failure, box.HistoryPending)
+            or getattr(failure, "history_retryable", False) is True
+            or isinstance(failure.__cause__, subprocess.TimeoutExpired)
+        )
+        and history_reader.snapshot_profile(data.get("opencode_version")) == "2.3"
+        and getattr(failure, "history_compatibility_category", None) is None
+        and getattr(failure, "history_reader_category", None) is None
+        and not getattr(failure, "history_contract_refusal", False)
+        and not getattr(failure, "history_source_cleanup_failed", False)
+    )
+
+
 def skip_reasons(owner, timeout, *, closed=False):
     """Explain routing only; these labels never authorize or relax recovery."""
     reasons = []
@@ -464,6 +489,8 @@ def recover(box, path, data, source):
             and reader_reason in history_reader.CATEGORIES
             else "snapshot-failed"
         )
+        if isinstance(exc, box.HistoryPending):
+            category = "snapshot-incomplete"
     finally:
         if transitioned:
             try:
@@ -479,6 +506,13 @@ def recover(box, path, data, source):
             file=sys.stderr,
         )
     else:
+        if category == "snapshot-incomplete":
+            print(
+                "oc-box: Some persisted sessions remain unsettled. "
+                "Verified progress and prior archives for pending sessions are retained. "
+                "Execution was interrupted; background work is not declared complete.",
+                file=sys.stderr,
+            )
         print(
             f"oc-box: Automatic persisted-history snapshot unavailable ({category}). "
             "Container data retained; retry with 'oc-box sync'.",

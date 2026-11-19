@@ -9,6 +9,12 @@ fresh destination verification and source/destination guards remain real.
 One separately stopped destination subagent/claim must survive standalone
 inventory, archive replacement, import and verification without resumption.
 
+Optional --foreground also interrupts an independent genuinely active provider
+turn with native queued input, on both source and destination. --producer-close
+abrupt kills/reaps only the owned source producer; graceful EOF is the default.
+Pending foreground exports retain their previous verified archive/checkpoint;
+independent sessions must still progress. No queued input or claim may change.
+
 This local process barrier is NOT the whole-container stop/same-ID restart
 proof. Retained jobs remain resumable native metadata, not completed work.
 No image-job allowance or diagnosis of a user's timeout is established here.
@@ -61,9 +67,10 @@ from smoke_session_sync_v2 import (
 class SubagentProvider(BackgroundProvider):
     """Native shell canary, ten background children, and a settled parent."""
 
-    def __init__(self, children, command, project):
+    def __init__(self, children, command, project, *, foreground=False):
         self.children, self.command, self.project = children, command, project
         self.requests = self.errors = self.children_entered = 0
+        self.foreground_entered = 0
         self.parent_started = False
         self.lock = threading.Lock()
         self.release = threading.Event()
@@ -90,16 +97,28 @@ class SubagentProvider(BackgroundProvider):
                     with outer.lock:
                         outer.requests += 1
                         require(
-                            outer.requests <= children + 2,
+                            outer.requests <= children + 2 + int(foreground),
                             "Unexpected synthetic subagent provider turn.",
                         )
+                    held_foreground = any(
+                        item.get("role") == "user"
+                        and "SYNTHETIC_READER_HELD_FOREGROUND"
+                        in str(item.get("content", ""))
+                        for item in body.get("messages", [])
+                    )
                     child = any(
                         item.get("role") == "user"
                         and "SYNTHETIC_READER_HELD_CHILD"
                         in str(item.get("content", ""))
                         for item in body.get("messages", [])
                     )
-                    if child:
+                    if held_foreground:
+                        require(foreground, "Unexpected foreground provider request.")
+                        delta, finish = (
+                            {"content": "SYNTHETIC_FOREGROUND_INCOMPLETE"},
+                            "stop",
+                        )
+                    elif child:
                         with outer.lock:
                             outer.children_entered += 1
                         require(
@@ -136,6 +155,17 @@ class SubagentProvider(BackgroundProvider):
                         self.wfile.write(
                             ("data: " + json.dumps(payload) + "\n\n").encode()
                         )
+                        if held_foreground and end is None:
+                            # A held request alone may leave only prior settled
+                            # history projected. Deliver real text before holding
+                            # the unfinished stream, never its finish or DONE.
+                            self.wfile.flush()
+                            with outer.lock:
+                                outer.foreground_entered += 1
+                            require(
+                                outer.release.wait(60),
+                                "Synthetic foreground provider hold timed out.",
+                            )
                     self.wfile.write(b"data: [DONE]\n\n")
                     self.wfile.flush()
                 except (BrokenPipeError, ConnectionResetError):
@@ -264,7 +294,87 @@ def expect_command_refusal(callback):
     raise FixtureFailure("Reader admitted a non-history command or service flag.")
 
 
-def exercise(binary, root, children=10):
+def hold_foreground(native, provider, project, ident, until):
+    """Use only supported native admission, never fabricate inbox/claim rows."""
+    seed(native, ident, project)
+    previous = bridge.checked_export(native, ident)
+    native(
+        "POST",
+        "/api/session/" + ident + "/prompt",
+        {
+            "id": "msg_" + ident.removeprefix("ses_") + "_held",
+            "text": "SYNTHETIC_READER_HELD_FOREGROUND",
+            "delivery": "queue",
+            "resume": True,
+        },
+    )
+
+    until(
+        lambda: (
+            provider.foreground_entered == 1
+            and ident in native("GET", "/api/session/active")["data"]
+        )
+    )
+    queued_id = "msg_" + ident.removeprefix("ses_") + "_queued"
+    admitted = native(
+        "POST",
+        "/api/session/" + ident + "/prompt",
+        {
+            "id": queued_id,
+            "text": "SYNTHETIC_READER_QUEUED_NEVER_EXECUTE",
+            "delivery": "queue",
+            "resume": False,
+        },
+    )["data"]
+    require(
+        admitted["id"] == queued_id
+        and admitted["sessionID"] == ident
+        and admitted["type"] == "user"
+        and admitted["delivery"] == "queue"
+        and native("GET", "/api/session/" + ident + "/inbox")["data"] == [admitted]
+        and ident in native("GET", "/api/session/active")["data"],
+        "Foreground hold or genuine native queued admission was not established.",
+    )
+    try:
+        # A genuinely active streamed turn need not yet have a durable unfinished
+        # assistant projection. Check whichever history native actually exposes;
+        # never manufacture a pending row merely to satisfy the fixture.
+        bridge.checked_export(native, ident)
+    except bridge.FixedError as error:
+        require(
+            str(error) == bridge.UNSETTLED, "Live foreground export failed differently."
+        )
+    return previous, admitted
+
+
+def require_queued_claim(database, snapshot, columns, ident, admitted):
+    """Bind the nonempty native inbox and the foreground execution claim."""
+    with contextlib.closing(
+        sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=1)
+    ) as connection:
+        inbox_columns = {
+            row[1]: number
+            for number, row in enumerate(
+                connection.execute("PRAGMA table_info(session_inbox)")
+            )
+        }
+    require(
+        len(snapshot["session_inbox"]) == 1
+        and snapshot["session_inbox"][0][inbox_columns["id"]] == admitted["id"]
+        and snapshot["session_inbox"][0][inbox_columns["session_id"]] == ident
+        and snapshot["session_inbox"][0][inbox_columns["delivery"]] == "queue"
+        and snapshot["session_inbox"][0][inbox_columns["type"]] == "user"
+        and json.loads(snapshot["session_inbox"][0][inbox_columns["payload"]])
+        == admitted["payload"]
+        and any(
+            row[columns["id"]] == ident and row[columns["time_suspended"]] is not None
+            for row in snapshot["session_v2"]
+        ),
+        "Stopped foreground lost its queued input or durable execution claim.",
+    )
+
+
+def exercise(binary, root, children=10, *, foreground=False, producer_close="graceful"):
     """Return the routing hint separately from the native Reader proof.
 
     The normal CLI below requires the fixed hint. Keeping that final assertion
@@ -272,6 +382,11 @@ def exercise(binary, root, children=10):
     changing production code or falsely reporting an integrated fixture pass.
     """
     require(children in (1, 10), "Only one or ten synthetic children are supported.")
+    require(
+        producer_close in ("graceful", "abrupt")
+        and (foreground or producer_close == "graceful"),
+        "Abrupt producer loss requires the optional foreground variant.",
+    )
     project = root / "project"
     project.mkdir()
     source_env = environment(root / "source")
@@ -316,7 +431,10 @@ def exercise(binary, root, children=10):
         + ",'x');}};\n"
     )
     provider = SubagentProvider(
-        children, shlex.join([sys.executable, str(shell_script)]), project
+        children,
+        shlex.join([sys.executable, str(shell_script)]),
+        project,
+        foreground=foreground,
     )
     config = json.loads(provider.config(source_env["OPENCODE_CONFIG_CONTENT"]))
     config["plugins"] = [{"package": str(plugin)}]
@@ -361,6 +479,8 @@ def exercise(binary, root, children=10):
         cleanup.enter_context(patch.object(subprocess, "Popen", new=local))
         cleanup.enter_context(patch.object(box, "CONTAINER_OPENCODE", binary))
         producer_exit = {}
+        foreground_ident = "ses_fixture_source_foreground"
+        foreground_hint = None
         with (
             patch.dict(os.environ, source_env, clear=True),
             bridge.server(binary, exit_info=producer_exit) as old,
@@ -424,12 +544,71 @@ def exercise(binary, root, children=10):
                 and activations.exists(),
                 "Native provider, subagent or execution canaries were not proven.",
             )
+            if foreground:
+                foreground_before, source_queued = hold_foreground(
+                    old, provider, project, foreground_ident, until
+                )
+                live_activations = activations.read_bytes()
+
+                def live_client(_box, _data, _connection, arguments, **_kwargs):
+                    return list(arguments)
+
+                # Exercise the genuine live timeout BEFORE closing the producer.
+                # The hint is routing only: normal readiness must still refuse.
+                with (
+                    patch.dict(
+                        os.environ, {"OPENCODE_PASSWORD": old.endpoint["password"]}
+                    ),
+                    patch.object(
+                        workspace_service, "client_command", side_effect=live_client
+                    ),
+                ):
+                    try:
+                        workspace_service.wait_history(
+                            box, data, old.endpoint, timeout=3, interval=0.1
+                        )
+                    except box.HistoryWaitTimeout as error:
+                        foreground_hint = (
+                            error.recovery_eligible is True
+                            and error.interrupted_foreground is True
+                        )
+                        require(
+                            f"foreground={children + 1}" in error.diagnostic
+                            and f"jobs-running={children}" in error.diagnostic,
+                            "Live timeout lost the actual foreground/job observation.",
+                        )
+                    else:
+                        raise FixtureFailure(
+                            "Normal readiness waived active foreground."
+                        )
+                require(
+                    foreground_ident in old("GET", "/api/session/active")["data"]
+                    and provider.requests == children + 3
+                    and provider.foreground_entered == 1
+                    and shell_starts.read_bytes() == b"x"
+                    and activations.read_bytes() == live_activations
+                    and old("GET", "/api/session/" + foreground_ident + "/inbox")[
+                        "data"
+                    ]
+                    == [source_queued],
+                    "Live history wait consumed queued input or ended the provider hold.",
+                )
+                if producer_close == "abrupt":
+                    producer = local.producers[-1]
+                    require(producer.poll() is None, "Source producer already exited.")
+                    os.killpg(producer.pid, signal.SIGKILL)
+                    producer.wait(timeout=5)
         require(
-            not old.alive() and producer_exit == {"code": 0, "forced": False},
-            "Original native producer did not close gracefully and reap.",
+            not old.alive()
+            and producer_exit
+            == {
+                "code": 0 if producer_close == "graceful" else -signal.SIGKILL,
+                "forced": False,
+            },
+            "Original native producer did not close in the selected mode and reap.",
         )
         # A run client may outlive its final parent response while children run.
-        # It is a client only; the graceful producer barrier above stays real.
+        # It is a client only; the selected producer/reap barrier stays real.
         stop_owned_client(process)
         require(process.poll() is not None, "Original native client was not reaped.")
         provider.release.set()
@@ -438,9 +617,13 @@ def exercise(binary, root, children=10):
         require(
             len(persisted["job"]) == children
             and persisted["schedule"] == []
-            and persisted["session_inbox"] == [],
+            and (foreground or persisted["session_inbox"] == []),
             "Unexpected post-stop jobs, scheduler or queued input.",
         )
+        if foreground:
+            require_queued_claim(
+                source_db, persisted, columns, foreground_ident, source_queued
+            )
         source_sessions = {row[columns["id"]]: row for row in persisted["session_v2"]}
         require(
             all(
@@ -452,7 +635,10 @@ def exercise(binary, root, children=10):
         # A separately stopped destination producer leaves one real resumable
         # child BEFORE any standalone destination history command is tested.
         destination_provider = SubagentProvider(
-            1, shlex.join([sys.executable, str(shell_script)]), project
+            1,
+            shlex.join([sys.executable, str(shell_script)]),
+            project,
+            foreground=foreground,
         )
         cleanup.callback(destination_provider.close)
         destination_config = json.loads(
@@ -525,6 +711,21 @@ def exercise(binary, root, children=10):
                 and shell_starts.read_bytes() == b"xx",
                 "Destination provider/subagent/shell canaries were not proven.",
             )
+            if foreground:
+                destination_foreground = "ses_fixture_destination_foreground"
+                _, destination_queued = hold_foreground(
+                    destination,
+                    destination_provider,
+                    project,
+                    destination_foreground,
+                    until,
+                )
+                destination_ids.add(destination_foreground)
+                require(
+                    destination_provider.requests == 4
+                    and destination_provider.errors == 0,
+                    "Destination foreground provider was not independently held.",
+                )
         require(
             not destination.alive()
             and destination_exit == {"code": 0, "forced": False}
@@ -550,10 +751,18 @@ def exercise(binary, root, children=10):
         require(
             len(destination_persisted["job"]) == 1
             and destination_persisted["schedule"] == []
-            and destination_persisted["session_inbox"] == [],
+            and (foreground or destination_persisted["session_inbox"] == []),
             "Destination did not retain one native subagent with empty scheduling.",
         )
         _, destination_columns = execution_snapshot(host_db)
+        if foreground:
+            require_queued_claim(
+                host_db,
+                destination_persisted,
+                destination_columns,
+                destination_foreground,
+                destination_queued,
+            )
         require(
             any(
                 row[destination_columns["id"]] == destination_job["childSessionID"]
@@ -588,6 +797,9 @@ def exercise(binary, root, children=10):
         destination_exports = {}
         history_reader._check_database(host_db, version=release)
         for ident in destination_ids:
+            # Native's own export may omit an unfinished foreground tail. This
+            # is a destination preservation sentinel, not checked archival of
+            # that tail; the full database snapshot also has to remain exact.
             destination_exports[ident] = json.loads(
                 bounded(
                     compat.command(release, binary, ("--pure", "export", ident)),
@@ -618,6 +830,28 @@ def exercise(binary, root, children=10):
                 "host_sessions": {independent: previous_archive["info"]["id"]},
             },
         )
+        if foreground:
+            previous_foreground = box.archive_session(foreground_before, data)
+            foreground_target = (
+                path.parent / "history" / (previous_foreground["info"]["id"] + ".json")
+            )
+            box.atomic_json(foreground_target, previous_foreground)
+            foreground_archive_bytes = foreground_target.read_bytes()
+            foreground_digest = hashlib.sha256(foreground_archive_bytes).hexdigest()
+            bounded(
+                compat.command(
+                    release, binary, ("--pure", "import", str(foreground_target))
+                ),
+                history_reader.fence_environment(destination_env),
+                path.parent / "controller",
+            )
+            prior_state = box.session_state(path)
+            prior_state["sessions"].append(foreground_ident)
+            prior_state["synced"][foreground_ident] = foreground_digest
+            prior_state["host_sessions"][foreground_ident] = previous_foreground[
+                "info"
+            ]["id"]
+            box.atomic_json(box.session_file(path), prior_state)
         require(
             destination_snapshot(host_db, destination_ids) == destination_persisted,
             "Initial standalone host exports resumed or changed destination work.",
@@ -670,6 +904,11 @@ def exercise(binary, root, children=10):
                     )
                 except box.HistoryWaitTimeout as error:
                     recovery_hint = error.recovery_eligible
+                    if foreground:
+                        require(
+                            error.interrupted_foreground is False,
+                            "Retained idle jobs were misclassified as live foreground.",
+                        )
                     require(
                         all(
                             field in error.diagnostic
@@ -701,9 +940,20 @@ def exercise(binary, root, children=10):
                 expect_command_refusal(lambda: reader.command(command))
 
             expected_ids = child_ids | {parent, independent}
-            exports = {
-                ident: bridge.checked_export(fresh, ident) for ident in expected_ids
-            }
+            if foreground:
+                expected_ids.add(foreground_ident)
+            exports, pending_ids = {}, set()
+            for ident in expected_ids:
+                try:
+                    exports[ident] = bridge.checked_export(fresh, ident)
+                except bridge.FixedError as error:
+                    require(
+                        foreground
+                        and ident == foreground_ident
+                        and str(error) == bridge.UNSETTLED,
+                        "Reader checked export failed outside interrupted foreground.",
+                    )
+                    pending_ids.add(ident)
             require(
                 not any(
                     message.get("metadata", {}).get("jobID") in job_ids
@@ -714,12 +964,36 @@ def exercise(binary, root, children=10):
             )
             output = io.StringIO()
             with contextlib.redirect_stdout(output):
-                box.sync_sessions(path, data, announce=False)
+                try:
+                    box.sync_sessions(path, data, announce=False)
+                except box.BoxError as error:
+                    require(
+                        pending_ids == {foreground_ident}
+                        and str(error)
+                        == (
+                            "1 session(s) not settled yet: "
+                            + bridge.UNSETTLED
+                            + " Their last archives are retained and other sessions "
+                            "were synchronized."
+                        ),
+                        "Reader sync failed outside the known pending foreground.",
+                    )
+                else:
+                    require(not pending_ids, "Reader sync concealed pending history.")
             require(
                 "Session history synced" not in output.getvalue(),
                 "Post-stop snapshot printed ordinary live sync success.",
             )
             state = box.session_state(path)
+            if pending_ids:
+                require(
+                    foreground_target.read_bytes() == foreground_archive_bytes
+                    and state["synced"][foreground_ident] == foreground_digest
+                    and state["host_sessions"][foreground_ident]
+                    == previous_foreground["info"]["id"],
+                    "Pending foreground replaced its prior archive or checkpoint.",
+                )
+                box.verify_host_archive(path, data, previous_foreground)
             require(
                 set(state["sessions"]) == expected_ids
                 and set(state["synced"]) == expected_ids,
@@ -837,6 +1111,13 @@ def exercise(binary, root, children=10):
             destination_snapshot(host_db, destination_ids) == destination_persisted,
             "Reader shutdown changed original destination execution/history rows.",
         )
+        if pending_ids:
+            require(
+                foreground_target.read_bytes() == foreground_archive_bytes
+                and box.session_state(path)["synced"][foreground_ident]
+                == foreground_digest,
+                "Reader cleanup changed the pending archive or checkpoint.",
+            )
         no_execution()
         marker, observed_binary = root / "native-boot", root / "observe-native.py"
         observed_binary.write_text(
@@ -876,7 +1157,7 @@ def exercise(binary, root, children=10):
             file_digest(binary) == native_digest,
             "The native executable changed during the fixture.",
         )
-        return {
+        result = {
             "native_version": release,
             "native_binary_sha256": native_digest,
             "source_scheduler_layout": persisted["scheduler_layout"],
@@ -897,9 +1178,25 @@ def exercise(binary, root, children=10):
             "durable_execution_history_unchanged": True,
             "extra_provider_shell_plugin_execution": False,
         }
+        if foreground:
+            result.update(
+                foreground_interruption=True,
+                foreground_recovery_hint=foreground_hint,
+                source_producer_close=producer_close,
+                source_queued_input_preserved=True,
+                destination_queued_input_preserved=True,
+                foreground_execution_claims_preserved=True,
+                pending_foreground_sessions=len(pending_ids),
+                pending_prior_archive_checkpoint_preserved=bool(pending_ids),
+                sessions_verified=len(exports),
+                all_source_history_archived=not pending_ids,
+            )
+        return result
 
 
-def main(binary, temp_dir=None, children=10):
+def main(
+    binary, temp_dir=None, children=10, *, foreground=False, producer_close="graceful"
+):
     previous = os.umask(0o077)
     try:
         with (
@@ -908,11 +1205,22 @@ def main(binary, temp_dir=None, children=10):
                 prefix="oc-box-subagent-reader-", dir=temp_dir
             ) as temporary,
         ):
-            result = exercise(str(Path(binary).resolve()), Path(temporary), children)
+            result = exercise(
+                str(Path(binary).resolve()),
+                Path(temporary),
+                children,
+                foreground=foreground,
+                producer_close=producer_close,
+            )
             require(
                 result["recovery_hint"] is True,
                 "Native 2.3 retained subagents lacked the post-stop routing hint.",
             )
+            if foreground:
+                require(
+                    result["foreground_recovery_hint"] is True,
+                    "Native 2.3 live foreground lacked the separate post-stop routing hint.",
+                )
     except FixtureFailure:
         raise
     except Exception:
@@ -926,6 +1234,12 @@ def main(binary, temp_dir=None, children=10):
         "and fresh destination verification; durable claims/jobs/history preserved.",
         flush=True,
     )
+    if foreground and result["pending_foreground_sessions"]:
+        print(
+            "PENDING: interrupted foreground remains unarchived; its prior verified "
+            "archive/checkpoint was retained while independent sessions progressed.",
+            flush=True,
+        )
     print("PROFILE: " + json.dumps(result, sort_keys=True), flush=True)
     print(
         "SCOPE: synthetic local native/offline only; no image-job, user-cause or "
@@ -939,9 +1253,21 @@ if __name__ == "__main__":
     parser.add_argument("--opencode", required=True)
     parser.add_argument("--temp-dir")
     parser.add_argument("--children", type=int, choices=(1, 10), default=10)
+    parser.add_argument("--foreground", action="store_true")
+    parser.add_argument(
+        "--producer-close", choices=("graceful", "abrupt"), default="graceful"
+    )
     arguments = parser.parse_args()
+    if arguments.producer_close == "abrupt" and not arguments.foreground:
+        parser.error("--producer-close abrupt requires --foreground")
     try:
-        main(arguments.opencode, arguments.temp_dir, arguments.children)
+        main(
+            arguments.opencode,
+            arguments.temp_dir,
+            arguments.children,
+            foreground=arguments.foreground,
+            producer_close=arguments.producer_close,
+        )
     except FixtureFailure as error:
         print("FAIL: " + str(error), file=sys.stderr)
         raise SystemExit(1) from None

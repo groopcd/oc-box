@@ -703,15 +703,42 @@ below completes in full, history remains pending and the command returns nonzero
 Normal cleanup still stops the container, so running work is not promised to
 continue. This is bounded checking, not an atomic freeze of every possible
 history producer.
-On timeout, a separate diagnostic reports the wait phase (`foreground-query`,
-`background-query` or `poll-delay`) and counts from the last complete, validated
-activity/job observation. Job counts distinguish running, completed, error and
-cancelled entries, with separate allowlisted shell/subagent/image kind counts;
-counts above 9999 appear as `9999+`. If no complete pair was
-validated, the observation is `unavailable`, not zero. These are previous
-observations, not proof of the current state or that a native request succeeded:
-a request failure at the deadline also retains the `activity-timeout` category.
-No session/job identifiers, commands, transcript text or native errors are printed.
+On timeout, the existing `History wait timeout:` diagnostic reports the wait
+phase (`foreground-query`, `background-query` or `poll-delay`) and counts from the
+last complete, validated activity/job observation. Job counts distinguish
+running, completed, error and cancelled entries, with separate allowlisted
+shell/subagent/image kind counts; counts above 9999 appear as `9999+`. If no
+complete pair was validated, the observation is `unavailable`, not zero. These
+are previous observations, not proof of the current state or that a native
+request succeeded: a request failure at the deadline also retains the
+`activity-timeout` category.
+Its output remains byte-compatible. A separate `History wait timing:` line is
+emitted only for `activity-timeout`, not on normal success:
+
+* `complete-pairs=N` counts all fully validated foreground/background pairs,
+  not just quiet or recovery-eligible pairs.
+* `foreground-queries=N,total=X.XXXs,max=X.XXXs` and
+  `background-queries=N,total=X.XXXs,max=X.XXXs` count and time API attempts,
+  including failed and timed-out attempts.
+* `last-query=foreground-query` or `background-query` identifies the last API
+  attempt. `remaining-at-start=X.XXXs` is the remaining whole live-readiness grace
+  when that attempt began, not that query's individual timeout cap.
+* `outcome=returned`, `subprocess-timeout` or `failed` describes that attempt.
+  `returned` means the transport/API helper returned, not that its inventory
+  passed validation.
+* `last-complete-age=X.XXXs` is the age of the last fully validated pair.
+  Missing last-attempt fields or observation age are `unavailable`; with zero
+  query budget, query counts are zero and those fields remain `unavailable`.
+
+Counts are capped at `9999+` and durations at `9999+s`. Query times are wall-clock
+measurements around the existing native API helper, including Podman, Python and
+native CLI startup and JSON decoding; they are not pure server latency. Late or
+partial responses do not manufacture a complete pair. Neither diagnostic emits
+session/job identifiers, paths, commands, payloads, native errors, environment
+values or credentials. Timing does not track job identity, distinguish live from
+durable jobs, or prove that a job is stuck or orphaned. Timing itself adds no
+probes or job cleanup and changes neither validation, the 30-second grace,
+polling interval, 60-second request cap, recovery guards nor exit policy.
 
 If automatic post-stop recovery is not attempted, a separate fixed-category line
 explains its routing guards. For example, `custom-podman-options` means the
@@ -730,9 +757,10 @@ The 30 seconds are oc-box's live-readiness grace, not a native export/import
 timeout or a duration limit for the entire synchronization. This grace remains
 unchanged. The two paths differ:
 
-* Automatic owner exit waits up to 30 seconds before live export; an eligible
-  timeout may then use the guarded post-stop reader. Checked exports, host
-  imports and native verification take additional time.
+* Automatic owner exit waits up to 30 seconds before live export. An eligible
+  timeout, or a supported 2.3.x live-sync failure described below, can then use
+  one guarded post-stop reader attempt. Checked exports, host imports and native
+  verification take additional time.
 * Explicit `oc-box sync` has no original owner's live-readiness wait. It uses
   the same checked archival implementation, with ordinary manual-sync
   preparation and cleanup.
@@ -753,8 +781,8 @@ old producer closes, while a new unregistered process reports no foreground
 activity. Foreground activity describes that process, not proof that durable
 jobs finished. Retained work still blocks the ordinary live wait.
 
-For supported native owners, a qualifying timeout can trigger **one post-stop
-persisted-history snapshot** automatically:
+For supported native owners, an eligible live-sync failure can trigger **one
+post-stop persisted-history snapshot** automatically:
 
 * Native **2.2.6/2.2.7** retains the original shell-only profile.
 * Stable native **2.3.x** also permits retained subagent jobs, including mixtures
@@ -774,11 +802,26 @@ Subagent recovery may include a bounded `outstanding` list of known shell or
 subagent metadata. Image, Code Mode, nested/unknown forms and invalid bindings
 remain unsupported; these references are not completed, acknowledged or resumed.
 
-Two complete validated observations must have shown no foreground activity and
-only jobs allowed by that storage profile. A later real query timeout does
-not manufacture an observation; a contradictory/malformed response or known
-non-timeout API error invalidates the hint. The live wait still refuses, and no
-live export is authorized by that hint.
+The original timeout route requires two consecutive complete validated
+foreground/background pairs with no foreground activity and at least one job,
+all allowed by that storage profile. Native 2.2.6/2.2.7 keeps this rule: foreground
+activity still refuses its automatic snapshot route.
+
+On supported 2.3.x, two consecutive complete validated pairs with nonempty
+foreground activity and only supported shell/subagent jobs can instead request
+post-stop archival, including when there are no jobs. A later empty foreground
+response resets this foreground-interruption hint; malformed responses or
+unsupported job kinds invalidate it. Known non-timeout API errors invalidate
+the observation hints; an actual query timeout may retain prior qualifying
+pairs, but cannot manufacture another pair. **Neither hint permits live export
+or establishes that work finished.**
+
+Supported 2.3.x can also route positively classified transport or unsettled-history
+failures during live wait/sync through this same one-shot reader when a safe source
+was captured. Unclassified failures do not enable a retry. Explicit
+compatibility or Reader refusals and failed/uncertain source cleanup are not
+retried automatically; unexpected programming/data-shape errors do not enable
+this route. It does not broaden legacy or unsupported-version recovery.
 
 After the owner closes normally and all clients detach, oc-box verifies and stops
 the same existing, ready container. If stop intent is unchanged, it starts that
@@ -794,6 +837,11 @@ starting managed job recovery. Retained jobs, execution claims and queued input
 are not acknowledged, cleared or replayed.
 The transition budget is 35 seconds and the snapshot budget 180 seconds, with
 separate bounded cleanup. The container is stopped again before exit.
+This is **one automatic attempt only**, not a fast reader followed by a second,
+unrestricted manual sync. If the reader refuses or cannot finish, oc-box does
+not perform ordinary manual preparation, restart native work or replay requests
+to try again. Manual `oc-box sync` guidance remains for incomplete or unsafe
+automatic recovery, after resolving its refusal.
 
 The guarded post-stop copy reuses one private, pass-local Python export helper
 against the Reader's existing endpoint instead of starting a container/Python
@@ -836,21 +884,30 @@ native restart notification handling can still wake work. Other failures retain
 the normal pending-history/manual-sync behavior.
 
 Snapshots retain the existing complete-inventory, checked-export, pending-session
-and verified-host-import safeguards. Native startup/projection can maintain its
-database; this is not a byte-read-only database backup. No native job is deleted,
-rewritten or declared completed, and no queued input is acknowledged.
+and verified-host-import safeguards. Pending sessions do not prevent checked
+progress on other sessions; their prior archives/checkpoints remain intact.
+If any remain unsettled, `snapshot-incomplete` reports the partial result with
+an interruption warning, never an all-history success. Native startup/projection
+can maintain its database; this is not a byte-read-only database backup. No native
+job is deleted, rewritten or declared completed, and no queued input is
+acknowledged.
 
-**A raw client exit of `0` can return CLI status `0` after a live timeout only
-when the existing guarded reader completes every checked export, import and native
-verification, recovery cleanup succeeds, and the final container stop is
-verified.** The warning still states that execution was interrupted and background
+**A raw client exit of `0` can return CLI status `0` after an eligible live-sync
+failure only when the existing guarded reader completes every checked export,
+import and native verification, recovery cleanup succeeds, the final stop is
+verified, and the foreground-interruption hint was not used.** Saving history
+after a foreground-interruption timeout still returns nonzero, even if all
+archives were saved and the raw client exited `0`. Archive-sync success is
+reported only after clean stops; it is not work-completion success.
+The warning still states that execution was interrupted and background
 completion is unconfirmed: completion notices or final results may be missing.
 This policy is the same for owning native TUI and web launches. Actual raw client
 failures, including exit `7` or cancellation, are never converted to success.
 Unknown raw client status, pending/partial history, any sync/recovery failure or
-failed/uncertain cleanup remains nonzero. Whenever history sync, recovery or
-cleanup fails, the guidance to retry `oc-box sync` remains; resolve the refusal
-before retrying, without resetting or purging the workspace.
+failed/uncertain cleanup remains nonzero. Guidance to retry `oc-box sync` remains
+when automatic archival cannot safely finish, not as the first response to an
+eligible live failure. Resolve the refusal before retrying, without resetting
+or purging the workspace.
 
 Historical job rows can remain running-looking on the next owner; the same
 bounded post-stop path may save another snapshot, but does not make the underlying
