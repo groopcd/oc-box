@@ -1,0 +1,111 @@
+name: LinkedIn article or PDF
+run-name: "LinkedIn editorial ${{ inputs.action }}: ${{ inputs.title }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: Preview, publish approved content, or check an existing Buffer post
+        type: choice
+        options: [preview, publish, status]
+        default: preview
+      kind:
+        description: A link card or a PDF document
+        type: choice
+        options: [article, pdf]
+        default: article
+      title:
+        description: Public link card or PDF document title
+        type: string
+      caption:
+        description: Exact public LinkedIn caption (gh -F caption=@file supports multiline input)
+        type: string
+      article_url:
+        description: Public article URL (optional for PDF; include it in the caption if provided)
+        type: string
+      pdf_url:
+        description: Public, immutable PDF URL (PDF mode only)
+        type: string
+      thumbnail_url:
+        description: Public, immutable PNG or JPEG cover URL (PDF mode only)
+        type: string
+      approval_sha256:
+        description: Digest from the preview artifact (publish only)
+        type: string
+      post_id:
+        description: Existing Buffer post ID (status only)
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  EDITORIAL_ALLOWED_HOSTS: ${{ vars.LINKEDIN_EDITORIAL_HOSTS || 'www.padoka.org' }}
+  EDITORIAL_CHANNEL_ID: ${{ vars.BUFFER_LINKEDIN_CHANNEL_ID }}
+  EDITORIAL_KIND: ${{ inputs.kind }}
+  EDITORIAL_TITLE: ${{ inputs.title }}
+  EDITORIAL_CAPTION: ${{ inputs.caption }}
+  EDITORIAL_ARTICLE_URL: ${{ inputs.article_url }}
+  EDITORIAL_PDF_URL: ${{ inputs.pdf_url }}
+  EDITORIAL_THUMBNAIL_URL: ${{ inputs.thumbnail_url }}
+
+jobs:
+  preview:
+    if: inputs.action == 'preview' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+      - run: |
+          printf 'Editorial publishing enabled: %s\n' "$EDITORIAL_PUBLISH_ENABLED"
+          python3 tools/linkedin_editorial.py preview
+        env:
+          EDITORIAL_PUBLISH_ENABLED: ${{ vars.LINKEDIN_EDITORIAL_ENABLED == 'true' }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linkedin-editorial-preview
+          path: linkedin-editorial-output/
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    if: inputs.action == 'publish' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: linkedin-editorial
+    concurrency:
+      group: linkedin-editorial-publish-${{ inputs.approval_sha256 }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+      - run: python3 tools/linkedin_editorial.py publish
+        env:
+          EDITORIAL_ENABLED: ${{ vars.LINKEDIN_EDITORIAL_ENABLED }}
+          EDITORIAL_APPROVAL: ${{ inputs.approval_sha256 }}
+          BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
+          EDITORIAL_GITHUB_TOKEN: ${{ github.token }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: linkedin-editorial-receipt
+          path: linkedin-editorial-output/receipt.json
+          if-no-files-found: error
+          retention-days: 90
+
+  status:
+    if: inputs.action == 'status' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
+        with:
+          persist-credentials: false
+      - run: python3 tools/linkedin_editorial.py status
+        env:
+          BUFFER_API_KEY: ${{ secrets.BUFFER_API_KEY }}
+          EDITORIAL_POST_ID: ${{ inputs.post_id }}
