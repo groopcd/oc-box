@@ -314,6 +314,12 @@ This is separate from the ‘attach’ confirmation broker and from browser
 uploads; see the option below for the host-input authorization boundary
 and terminal requirements.
 
+Host clipboard imports are separately **off by default**.  Save
+‘--host-clipboard’ to enable the Ctrl+Y import shortcut for this and
+future workspace TUI clients, or ‘--no-host-clipboard’ to disable it.
+Only that shortcut reads the clipboard; enabling the preference or
+starting a client does not read it.
+
 4.4 preferences
 ===============
 
@@ -324,18 +330,39 @@ refreshing native configuration or unlocking credentials:
      oc-box preferences --project ~/devel/demo
      oc-box preferences --project ~/devel/demo --host-drop off
      oc-box preferences --workspace WORKSPACE_ID --host-drop on
+     oc-box preferences --project ~/devel/demo --host-clipboard on
+     oc-box preferences --project ~/devel/demo --host-clipboard-symlinks off
+     oc-box preferences --project ~/devel/demo --host-clipboard off
      oc-box preferences --project ~/devel/demo --json
 
 ‘--project’ and ‘--workspace’ are mutually exclusive.  With no change
-option this is read-only.  Missing preferences mean importing is enabled
-by default; corrupt, unsafe or mismatched preferences refuse rather than
-silently granting access.  Changes apply to future clients only.
-Preferences survive ordinary stop/start and reset in a private host
+option this is read-only.  The independent settings accept ‘on’/‘off’:
+
+| Setting | Default when no choice is saved | | -- | -- | |
+‘--host-drop’ | ‘on’: pathname/file-drop imports on supported clients |
+| ‘--host-clipboard’ | ‘off’: no clipboard shortcut | |
+‘--host-clipboard-symlinks’ | ‘on’: follow ordinary links for clipboard
+file imports |
+
+The symlink preference can be saved independently, even while clipboard
+importing is off; it takes effect on a later enabled client.  The strict
+symlink choice remains saved when clipboard importing is later disabled,
+so re-enabling does not silently restore link following.  This command
+also works without a TTY. It does not discover desktop helpers or read
+the clipboard, even when saving an enable choice.  JSON output includes
+the effective ‘host_clipboard’ and ‘host_clipboard_symlinks’ booleans;
+‘source’ still indicates whether a preference file is saved or defaults
+are in use, not the origin of each individual field.
+
+Corrupt, unsafe or mismatched preferences refuse rather than silently
+granting access.  Changes apply to future clients only.  Preferences
+survive ordinary stop/start and reset in a private host
 ‘ui-preferences.json’ beside workspace metadata, with an independent
-lock so an active owning launcher need not exit.  They are not native
-CLI settings, credential policy or archived authority: backup/restore
-into a fresh workspace does not reactivate this host preference.  The
-new workspace uses the restoring host's default until explicitly
+lock so an active owning launcher need not exit.  Only policy booleans
+are saved, never clipboard contents or a helper path.  They are not
+native CLI settings, credential policy or archived authority:
+backup/restore into a fresh workspace does not reactivate these host
+preferences.  The new workspace uses the defaults above until explicitly
 changed.
 
 4.5 stop
@@ -2657,13 +2684,23 @@ off’.
 5.34 -host-clipboard
 ====================
 
-Experimental, **off by default and per native TUI client**.  On a
-supported direct Konsole or Kitty terminal, opt in with ‘start’ (the
-default command) or ‘reset’, then press **Ctrl+Y** to import a PNG
-clipboard image or copied local PNG/JPEG/GIF/WebP/PDF files.  Ordinary
-Ctrl+V, terminal text paste, clipboard contents and host OpenCode
-settings are unchanged.  The native TUI still runs inside the container;
-there is no Wayland/X11 socket mount or host clipboard MCP endpoint.
+Experimental, **off by default, with a saved per-workspace host
+preference**.  On a supported direct Konsole or Kitty terminal, enable
+with ‘start’ (the default command) or ‘reset’, then press **Ctrl+Y** to
+import a PNG clipboard image or copied local PNG/JPEG/GIF/WebP/PDF
+files.  Ordinary Ctrl+V, terminal text paste, clipboard contents and
+host OpenCode settings are unchanged.  The native TUI still runs inside
+the container; there is no Wayland/X11 socket mount or host clipboard
+MCP endpoint.
+
+‘--host-clipboard’ saves enabled for future native TUI clients;
+‘--no-host-clipboard’ saves disabled.  Omit both to use the saved
+choice, or off when none exists.  Existing clients retain their original
+setting.  To save policy without opening a client, use ‘oc-box
+preferences --host-clipboard on|off’.  The private host preferences
+survive stop/start and reset, but are not restore authority for a fresh
+workspace.  They store only booleans, not clipboard data or a desktop
+helper path.
 
 The host relay recognizes the legacy Ctrl+Y byte (0x19) and distinct
 ASCII CSI-u or ModifyOtherKeys reports only at top-level host input, not
@@ -2675,12 +2712,17 @@ shortcuts may still conflict.  It replaces the earlier experimental
 Ctrl+Alt+Shift+V binding, without editing native keybindings or
 intercepting normal Ctrl+V. **Ctrl+Y is reserved throughout an opted-in
 client, including shell panes, so its usual shell-yank action is not
-available there.** Clients without this opt-in retain their native
-Ctrl+Y.  It inherits the direct-TTY, native-version and terminal-profile
-requirements of ‘--host-drop’; SSH, tmux, screen, unknown/ambiguous
-profiles and unsupported clients refuse.  CSI-u repeat/release reports
-do not request another import; legacy control-byte/ModifyOtherKeys
-repeats cannot be distinguished from new presses.
+available there.** Clients without effective clipboard importing retain
+their native Ctrl+Y. It inherits the direct-TTY, native-version and
+terminal-profile requirements of ‘--host-drop’; SSH, tmux, screen,
+unknown/ambiguous profiles and unsupported clients refuse explicit
+enable.  A saved enable gracefully skips clipboard importing on
+unsupported terminals, native V1 or when the selected desktop helper is
+missing, without clearing the preference.  Explicit enable still
+requires strict preflight; it does not read the clipboard.  CSI-u
+repeat/release reports do not request another import; legacy
+control-byte/ModifyOtherKeys repeats cannot be distinguished from new
+presses.
 
 Clipboard access occurs only in response to the opted-in host input
 shortcut, never from model output, a plugin/MCP request or background
@@ -2705,9 +2747,11 @@ limited to 16 KiB, with at most 128 offered targets.
 Only local ‘file:’ references are accepted.  **Clipboard file imports
 follow ordinary symlinks by default**, including links in parent
 folders.  No folder approval or extra prompt is required.  Add
-‘--no-host-clipboard-symlinks’ to reject linked sources for this client
-instead.  This changes clipboard imports only: normal pathname/file
-drops and live sharing still refuse symlinks.
+‘--no-host-clipboard-symlinks’ to reject linked sources for this and
+future workspace TUI clients instead.  That strict choice persists until
+‘--host-clipboard-symlinks’ saves link following again.  Both require an
+effective enabled clipboard preference.  This changes clipboard imports
+only: normal pathname/file drops and live sharing still refuse symlinks.
 
 The selected alias and its actual target are checked against
 protected-path rules.  Kernel magic links, runtime/device paths, hard
@@ -2757,17 +2801,22 @@ Native attachment composition and sending remain native behavior.
 ‘--image-preview’ separately controls image visuals for a qualifying
 owning launch.
 
-No clipboard setting or data is saved in workspace preferences or the
-registry.  An additional ‘start --host-clipboard’ may attach to an
-existing private V2 owner without restart, credential refresh or unlock.
-It opts in only that new TUI client; existing clients are unchanged.
-‘--no-host-drop --host-clipboard’ can enable clipboard imports
-(including copied files) while retaining the explicit
-drag/pathname-paste file-drop opt-out.  V1, web, the manager/embedded
-terminal, maintenance, sync and informational commands reject the flag.
-Do not reset a workspace just to enable this feature.
+An additional ‘start --host-clipboard’ may attach to an existing private
+V2 owner without restart, credential/configuration refresh or unlock.
+It saves the choice for future clients and enables that new TUI client;
+existing clients are unchanged.  ‘--no-host-drop --host-clipboard’ can
+enable clipboard imports (including copied files) while retaining the
+explicit drag/pathname-paste file-drop opt-out.  Explicit enable refuses
+V1.  Web, terminal/maintenance, the manager/embedded terminal, sync and
+informational commands ignore saved clipboard policy and reject explicit
+clipboard startup flags.  Do not reset a workspace just to enable this
+feature.
 
      oc-box --project ~/devel/demo --host-clipboard
+     # Later clients inherit that choice:
+     oc-box --project ~/devel/demo
+     # Save disabled without opening a client:
+     oc-box preferences --project ~/devel/demo --host-clipboard off
      # For a new owning launch when image previews are also wanted:
      oc-box --project ~/devel/demo --host-clipboard --image-preview
 
@@ -2775,20 +2824,46 @@ See the short [host test guide](host-clipboard-testing.md).  Focused
 mocked tests are not acceptance of KDE/Wayland/X11 behavior or native
 image composition.
 
-5.35 -no-host-clipboard-symlinks
+5.35 -no-host-clipboard
+=======================
+
+Save clipboard importing disabled for future workspace TUI clients and
+open this client without the clipboard shortcut.  Mutually exclusive
+with ‘--host-clipboard’; neither flag live-toggles existing clients or
+changes the independent host-drop preference.  A saved strict symlink
+choice is retained.  To change only policy, use ‘oc-box preferences
+--host-clipboard off’.
+
+5.36 -host-clipboard-symlinks
+=============================
+
+Save ordinary symlink following for clipboard file imports for this and
+future workspace native TUI clients.  This is also the default when no
+symlink choice is saved.  Requires an effective enabled clipboard
+preference: a saved enable is enough, or combine with
+‘--host-clipboard’.  Accepted only on ‘start’ or ‘reset’, and mutually
+exclusive with ‘--no-host-clipboard-symlinks’.
+
+5.37 -no-host-clipboard-symlinks
 ================================
 
-Restore strict no-symlink clipboard sources for this native TUI client.
-Requires ‘--host-clipboard’ on ‘start’ or ‘reset’; a symlink in the
-selected file or any parent folder produces the same fixed source
-refusal as other denied sources.  PNG pixel imports are unchanged.  This
-option is not persisted and cannot live-toggle an existing client; an
-additional client can use it without restarting the workspace owner.  It
-changes neither file-drop preferences nor live sharing.
+Save strict no-symlink clipboard sources for this and future workspace
+native TUI clients.  Requires effective clipboard enable (saved or
+explicit) on ‘start’ or ‘reset’.  A symlink in the selected file or any
+parent folder produces the same fixed source refusal as other denied
+sources.  PNG pixel imports are unchanged.  An additional client can
+save/use the choice without restarting the workspace owner; existing
+clients are not live-toggled.  Neither choice changes file-drop
+preferences or live sharing.  Use ‘preferences --host-clipboard-symlinks
+on|off’ to save without opening a client, even while clipboard importing
+is off.
 
      oc-box --project ~/devel/demo --host-clipboard --no-host-clipboard-symlinks
+     # Saved clipboard enable and strict capture now apply without flags:
+     oc-box --project ~/devel/demo
+     oc-box preferences --project ~/devel/demo --host-clipboard-symlinks on
 
-5.36 -credential-mode env|selected|vault
+5.38 -credential-mode env|selected|vault
 ========================================
 
 With ‘credentials’, save an explicit forwarding mode for that workspace.
@@ -2804,7 +2879,7 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.37 -attachments
+5.39 -attachments
 =================
 
 Web only: explicitly select the visible, source-version-bounded browser
@@ -2812,7 +2887,7 @@ File-drop adapter described under ‘web’.  Keeps the native app and its
 draft/Send controls unchanged.  No automatic prompt admission or
 host-path/URL reading.
 
-5.38 -no-vault
+5.40 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -2831,7 +2906,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.39 -env-secret NAME
+5.41 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -2844,7 +2919,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.40 -vault-secret NAME
+5.42 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -2856,7 +2931,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.41 -clear-credentials
+5.43 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -2868,7 +2943,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.42 -output FILE
+5.44 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -2878,7 +2953,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.43 -portable
+5.45 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -2888,7 +2963,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.44 -recipient AGE_KEY
+5.46 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -2899,7 +2974,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.45 -identity FILE
+5.47 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -2910,7 +2985,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.46 -cpus NUMBER
+5.48 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -2921,7 +2996,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.47 -memory SIZE
+5.49 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -2933,7 +3008,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.48 -pids-limit NUMBER
+5.50 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -2941,7 +3016,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.49 -device MAPPING
+5.51 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -2955,7 +3030,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.50 -podman-arg=-OPTION[=VALUE]
+5.52 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -2982,7 +3057,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.51 -clear-devices
+5.53 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -2993,7 +3068,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.52 -clear-podman-args
+5.54 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -3003,7 +3078,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.53 -delete-sessions
+5.55 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -3012,7 +3087,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.54 -all
+5.56 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -3020,7 +3095,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.55 -y, -yes
+5.57 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -4081,8 +4156,10 @@ the default start context).  Completion does not inspect the OpenCode
 major version or whether a service is already active; the command itself
 rejects V1 or attached-client use of ‘--no-vault’.  ‘--host-drop’ and
 ‘--no-host-drop’ startup flags are offered only for default/start/reset
-TUI clients, not web, terminal or the separate dashboard.  The separate
-‘preferences --host-drop’ setting completes ‘on’/‘off’.  Direct-TTY,
+TUI clients, not web, terminal or the separate dashboard.  The clipboard
+enable/disable and symlink startup flags use the same command scope.
+The separate ‘preferences --host-drop’, ‘--host-clipboard’ and
+‘--host-clipboard-symlinks’ settings complete ‘on’/‘off’.  Direct-TTY,
 native-version and host-input requirements are checked by the command,
 not during completion.  ‘--project’ completes directories; backup
 archive inputs, ‘--output’, and ‘--identity’ complete paths, including
@@ -4269,20 +4346,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description3057
 Node: Commands7035
-Node: Options119687
-Node: Lifecycle and persistence161939
-Node: Distribution images164239
-Node: Sessions and recovery169203
-Node: Devices and host permissions175788
-Node: Resource reports178134
-Node: Configuration and environment180245
-Node: Files191626
-Node: Exit status197570
-Node: Examples198978
-Node: Troubleshooting201064
-Node: Installation and manuals212416
-Node: Authors and license222442
-Node: See also223049
+Node: Options121219
+Node: Lifecycle and persistence165939
+Node: Distribution images168239
+Node: Sessions and recovery173203
+Node: Devices and host permissions179788
+Node: Resource reports182134
+Node: Configuration and environment184245
+Node: Files195626
+Node: Exit status201570
+Node: Examples202978
+Node: Troubleshooting205064
+Node: Installation and manuals216416
+Node: Authors and license226585
+Node: See also227192
 
 End Tag Table
 

@@ -95,6 +95,23 @@ Konsole/Kitty shortcut reporting, native composer focus and image attachment
 behavior to the operator's short [host check](host-clipboard-testing.md).
 These local checks establish no live rootless-Podman or desktop acceptance.
 Do not add a new broad harness or repeat unrelated release gates for this check.
+
+Persistent clipboard policy additionally needs focused offline coverage for
+absent-choice OFF, saved enable/disable inheritance, independent host-drop
+policy, strict symlink-choice persistence (including disable/re-enable), and
+read-free non-TTY `preferences` changes, including independent symlink-policy
+saves while clipboard is off. Native startup symlink flags still require an
+effective enabled clipboard preference. Cover private preference ownership,
+locking, corrupt/unsafe refusals and host-only restore boundaries, plus saving
+from an additional native TUI client without owner restart, unlock or config
+refresh. Saved enable must skip unsupported terminals/native V1/missing desktop
+helpers without clearing policy; explicit enable must retain strict preflight.
+Web/terminal/manager/sync/info commands must ignore saved choices and reject
+explicit startup flags. Neither startup nor preference changes may read the
+clipboard or persist helper paths/content. These are policy regressions, not new
+live desktop/native-composition or rootless-Podman acceptance. The historical
+reports below predate persistent policy and retain their original scopes.
+
 The owner's earlier "it worked" report covers the PNG workflow on native 2.3.2.
 On diagnostic revision `af73035d848daa93ca832351564ba9635082568c`, the owner
 reported `source-guard` for the original copied PDF, then a `[PDF 1]` attachment

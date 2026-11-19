@@ -14,6 +14,7 @@ import unittest
 from unittest.mock import patch
 
 from oc_box import backups, backup_crypto as crypto, oc_box as box, vault
+from oc_box import workspace_preferences as preferences
 
 
 @unittest.skipUnless(
@@ -367,6 +368,12 @@ class WorkspaceBackupTests(unittest.TestCase):
                         self.assertEqual(restored["opencode_version"], release)
 
     def test_full_real_encrypted_roundtrip_preserves_project_home_and_session_ids(self):
+        preferences.set_preferences(
+            self.path,
+            self.data["id"],
+            host_clipboard=True,
+            host_clipboard_symlinks=False,
+        )
         before = {
             path: path.read_bytes()
             for path in (
@@ -411,6 +418,10 @@ class WorkspaceBackupTests(unittest.TestCase):
             {"sessions": self.sessions["sessions"], "last": self.sessions["last"]},
         )
         self.assertTrue((path.parent / "recovered-registry/sessions.json").exists())
+        recovered_policy = path.parent / "recovered-registry" / preferences.FILE_NAME
+        self.assertTrue(json.loads(recovered_policy.read_bytes())["host_clipboard"])
+        self.assertFalse((path.parent / preferences.FILE_NAME).exists())
+        self.assertNotIn("host_clipboard", preferences.read(path, data["id"]))
         self.assertEqual(data["credentials"], self.data["credentials"])
         self.assertEqual(data["devices"], [])
         self.assertEqual(data["podman_args"], [])
@@ -421,14 +432,24 @@ class WorkspaceBackupTests(unittest.TestCase):
         )
 
     def test_portable_restore_uses_distro_image_and_requires_baseline_setup(self):
+        preferences.set_preferences(self.path, self.data["id"], host_clipboard=True)
         self.backup(portable=True)
         self.assertFalse(any(command[0] == "commit" for command in self.operations))
         with crypto.opened(self.archive, [self.identity]) as (manifest, _, _):
             self.assertEqual(manifest["kind"], "portable")
             self.assertNotIn("image.age", manifest["components"])
-        _, data = self.restore(self.root / "portable")
+        path, data = self.restore(self.root / "portable")
         self.assertEqual(data["image"], box.DISTROS["tumbleweed"][0])
         self.assertFalse(data["ready"])
+        self.assertFalse((path.parent / preferences.FILE_NAME).exists())
+        self.assertNotIn("host_clipboard", preferences.read(path, data["id"]))
+        self.assertTrue(
+            json.loads(
+                (
+                    path.parent / "recovered-registry" / preferences.FILE_NAME
+                ).read_bytes()
+            )["host_clipboard"]
+        )
 
     def test_backup_info_omits_raw_extra_option_values_and_never_uses_podman(self):
         self.backup(portable=True)

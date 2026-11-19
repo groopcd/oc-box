@@ -242,7 +242,10 @@ fi
     def test_host_drop_is_offered_only_for_start_and_reset_tui_clients(self):
         self.assertEqual(self.complete("--host-d"), ["--host-drop"])
         self.assertEqual(self.complete("--no-host-d"), ["--no-host-drop"])
-        self.assertEqual(self.complete("--no-host-c"), ["--no-host-clipboard-symlinks"])
+        self.assertEqual(
+            self.complete("--no-host-c"),
+            ["--no-host-clipboard", "--no-host-clipboard-symlinks"],
+        )
         for command in ("start", "reset"):
             with self.subTest(command=command):
                 self.assertEqual(self.complete(command, "--host-d"), ["--host-drop"])
@@ -251,7 +254,7 @@ fi
                 )
                 self.assertEqual(
                     self.complete(command, "--no-host-c"),
-                    ["--no-host-clipboard-symlinks"],
+                    ["--no-host-clipboard", "--no-host-clipboard-symlinks"],
                 )
         for command in (
             "web",
@@ -288,6 +291,17 @@ fi
         )
         self.assertEqual(self.complete("preferences", "--no-host-d"), [])
         self.assertEqual(self.complete("preferences", "--j"), ["--json"])
+        for flag in ("--host-clipboard", "--host-clipboard-symlinks"):
+            for value in ("", "o"):
+                with self.subTest(flag=flag, value=value):
+                    self.assertEqual(
+                        self.complete("preferences", flag, value), ["on", "off"]
+                    )
+        self.assertEqual(
+            self.complete("preferences", "--host-clipboard=of", breaks=" "),
+            ["--host-clipboard=off"],
+        )
+        self.assertEqual(self.complete("preferences", "--no-host-c"), [])
 
     def test_vault_mode_completes_with_separate_and_equals_values(self):
         self.assertEqual(
