@@ -353,6 +353,14 @@ class HostClipboardPreferenceTests(unittest.TestCase):
         before = policy.read_bytes()
         stack = self.main_fixture()
         stack.enter_context(patch.dict(box.os.environ, {"OC_BOX_CONTAINER": "0"}))
+        stack.enter_context(
+            patch.object(box, "detect_opencode_release", return_value="2.3.2")
+        )
+        stack.enter_context(
+            patch.object(
+                box, "run", side_effect=AssertionError("unexpected host command")
+            )
+        )
         connection = {"url": "http://127.0.0.1:12345", "session": None}
         stack.enter_context(
             patch.object(box.workspace_service, "controller_running", return_value=True)
