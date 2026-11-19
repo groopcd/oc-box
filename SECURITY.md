@@ -265,12 +265,24 @@ security certification.
 
 ## Opt-in native TUI host clipboard
 
-`--host-clipboard` separately enables a host clipboard reader for one supported
-native TUI client. Only the top-level host Ctrl+Y shortcut authorizes a bounded
-read; startup discovers a helper without reading the clipboard. There is no
+`--host-clipboard` separately enables a host clipboard reader for this and future
+supported native TUI clients of the workspace. With no saved choice it is off;
+`--no-host-clipboard` saves disabled. Existing clients do not live-toggle.
+`oc-box preferences --host-clipboard on|off` changes only host policy without a
+TTY, client launch, unlock, configuration refresh or helper discovery. Private
+host `ui-preferences.json` stores only booleans, never clipboard contents or a
+helper path. Choices survive stop/start and reset, but are not restore authority
+for a fresh workspace.
+
+Only the top-level host Ctrl+Y shortcut authorizes a bounded read; startup
+discovers a helper without reading the clipboard. There is no
 background polling, model/output/MCP trigger or desktop socket mount. Ctrl+Y is
 reserved throughout the opted-in client, including shell panes; ordinary Ctrl+V
-and clients without this flag retain their native behavior.
+and clients without effective clipboard importing retain their native behavior.
+Explicit enable requires strict preflight. A saved enable skips unsupported
+terminals, native V1 or missing desktop helpers without clearing the preference.
+Web, terminal, manager, sync and informational commands ignore saved policy and
+reject explicit clipboard startup flags.
 
 Imports accept PNG pixels or typed local URI lists selecting supported image/PDF
 files, not arbitrary clipboard text or remote URLs. File-list MIME types are
@@ -286,8 +298,14 @@ Selected aliases and actual targets retain protected-path checks. Kernel magic
 links, special files and hard links remain refused. The strict export must match
 the still-pinned kernel-selected descriptor before reading; later link retargeting
 cannot redirect that read, but this does not freeze file contents or prevent all
-same-user filesystem races. `--no-host-clipboard-symlinks` restores strict
-no-symlink clipboard sources for this client. Normal host drops and live sharing
+same-user filesystem races. `--no-host-clipboard-symlinks` saves strict
+no-symlink clipboard sources for this and future workspace TUI clients;
+`--host-clipboard-symlinks` saves link following again. Either requires effective
+clipboard enable on native start/reset.
+`preferences --host-clipboard-symlinks on|off` can instead save that policy
+independently while clipboard is off, for a later enabled client.
+Disabling clipboard importing retains a saved strict choice, so later re-enable
+does not silently follow links. Normal host drops and live sharing
 remain strict. Fixed refusal markers never include paths, raw errors or clipboard
 contents. The owner has reported a successful PDF import through a linked folder
 with Ctrl+Y on the merged devel source. That scoped manual observation is not

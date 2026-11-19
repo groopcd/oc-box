@@ -19,7 +19,16 @@ OTHER = "fedcba9876543210fedcba9876543210"
 PRIVATE = "synthetic-private-future-value"
 
 
-def _setter(path, workspace, value, start, result, locking=None, inherited_lock=None):
+def _setter(
+    path,
+    workspace,
+    value,
+    start,
+    result,
+    locking=None,
+    inherited_lock=None,
+    field="host_drop",
+):
     try:
         if inherited_lock is not None:
             os.close(inherited_lock)
@@ -28,7 +37,7 @@ def _setter(path, workspace, value, start, result, locking=None, inherited_lock=
             return
         if locking is None:
             for _ in range(8):
-                preferences.set_host_drop(path, workspace, value)
+                preferences.set_preferences(path, workspace, **{field: value})
                 value = not value
             result.put(("ok", None))
         else:
@@ -170,6 +179,7 @@ class _WorkspaceFixture(unittest.TestCase):
                 preferences.INVALID_WORKSPACE,
                 preferences.INVALID_DATA,
                 preferences.INVALID_VALUE,
+                preferences.INVALID_CLIPBOARD_VALUE,
                 preferences.UNSAFE_STORAGE,
                 preferences.BUSY,
                 preferences.SAVE_UNVERIFIED,
@@ -267,6 +277,56 @@ class WorkspacePreferenceTests(_WorkspaceFixture):
         updated = preferences.set_host_drop(self.path, WORKSPACE, True)
         self.assertEqual(updated, {**future, "host_drop": True})
         self.assertEqual(json.loads(self.file.read_bytes()), updated)
+
+    def test_clipboard_fields_default_off_and_update_independently_of_host_drop(self):
+        self.seed()
+        legacy = preferences.read(self.path, WORKSPACE)
+        self.assertNotIn("host_clipboard", legacy)
+        saved = preferences.set_preferences(
+            self.path, WORKSPACE, host_clipboard=True, host_clipboard_symlinks=False
+        )
+        self.assertFalse(saved["host_drop"])
+        self.assertTrue(saved["host_clipboard"])
+        self.assertFalse(saved["host_clipboard_symlinks"])
+        updated = preferences.set_host_drop(self.path, WORKSPACE, True)
+        self.assertTrue(updated["host_clipboard"])
+        self.assertFalse(updated["host_clipboard_symlinks"])
+        disabled = preferences.set_preferences(
+            self.path, WORKSPACE, host_clipboard=False
+        )
+        self.assertTrue(disabled["host_drop"])
+        self.assertFalse(disabled["host_clipboard"])
+        self.assertFalse(disabled["host_clipboard_symlinks"])
+        self.assertEqual(self.path.read_text(), json.dumps(self.registration))
+
+    def test_invalid_clipboard_fields_and_setter_types_refuse_without_replacement(self):
+        for name in ("host_clipboard", "host_clipboard_symlinks"):
+            for invalid in (None, 0, 1, "on", "off", [], {}):
+                with self.subTest(name=name, value=invalid):
+                    self.seed(
+                        {
+                            "version": 1,
+                            "workspace": WORKSPACE,
+                            "host_drop": False,
+                            name: invalid,
+                        }
+                    )
+                    before = self.file.read_bytes()
+                    self.refuse(preferences.read, self.path, WORKSPACE)
+                    self.refuse(preferences.set_preferences, self.path, WORKSPACE)
+                    self.assertEqual(self.file.read_bytes(), before)
+                    self.assertFalse(self.lock.exists())
+            self.file.unlink()
+            for invalid in (0, 1, "on", [], {}):
+                with self.subTest(name=name, setter_value=invalid):
+                    with self.assertRaisesRegex(
+                        preferences.PreferenceError, preferences.INVALID_CLIPBOARD_VALUE
+                    ):
+                        preferences.set_preferences(
+                            self.path, WORKSPACE, **{name: invalid}
+                        )
+                    self.assertFalse(self.file.exists())
+                    self.assertFalse(self.lock.exists())
 
     def test_boolean_and_schema_validation_never_falls_back_to_enabled(self):
         valid = {"version": 1, "workspace": WORKSPACE, "host_drop": False}
@@ -942,6 +1002,41 @@ class WorkspacePreferenceTests(_WorkspaceFixture):
             preferences.read(self.path, WORKSPACE)["future"], future["future"]
         )
 
+    def test_concurrent_clipboard_and_drop_updates_preserve_each_others_fields(self):
+        self.seed(
+            {
+                "version": 1,
+                "workspace": WORKSPACE,
+                "host_drop": False,
+                "host_clipboard": False,
+                "host_clipboard_symlinks": False,
+                "future": PRIVATE,
+            }
+        )
+        context = multiprocessing.get_context("fork")
+        start, results = context.Event(), context.Queue()
+        workers = [
+            context.Process(
+                target=_setter,
+                args=(self.path, WORKSPACE, False, start, results, None, None, field),
+            )
+            for field in ("host_drop", "host_clipboard")
+        ]
+        for worker in workers:
+            worker.start()
+            self.addCleanup(self.stop_worker, worker)
+        start.set()
+        for worker in workers:
+            worker.join(timeout=10)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(worker.exitcode, 0)
+        self.assertEqual([results.get(timeout=5)[0] for _ in workers], ["ok", "ok"])
+        saved = preferences.read(self.path, WORKSPACE)
+        self.assertTrue(saved["host_drop"])
+        self.assertTrue(saved["host_clipboard"])
+        self.assertFalse(saved["host_clipboard_symlinks"])
+        self.assertEqual(saved["future"], PRIVATE)
+
     def test_setter_rereads_future_fields_after_waiting_for_its_lock(self):
         self.seed(
             {"version": 1, "workspace": WORKSPACE, "host_drop": False, "future": "old"}
@@ -999,7 +1094,12 @@ class WorkspacePreferenceCliTests(_WorkspaceFixture):
     def test_host_guard_precedes_lookup_and_help_remains_available(self):
         box = self.box()
         with patch.dict(os.environ, {"OC_BOX_CONTAINER": "1"}):
-            for arguments in ((), ("--json",), ("--host-drop", "off")):
+            for arguments in (
+                (),
+                ("--json",),
+                ("--host-drop", "off"),
+                ("--host-clipboard", "on"),
+            ):
                 with self.assertRaises(box.BoxError) as raised:
                     self.invoke(box, *arguments)
                 self.assertEqual(str(raised.exception), preferences.HOST_ONLY)
@@ -1057,7 +1157,15 @@ class WorkspacePreferenceCliTests(_WorkspaceFixture):
         box = self.box()
         with patch.dict(os.environ, {}, clear=True):
             default = self.invoke(box, "--json")
-        self.assertEqual(json.loads(default), {"host_drop": True, "source": "default"})
+        self.assertEqual(
+            json.loads(default),
+            {
+                "host_drop": True,
+                "host_clipboard": False,
+                "host_clipboard_symlinks": True,
+                "source": "default",
+            },
+        )
         self.assertFalse(self.file.exists())
         self.assertFalse(self.lock.exists())
         self.seed(
@@ -1072,13 +1180,21 @@ class WorkspacePreferenceCliTests(_WorkspaceFixture):
         with patch.dict(os.environ, {}, clear=True):
             output = self.invoke(box, "--json")
             self.assertEqual(
-                json.loads(output), {"host_drop": False, "source": "saved"}
+                json.loads(output),
+                {
+                    "host_drop": False,
+                    "host_clipboard": False,
+                    "host_clipboard_symlinks": True,
+                    "source": "saved",
+                },
             )
             updated = self.invoke(box, "--host-drop", "on", "--json")
         self.assertEqual(
             json.loads(updated),
             {
                 "host_drop": True,
+                "host_clipboard": False,
+                "host_clipboard_symlinks": True,
                 "source": "saved",
                 "applies_to_future_clients": True,
                 "current_clients_unchanged": True,
@@ -1089,6 +1205,44 @@ class WorkspacePreferenceCliTests(_WorkspaceFixture):
             self.assertNotIn(str(self.path), text)
             self.assertNotIn(WORKSPACE, text)
         self.assertEqual(preferences.read(self.path, WORKSPACE)["future"], PRIVATE)
+
+    def test_clipboard_preferences_save_without_discovery_or_runtime_and_project_safely(
+        self,
+    ):
+        box = self.box()
+        with (
+            patch.dict(
+                os.environ, {"TERM": "dumb", "SSH_TTY": "synthetic"}, clear=True
+            ),
+            patch("sys.stdin.isatty", side_effect=AssertionError("queried TTY")),
+        ):
+            output = self.invoke(
+                box,
+                "--host-clipboard",
+                "on",
+                "--host-clipboard-symlinks",
+                "off",
+                "--host-drop",
+                "off",
+                "--json",
+            )
+            status = self.invoke(box)
+        self.assertEqual(
+            json.loads(output),
+            {
+                "host_drop": False,
+                "host_clipboard": True,
+                "host_clipboard_symlinks": False,
+                "source": "saved",
+                "applies_to_future_clients": True,
+                "current_clients_unchanged": True,
+            },
+        )
+        self.assertIn("Host clipboard preference: enabled (saved)", status)
+        self.assertIn("Host clipboard symlink preference: disabled (saved)", status)
+        self.assertEqual(
+            [call[0] for call in box.calls], ["find_workspace", "find_workspace"]
+        )
 
     def test_corrupt_storage_returns_only_a_fixed_root_error_without_output_or_repair(
         self,

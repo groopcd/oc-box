@@ -49,12 +49,17 @@ def inline_python(source, step_name=None):
 
 
 def evaluate(value, context):
+    value = value.replace("&&", " and ").replace("||", " or ")
+    value = re.sub(r"!(?=[A-Za-z_(])", " not ", value).strip()
     for key in sorted(context, key=len, reverse=True):
         value = value.replace(key, repr(context[key]))
-    value = value.replace("&&", " and ").replace("||", " or ")
-    value = re.sub(r"!(?!=)", " not ", value).strip()
     return eval(
-        value, {"__builtins__": {}, "endsWith": lambda s, suffix: s.endswith(suffix)}
+        value,
+        {
+            "__builtins__": {},
+            "endsWith": lambda s, suffix: s.endswith(suffix),
+            "contains": lambda s, part: part.casefold() in s.casefold(),
+        },
     )
 
 
@@ -68,7 +73,9 @@ class AnnouncementWorkflowTests(unittest.TestCase):
     def context(self, **changes):
         return {
             "github.event.release.tag_name": "",
+            "github.event.release.body": "",
             "inputs.release_tag": "",
+            "inputs.skip_linkedin": False,
             "vars.LINKEDIN_ANNOUNCEMENTS": "true",
             "needs.publish.result": "success",
             "needs.build.outputs.publish_validated": "true",
@@ -97,6 +104,50 @@ class AnnouncementWorkflowTests(unittest.TestCase):
                         evaluate(expression(self.hook, "release_tag"), context),
                         "v1.7.250.dev0",
                     )
+
+    def test_per_publication_skip_matrix_preserves_default_channel_routing(self):
+        routes = (
+            ("release-default", "github.event.release.tag_name", None, "", True),
+            (
+                "release-body",
+                "github.event.release.tag_name",
+                "## Highlights",
+                "",
+                True,
+            ),
+            (
+                "release-skip",
+                "github.event.release.tag_name",
+                "## Highlights\n\n<!-- linkedin:skip -->\n",
+                "",
+                False,
+            ),
+            (
+                "release-unrelated-marker",
+                "github.event.release.tag_name",
+                "<!-- linkedin-image:readme-tui -->",
+                "",
+                True,
+            ),
+            ("dispatch-default", "inputs.release_tag", None, False, True),
+            ("dispatch-skip", "inputs.release_tag", None, True, False),
+        )
+        for tag in ("v1.6.99", "v1.7.250.dev0"):
+            for enabled in ("true", "false", ""):
+                for route, source, body, skip, allowed in routes:
+                    context = self.context(
+                        **{
+                            source: tag,
+                            "github.event.release.body": body,
+                            "inputs.skip_linkedin": skip,
+                            "vars.LINKEDIN_ANNOUNCEMENTS": enabled,
+                        }
+                    )
+                    with self.subTest(tag=tag, enabled=enabled, route=route):
+                        self.assertEqual(
+                            bool(evaluate(condition(self.hook), context)),
+                            allowed and (tag.endswith(".dev0") or enabled == "true"),
+                        )
 
     def test_stable_auto_posting_retains_enable_and_publish_success_gates(self):
         for source in ("github.event.release.tag_name", "inputs.release_tag"):

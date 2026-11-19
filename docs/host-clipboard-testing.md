@@ -22,15 +22,22 @@ earlier Ctrl+Alt+Shift+V chord. It is unassigned in the
 checked on 2026-11-18. Ctrl+V remains ordinary paste and Ctrl+S/Q retain their
 terminal meanings. Ctrl+Y is reserved throughout this opted-in client, including
 shell panes, so it no longer performs shell yank there. Without
-`--host-clipboard`, Ctrl+Y stays native. Printable `y`/`Y` text is not intercepted.
+an effective clipboard enable, Ctrl+Y stays native. Printable `y`/`Y` text is not
+intercepted. Clipboard importing defaults to off when no workspace choice is saved.
+`--host-clipboard` saves enabled; future native TUI clients inherit it without
+repeating the flag. `--no-host-clipboard` saves disabled. Running clients do not
+live-toggle, and no clipboard read happens until the dedicated shortcut.
 
 Clipboard file sources now follow symlinks by default, including linked folders.
 There is no approval popup or folder setup. Copy the file in Dolphin and use
 Ctrl+Y as usual. A link changed after Copy can select a different target at
 import time; protected targets and kernel magic links remain refused.
 Use `--host-clipboard --no-host-clipboard-symlinks` on a fresh client to restore
-strict no-symlink imports. This is per-client, not a saved workspace preference.
-Normal file drops and live sharing remain strict.
+strict no-symlink imports. Both choices are saved for future workspace clients;
+the strict choice remains saved even if clipboard importing is later disabled.
+Use `--host-clipboard-symlinks` to save link following again. Either symlink flag
+requires an effective clipboard enable (saved or explicit). Normal file drops
+and live sharing remain strict.
 
 `uv --with .` builds the **current checkout**, not a named development branch.
 An installed release or another checkout will not acquire the new flag from
@@ -44,7 +51,8 @@ cd ../oc-box-host-clipboard-test
 uv run --no-project --refresh-package oc-box --with '.[vault]' python -I -m oc_box --help
 ```
 
-Confirm the help lists `--host-clipboard` **before** launching a workspace.
+Confirm the help lists `--host-clipboard`, `--no-host-clipboard` and both symlink
+flags **before** launching a workspace.
 If the test directory already exists, do not overwrite or force-remove it;
 use another new directory or verify its revision. `--refresh-package oc-box`
 also avoids reusing an older local package build when testing branch updates.
@@ -57,11 +65,14 @@ checkout or prune unrelated worktrees; a nonempty directory is not overwritten.
 Now use the branch launcher without replacing your published installation:
 
 ```sh
+# Record the existing policy before saving a test choice:
+uv run --no-project --refresh-package oc-box --with '.[vault]' python -I -m oc_box \
+  preferences --project ~/devel/demo
 uv run --no-project --refresh-package oc-box --with '.[vault]' python -I -m oc_box \
   --project ~/devel/demo --host-clipboard
 ```
 
-Replace `~/devel/demo` with the **real existing project** you intend to use.
+Replace `~/devel/demo` with the **existing registered project** you intend to use.
 Do not pass a literal placeholder such as `/path/to/your/project`.
 
 The package is non-editable and isolated. Omit `[vault]` only if your normal
@@ -70,9 +81,27 @@ project explicitly; normal owner/credential prompts and workspace safeguards
 still apply. No reset, purge, repair or history reimport is needed.
 
 An existing private owner may stay running: the command opens an additional TUI
-client with its own clipboard opt-in and does not refresh its credentials. For
+client, saves the clipboard enable and does not refresh configuration or
+credentials or unlock the vault. Existing clients stay unchanged. For
 a new owning launch, `--image-preview` may be added for inline visuals; it is
 not accepted as a live toggle while another owner is active.
+
+After testing, restore the intended choices explicitly; do not reset or edit
+private preference files. For example, using the same branch launcher:
+
+```sh
+uv run --no-project --refresh-package oc-box --with '.[vault]' python -I -m oc_box \
+  preferences --project ~/devel/demo --host-clipboard off
+```
+
+`preferences --host-clipboard on|off` and
+`preferences --host-clipboard-symlinks on|off` work without opening a client,
+starting/unlocking the workspace or discovering desktop helpers, including from
+a non-TTY. Unlike native startup symlink flags, the symlink preference can be
+saved while clipboard importing is off; it matters on a later enabled client.
+Only policy booleans are saved, never clipboard data or helper paths.
+Stop/reset retains these host-only choices;
+restoring into a fresh workspace does not reactivate them.
 
 ## Host clipboard packages
 
@@ -85,8 +114,12 @@ command -v wl-paste
 
 This only looks up the command; it does not read the clipboard. A check inside
 oc-box describes the container, not the host. The feature's startup preflight
-performs this host PATH check and reports the selected utility/package if missing.
-It never installs packages automatically.
+performs this host PATH check without reading clipboard data. Explicit
+`--host-clipboard` reports the selected utility/package and refuses if missing.
+A saved enable instead skips unsupported terminals, native V1 or a missing
+desktop helper without erasing the choice. Web/terminal/manager/sync/info commands
+ignore it and reject explicit startup flags. Packages are never installed
+automatically.
 
 | Host distro | Wayland package installation |
 | --- | --- |
@@ -124,11 +157,17 @@ back to an X11 clipboard if `wl-paste` is missing.
 3. **Normal controls:** ordinary text paste and Ctrl+V in a focused native shell
    pane remain ordinary controls. They must not import host clipboard images.
 4. **No image / opt-out:** with plain text copied, the dedicated shortcut should
-   show only a fixed refusal, never the text. A client launched without
-   `--host-clipboard` must not read the desktop clipboard through this feature.
+   show only a fixed refusal, never the text. A fresh client launched with
+   `--no-host-clipboard` must not read the desktop clipboard through this feature;
+   future flagless clients must inherit disabled. Conversely, after an explicit
+   enable, a fresh flagless supported client should inherit the shortcut. Changing
+   policy must not live-toggle the existing test client.
    `--no-host-drop --host-clipboard` should still allow clipboard PNGs and copied
    supported files while leaving drag/path-paste imports disabled (that explicit
-   file preference persists).
+   file preference persists). If checking strict symlink capture, save
+   `--no-host-clipboard-symlinks` while clipboard is enabled and verify that a
+   fresh flagless client still refuses linked sources; restore your intended
+   policy afterward.
 5. **Exit:** quit the test client normally. Observe any fixed refusal/cleanup
    warning; don't restart or inspect other resources to hide a failure. Cleanup
    is best-effort and does not recall history, provider or copied bytes.
@@ -147,6 +186,8 @@ in development.
   placeholder, or no visible action.
 - Whether anything was sent without Enter (must not happen).
 - Whether ordinary Ctrl+V/text paste and existing supported file drops changed.
+- Which saved clipboard/symlink choices were exercised, whether a fresh flagless
+  client inherited them, and whether existing clients remained unchanged.
 - Whether copied PDF/image files worked, how many were selected and their rough
   sizes; don't paste the raw clipboard's URI list or private filenames.
 - Any **fixed** refusal/cleanup warning. Do not send clipboard contents, private

@@ -151,6 +151,8 @@ An owner may be ready at native home without a default conversation. Additional 
 
 Experimental outside-host image/PDF drops into the native TUI are enabled by default for supported clients. Save @code{--no-host-drop} to disable importing for this workspace, or @code{--host-drop} to enable it again. A new additional @code{start} TUI client reads the preference without restarting the existing owner; existing clients do not live-toggle. This is separate from the @code{attach} confirmation broker and from browser uploads; see the option below for the host-input authorization boundary and terminal requirements.
 
+Host clipboard imports are separately **off by default**. Save @code{--host-clipboard} to enable the Ctrl+Y import shortcut for this and future workspace TUI clients, or @code{--no-host-clipboard} to disable it. Only that shortcut reads the clipboard; enabling the preference or starting a client does not read it.
+
 @section preferences
 
 Read or change host-only UI preferences for an **existing registered workspace** without opening a client, starting/stopping a container, refreshing native configuration or unlocking credentials:
@@ -159,10 +161,19 @@ Read or change host-only UI preferences for an **existing registered workspace**
 oc-box preferences --project ~/devel/demo
 oc-box preferences --project ~/devel/demo --host-drop off
 oc-box preferences --workspace WORKSPACE_ID --host-drop on
+oc-box preferences --project ~/devel/demo --host-clipboard on
+oc-box preferences --project ~/devel/demo --host-clipboard-symlinks off
+oc-box preferences --project ~/devel/demo --host-clipboard off
 oc-box preferences --project ~/devel/demo --json
 @end example
 
-@code{--project} and @code{--workspace} are mutually exclusive. With no change option this is read-only. Missing preferences mean importing is enabled by default; corrupt, unsafe or mismatched preferences refuse rather than silently granting access. Changes apply to future clients only. Preferences survive ordinary stop/start and reset in a private host @code{ui-preferences.json} beside workspace metadata, with an independent lock so an active owning launcher need not exit. They are not native CLI settings, credential policy or archived authority: backup/restore into a fresh workspace does not reactivate this host preference. The new workspace uses the restoring host's default until explicitly changed.
+@code{--project} and @code{--workspace} are mutually exclusive. With no change option this is read-only. The independent settings accept @code{on}/@code{off}:
+
+| Setting | Default when no choice is saved | | --- | --- | | @code{--host-drop} | @code{on}: pathname/file-drop imports on supported clients | | @code{--host-clipboard} | @code{off}: no clipboard shortcut | | @code{--host-clipboard-symlinks} | @code{on}: follow ordinary links for clipboard file imports |
+
+The symlink preference can be saved independently, even while clipboard importing is off; it takes effect on a later enabled client. The strict symlink choice remains saved when clipboard importing is later disabled, so re-enabling does not silently restore link following. This command also works without a TTY. It does not discover desktop helpers or read the clipboard, even when saving an enable choice. JSON output includes the effective @code{host_clipboard} and @code{host_clipboard_symlinks} booleans; @code{source} still indicates whether a preference file is saved or defaults are in use, not the origin of each individual field.
+
+Corrupt, unsafe or mismatched preferences refuse rather than silently granting access. Changes apply to future clients only. Preferences survive ordinary stop/start and reset in a private host @code{ui-preferences.json} beside workspace metadata, with an independent lock so an active owning launcher need not exit. Only policy booleans are saved, never clipboard contents or a helper path. They are not native CLI settings, credential policy or archived authority: backup/restore into a fresh workspace does not reactivate these host preferences. The new workspace uses the defaults above until explicitly changed.
 
 @section stop
 
@@ -933,15 +944,17 @@ Save host importing disabled for future workspace TUI clients and open this clie
 
 @section --host-clipboard
 
-Experimental, **off by default and per native TUI client**. On a supported direct Konsole or Kitty terminal, opt in with @code{start} (the default command) or @code{reset}, then press **Ctrl+Y** to import a PNG clipboard image or copied local PNG/JPEG/GIF/WebP/PDF files. Ordinary Ctrl+V, terminal text paste, clipboard contents and host OpenCode settings are unchanged. The native TUI still runs inside the container; there is no Wayland/X11 socket mount or host clipboard MCP endpoint.
+Experimental, **off by default, with a saved per-workspace host preference**. On a supported direct Konsole or Kitty terminal, enable with @code{start} (the default command) or @code{reset}, then press **Ctrl+Y** to import a PNG clipboard image or copied local PNG/JPEG/GIF/WebP/PDF files. Ordinary Ctrl+V, terminal text paste, clipboard contents and host OpenCode settings are unchanged. The native TUI still runs inside the container; there is no Wayland/X11 socket mount or host clipboard MCP endpoint.
 
-The host relay recognizes the legacy Ctrl+Y byte (0x19) and distinct ASCII CSI-u or ModifyOtherKeys reports only at top-level host input, not inside bracketed pastes or terminal replies. Printable @code{y}/@code{Y} text never grants a read. A terminal/global shortcut that consumes the chord will not import content. Ctrl+Y is unassigned in the documented OpenCode 2.x defaults checked on 2026-11-18; custom bindings and desktop shortcuts may still conflict. It replaces the earlier experimental Ctrl+Alt+Shift+V binding, without editing native keybindings or intercepting normal Ctrl+V. **Ctrl+Y is reserved throughout an opted-in client, including shell panes, so its usual shell-yank action is not available there.** Clients without this opt-in retain their native Ctrl+Y. It inherits the direct-TTY, native-version and terminal-profile requirements of @code{--host-drop}; SSH, tmux, screen, unknown/ambiguous profiles and unsupported clients refuse. CSI-u repeat/release reports do not request another import; legacy control-byte/ModifyOtherKeys repeats cannot be distinguished from new presses.
+@code{--host-clipboard} saves enabled for future native TUI clients; @code{--no-host-clipboard} saves disabled. Omit both to use the saved choice, or off when none exists. Existing clients retain their original setting. To save policy without opening a client, use @code{oc-box preferences --host-clipboard on|off}. The private host preferences survive stop/start and reset, but are not restore authority for a fresh workspace. They store only booleans, not clipboard data or a desktop helper path.
+
+The host relay recognizes the legacy Ctrl+Y byte (0x19) and distinct ASCII CSI-u or ModifyOtherKeys reports only at top-level host input, not inside bracketed pastes or terminal replies. Printable @code{y}/@code{Y} text never grants a read. A terminal/global shortcut that consumes the chord will not import content. Ctrl+Y is unassigned in the documented OpenCode 2.x defaults checked on 2026-11-18; custom bindings and desktop shortcuts may still conflict. It replaces the earlier experimental Ctrl+Alt+Shift+V binding, without editing native keybindings or intercepting normal Ctrl+V. **Ctrl+Y is reserved throughout an opted-in client, including shell panes, so its usual shell-yank action is not available there.** Clients without effective clipboard importing retain their native Ctrl+Y. It inherits the direct-TTY, native-version and terminal-profile requirements of @code{--host-drop}; SSH, tmux, screen, unknown/ambiguous profiles and unsupported clients refuse explicit enable. A saved enable gracefully skips clipboard importing on unsupported terminals, native V1 or when the selected desktop helper is missing, without clearing the preference. Explicit enable still requires strict preflight; it does not read the clipboard. CSI-u repeat/release reports do not request another import; legacy control-byte/ModifyOtherKeys repeats cannot be distinguished from new presses.
 
 Clipboard access occurs only in response to the opted-in host input shortcut, never from model output, a plugin/MCP request or background polling. The keyboard report is host input authority, not cryptographic proof of a physical keypress or composer focus. The shortcut authorizes import anywhere in that connection; focus the native prompt before using it. Other workspace tools can read imported bytes, and history, provider systems, backups, copies or crashes may retain them. Read-only import is not confidentiality or recall.
 
 Wayland requires @code{wl-paste} from @code{wl-clipboard} on the host. X11 requires @code{xclip}. If Wayland is selected, a missing helper does not fall back to another clipboard. Preflight only locates the helper; it reads no clipboard data. On the shortcut, one bounded content-type query selects @code{text/uri-list}, @code{x-special/gnome-copied-files}, or @code{image/png}, in that order. There is one payload read under the same helper deadline and desktop-only environment. File lists take precedence over an optional PNG thumbnail; refused/invalid file lists do not fall back to another format. Type lists and file-list payloads are limited to 16 KiB, with at most 128 offered targets.
 
-Only local @code{file:} references are accepted. **Clipboard file imports follow ordinary symlinks by default**, including links in parent folders. No folder approval or extra prompt is required. Add @code{--no-host-clipboard-symlinks} to reject linked sources for this client instead. This changes clipboard imports only: normal pathname/file drops and live sharing still refuse symlinks.
+Only local @code{file:} references are accepted. **Clipboard file imports follow ordinary symlinks by default**, including links in parent folders. No folder approval or extra prompt is required. Add @code{--no-host-clipboard-symlinks} to reject linked sources for this and future workspace TUI clients instead. That strict choice persists until @code{--host-clipboard-symlinks} saves link following again. Both require an effective enabled clipboard preference. This changes clipboard imports only: normal pathname/file drops and live sharing still refuse symlinks.
 
 The selected alias and its actual target are checked against protected-path rules. Kernel magic links, runtime/device paths, hard links, special/protected files, directories and unsupported extensions remain refused. Both the selected and target filename extensions must match the captured content. The target is pinned without reading source bytes, then matched by identity to the existing strict host-drop capture before any file bytes are read. Unsupported kernel resolution contracts refuse rather than fall back to ordinary link following.
 
@@ -953,22 +966,37 @@ Arbitrary @code{text/plain}, bare text paths and raw PDF clipboard payloads are 
 
 Captured bytes use the existing private drop transfer and staging/cleanup limits. The relay supplies a container pathname as native paste input; it never synthesizes Enter or submits a prompt. Native attachment composition and sending remain native behavior. @code{--image-preview} separately controls image visuals for a qualifying owning launch.
 
-No clipboard setting or data is saved in workspace preferences or the registry. An additional @code{start --host-clipboard} may attach to an existing private V2 owner without restart, credential refresh or unlock. It opts in only that new TUI client; existing clients are unchanged. @code{--no-host-drop --host-clipboard} can enable clipboard imports (including copied files) while retaining the explicit drag/pathname-paste file-drop opt-out. V1, web, the manager/embedded terminal, maintenance, sync and informational commands reject the flag. Do not reset a workspace just to enable this feature.
+An additional @code{start --host-clipboard} may attach to an existing private V2 owner without restart, credential/configuration refresh or unlock. It saves the choice for future clients and enables that new TUI client; existing clients are unchanged. @code{--no-host-drop --host-clipboard} can enable clipboard imports (including copied files) while retaining the explicit drag/pathname-paste file-drop opt-out. Explicit enable refuses V1. Web, terminal/maintenance, the manager/embedded terminal, sync and informational commands ignore saved clipboard policy and reject explicit clipboard startup flags. Do not reset a workspace just to enable this feature.
 
 @example
 oc-box --project ~/devel/demo --host-clipboard
+# Later clients inherit that choice:
+oc-box --project ~/devel/demo
+# Save disabled without opening a client:
+oc-box preferences --project ~/devel/demo --host-clipboard off
 # For a new owning launch when image previews are also wanted:
 oc-box --project ~/devel/demo --host-clipboard --image-preview
 @end example
 
 See the short [host test guide](host-clipboard-testing.md). Focused mocked tests are not acceptance of KDE/Wayland/X11 behavior or native image composition.
 
+@section --no-host-clipboard
+
+Save clipboard importing disabled for future workspace TUI clients and open this client without the clipboard shortcut. Mutually exclusive with @code{--host-clipboard}; neither flag live-toggles existing clients or changes the independent host-drop preference. A saved strict symlink choice is retained. To change only policy, use @code{oc-box preferences --host-clipboard off}.
+
+@section --host-clipboard-symlinks
+
+Save ordinary symlink following for clipboard file imports for this and future workspace native TUI clients. This is also the default when no symlink choice is saved. Requires an effective enabled clipboard preference: a saved enable is enough, or combine with @code{--host-clipboard}. Accepted only on @code{start} or @code{reset}, and mutually exclusive with @code{--no-host-clipboard-symlinks}.
+
 @section --no-host-clipboard-symlinks
 
-Restore strict no-symlink clipboard sources for this native TUI client. Requires @code{--host-clipboard} on @code{start} or @code{reset}; a symlink in the selected file or any parent folder produces the same fixed source refusal as other denied sources. PNG pixel imports are unchanged. This option is not persisted and cannot live-toggle an existing client; an additional client can use it without restarting the workspace owner. It changes neither file-drop preferences nor live sharing.
+Save strict no-symlink clipboard sources for this and future workspace native TUI clients. Requires effective clipboard enable (saved or explicit) on @code{start} or @code{reset}. A symlink in the selected file or any parent folder produces the same fixed source refusal as other denied sources. PNG pixel imports are unchanged. An additional client can save/use the choice without restarting the workspace owner; existing clients are not live-toggled. Neither choice changes file-drop preferences or live sharing. Use @code{preferences --host-clipboard-symlinks on|off} to save without opening a client, even while clipboard importing is off.
 
 @example
 oc-box --project ~/devel/demo --host-clipboard --no-host-clipboard-symlinks
+# Saved clipboard enable and strict capture now apply without flags:
+oc-box --project ~/devel/demo
+oc-box preferences --project ~/devel/demo --host-clipboard-symlinks on
 @end example
 
 @section --credential-mode env|selected|vault
@@ -1582,7 +1610,7 @@ The framework's OS package is normally @code{bash-completion} on all seven suppo
 
 GitHub/source installs place it in @code{~/.local/share/bash-completion/completions/oc-box} and refresh it on upgrades. They also retain a release-local copy at @code{completions/oc-box}. Wheels contain the same package resource and install another copy under their Python environment's @code{share/bash-completion/completions/oc-box}; uv/pipx private environments may not be on Bash's autoload search path, so use either activation method above. From a source checkout, @code{source completions/oc-box} works directly in Bash.
 
-Completion suggests commands, context-appropriate options, vault actions, distros/aliases, doctor features, auto-update and credential-mode choices. Credential modes include @code{env}, @code{selected}, and @code{vault}; @code{--no-vault} is offered for start/reset/web only (including the default start context). Completion does not inspect the OpenCode major version or whether a service is already active; the command itself rejects V1 or attached-client use of @code{--no-vault}. @code{--host-drop} and @code{--no-host-drop} startup flags are offered only for default/start/reset TUI clients, not web, terminal or the separate dashboard. The separate @code{preferences --host-drop} setting completes @code{on}/@code{off}. Direct-TTY, native-version and host-input requirements are checked by the command, not during completion. @code{--project} completes directories; backup archive inputs, @code{--output}, and @code{--identity} complete paths, including spaces. Both @code{--option VALUE} and @code{--option=VALUE} are supported. Press Tab after @code{oc-box } or @code{oc-box backup --} to see candidates. Completion uses only Bash builtins and local pathname expansion: it does not run oc-box on each Tab, query Podman, contact providers, read vault contents, or guess passwords, credential names, session/workspace IDs, or model identifiers.
+Completion suggests commands, context-appropriate options, vault actions, distros/aliases, doctor features, auto-update and credential-mode choices. Credential modes include @code{env}, @code{selected}, and @code{vault}; @code{--no-vault} is offered for start/reset/web only (including the default start context). Completion does not inspect the OpenCode major version or whether a service is already active; the command itself rejects V1 or attached-client use of @code{--no-vault}. @code{--host-drop} and @code{--no-host-drop} startup flags are offered only for default/start/reset TUI clients, not web, terminal or the separate dashboard. The clipboard enable/disable and symlink startup flags use the same command scope. The separate @code{preferences --host-drop}, @code{--host-clipboard} and @code{--host-clipboard-symlinks} settings complete @code{on}/@code{off}. Direct-TTY, native-version and host-input requirements are checked by the command, not during completion. @code{--project} completes directories; backup archive inputs, @code{--output}, and @code{--identity} complete paths, including spaces. Both @code{--option VALUE} and @code{--option=VALUE} are supported. Press Tab after @code{oc-box } or @code{oc-box backup --} to see candidates. Completion uses only Bash builtins and local pathname expansion: it does not run oc-box on each Tab, query Podman, contact providers, read vault contents, or guess passwords, credential names, session/workspace IDs, or model identifiers.
 
 @section Python package installations
 

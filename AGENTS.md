@@ -227,12 +227,29 @@ their checkout ownership distinct from unrelated source and flat installations.
   can retain staging/history/provider/backup copies. Default relay behavior and
   the independent-confirmation broker remain unchanged. No host acceptance is
   established by synthetic parser/process/native checks.
-- `host_clipboard.py`: opt-in, per-client host PNG/copied-file clipboard reader. Discovery
+- `host_clipboard.py`: opt-in host PNG/copied-file clipboard reader. Workspace
+  `ui-preferences.json` saves future-client clipboard/symlink booleans under the
+  independent host preference lock; absent clipboard choice means OFF, absent
+  symlink choice means ordinary following. Explicit native start/reset
+  --host-clipboard / --no-host-clipboard choices persist, including on additional
+  clients without owner restart/unlock/config refresh; existing clients never
+  live-toggle. Saved enable skips unsupported terminals/native V1/missing desktop
+  helpers without clearing policy; explicit enable remains strict. Web, terminal,
+  manager, sync and informational commands ignore saved policy and reject startup
+  flags. `preferences --host-clipboard on|off` and
+  `--host-clipboard-symlinks on|off` never launch/unlock/discover helpers and work
+  without a TTY. Store only booleans, never helper paths or clipboard data;
+  host-only preferences are not restore authority. Discovery
   never reads; only the dedicated top-level host shortcut may call the bounded
   desktop helper. Typed local URI lists reuse the existing pinned host-drop
   source guards; type discovery is not proof of file-manager provenance.
-  Clipboard file sources follow ordinary symlinks by default; the per-client
-  --no-host-clipboard-symlinks opt-out restores strict capture. Keep that exception
+  Clipboard file sources follow ordinary symlinks by default;
+  --host-clipboard-symlinks / --no-host-clipboard-symlinks save the future-client
+  choice and require effective clipboard enable on native start/reset.
+  `preferences --host-clipboard-symlinks on|off` is independent and can save the
+  future choice even while clipboard is OFF, without runtime checks.
+  Keep strict choices through clipboard disable/re-enable; never silently revert
+  to link following. Keep this link-following exception
   out of normal drops and live sharing. Validate selected and canonical protected
   paths; use kernel NO_MAGICLINKS O_PATH selection and match the strict export
   against its still-pinned descriptor before reading. Never use Path.resolve

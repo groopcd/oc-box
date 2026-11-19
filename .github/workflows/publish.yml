@@ -13,6 +13,10 @@ on:
         description: Existing published release tag (required when publishing)
         type: string
         default: ''
+      skip_linkedin:
+        description: Skip the LinkedIn preview or announcement for this publication
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -163,6 +167,8 @@ jobs:
   linkedin:
     needs: [build, publish]
     if: >-
+      !inputs.skip_linkedin &&
+      !contains(github.event.release.body || '', '<!-- linkedin:skip -->') &&
       (endsWith(github.event.release.tag_name || inputs.release_tag, '.dev0') ||
        vars.LINKEDIN_ANNOUNCEMENTS == 'true') &&
       needs.publish.result == 'success' &&

@@ -95,6 +95,23 @@ Konsole/Kitty shortcut reporting, native composer focus and image attachment
 behavior to the operator's short [host check](host-clipboard-testing.md).
 These local checks establish no live rootless-Podman or desktop acceptance.
 Do not add a new broad harness or repeat unrelated release gates for this check.
+
+Persistent clipboard policy additionally needs focused offline coverage for
+absent-choice OFF, saved enable/disable inheritance, independent host-drop
+policy, strict symlink-choice persistence (including disable/re-enable), and
+read-free non-TTY `preferences` changes, including independent symlink-policy
+saves while clipboard is off. Native startup symlink flags still require an
+effective enabled clipboard preference. Cover private preference ownership,
+locking, corrupt/unsafe refusals and host-only restore boundaries, plus saving
+from an additional native TUI client without owner restart, unlock or config
+refresh. Saved enable must skip unsupported terminals/native V1/missing desktop
+helpers without clearing policy; explicit enable must retain strict preflight.
+Web/terminal/manager/sync/info commands must ignore saved choices and reject
+explicit startup flags. Neither startup nor preference changes may read the
+clipboard or persist helper paths/content. These are policy regressions, not new
+live desktop/native-composition or rootless-Podman acceptance. The historical
+reports below predate persistent policy and retain their original scopes.
+
 The owner's earlier "it worked" report covers the PNG workflow on native 2.3.2.
 On diagnostic revision `af73035d848daa93ca832351564ba9635082568c`, the owner
 reported `source-guard` for the original copied PDF, then a `[PDF 1]` attachment
@@ -1093,10 +1110,24 @@ an empty-tail cursor. The corrected fixture requires actual foreground activity,
 native queued admission and checked exports, rather than fabricating a pending
 row or weakening history validation.
 
-These are synthetic local native checks, not whole-container process-death or
-external-host acceptance. The final candidate still requires focused host proof;
-do not relabel earlier history/recovery reports or infer a new host pass from
-these checks.
+These synthetic local native checks do not establish whole-container process death
+or external-host acceptance. Do not relabel earlier history/recovery reports or
+infer a new host pass from them.
+
+The owner separately reviewed three private focused host reports for exact source
+`5135664da3ab6ba2aab8b7f60b5709176ec4448e` (`1.7.244.dev0+g5135664`),
+including source, native binary and approved runner hashes:
+
+| Host case | Checks | Observed outcome |
+| --- | ---: | --- |
+| Graceful | 31/31 | All 13 archives verified. |
+| Stop-cancel | 29/29 | Explicit stop prevented both restart and Reader launch. |
+| Live transport | 31/31 | Recovery verified all 13 archives without consuming queued work or changing execution markers. |
+
+This evidence is scoped to the history-fix commit and those cases. It does not
+establish a host pass for the combined clipboard/history release, other runtime
+changes or interactive clipboard composition. The private reports are not
+distributed with the release.
 
 #### Post-stop persisted-history snapshot candidate
 

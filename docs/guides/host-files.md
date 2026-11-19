@@ -29,7 +29,7 @@ copies or a model provider.
 | Workflow | What authorizes access | Data | Native input behavior |
 | --- | --- | --- | --- |
 | Native TUI host imports | A qualifying host pathname paste; no per-file prompt | Images/PDF, up to 8 MiB/file | A native paste; no added Enter |
-| TUI `--host-clipboard` | Per-client opt-in and host Ctrl+Y; no per-file prompt | PNG pixels or copied image/PDF files, up to 8 MiB/file | Native paste; you send manually |
+| TUI `--host-clipboard` | Saved workspace opt-in and host Ctrl+Y; no per-file prompt | PNG pixels or copied image/PDF files, up to 8 MiB/file | Native paste; you send manually |
 | Browser `web --attachments` | Explicit addon and actual browser Files | Images/PDF, up to 20 MiB/file | Native composer; you press Send |
 | Direct `attach PATH` | Typed `attach`, or explicit risk acknowledgment | One image up to 8 MiB | Queues a native message; **not a draft** |
 | `attach --broker` | Independent host approval for every image | One captured image up to 8 MiB | Expiring, session-bound, one-use tool retrieval |
@@ -120,12 +120,24 @@ a new live-host acceptance pass. See [`--host-drop`](../cli.md#--host-drop),
 
 ## Import clipboard images and copied files with Ctrl+Y
 
-Clipboard access is separate from default pathname drops: enable it for each
-native TUI client on a direct Konsole/Kitty host terminal:
+Clipboard access is separate from default pathname drops and **off by default**.
+Enable it for this and future workspace native TUI clients on a direct
+Konsole/Kitty host terminal:
 
 ```sh
 oc-box --project ~/devel/demo --host-clipboard
+# Later native TUI clients inherit the saved choice:
+oc-box --project ~/devel/demo
+# Or save policy without opening a client:
+oc-box preferences --project ~/devel/demo --host-clipboard off
 ```
+
+`--no-host-clipboard` also saves disabled while opening a new native TUI client.
+These host-only preferences survive stop/start and reset; existing clients do
+not live-toggle. Explicit enable has strict preflight. A saved enable gracefully
+skips unsupported terminals, native V1 or missing desktop helpers without
+clearing the choice. Web, terminal, manager, sync and info commands ignore saved
+clipboard policy and reject explicit clipboard startup flags.
 
 Wayland requires host `wl-paste` (`wl-clipboard`); X11 requires `xclip`. Copy
 image pixels, or copy local PNG/JPEG/GIF/WebP/PDF files in a file manager, focus
@@ -142,14 +154,21 @@ trigger, desktop socket mount, source move or clipboard modification is added.
 folders, with no approval popup. A link changed after Copy may select a new
 target when Ctrl+Y is pressed. Protected aliases/targets, kernel magic links,
 hard links and special files remain refused; descriptor pinning does not freeze
-the file's contents. Add `--no-host-clipboard-symlinks` to the launch command to
-restore strict no-symlink clipboard sources for that client. Normal drops and
-live sharing remain strict.
+the file's contents. Add `--no-host-clipboard-symlinks` to save strict no-symlink
+clipboard sources for this and future clients. `--host-clipboard-symlinks` saves
+link following again; either needs an effective clipboard enable. The strict
+choice is retained across disabling/re-enabling clipboard imports. You can also
+use `preferences --host-clipboard-symlinks off|on` independently, even while
+clipboard is off, for a later enabled client. Normal drops and live sharing
+remain strict.
 
 An additional client may use these flags without restarting/unlocking the owner.
-The option is not a workspace preference and cannot live-toggle existing
-clients. Imported bytes are readable by workspace tools and may survive in
-history, provider systems or retained copies. See the [full reference](../cli.md#--host-clipboard)
+The `preferences` command needs no TTY, owner restart, unlock, configuration
+refresh or desktop-helper discovery. Only policy booleans are saved, never
+clipboard contents or a helper path, and restoring a fresh workspace does not
+reactivate these host-only preferences. Imported bytes are readable by workspace
+tools and may survive in history, provider systems or retained copies.
+See the [full reference](../cli.md#--host-clipboard)
 and [short host check](../host-clipboard-testing.md). The owner has reported a
 successful Ctrl+Y PDF import through a linked folder using the merged devel test
 instructions. This is a scoped manual observation, not a full platform/refusal

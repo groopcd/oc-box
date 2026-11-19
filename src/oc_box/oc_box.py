@@ -375,9 +375,14 @@ def effective_host_drop(args):
 
 def configure_host_clipboard(args, version=None):
     """Discover the host helper before unlock/reset, never read its clipboard."""
-    if not getattr(args, "host_clipboard", False):
-        if not getattr(args, "host_clipboard_symlinks", True):
-            raise BoxError("--no-host-clipboard-symlinks requires --host-clipboard.")
+    if not effective_host_clipboard(args):
+        if (
+            getattr(args, "host_clipboard", None) is False
+            and getattr(args, "host_clipboard_symlinks", None) is not None
+        ):
+            raise BoxError(
+                "Clipboard symlink options require --host-clipboard or a saved enabled preference."
+            )
         return None
     validate_host_drop(version)
     if not hasattr(args, "_host_clipboard_reader"):
@@ -390,6 +395,92 @@ def configure_host_clipboard(args, version=None):
         except host_clipboard.ClipboardError as error:
             raise BoxError(str(error)) from None
     return args._host_clipboard_reader
+
+
+def effective_host_clipboard(args):
+    return bool(
+        getattr(args, "_host_clipboard_enabled", getattr(args, "host_clipboard", False))
+    )
+
+
+def effective_host_clipboard_symlinks(args):
+    value = getattr(
+        args, "_host_clipboard_symlinks", getattr(args, "host_clipboard_symlinks", None)
+    )
+    return True if value is None else value
+
+
+def configure_host_clipboard_preferences(path, data, args, version):
+    """Resolve saved future-client policy without ever reading clipboard contents."""
+    if getattr(args, "_host_clipboard_resolved", False):
+        return
+    if __package__:
+        from . import workspace_preferences
+    else:
+        import workspace_preferences
+    requested = getattr(args, "host_clipboard", None)
+    symlinks = getattr(args, "host_clipboard_symlinks", None)
+    if any(
+        type(value) is not bool for value in (requested, symlinks) if value is not None
+    ):
+        raise BoxError("Invalid host clipboard preference.")
+    try:
+        saved = workspace_preferences.read(path, data["id"])
+        wanted = (
+            saved.get("host_clipboard", workspace_preferences.DEFAULT_HOST_CLIPBOARD)
+            if requested is None
+            else requested
+        )
+        if symlinks is not None and not wanted:
+            raise BoxError(
+                "Clipboard symlink options require --host-clipboard or a saved enabled preference."
+            )
+        args._host_clipboard_symlinks = (
+            saved.get(
+                "host_clipboard_symlinks",
+                workspace_preferences.DEFAULT_HOST_CLIPBOARD_SYMLINKS,
+            )
+            if symlinks is None
+            else symlinks
+        )
+        args._host_clipboard_enabled = wanted
+        try:
+            if wanted and version is None:
+                # Automatic unsupported clients must not add version/helper
+                # probes ahead of ordinary credential validation.
+                validate_host_drop()
+                version = (
+                    getattr(args, "_opencode_release", None)
+                    or detect_opencode_release()
+                )
+                args._opencode_release = version
+            configure_host_clipboard(args, version)
+        except BoxError:
+            args._host_clipboard_enabled = False
+            if requested is True or symlinks is not None:
+                raise
+            if sys.stdin.isatty() and sys.stdout.isatty():
+                print(
+                    "oc-box: Host clipboard importing is unavailable for this client; "
+                    "the workspace preference is unchanged.",
+                    flush=True,
+                )
+        if requested is not None or symlinks is not None:
+            workspace_preferences.set_preferences(
+                path,
+                data["id"],
+                host_clipboard=requested,
+                host_clipboard_symlinks=symlinks,
+            )
+            print(
+                "oc-box: Saved workspace host clipboard preferences. "
+                "Existing clients keep their current setting.",
+                flush=True,
+            )
+    except workspace_preferences.PreferenceError as error:
+        args._host_clipboard_enabled = False
+        raise BoxError(str(error)) from None
+    args._host_clipboard_resolved = True
 
 
 def run_native_tui(
@@ -2964,9 +3055,7 @@ def launch(path, data, args, *, image_preview_snapshot=None):
         if image_preview_snapshot is not None
         else {}
     )
-    if getattr(args, "host_drop", None) is True or getattr(
-        args, "host_clipboard", False
-    ):
+    if getattr(args, "host_drop", None) is True or effective_host_clipboard(args):
         release = getattr(args, "_opencode_release", None) or detect_opencode_release()
         if getattr(args, "host_drop", None) is True:
             validate_host_drop(release)
@@ -3326,11 +3415,11 @@ def launch_client(path, data, args, version, exported, owner=None):
                 **(
                     {
                         "host_clipboard_reader": args._host_clipboard_reader,
-                        "host_clipboard_symlinks": getattr(
-                            args, "host_clipboard_symlinks", True
+                        "host_clipboard_symlinks": effective_host_clipboard_symlinks(
+                            args
                         ),
                     }
-                    if getattr(args, "host_clipboard", False)
+                    if effective_host_clipboard(args)
                     else {}
                 ),
             )
@@ -3699,16 +3788,36 @@ def parser():
         const=False,
         help="save host file importing disabled for this workspace",
     )
-    result.add_argument(
+    clipboard_choice = result.add_mutually_exclusive_group()
+    clipboard_choice.add_argument(
         "--host-clipboard",
-        action="store_true",
-        help="opt in this native TUI client to host clipboard images/copied image or PDF files with Ctrl+Y (reserved throughout this client)",
+        action="store_const",
+        const=True,
+        default=None,
+        help="save Ctrl+Y host clipboard importing enabled for this workspace (default off)",
     )
-    result.add_argument(
+    clipboard_choice.add_argument(
+        "--no-host-clipboard",
+        dest="host_clipboard",
+        action="store_const",
+        const=False,
+        help="save host clipboard importing disabled for this workspace",
+    )
+    clipboard_symlinks = result.add_mutually_exclusive_group()
+    clipboard_symlinks.add_argument(
+        "--host-clipboard-symlinks",
+        dest="host_clipboard_symlinks",
+        action="store_const",
+        const=True,
+        default=None,
+        help="save symlink following for clipboard files (requires clipboard importing; default follows them)",
+    )
+    clipboard_symlinks.add_argument(
         "--no-host-clipboard-symlinks",
         dest="host_clipboard_symlinks",
-        action="store_false",
-        help="reject symlinks in clipboard file sources for this client (requires --host-clipboard; default follows them)",
+        action="store_const",
+        const=False,
+        help="save strict no-symlink clipboard file importing for this workspace (requires clipboard importing)",
     )
     result.add_argument(
         "--credential-mode",
@@ -4034,7 +4143,9 @@ def main(argv=None):
         )
     if args.host_drop is True:
         validate_host_drop()
-    if args.host_clipboard and (
+    if (
+        args.host_clipboard is not None or args.host_clipboard_symlinks is not None
+    ) and (
         args.command not in ("start", "reset")
         or args.status
         or args.about
@@ -4042,7 +4153,7 @@ def main(argv=None):
         or args.json
     ):
         raise BoxError(
-            "--host-clipboard applies only to native start/reset TUI clients."
+            "Host clipboard options apply only to native start/reset TUI clients."
         )
     configure_host_clipboard(args)
     if args.no_vault and (
@@ -4499,6 +4610,9 @@ def main(argv=None):
                     "An active V2 workspace accepts additional TUI clients with selectors/--resume only; change session/configuration after the owner exits."
                 )
             configure_host_drop(path, data, args, data.get("opencode_version"))
+            configure_host_clipboard_preferences(
+                path, data, args, data.get("opencode_version")
+            )
             configure_host_clipboard(args, data.get("opencode_version"))
             with workspace_service.attach(
                 sys.modules[__name__], path, data
@@ -4529,9 +4643,11 @@ def main(argv=None):
                     **(
                         {
                             "host_clipboard_reader": args._host_clipboard_reader,
-                            "host_clipboard_symlinks": args.host_clipboard_symlinks,
+                            "host_clipboard_symlinks": effective_host_clipboard_symlinks(
+                                args
+                            ),
                         }
-                        if args.host_clipboard
+                        if effective_host_clipboard(args)
                         else {}
                     ),
                 )
@@ -4548,7 +4664,7 @@ def main(argv=None):
                 return workspace_service.web_session(
                     sys.modules[__name__], data, connection, args
                 )
-    if args.image_preview or args.host_drop is True or args.host_clipboard:
+    if args.image_preview or args.host_drop is True or effective_host_clipboard(args):
         version = getattr(args, "_opencode_release", None) or detect_opencode_release()
         if args.image_preview and image_preview_snapshot is None:
             image_preview_snapshot = validate_image_preview(version)
@@ -4556,6 +4672,9 @@ def main(argv=None):
         configure_host_clipboard(args, version)
     if args.command in ("start", "reset"):
         configure_host_drop(path, data, args, getattr(args, "_opencode_release", None))
+        configure_host_clipboard_preferences(
+            path, data, args, getattr(args, "_opencode_release", None)
+        )
     with workspace_lock(path), contextlib.ExitStack() as launch_context:
         if data.get("restore_incomplete") and args.command != "purge":
             raise BoxError(

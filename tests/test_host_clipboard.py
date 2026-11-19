@@ -584,8 +584,11 @@ class HostClipboardTests(unittest.TestCase):
         self.assertNotIn("private text", errors.getvalue())
 
     def test_cli_client_scope_preflight_and_shipping(self):
-        self.assertFalse(box.parser().parse_args([]).host_clipboard)
-        self.assertTrue(box.parser().parse_args([]).host_clipboard_symlinks)
+        self.assertIsNone(box.parser().parse_args([]).host_clipboard)
+        self.assertIsNone(box.parser().parse_args([]).host_clipboard_symlinks)
+        self.assertTrue(
+            box.effective_host_clipboard_symlinks(box.parser().parse_args([]))
+        )
         self.assertFalse(
             box.parser()
             .parse_args(["--host-clipboard", "--no-host-clipboard-symlinks"])
@@ -611,7 +614,6 @@ class HostClipboardTests(unittest.TestCase):
             )
         discover.assert_not_called()
         for arguments in (
-            ["--no-host-clipboard-symlinks"],
             ["--no-host-clipboard-symlinks", "--status"],
             ["--host-clipboard", "sync"],
             ["--host-clipboard", "web"],

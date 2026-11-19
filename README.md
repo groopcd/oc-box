@@ -180,7 +180,11 @@ all included in stable installations.
 > **Disclosure matters:** on supported development TUI clients, host importing is
 > enabled by default. A qualifying path paste authorizes an image/PDF copy
 > without per-file confirmation; disable it with the saved host-drop preference
-> if that is not wanted. Sharing, importing and attachments can disclose data to
+> if that is not wanted. Clipboard imports are separately off by default:
+> `--host-clipboard` saves the Ctrl+Y shortcut enabled for future workspace TUI
+> clients; `--no-host-clipboard` or `preferences --host-clipboard off` saves disabled.
+> Existing clients do not live-toggle, and only the shortcut reads the clipboard.
+> Sharing, importing and attachments can disclose data to
 > model providers or history. [Compare the workflows and consent rules](docs/guides/host-files.md).
 
 <a id="integrations-and-permissions"></a>

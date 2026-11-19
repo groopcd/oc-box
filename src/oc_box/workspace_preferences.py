@@ -1,7 +1,8 @@
 """Host-only workspace UI preferences, independent of lifecycle metadata.
 
 The preference is a request for future TUI clients, not native-version/terminal
-compatibility or live activation. An absent preference means host_drop=True.
+compatibility or live activation. Absent preferences mean host_drop=True,
+host_clipboard=False and host_clipboard_symlinks=True.
 Reads never create directories, files or locks. Only an intentional setter
 writes, using a distinct per-workspace lock and an atomic private-file replace.
 
@@ -26,6 +27,8 @@ import time
 
 
 DEFAULT_HOST_DROP = True
+DEFAULT_HOST_CLIPBOARD = False
+DEFAULT_HOST_CLIPBOARD_SYMLINKS = True
 FILE_NAME = "ui-preferences.json"
 LOCK_NAME = ".ui-preferences.lock"
 MAX_BYTES = 16 * 1024
@@ -43,6 +46,7 @@ INVALID_WORKSPACE = (
 )
 INVALID_DATA = "Workspace preferences are invalid or unsupported."
 INVALID_VALUE = "Host drop preference must be a boolean."
+INVALID_CLIPBOARD_VALUE = "Host clipboard preferences must be booleans."
 UNSAFE_STORAGE = "Workspace preference storage is unsafe or unavailable."
 BUSY = "Workspace preferences are busy; retry the command."
 SAVE_UNVERIFIED = "Workspace preference saving could not be verified; read preferences before retrying."
@@ -320,6 +324,10 @@ def _preferences(directory):
         or value["version"] != 1
         or value.get("workspace") != directory.workspace_id
         or type(value.get("host_drop")) is not bool
+        or any(
+            name in value and type(value[name]) is not bool
+            for name in ("host_clipboard", "host_clipboard_symlinks")
+        )
     ):
         raise PreferenceError(INVALID_DATA)
     _bounded_tree(value)
@@ -484,15 +492,36 @@ def _write(directory, lock_fd, value, previous):
 
 
 def set_host_drop(workspace_path, workspace_id, enabled):
-    """Save an explicit future-client preference under its own private lock."""
     if type(enabled) is not bool:
         raise PreferenceError(INVALID_VALUE)
+    return set_preferences(workspace_path, workspace_id, host_drop=enabled)
+
+
+def set_preferences(
+    workspace_path,
+    workspace_id,
+    *,
+    host_drop=None,
+    host_clipboard=None,
+    host_clipboard_symlinks=None,
+):
+    """Atomically save explicit choices, preserving other fields under the lock."""
+    updates = {}
+    for name, value in (
+        ("host_drop", host_drop),
+        ("host_clipboard", host_clipboard),
+        ("host_clipboard_symlinks", host_clipboard_symlinks),
+    ):
+        if value is not None:
+            if type(value) is not bool:
+                raise PreferenceError(
+                    INVALID_VALUE if name == "host_drop" else INVALID_CLIPBOARD_VALUE
+                )
+            updates[name] = value
     with _directory(workspace_path, workspace_id) as directory:
         # Refuse pre-existing unsafe/corrupt state before creating even the lock.
         initial, _ = _preferences(directory)
-        _encode(
-            {**initial, "version": 1, "workspace": workspace_id, "host_drop": enabled}
-        )
+        _encode({**initial, "version": 1, "workspace": workspace_id, **updates})
         with _locked(directory) as lock_fd:
             directory.registration()
             current, previous = _preferences(directory)
@@ -500,7 +529,7 @@ def set_host_drop(workspace_path, workspace_id, enabled):
                 **current,
                 "version": 1,
                 "workspace": workspace_id,
-                "host_drop": enabled,
+                **updates,
             }
             _write(directory, lock_fd, value, previous)
             return value
@@ -518,6 +547,16 @@ def parser():
         "--host-drop",
         choices=("on", "off"),
         help="save the future-client host-drop preference",
+    )
+    result.add_argument(
+        "--host-clipboard",
+        choices=("on", "off"),
+        help="save the future-client Ctrl+Y host clipboard preference (default off)",
+    )
+    result.add_argument(
+        "--host-clipboard-symlinks",
+        choices=("on", "off"),
+        help="save whether future clipboard file imports follow symlinks (default on)",
     )
     result.add_argument(
         "--json", action="store_true", help="print only projected preference status"
@@ -544,9 +583,14 @@ def cli(box, args):
             or (args.workspace is not None and data["id"] != args.workspace)
         ):
             raise PreferenceError(INVALID_WORKSPACE)
-        changed = args.host_drop is not None
+        updates = {
+            name: getattr(args, name) == "on"
+            for name in ("host_drop", "host_clipboard", "host_clipboard_symlinks")
+            if getattr(args, name) is not None
+        }
+        changed = bool(updates)
         value = (
-            set_host_drop(path, data["id"], args.host_drop == "on")
+            set_preferences(path, data["id"], **updates)
             if changed
             else read(path, data["id"])
         )
@@ -554,17 +598,32 @@ def cli(box, args):
         raise box.BoxError(str(error)) from None
     source = "saved" if "version" in value else "default"
     if args.json:
-        projected = {"host_drop": value["host_drop"], "source": source}
+        projected = {
+            "host_drop": value["host_drop"],
+            "host_clipboard": value.get("host_clipboard", DEFAULT_HOST_CLIPBOARD),
+            "host_clipboard_symlinks": value.get(
+                "host_clipboard_symlinks", DEFAULT_HOST_CLIPBOARD_SYMLINKS
+            ),
+            "source": source,
+        }
         if changed:
             projected.update(
                 applies_to_future_clients=True, current_clients_unchanged=True
             )
         print(json.dumps(projected, separators=(",", ":")))
     elif changed:
-        print(
-            "Saved host drop preference: "
-            + ("enabled." if value["host_drop"] else "disabled.")
-        )
+        for name, label in (
+            ("host_drop", "host drop"),
+            ("host_clipboard", "host clipboard"),
+            ("host_clipboard_symlinks", "host clipboard symlink"),
+        ):
+            if name in updates:
+                print(
+                    "Saved "
+                    + label
+                    + " preference: "
+                    + ("enabled." if updates[name] else "disabled.")
+                )
         print("Applies to future TUI clients; current clients keep their setting.")
     else:
         print(
@@ -574,4 +633,20 @@ def cli(box, args):
             + source
             + ")."
         )
+        for name, label, default in (
+            ("host_clipboard", "Host clipboard", DEFAULT_HOST_CLIPBOARD),
+            (
+                "host_clipboard_symlinks",
+                "Host clipboard symlink",
+                DEFAULT_HOST_CLIPBOARD_SYMLINKS,
+            ),
+        ):
+            print(
+                label
+                + " preference: "
+                + ("enabled" if value.get(name, default) else "disabled")
+                + " ("
+                + ("saved" if name in value else "default")
+                + ")."
+            )
     return 0
