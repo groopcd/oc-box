@@ -174,6 +174,15 @@ variable is false. Stable releases still pass **announce** only when
 and failed/skipped publication do not post. Both paths use the validated
 immutable release tag, not moving branch HEAD.
 
+To skip the entire LinkedIn job for one release (including its devel preview),
+put the exact standalone line `<!-- linkedin:skip -->` in the release body
+**before publishing**. For a manual existing-release `publish=true` dispatch,
+select **skip_linkedin** instead; it defaults to `false`. Neither opt-out changes
+PyPI publication or the separate manual announcement approval requirements.
+Manual publication does not receive the release-event body, so use its explicit
+input rather than relying on the marker. Do not repeat a PyPI upload to change
+announcement behavior.
+
 The reusable workflow's `workflow_call` interface accepts `action` (default
 `announce` for older stable callers) and `release_tag`. It does not interpret
 a blank action as permission to announce. For **every devel announce dispatch**,
