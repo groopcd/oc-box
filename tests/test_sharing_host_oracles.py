@@ -397,19 +397,25 @@ class ChildDiagnosticsTests(LocalCase):
     def test_only_explicit_stop_owner_entrypoint_opts_in(self):
         flag = "--lifecycle-diagnostics"
         cases = (
-            ("owner", True, False, True),
-            ("owner", True, False, False),
-            ("owner", False, False, True),
-            ("owner", False, True, True),
-            ("share", False, False, True),
+            ("owner", True, False, "flag"),
+            ("owner", True, False, "pre-quiet"),
+            ("owner", True, False, "interim"),
+            ("owner", False, False, "flag"),
+            ("owner", False, False, "interim"),
+            ("owner", False, True, "flag"),
+            ("owner", False, True, "interim"),
+            ("share", False, False, "flag"),
+            ("share", False, False, "interim"),
         )
-        for child, expect_stop, reset, supports_flag in cases:
+        for child, expect_stop, reset, source in cases:
             with self.subTest(
                 child=child,
                 expect_stop=expect_stop,
                 reset=reset,
-                supports_flag=supports_flag,
+                source=source,
             ):
+                supports_flag = source == "flag"
+                refuse = expect_stop and source == "interim"
                 observed = []
                 child_argv = ["sharing-fixture-child"]
                 parent_env = {"OC_BOX_LIFECYCLE_DIAGNOSTICS": "parent-only"}
@@ -452,6 +458,8 @@ class ChildDiagnosticsTests(LocalCase):
                     parser=lambda: observe("parser") or source_parser,
                     entrypoint=entrypoint,
                 )
+                if source != "pre-quiet":
+                    box.lifecycle_output = object()
                 service = SimpleNamespace(
                     Owner=SimpleNamespace(wait_clients=Mock()),
                     controller_running=Mock(return_value=True),
@@ -486,11 +494,26 @@ class ChildDiagnosticsTests(LocalCase):
                     patch.object(os, "isatty", return_value=False),
                 ):
                     control = io.StringIO() if child == "owner" else None
-                    self.assertEqual(runner.child(args, loaded, control=control), 0)
+                    if refuse:
+                        reason = "explicit-stop-source-needs-lifecycle-diagnostics"
+                        with self.refused(reason) as error:
+                            runner.child(args, loaded, control=control)
+                        self.assertEqual(runner.category(error.exception), reason)
+                    else:
+                        self.assertEqual(runner.child(args, loaded, control=control), 0)
                     self.assertEqual(dict(os.environ), parent_env)
                     self.assertEqual(sys.argv, child_argv)
 
                 expected = [("store", child_argv, child_env)]
+                if refuse:
+                    self.assertEqual(
+                        observed, expected + [("parser", child_argv, child_env)]
+                    )
+                    self.assertNotIn(
+                        {"stage": "owner-launch"},
+                        [json.loads(line) for line in control.getvalue().splitlines()],
+                    )
+                    continue
                 resources = ("resources", child_argv, child_env)
                 if child == "share":
                     expected.append(resources)

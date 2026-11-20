@@ -124,6 +124,7 @@ CATEGORIES = frozenset(
         "workspace-allowlist",
         "owner-start",
         "owner-exit",
+        "explicit-stop-source-needs-lifecycle-diagnostics",
         "share-start",
         "share-exit",
         "timeout",
@@ -1363,7 +1364,6 @@ def child(args, loaded, *, control=None):
                     patch.object(loaded.service.Owner, "wait_clients", wait_clients),
                 ):
                     operation = "reset" if args.reset else "start"
-                    owner_stage(control, "owner-launch")
                     arguments = [
                         operation,
                         "--project",
@@ -1373,11 +1373,18 @@ def child(args, loaded, *, control=None):
                         "--no-vault",
                     ]
                     # The explicit-stop oracle checks one legacy pending line.
-                    # Older source parsers cannot opt in via this flag.
+                    # Pre-quiet sources emit it by default; interim quiet
+                    # sources without the flag cannot satisfy the oracle.
                     if args.expect_stop:
                         flag = "--lifecycle-diagnostics"
                         if flag in box.parser()._option_string_actions:
                             arguments.append(flag)
+                        else:
+                            require(
+                                getattr(box, "lifecycle_output", None) is None,
+                                "explicit-stop-source-needs-lifecycle-diagnostics",
+                            )
+                    owner_stage(control, "owner-launch")
                     code = entrypoint(box, arguments)
                     if code != 0:
                         sys.stderr.flush()
@@ -2363,6 +2370,15 @@ def main(argv=None):
                 primary = primary or "operation-failed"
         if primary:
             print("sharing fixture: category=" + primary, file=output)
+            if (
+                not args.child
+                and primary == "explicit-stop-source-needs-lifecycle-diagnostics"
+            ):
+                print(
+                    "sharing fixture: pin a source that supports --lifecycle-diagnostics "
+                    "or predates quiet lifecycle output.",
+                    file=output,
+                )
         if control is not None:
             control.close()
         output.close()
