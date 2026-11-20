@@ -122,7 +122,7 @@ _oc_box()
             options="$help $selectors --session --broker"
             (( broker )) || options+=' --text --send --acknowledge-risk' ;;
         status) options="$help $selectors --json" ;;
-        logs) options="$help $selectors --level --limit --follow --json --journald" ;;
+        logs) options="$help $selectors --level --limit --follow --json --journald --path" ;;
         purge) options="$help $selectors --delete-sessions --all -y --yes" ;;
         credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;
         preferences) options="$help $selectors --host-drop --host-clipboard --host-clipboard-symlinks --json" ;;

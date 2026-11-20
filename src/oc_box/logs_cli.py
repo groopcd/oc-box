@@ -63,10 +63,16 @@ def parser():
     result.add_argument(
         "--json", action="store_true", help="emit one JSON object per line"
     )
-    result.add_argument(
+    source = result.add_mutually_exclusive_group()
+    source.add_argument(
         "--journald",
         action="store_true",
         help="read this user's oc-box entries from the local system journal",
+    )
+    source.add_argument(
+        "--path",
+        action="store_true",
+        help="show the configured private journal path without reading it",
     )
     return result
 
@@ -274,6 +280,15 @@ def _read_events(box, root, *, journald, follow, limit, level, workspace):
         ) from None
 
 
+def _configured_path(box, root=None):
+    try:
+        return activity_log.log_path(root)
+    except (OSError, ValueError, RuntimeError):
+        raise box.BoxError(
+            "The private activity-log configuration is invalid or unavailable. Check the host oc-box logs settings."
+        ) from None
+
+
 def cli(box, arguments):
     try:
         try:
@@ -284,7 +299,22 @@ def cli(box, arguments):
             raise
         if os.environ.get("OC_BOX_CONTAINER") == "1":
             raise box.BoxError("Run 'oc-box logs' on the host, not inside a container.")
+        if args.path:
+            if (
+                args.project is not None
+                or args.workspace is not None
+                or args.follow
+                or args.json
+            ):
+                raise box.BoxError(
+                    "'oc-box logs --path' does not take event filters or output modes."
+                )
+            path = str(_configured_path(box))
+            print(path if path.isprintable() else json.dumps(path), flush=True)
+            return 0
         root, workspace = _journal_scope(box, args)
+        if not args.journald:
+            _configured_path(box, root)
         selectors = {
             "level": args.level,
             "workspace": workspace,

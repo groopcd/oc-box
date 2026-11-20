@@ -27,6 +27,7 @@ oc\-box web [\-\-project PATH | \-\-workspace ID] [\-\-session ID] [\-\-port N] 
 oc\-box \-\-status [\-\-project PATH | \-\-workspace ID] [\-\-json]
 oc\-box status [\-\-project PATH | \-\-workspace ID] [\-\-json]
 oc\-box logs [\-\-journald] [\-\-project PATH | \-\-workspace ID] [\-\-level debug|info|warn|error] [\-\-limit N] [\-\-follow] [\-\-json]
+oc\-box logs \-\-path
 oc\-box tui [\-\-project PATH | \-\-workspace ID] [\-\-read\-only] [\-\-demo]
 oc\-box upgrade [\-\-check] [\-\-stable | \-\-devel] [\-\-vault] [\-\-tui]
 oc\-box upgrade \-\-auto\-update on|off
@@ -548,6 +549,7 @@ Use \fB\-\-journald\fR to explicitly read this user's mirrored oc\-box activity 
 .nf
 .fam C
 oc\-box logs
+oc\-box logs \-\-path
 oc\-box logs \-\-project ~/devel/demo \-\-level debug \-\-limit 50
 oc\-box logs \-\-workspace WORKSPACE_ID \-\-level warn \-\-follow \-\-json
 oc\-box logs \-\-journald \-\-level warn \-\-follow \-\-json
@@ -846,6 +848,9 @@ For \fBlogs\fR, keep displaying newly retained matching entries after the initia
 .SS \-\-journald
 .PP
 For \fBlogs\fR, read this user's mirrored activity events from the local system journal instead of the private file. Requires a usable local \fBjournalctl\fR and access to those records. It does not enable mirroring, change journal settings or fall back to the private file.
+.SS \-\-path
+.PP
+For \fBlogs\fR, display the configured private \fBactivity.jsonl\fR pathname without reading or creating the journal. Use \fBoc\-box logs \-\-path\fR by itself, not with \fB\-\-journald\fR, workspace filters, \fB\-\-follow\fR, or \fB\-\-json\fR\&.
 .SS \-\-about
 .PP
 Print oc\-box version, author Paulo Dias and email, OpenAI coding\-assistant contribution, GPL\-3.0\-or\-later licensing, and source commit. No Podman or workspace is required. Use alone, without lifecycle selectors/options.
@@ -1417,9 +1422,33 @@ Plain purge retains verified archive recovery evidence under \fB~/\:.local/\:sta
 The normal host OpenCode database, usually under \fB~/\:.local/\:share/\:opencode/\:\fR, contains archive copies. Old installations may retain one\-time relocation backups under \fB~/\:.local/\:state/\:oc\-box/\:migrations/\:\fR; these are private data, not workspace resources or release artifacts, and later workspace purge leaves them intact. The original development\-only relocation helper is retired.
 .SS Dashboard state and activity journal
 .PP
-The experimental dashboard keeps favorites as private UI state, not native OpenCode pins. The oc\-box activity journal is \fBlog/\:activity.jsonl\fR under \fBOC_BOX_STATE_HOME\fR, or \fB$XDG_STATE_HOME/\:oc\-box\fR (default \fB~/\:.local/\:state/\:oc\-box/\:log/\:activity.jsonl\fR). It rotates to \fBactivity.jsonl.1\fR through \fB\&.3\fR, with four 256 KiB files, files mode 0600 and private directories 0700. Readers do not create files. \fBoc\-box logs\fR and the dashboard's oc\-box source share the same validated severity and message formatting. Only the CLI defaults to \fBinfo\fR or higher; the dashboard includes \fBdebug\fR\&. Retained valid older entries without a severity remain readable with a derived level.
+The experimental dashboard keeps favorites as private UI state, not native OpenCode pins. The oc\-box activity journal is \fBlog/\:activity.jsonl\fR under \fBOC_BOX_STATE_HOME\fR, or \fB$XDG_STATE_HOME/\:oc\-box\fR (default \fB~/\:.local/\:state/\:oc\-box/\:log/\:activity.jsonl\fR). By default it rotates to \fBactivity.jsonl.1\fR through \fB\&.3\fR, with four 256 KiB files. Files use mode 0600 and log directories mode 0700. Readers do not create files. \fBoc\-box logs \-\-path\fR shows the active private pathname. \fBoc\-box logs\fR and the dashboard's oc\-box source share the same validated severity and message formatting. Only the CLI defaults to \fBinfo\fR or higher; the dashboard includes \fBdebug\fR\&. Retained valid older entries without a severity remain readable with a derived level.
 .PP
 Generated entries use fixed categories and allowlisted metadata, such as a workspace ID, stage, duration, or aggregate count. Reason codes and metric names come from fixed lists, and metric values are bounded integers. Entries do not record raw arguments, environment values, errors, stdout/stderr, prompts, transcripts, pairing links, authentication or clipboard data, or other free\-form text. This is bounded activity metadata, not a terminal recording or a permanent audit archive. The dashboard's separate opt\-in Podman log view stays in memory and never adds content to the journal; its best\-effort credential redaction cannot guarantee that arbitrary secrets are absent.
+.PP
+**Private log location and rotation.** Add a \fBlogs\fR object to the existing host configuration, \fB~/\:.config/\:oc\-box/\:config.json\fR or \fB$XDG_CONFIG_HOME/\:oc\-box/\:config.json\fR\&. Keep the other keys. For example:
+.PP
+.nf
+.fam C
+{
+  "logs": {
+    "directory": "~/.local/state/oc\-box\-logs",
+    "SystemMaxFileSize": "512K",
+    "SystemMaxFiles": 4,
+    "SystemMaxUse": "2M",
+    "SystemKeepFree": "1G",
+    "MaxFileSec": "1d",
+    "MaxRetentionSec": "14d"
+  }
+}
+.fam T
+.fi
+.PP
+Set \fBOC_BOX_LOG_DIR\fR to override only \fBlogs.directory\fR for an invocation. A custom directory must be absolute after \fB~\fR expansion. oc\-box can create it privately when it appends; it won't fix unsafe permissions or follow symlinks. Changing it does not move or delete the previous journal.
+.PP
+| Private setting | Meaning | Default | | \-\-\- | \-\-\- | \-\-\- | | \fBSystemMaxFileSize\fR | Size that triggers rotation, 1 KiB–4 MiB | \fB256K\fR | | \fBSystemMaxFiles\fR | Active file plus rotations, 1–16 | \fB4\fR | | \fBSystemMaxUse\fR | Total retained journal bytes, up to 16 MiB | File size × count, capped at 16 MiB | | \fBSystemKeepFree\fR | Filesystem free\-space reserve, in bytes; zero disables it | \fB0\fR | | \fBMaxFileSec\fR | Age limit for the active file; zero disables it | \fB0\fR | | \fBMaxRetentionSec\fR | Age limit for retained journal files; zero disables it | \fB0\fR |
+.PP
+Size settings accept bytes or a single binary \fBK\fR, \fBM\fR, or \fBG\fR suffix. Age settings accept seconds or a single \fBs\fR, \fBm\fR, \fBh\fR, \fBd\fR, or \fBw\fR suffix, up to one year. Rotation and expiry are checked on append; there is no timer, and a reader never prunes files. Age cleanup applies to whole files, not individual entries. Only the private journal's own validated files are eligible. If the requested free\-space reserve cannot be met, an append may be skipped. Invalid settings do not silently select a different journal or change lifecycle results. These settings borrow journald's names; **they do not edit \fBjournald.conf\fR or change the system journal**.
 .PP
 **Optional system journal mirror.** Set \fBOC_BOX_JOURNALD=1\fR in the host launcher's environment. oc\-box mirrors only validated activity events after they have been successfully appended to the private file. The file remains the primary journal. Mirroring uses native journal priorities and never includes raw output, authentication data or secrets. A missing sink or delivery error cannot change lifecycle results. No daemon is started, installed or reconfigured; an ordinary installation does not require systemd.
 .PP

@@ -64,6 +64,7 @@ RUNTIME_FILES = (
     "activity_log.py",
     "journal_output.py",
     "lifecycle_output.py",
+    "log_config.py",
     "logs_cli.py",
     "tui.py",
     "tui_app.py",

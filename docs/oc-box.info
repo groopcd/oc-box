@@ -68,6 +68,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box --status [--project PATH | --workspace ID] [--json]
      oc-box status [--project PATH | --workspace ID] [--json]
      oc-box logs [--journald] [--project PATH | --workspace ID] [--level debug|info|warn|error] [--limit N] [--follow] [--json]
+     oc-box logs --path
      oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
      oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
      oc-box upgrade --auto-update on|off
@@ -1736,6 +1737,7 @@ retention limits are described under [Dashboard state and activity
 journal](#dashboard-state-and-activity-journal).
 
      oc-box logs
+     oc-box logs --path
      oc-box logs --project ~/devel/demo --level debug --limit 50
      oc-box logs --workspace WORKSPACE_ID --level warn --follow --json
      oc-box logs --journald --level warn --follow --json
@@ -2527,7 +2529,15 @@ system journal instead of the private file.  Requires a usable local
 ‘journalctl’ and access to those records.  It does not enable mirroring,
 change journal settings or fall back to the private file.
 
-5.22 -about
+5.22 -path
+==========
+
+For ‘logs’, display the configured private ‘activity.jsonl’ pathname
+without reading or creating the journal.  Use ‘oc-box logs --path’ by
+itself, not with ‘--journald’, workspace filters, ‘--follow’, or
+‘--json’.
+
+5.23 -about
 ===========
 
 Print oc-box version, author Paulo Dias and email, OpenAI
@@ -2535,7 +2545,7 @@ coding-assistant contribution, GPL-3.0-or-later licensing, and source
 commit.  No Podman or workspace is required.  Use alone, without
 lifecycle selectors/options.
 
-5.23 -version
+5.24 -version
 =============
 
 Print oc-box's commit-derived version and exit without Podman.  The
@@ -2560,7 +2570,7 @@ until upgraded through their usual channel.  The absolute commit count
 remains in metadata for upgrade ordering; no workspace reset or database
 migration is required for the version-series transition.
 
-5.24 -distro NAME
+5.25 -distro NAME
 =================
 
 Choose a supported distro for a new environment.  The default matches
@@ -2573,7 +2583,7 @@ host packages or snapshot date.  Changing an existing workspace requires
      oc-box --project ~/devel/demo --distro tumbleweed
      oc-box reset --project ~/devel/demo --distro debian
 
-5.25 -check
+5.26 -check
 ===========
 
 With ‘upgrade’, preview the saved or explicitly selected published
@@ -2585,7 +2595,7 @@ requested extras return nonzero.  Cannot be combined with
 ‘--auto-update’, workspace selectors or other commands.  Example:
 ‘oc-box upgrade --devel --tui --check’.
 
-5.26 -stable
+5.27 -stable
 ============
 
 With ‘upgrade’, select and remember the stable channel after a
@@ -2594,7 +2604,7 @@ exclusive with ‘--devel’; cannot be combined with ‘--auto-update’ or
 workspace actions.  An explicit downgrade replaces launcher files, not
 workspace/session state.  Example: ‘oc-box upgrade --stable’.
 
-5.27 -devel
+5.28 -devel
 ===========
 
 With ‘upgrade’, select and remember published development prereleases
@@ -2604,7 +2614,7 @@ Mutually exclusive with ‘--stable’; cannot be combined with
 experimental; selection is not stable acceptance.  Example: ‘oc-box
 upgrade --devel’.
 
-5.28 -vault
+5.29 -vault
 ===========
 
 With ‘upgrade’ only, add optional vault/cryptography dependencies
@@ -2618,7 +2628,7 @@ release supporting this flag and a published target supporting the
 extra.  Cannot be combined with ‘--auto-update’ or workspace actions.
 Example: ‘oc-box upgrade --devel --vault’.
 
-5.29 -tui
+5.30 -tui
 =========
 
 With ‘upgrade’ only, add optional dashboard dependencies through the
@@ -2633,7 +2643,7 @@ Requires a launcher release supporting this flag and a published
 supporting target.  Cannot be combined with ‘--auto-update’ or workspace
 actions.  Example: ‘oc-box upgrade --devel --vault --tui’.
 
-5.30 -auto-update on|off
+5.31 -auto-update on|off
 ========================
 
 With ‘upgrade’, persistently enable or disable automatic updates before
@@ -2645,7 +2655,7 @@ Cannot be combined with ‘--check’, ‘--stable’, ‘--devel’, ‘--vault
 ‘--tui’ or workspace actions.  Example: ‘oc-box upgrade --auto-update
 on’.
 
-5.31 -new
+5.32 -new
 =========
 
 Start a new root conversation while retaining the same container and
@@ -2653,7 +2663,7 @@ files.  Use with start (the default) or reset.  Mutually exclusive with
 ‘--resume’ and ‘--import-session’.  Example: ‘oc-box --project
 ~/devel/demo --new’.
 
-5.32 -resume
+5.33 -resume
 ============
 
 Explicitly request the normal resume behavior.  Requires a registered
@@ -2662,7 +2672,7 @@ can start a new conversation.  Use with start/reset.  Mutually exclusive
 with ‘--new’ and ‘--import-session’.  Example: ‘oc-box --project
 ~/devel/demo --resume’.
 
-5.33 -import-session SESSION_ID
+5.34 -import-session SESSION_ID
 ===============================
 
 Copy a host conversation from the selected project into the private
@@ -2676,7 +2686,7 @@ project; the original registry and saved archive verify its project.
 
      oc-box --project ~/devel/demo --import-session ses_HOST_SESSION_ID
 
-5.34 -model PROVIDER/MODEL
+5.35 -model PROVIDER/MODEL
 ==========================
 
 Pass the provider/model choice to the OpenCode TUI on this launch.  It
@@ -2685,7 +2695,7 @@ otherwise normal OpenCode provider/model preferences apply.
 
      oc-box --project ~/devel/demo --model github-copilot/gpt-6.1-sol
 
-5.35 -image-preview
+5.36 -image-preview
 ===================
 
 V2-only, for an **owning** start (the default command) or reset TUI
@@ -2733,7 +2743,7 @@ host.
      oc-box --project ~/devel/demo --image-preview
      oc-box reset --project ~/devel/demo --image-preview
 
-5.36 -host-drop
+5.37 -host-drop
 ===============
 
 Experimental and **enabled by default per workspace** for supported
@@ -2841,7 +2851,7 @@ guarantee, nor a new live-host acceptance result.  See ‘SECURITY.md’ and
      oc-box --project ~/devel/demo --no-host-drop
      oc-box preferences --project ~/devel/demo --host-drop off
 
-5.37 -no-host-drop
+5.38 -no-host-drop
 ==================
 
 Save host importing disabled for future workspace TUI clients and open
@@ -2850,7 +2860,7 @@ neither flag live-toggles existing clients.  To change only the
 preference without opening a TUI, use ‘oc-box preferences --host-drop
 off’.
 
-5.38 -host-clipboard
+5.39 -host-clipboard
 ====================
 
 Experimental, **off by default, with a saved per-workspace host
@@ -2993,7 +3003,7 @@ See the short [host test guide](host-clipboard-testing.md).  Focused
 mocked tests are not acceptance of KDE/Wayland/X11 behavior or native
 image composition.
 
-5.39 -no-host-clipboard
+5.40 -no-host-clipboard
 =======================
 
 Save clipboard importing disabled for future workspace TUI clients and
@@ -3003,7 +3013,7 @@ changes the independent host-drop preference.  A saved strict symlink
 choice is retained.  To change only policy, use ‘oc-box preferences
 --host-clipboard off’.
 
-5.40 -host-clipboard-symlinks
+5.41 -host-clipboard-symlinks
 =============================
 
 Save ordinary symlink following for clipboard file imports for this and
@@ -3013,7 +3023,7 @@ preference: a saved enable is enough, or combine with
 ‘--host-clipboard’.  Accepted only on ‘start’ or ‘reset’, and mutually
 exclusive with ‘--no-host-clipboard-symlinks’.
 
-5.41 -no-host-clipboard-symlinks
+5.42 -no-host-clipboard-symlinks
 ================================
 
 Save strict no-symlink clipboard sources for this and future workspace
@@ -3032,7 +3042,7 @@ is off.
      oc-box --project ~/devel/demo
      oc-box preferences --project ~/devel/demo --host-clipboard-symlinks on
 
-5.42 -credential-mode env|selected|vault
+5.43 -credential-mode env|selected|vault
 ========================================
 
 With ‘credentials’, save an explicit forwarding mode for that workspace.
@@ -3048,7 +3058,7 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.43 -attachments
+5.44 -attachments
 =================
 
 Web only: explicitly select the visible, source-version-bounded browser
@@ -3056,7 +3066,7 @@ File-drop adapter described under ‘web’.  Keeps the native app and its
 draft/Send controls unchanged.  No automatic prompt admission or
 host-path/URL reading.
 
-5.44 -no-vault
+5.45 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -3075,7 +3085,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.45 -env-secret NAME
+5.46 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -3088,7 +3098,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.46 -vault-secret NAME
+5.47 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -3100,7 +3110,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.47 -clear-credentials
+5.48 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -3112,7 +3122,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.48 -output FILE
+5.49 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -3122,7 +3132,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.49 -portable
+5.50 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -3132,7 +3142,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.50 -recipient AGE_KEY
+5.51 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -3143,7 +3153,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.51 -identity FILE
+5.52 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -3154,7 +3164,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.52 -cpus NUMBER
+5.53 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -3165,7 +3175,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.53 -memory SIZE
+5.54 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -3177,7 +3187,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.54 -pids-limit NUMBER
+5.55 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -3185,7 +3195,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.55 -device MAPPING
+5.56 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -3199,7 +3209,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.56 -podman-arg=-OPTION[=VALUE]
+5.57 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -3226,7 +3236,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.57 -clear-devices
+5.58 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -3237,7 +3247,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.58 -clear-podman-args
+5.59 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -3247,7 +3257,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.59 -delete-sessions
+5.60 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -3256,7 +3266,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.60 -all
+5.61 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -3264,7 +3274,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.61 -y, -yes
+5.62 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -3941,13 +3951,14 @@ The experimental dashboard keeps favorites as private UI state, not
 native OpenCode pins.  The oc-box activity journal is
 ‘log/activity.jsonl’ under ‘OC_BOX_STATE_HOME’, or
 ‘$XDG_STATE_HOME/oc-box’ (default
-‘~/.local/state/oc-box/log/activity.jsonl’).  It rotates to
-‘activity.jsonl.1’ through ‘.3’, with four 256 KiB files, files mode
-0600 and private directories 0700.  Readers do not create files.
-‘oc-box logs’ and the dashboard's oc-box source share the same validated
-severity and message formatting.  Only the CLI defaults to ‘info’ or
-higher; the dashboard includes ‘debug’.  Retained valid older entries
-without a severity remain readable with a derived level.
+‘~/.local/state/oc-box/log/activity.jsonl’).  By default it rotates to
+‘activity.jsonl.1’ through ‘.3’, with four 256 KiB files.  Files use
+mode 0600 and log directories mode 0700.  Readers do not create files.
+‘oc-box logs --path’ shows the active private pathname.  ‘oc-box logs’
+and the dashboard's oc-box source share the same validated severity and
+message formatting.  Only the CLI defaults to ‘info’ or higher; the
+dashboard includes ‘debug’.  Retained valid older entries without a
+severity remain readable with a derived level.
 
 Generated entries use fixed categories and allowlisted metadata, such as
 a workspace ID, stage, duration, or aggregate count.  Reason codes and
@@ -3959,6 +3970,49 @@ bounded activity metadata, not a terminal recording or a permanent audit
 archive.  The dashboard's separate opt-in Podman log view stays in
 memory and never adds content to the journal; its best-effort credential
 redaction cannot guarantee that arbitrary secrets are absent.
+
+**Private log location and rotation.** Add a ‘logs’ object to the
+existing host configuration, ‘~/.config/oc-box/config.json’ or
+‘$XDG_CONFIG_HOME/oc-box/config.json’.  Keep the other keys.  For
+example:
+
+     {
+       "logs": {
+         "directory": "~/.local/state/oc-box-logs",
+         "SystemMaxFileSize": "512K",
+         "SystemMaxFiles": 4,
+         "SystemMaxUse": "2M",
+         "SystemKeepFree": "1G",
+         "MaxFileSec": "1d",
+         "MaxRetentionSec": "14d"
+       }
+     }
+
+Set ‘OC_BOX_LOG_DIR’ to override only ‘logs.directory’ for an
+invocation.  A custom directory must be absolute after ‘~’ expansion.
+oc-box can create it privately when it appends; it won't fix unsafe
+permissions or follow symlinks.  Changing it does not move or delete the
+previous journal.
+
+| Private setting | Meaning | Default | | -- | -- | -- | |
+‘SystemMaxFileSize’ | Size that triggers rotation, 1 KiB–4 MiB | ‘256K’
+| | ‘SystemMaxFiles’ | Active file plus rotations, 1–16 | ‘4’ | |
+‘SystemMaxUse’ | Total retained journal bytes, up to 16 MiB | File size
+× count, capped at 16 MiB | | ‘SystemKeepFree’ | Filesystem free-space
+reserve, in bytes; zero disables it | ‘0’ | | ‘MaxFileSec’ | Age limit
+for the active file; zero disables it | ‘0’ | | ‘MaxRetentionSec’ | Age
+limit for retained journal files; zero disables it | ‘0’ |
+
+Size settings accept bytes or a single binary ‘K’, ‘M’, or ‘G’ suffix.
+Age settings accept seconds or a single ‘s’, ‘m’, ‘h’, ‘d’, or ‘w’
+suffix, up to one year.  Rotation and expiry are checked on append;
+there is no timer, and a reader never prunes files.  Age cleanup applies
+to whole files, not individual entries.  Only the private journal's own
+validated files are eligible.  If the requested free-space reserve
+cannot be met, an append may be skipped.  Invalid settings do not
+silently select a different journal or change lifecycle results.  These
+settings borrow journald's names; **they do not edit ‘journald.conf’ or
+change the system journal**.
 
 **Optional system journal mirror.** Set ‘OC_BOX_JOURNALD=1’ in the host
 launcher's environment.  oc-box mirrors only validated activity events
@@ -4569,22 +4623,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description3185
-Node: Commands8370
-Node: Options129522
-Node: Lifecycle and persistence175525
-Node: Distribution images177825
-Node: Sessions and recovery182789
-Node: Devices and host permissions189374
-Node: Resource reports191720
-Node: Configuration and environment193831
-Node: Files205718
-Node: Exit status213290
-Node: Examples214698
-Node: Troubleshooting216837
-Node: Installation and manuals228952
-Node: Authors and license239121
-Node: See also239728
+Node: Description3209
+Node: Commands8394
+Node: Options129570
+Node: Lifecycle and persistence175835
+Node: Distribution images178135
+Node: Sessions and recovery183099
+Node: Devices and host permissions189684
+Node: Resource reports192030
+Node: Configuration and environment194141
+Node: Files206028
+Node: Exit status215773
+Node: Examples217181
+Node: Troubleshooting219320
+Node: Installation and manuals231435
+Node: Authors and license241604
+Node: See also242211
 
 End Tag Table
 

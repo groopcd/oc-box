@@ -124,6 +124,7 @@ def check_archives(directory):
             "status_report.py",
             "activity_log.py",
             "journal_output.py",
+            "log_config.py",
             "lifecycle_output.py",
             "logs_cli.py",
             "tui.py",
@@ -219,6 +220,7 @@ def check_archives(directory):
             "tests/test_workspace_preferences.py",
             "tests/test_logs_cli.py",
             "tests/test_journal_output.py",
+            "tests/test_log_config.py",
             "tests/test_lifecycle_output.py",
             "tests/test_host_drop_preferences.py",
             "tests/smoke_host_drop_v2.py",
@@ -323,6 +325,7 @@ def check_archives(directory):
             "src/oc_box/lifecycle_output.py",
             "src/oc_box/logs_cli.py",
             "src/oc_box/journal_output.py",
+            "src/oc_box/log_config.py",
             "src/oc_box/plugin_compat.py",
             "src/oc_box/plugin_bridge.js",
             "src/oc_box/paths.py",
@@ -397,7 +400,14 @@ def check(directory, *, with_vault=False, with_tui=False):
         cli = environment / "bin/oc-box"
         assert run(cli, "--version").strip() == "oc-box " + build["version"]
         log_help = run(cli, "logs", "--help")
-        for option in ("--level", "--limit", "--follow", "--json", "--journald"):
+        for option in (
+            "--level",
+            "--limit",
+            "--follow",
+            "--json",
+            "--journald",
+            "--path",
+        ):
             assert option in log_help, option
         assert (
             run(python, "-m", "oc_box", "--version").strip()

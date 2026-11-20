@@ -580,10 +580,13 @@ current while a selected output snapshot is held still for copying.
 The default oc-box activity source is the private rotating JSON-lines journal
 `log/activity.jsonl` under the configured oc-box state root:
 `OC_BOX_STATE_HOME`, otherwise `$XDG_STATE_HOME/oc-box`. With neither override,
-the file is `~/.local/state/oc-box/log/activity.jsonl`. Rotations are
+the file is `~/.local/state/oc-box/log/activity.jsonl`. Default rotations are
 `activity.jsonl.1` through `activity.jsonl.3`: four files capped at 256 KiB each.
 Files use mode 0600 and private directories 0700; readers never create journal
-files.
+files. The dashboard follows the same
+[log-directory and rotation settings](cli.md#dashboard-state-and-activity-journal)
+as `oc-box logs`. Use
+`oc-box logs --path` to see the configured private pathname.
 
 The dashboard's oc-box source shares validated severity and message formatting
 with the read-only host command [`oc-box logs`](cli.md#logs). The dashboard

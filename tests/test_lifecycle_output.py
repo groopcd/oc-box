@@ -23,7 +23,11 @@ class LifecycleOutputTests(unittest.TestCase):
         self.root = Path(area.name) / "state"
         environment = patch.dict(
             os.environ,
-            {"OC_BOX_CONTAINER": "0", "OC_BOX_STATE_HOME": str(self.root)},
+            {
+                "OC_BOX_CONTAINER": "0",
+                "OC_BOX_STATE_HOME": str(self.root),
+                "XDG_CONFIG_HOME": str(Path(area.name) / "config"),
+            },
             clear=True,
         )
         environment.start()

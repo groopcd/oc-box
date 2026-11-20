@@ -26,6 +26,7 @@ oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-ope
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
 oc-box logs [--journald] [--project PATH | --workspace ID] [--level debug|info|warn|error] [--limit N] [--follow] [--json]
+oc-box logs --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
 oc-box upgrade --auto-update on|off
@@ -1542,6 +1543,7 @@ under [Dashboard state and activity journal](#dashboard-state-and-activity-journ
 
 ```sh
 oc-box logs
+oc-box logs --path
 oc-box logs --project ~/devel/demo --level debug --limit 50
 oc-box logs --workspace WORKSPACE_ID --level warn --follow --json
 oc-box logs --journald --level warn --follow --json
@@ -2254,6 +2256,12 @@ For `logs`, read this user's mirrored activity events from the local system
 journal instead of the private file. Requires a usable local `journalctl` and
 access to those records. It does not enable mirroring, change journal settings
 or fall back to the private file.
+
+### --path
+
+For `logs`, display the configured private `activity.jsonl` pathname without
+reading or creating the journal. Use `oc-box logs --path` by itself, not with
+`--journald`, workspace filters, `--follow`, or `--json`.
 
 ### --about
 
@@ -3520,9 +3528,10 @@ them intact. The original development-only relocation helper is retired.
 The experimental dashboard keeps favorites as private UI state, not native
 OpenCode pins. The oc-box activity journal is `log/activity.jsonl` under
 `OC_BOX_STATE_HOME`, or `$XDG_STATE_HOME/oc-box` (default
-`~/.local/state/oc-box/log/activity.jsonl`). It rotates to `activity.jsonl.1`
-through `.3`, with four 256 KiB files, files mode 0600 and private directories
-0700. Readers do not create files. `oc-box logs` and the dashboard's oc-box
+`~/.local/state/oc-box/log/activity.jsonl`). By default it rotates to
+`activity.jsonl.1` through `.3`, with four 256 KiB files. Files use mode 0600
+and log directories mode 0700. Readers do not create files. `oc-box logs --path`
+shows the active private pathname. `oc-box logs` and the dashboard's oc-box
 source share the same validated severity and message formatting. Only the CLI
 defaults to `info` or higher; the dashboard includes `debug`. Retained valid
 older entries without a severity remain readable with a derived level.
@@ -3537,6 +3546,48 @@ This is bounded activity metadata, not a terminal recording or a permanent
 audit archive. The dashboard's separate opt-in Podman log view stays in memory
 and never adds content to the journal; its best-effort credential redaction
 cannot guarantee that arbitrary secrets are absent.
+
+**Private log location and rotation.** Add a `logs` object to the existing host
+configuration, `~/.config/oc-box/config.json` or `$XDG_CONFIG_HOME/oc-box/config.json`.
+Keep the other keys. For example:
+
+```json
+{
+  "logs": {
+    "directory": "~/.local/state/oc-box-logs",
+    "SystemMaxFileSize": "512K",
+    "SystemMaxFiles": 4,
+    "SystemMaxUse": "2M",
+    "SystemKeepFree": "1G",
+    "MaxFileSec": "1d",
+    "MaxRetentionSec": "14d"
+  }
+}
+```
+
+Set `OC_BOX_LOG_DIR` to override only `logs.directory` for an invocation. A
+custom directory must be absolute after `~` expansion. oc-box can create it
+privately when it appends; it won't fix unsafe permissions or follow symlinks.
+Changing it does not move or delete the previous journal.
+
+| Private setting | Meaning | Default |
+| --- | --- | --- |
+| `SystemMaxFileSize` | Size that triggers rotation, 1 KiB–4 MiB | `256K` |
+| `SystemMaxFiles` | Active file plus rotations, 1–16 | `4` |
+| `SystemMaxUse` | Total retained journal bytes, up to 16 MiB | File size × count, capped at 16 MiB |
+| `SystemKeepFree` | Filesystem free-space reserve, in bytes; zero disables it | `0` |
+| `MaxFileSec` | Age limit for the active file; zero disables it | `0` |
+| `MaxRetentionSec` | Age limit for retained journal files; zero disables it | `0` |
+
+Size settings accept bytes or a single binary `K`, `M`, or `G` suffix. Age
+settings accept seconds or a single `s`, `m`, `h`, `d`, or `w` suffix, up to one
+year. Rotation and expiry are checked on append; there is no timer, and a
+reader never prunes files. Age cleanup applies to whole files, not individual
+entries. Only the private journal's own validated files are eligible. If the
+requested free-space reserve cannot be met, an append may be skipped. Invalid
+settings do not silently select a different journal or change lifecycle results.
+These settings borrow journald's names; **they do not edit `journald.conf` or
+change the system journal**.
 
 **Optional system journal mirror.** Set `OC_BOX_JOURNALD=1` in the host
 launcher's environment. oc-box mirrors only validated activity events after

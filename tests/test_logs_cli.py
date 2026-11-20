@@ -41,15 +41,52 @@ class LogsCliTests(unittest.TestCase):
                 "OC_BOX_CONTAINER": "0",
                 "OC_BOX_JOURNALD": "0",
                 "OC_BOX_STATE_HOME": str(self.root),
+                "XDG_CONFIG_HOME": str(self.base / "config"),
             },
         )
         env.start()
         self.addCleanup(env.stop)
+        os.environ.pop("OC_BOX_LOG_DIR", None)
 
     def run_cli(self, *args):
         with contextlib.redirect_stdout(io.StringIO()) as stdout:
             code = logs_cli.cli(self.box, args)
         return code, stdout.getvalue()
+
+    def test_path_reports_default_configured_and_invocation_override_without_writes(
+        self,
+    ):
+        config = self.base / "config" / "oc-box" / "config.json"
+        configured = self.base / "custom logs"
+        override = self.base / "override"
+        self.assertEqual(
+            self.run_cli("--path"), (0, str(self.root / "log/activity.jsonl") + "\n")
+        )
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({"logs": {"directory": str(configured)}}))
+        before = config.read_bytes()
+        self.assertEqual(
+            self.run_cli("--path"), (0, str(configured / "activity.jsonl") + "\n")
+        )
+        with patch.dict(os.environ, {"OC_BOX_LOG_DIR": str(override)}):
+            self.assertEqual(
+                self.run_cli("--path"), (0, str(override / "activity.jsonl") + "\n")
+            )
+        self.assertFalse(
+            any(path.exists() for path in (self.root, configured, override))
+        )
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_path_and_read_refuse_invalid_config_with_fixed_help(self):
+        config = self.base / "config" / "oc-box" / "config.json"
+        config.parent.mkdir(parents=True)
+        config.write_text('{"logs":{"SystemMaxUse":"PRIVATE_SENTINEL"}}')
+        for flag in ("--path", "--json"):
+            with self.subTest(flag=flag), self.assertRaises(_BoxError) as raised:
+                self.run_cli(flag)
+            self.assertIn("configuration is invalid", str(raised.exception))
+            self.assertNotIn("PRIVATE_SENTINEL", str(raised.exception))
+        self.assertFalse(self.root.exists())
 
     def registration(self):
         project = self.base / "project"

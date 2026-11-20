@@ -104,6 +104,11 @@ their checkout ownership distinct from unrelated source and flat installations.
   pairing links, authentication, clipboard data or other free-form text.
   Dashboard external-log redaction remains best-effort, not a guarantee of
   arbitrary-secret removal.
+  `log_config.py` loads bounded host `logs` policy and `OC_BOX_LOG_DIR`
+  without writes or following config symlinks. `logs --path` is read-only.
+  Journal location is independent of workspace registration. Rotation and
+  age/space retention apply only on appends, only to the owner's validated
+  managed files, and never modify the system journal or move old logs.
   `OC_BOX_JOURNALD=1` opts the host launcher into best-effort mirroring of only
   successfully appended, validated activity events to existing local
   systemd-journald with native priorities. The private file remains primary;
