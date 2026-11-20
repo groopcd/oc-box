@@ -323,6 +323,67 @@ class LogViewTests(unittest.IsolatedAsyncioTestCase):
                     str(app.query_one("#log-target", Static).render()),
                 )
 
+    async def test_status_replacement_revokes_inflight_podman_snapshot_while_paused(
+        self,
+    ):
+        workspace, old, new = "a" * 32, "b" * 64, "c" * 64
+
+        class HeldContainer(LogFixture):
+            hold = False
+            container = old
+
+            def __init__(self):
+                super().__init__([])
+                self.entered, self.finish = threading.Event(), threading.Event()
+
+            def private_logs(self):
+                return Path("/synthetic/log"), []
+
+            def podman_logs(self, target):
+                if target != workspace:
+                    raise AssertionError("Unexpected Podman target")
+                ident = self.container
+                if self.hold:
+                    self.hold = False
+                    self.entered.set()
+                    if not self.finish.wait(5):
+                        raise TimeoutError
+                return tui_logs._PodmanEntries(
+                    [LogEntry("", "podman", "info", "container " + ident[0])], ident
+                )
+
+        backend = HeldContainer()
+        app = DashboardApp(backend, read_only=True)
+        with patch("oc_box.tui_app.activity_path", return_value=Path("/synthetic/log")):
+            async with app.run_test(size=(80, 24)) as pilot:
+                await self.ready(app, pilot)
+                follow = app.query_one("#log-follow", Switch)
+                follow.value = False
+                app.query_one("#log-source", Select).value = "podman"
+                app._load_podman(workspace)
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                table = app.query_one("#log-table", DataTable)
+                self.assertEqual(self.messages(table), ["container b"])
+                self.select_log_text(app, table)
+                backend.hold = True
+                await app.refresh_logs().wait()
+                try:
+                    self.assertTrue(await asyncio.to_thread(backend.entered.wait, 3))
+                    report = backend.collect()
+                    report["workspaces"][0]["container_id"] = backend.container = new
+                    app._apply_report(report, False)
+                    self.assertIsNone(table.text_selection)
+                    self.assertEqual(self.messages(table), [])
+                finally:
+                    backend.finish.set()
+                await app.workers.wait_for_complete()
+                self.assertEqual(self.messages(table), [])
+                self.assertFalse(follow.value)
+                await app.refresh_logs().wait()
+                await app.workers.wait_for_complete()
+                self.assertEqual(self.messages(table), ["container c"])
+
     async def test_table_sort_columns_details_and_filter_survive_tab_switch(self):
         entries = [
             LogEntry("2026-01-01T12:01:00Z", "oc-box", "error", "second [bold]"),

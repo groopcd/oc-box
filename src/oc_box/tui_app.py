@@ -1146,6 +1146,10 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             self._status_lock.release()
 
     def _apply_report(self, report, scanned):
+        target = self.podman_workspace
+        prior_target = (
+            self._podman_status_binding(self.report, target) if target else None
+        )
         if not scanned:
             previous = {w["workspace_id"]: w for w in self.report["workspaces"]}
             for item in report["workspaces"]:
@@ -1161,6 +1165,16 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                             item["storage"][key] = old.get("storage", {}).get(key)
                     item["storage_sampled_at"] = old.get("storage_sampled_at")
         self.report = report
+        if target is not None:
+            current_target = self._podman_status_binding(report, target)
+            if current_target != prior_target and current_target != (
+                self._podman_container_id,
+            ):
+                # Status independently observed a different resource. Revoke
+                # the retained rows and selection without starting a log query.
+                self._podman_container_id = None
+                self._log_scope_versions["podman"] += 1
+                self._apply_logs((), target, private=False)
         workspaces = report["workspaces"]
         skipped = report.get("inventory_skipped")
         self._update_text(
@@ -1776,12 +1790,30 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             workspace = None
         self._apply_logs(entries, workspace)
 
+    @staticmethod
+    def _podman_status_binding(report, workspace):
+        # Distinguish an unlisted registration from a listed one whose
+        # container was unavailable. Status is a fence, not read authority.
+        return next(
+            (
+                (item.get("container_id"),)
+                for item in report["workspaces"]
+                if item["workspace_id"] == workspace
+            ),
+            None,
+        )
+
     def _queue_podman_logs(self):
-        if self.podman_workspace and not self._podman_log_lock.locked():
-            self._refresh_podman_logs(self.podman_workspace, self._podman_request)
+        workspace = self.podman_workspace
+        if workspace and not self._podman_log_lock.locked():
+            self._refresh_podman_logs(
+                workspace,
+                self._podman_request,
+                self._podman_status_binding(self.report, workspace),
+            )
 
     @work(thread=True, group="podman-logs", exit_on_error=False)
-    def _refresh_podman_logs(self, workspace, request):
+    def _refresh_podman_logs(self, workspace, request, status_binding):
         if not self._podman_log_lock.acquire(blocking=False):
             return
         try:
@@ -1792,16 +1824,25 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                     entries = [PODMAN_UNAVAILABLE]
                 if self.is_running:
                     self.call_from_thread(
-                        self._apply_podman_logs, entries, workspace, request
+                        self._apply_podman_logs,
+                        entries,
+                        workspace,
+                        request,
+                        status_binding,
                     )
         finally:
             self._podman_log_lock.release()
             if self.is_running and request != self._podman_request:
                 self.call_from_thread(self._queue_podman_logs)
 
-    def _apply_podman_logs(self, entries, workspace, request):
+    def _apply_podman_logs(self, entries, workspace, request, status_binding):
         if request == self._podman_request and workspace == self.podman_workspace:
             container_id = getattr(entries, "container_id", None)
+            current = self._podman_status_binding(self.report, workspace)
+            if current != status_binding and (
+                container_id is None or current != (container_id,)
+            ):
+                return
             if container_id != self._podman_container_id:
                 # The same registration can now refer to a replacement
                 # container. A selected viewport must not freeze its old logs.
