@@ -866,20 +866,60 @@ class ActivityRotationTests(ActivityJournalFixture):
         emit.assert_called_once()
         self.assertEqual(emit.call_args.args[0]["duration_ms"], 6)
 
-    def test_single_file_rotation_does_not_discard_outgoing_active_on_sync_failure(
-        self,
-    ):
+    def test_filled_journal_recovers_after_failed_sync_on_single_file_rotation(self):
+        self.assertTrue(self.record(duration_ms=1000))
+        file_bytes = self.active.stat().st_size
+        total_bytes = 4 * file_bytes
         with (
-            patch.object(journal, "_MAX_FILE_BYTES", 160),
-            patch.object(journal, "_BACKUP_COUNT", 0),
+            patch.object(journal, "_MAX_FILE_BYTES", file_bytes),
+            patch.object(journal, "_HARD_FILE_BYTES", file_bytes),
+            patch.object(journal, "_HARD_TOTAL_BYTES", total_bytes),
         ):
+            self.record_range(1001, 1004)
+            self.assertEqual(sum(map(len, self.files().values())), total_bytes)
+            self.assertEqual(
+                self.durations(strict_snapshot=True), [1000, 1001, 1002, 1003]
+            )
+            before = self.active.read_bytes()
+            self.configure(SystemMaxFiles=1)
+            with patch.object(journal.os, "fsync", side_effect=OSError):
+                self.assertFalse(self.record(duration_ms=1004))
+            self.assertEqual(self.files()["activity.jsonl.1"], before)
+            self.assertLessEqual(sum(map(len, self.files().values())), total_bytes)
+            self.assertIn(1003, self.durations(strict_snapshot=True))
+            self.assertTrue(self.record(duration_ms=1005))
+        self.assertEqual(sorted(self.files()), [self.active.name])
+        self.assertEqual(self.durations(strict_snapshot=True), [1005])
+
+    def test_unsupported_archive_removal_is_silent_and_never_mirrored(self):
+        self.configure(SystemMaxFiles=1)
+        emit = Mock()
+        output = io.StringIO()
+        with patch.object(journal, "_MAX_FILE_BYTES", 160):
             self.assertTrue(self.record(duration_ms=1))
             before = self.active.read_bytes()
-            with patch.object(journal.os, "fsync", side_effect=OSError):
+            with (
+                patch.object(
+                    journal.os,
+                    "unlink",
+                    side_effect=NotImplementedError("synthetic-private-error"),
+                ) as remove,
+                patch("oc_box.journal_output", SimpleNamespace(emit=emit), create=True),
+                patch.dict(
+                    os.environ, {"OC_BOX_JOURNALD": "1", "OC_BOX_CONTAINER": "0"}
+                ),
+                contextlib.redirect_stdout(output),
+                contextlib.redirect_stderr(output),
+            ):
                 self.assertFalse(self.record(duration_ms=2))
+            self.assertEqual(
+                [call.args for call in remove.call_args_list], [("activity.jsonl.1",)]
+            )
+            self.assertEqual(output.getvalue(), "")
+            emit.assert_not_called()
             self.assertEqual(self.files()["activity.jsonl.1"], before)
+            self.assertEqual(self.durations(strict_snapshot=True), [1, 2])
             self.assertTrue(self.record(duration_ms=3))
-        self.assertEqual(sorted(self.files()), [self.active.name])
         self.assertEqual(self.durations(strict_snapshot=True), [3])
 
     def test_fixed_filename_bound_and_safe_pruning_even_after_count_decrease(self):
@@ -917,8 +957,13 @@ class ActivityRotationTests(ActivityJournalFixture):
             before["activity.jsonl.1"]
         )
         with patch.object(journal, "_HARD_TOTAL_BYTES", two_latest_bytes):
-            self.assertEqual(self.durations(strict_snapshot=True), [])
-            self.assertEqual(self.durations(), [2, 3])
+            read = os.read
+            for strict, expected in ((True, []), (False, [2, 3])):
+                with patch.object(journal.os, "read", wraps=read) as reads:
+                    self.assertEqual(self.durations(strict_snapshot=strict), expected)
+                self.assertEqual(
+                    sum(call.args[1] for call in reads.call_args_list), two_latest_bytes
+                )
             self.assertFalse(self.record(duration_ms=4))
         self.assertEqual(self.files(), before)
 

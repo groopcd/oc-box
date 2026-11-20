@@ -555,6 +555,9 @@ def _prepare_append(directory, files, policy, now, rotate, final_size, append_si
             _move_file(directory, files, index, index + 1)
     # Do not discard the outgoing active file until its replacement has
     # synced. By that point it has a checked archive name, never the active name.
+    # If it must be discarded, all older archives were already pruned above.
+    # Even on sync failure only one file (at most 4 MiB) plus one record remains,
+    # safely below the absolute aggregate read limit.
     return rotate and 0 not in keep
 
 
