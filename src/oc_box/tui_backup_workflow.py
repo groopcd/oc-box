@@ -135,8 +135,8 @@ class PrivateSecretScreen(ModalScreen):
     CSS = """
     PrivateSecretScreen { align: center middle; }
     PrivateSecretScreen > Vertical { width: 72; max-width: 95%; height: auto;
-      padding: 1 2; border: solid $accent; background: $surface; }
-    PrivateSecretScreen SecretEditor { border: solid $accent; background: $background; }
+      padding: 1 2; border: round $accent; background: $surface; }
+    PrivateSecretScreen SecretEditor { border: round $accent; background: $background; }
     PrivateSecretScreen Static { height: auto; margin-bottom: 1; }
     PrivateSecretScreen Horizontal { height: 3; margin-top: 1; }
     """
@@ -262,7 +262,7 @@ class MetadataReview(ModalScreen):
     CSS = """
     MetadataReview { align: center middle; }
     MetadataReview > Vertical { width: 86; max-width: 95%; height: 85%;
-      padding: 1 2; border: solid $warning; background: $surface; }
+      padding: 1 2; border: round $warning; background: $surface; }
     MetadataReview VerticalScroll { height: 1fr; }
     MetadataReview Horizontal { height: 3; }
     """
@@ -333,7 +333,7 @@ class BackupWorkflow(ModalScreen):
     CSS = """
     BackupWorkflow { align: center middle; }
     BackupWorkflow > Vertical { width: 88; max-width: 95%; height: 85%;
-      padding: 1 2; border: solid $warning; background: $surface; }
+      padding: 1 2; border: round $warning; background: $surface; }
     BackupWorkflow #backup-operation-stage { height: auto;
       color: $warning; text-style: bold; margin-bottom: 1; }
     BackupWorkflow #backup-operation-elapsed { height: auto; color: $text-muted; }

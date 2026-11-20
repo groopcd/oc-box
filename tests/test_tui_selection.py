@@ -258,6 +258,16 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                     else:
                         self.assertEqual(copies, [])
 
+    async def test_native_copy_entry_point_reports_once_for_nonempty_text(self):
+        async with self.dashboard() as (app, _pilot, copies, _backend):
+            app.notify.reset_mock()
+            self.assertTrue(app.copy_to_clipboard("native copy selection"))
+            self.assertEqual(copies, ["native copy selection"])
+            app.notify.assert_called_once_with(
+                "Copied text. Desktop clipboard delivery depends on your terminal.",
+                title="Clipboard",
+            )
+
     async def test_table_meter_bars_and_history_have_selectable_plain_text(self):
         async with self.dashboard(size=(140, 44)) as (app, pilot, copies, _):
             surfaces = (

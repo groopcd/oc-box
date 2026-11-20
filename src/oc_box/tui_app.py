@@ -55,7 +55,12 @@ if __package__:
         numeric,
         percentage,
     )
-    from .tui_settings import SettingsPanel, REFRESH_INTERVALS, DEFAULT_SETTINGS
+    from .tui_settings import (
+        SettingsPanel,
+        RoundedSwitch,
+        REFRESH_INTERVALS,
+        DEFAULT_SETTINGS,
+    )
     from .tui_management import ManagementActions, StoragePanel, BackupPanel
 else:
     import status_report
@@ -79,7 +84,12 @@ else:
         numeric,
         percentage,
     )
-    from tui_settings import SettingsPanel, REFRESH_INTERVALS, DEFAULT_SETTINGS
+    from tui_settings import (
+        SettingsPanel,
+        RoundedSwitch,
+        REFRESH_INTERVALS,
+        DEFAULT_SETTINGS,
+    )
     from tui_management import ManagementActions, StoragePanel, BackupPanel
 
 
@@ -88,10 +98,11 @@ def text(value):
 
 
 class Confirm(ModalScreen):
+    AUTO_FOCUS = "#cancel"
     CSS = """
     Confirm { align: center middle; }
     Confirm > Vertical { width: 76; max-width: 95%; height: 80%; max-height: 40;
-      padding: 1 2; border: thick $warning; background: $surface; }
+      padding: 1 2; border: round $warning; background: $surface; }
     Confirm Horizontal { height: 3; }
     #confirmation-review { height: 1fr; }
     #confirmation-error { height: auto; color: $warning; }
@@ -148,28 +159,39 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     )
     CSS = """
     Screen { layout: vertical; }
+    Button.-style-default, Input, SelectCurrent, SelectOverlay, Checkbox, TextArea {
+      border: round $primary 35%; background: $surface; color: $text; }
+    Button.-style-default { height: 3; min-width: 6; padding: 0 1; }
+    Button.-style-default.-primary { color: $primary; background: $primary 12%; }
+    Button.-style-default.-error { border: round $error 55%; color: $error; }
+    Button.-style-default:hover { border: round $primary 65%; background: $primary 12%; }
+    Button.-style-default.-active { border: round $primary 75%; background: $primary 18%; }
+    Button.-style-default:focus, Input:focus, Select:focus > SelectCurrent,
+    SelectOverlay:focus, Checkbox:focus, TextArea:focus {
+      border: round $accent; background-tint: transparent; }
+    Button.-style-default.-error:focus { border: round $error; }
+    Button.-style-default:disabled { border: round $primary 18%; }
     #dashboard-header { height: 3; background: $surface; }
     #host-summary { width: 24; height: 1; margin: 1 1; text-style: bold;
       text-wrap: nowrap; text-overflow: ellipsis; }
     #view-title { width: 1fr; height: 1; margin: 1 1; color: $primary; }
     #workspace-picker { width: 38; margin-right: 1; }
     #section-picker { display: none; width: 19; margin-right: 1; }
-    #dashboard-header Select > SelectCurrent { border: round $primary 25%;
-      background: $surface; }
     #monitoring-state { width: 15; height: 1; margin: 1 1; color: $success; }
     #log-tools { height: 3; }
-    #log-search { width: 1fr; border: round $primary 25%; background: $surface; }
+    #log-search { width: 1fr; }
     #log-hits { width: 18; height: 3; padding: 1 1; }
-    #log-tools Button { width: auto; min-width: 6; padding: 0 1;
-      border: round $primary 25%; background: $surface; color: $primary; }
+    #log-tools Button { width: auto; }
     #body { height: 1fr; }
     #sidebar { width: 18; padding: 0 1; background: $surface; }
     #section-heading { height: 2; padding-top: 1; color: $text-muted; }
-    .nav-choice { width: 1fr; min-width: 0; height: 1; margin: 1 0 0 0;
-      border: none; padding: 0 1; text-align: left; background: transparent;
-      content-align: left middle; color: $text-muted; }
-    .nav-choice.-selected { color: $primary; background: $primary 20%; text-style: bold; }
-    .nav-choice:focus { color: $text; background: $primary 30%; }
+    .nav-choice.-style-default { width: 1fr; min-width: 0; height: 1; margin: 1 0 0 0;
+       border: none; padding: 0 1; text-align: left; background: transparent;
+       content-align: left middle; color: $text-muted; }
+    .nav-choice.-style-default.-selected { color: $primary; background: $primary 20%; text-style: bold; }
+    .nav-choice.-style-default:focus, .nav-choice.-style-default:hover,
+    .nav-choice.-style-default.-active {
+      border: none; color: $text; background: $primary 25%; }
     #nav-context { dock: bottom; height: auto; max-height: 7; margin-top: 1;
       border: round $primary 25%; padding: 0 1; color: $text-muted; }
     #workspaces { height: 1fr; }
@@ -189,8 +211,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     #workspace-inspector > Contents { padding: 0; }
     #workspace-source-context { height: auto; color: $text-muted; padding: 0 1; }
     #workspace-details { padding: 0; border: none; margin: 0; }
-    #scan-storage { width: auto; min-width: 12; margin: 0 1;
-      border: round $primary 25%; background: $surface; color: $primary; }
+    #scan-storage { width: auto; min-width: 12; margin: 0 1; }
     #activity-card { height: 8; margin-top: 1; }
     #overview-activity { height: 4; text-wrap: nowrap; text-overflow: ellipsis; }
     #status-summary, #settings-info, #terminal-info { height: auto; padding: 1; }
@@ -206,9 +227,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     #log-output { height: 1fr; }
     #notice { height: auto; max-height: 3; color: $warning; }
     .toolbar { height: auto; min-height: 3; overflow-x: auto; }
-    .toolbar Button { min-width: 10; margin-right: 1;
-      border: round $primary 25%; background: $surface; color: $primary; }
-    .toolbar Button.-error { border: round $error 50%; color: $error; }
+    .toolbar Button { margin-right: 1; }
     .toolbar Button:last-child { margin-right: 0; }
     .toolbar Select { width: 24; }
     #session-source-tools Select { width: 1fr; min-width: 12; }
@@ -216,13 +235,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     .toolbar Label { width: auto; padding: 1; }
     .toolbar .setting-label { width: 28; padding: 1; }
     .toolbar SelectCurrent > #label { height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
-    Switch { width: 8; height: 1; padding: 0 1; margin: 1 0; border: none;
-      border-left: solid $primary 35%; border-right: solid $primary 35%; }
-    Switch .switch--slider { color: $text-muted; }
-    Switch.-on .switch--slider { color: $success; }
-    Switch:focus { border: none; border-left: solid $accent;
-      border-right: solid $accent; background: $primary 20%; }
-    SettingsPanel .settings-toggle-row Switch { margin: 0; }
+    RoundedSwitch { width: 8; height: 3; padding: 0; border: round $primary 35%;
+      background: $surface; color: $text-muted; content-align: center middle; }
+    RoundedSwitch.-on { color: $success; background: $success 12%; }
+    RoundedSwitch:hover { border: round $primary 65%; }
+    RoundedSwitch:focus { border: round $accent; background-tint: transparent; }
+    .toolbar RoundedSwitch { margin-right: 1; }
     NativeTerminal { height: 1fr; min-height: 5; border: round $secondary; }
     TabPane { padding: 0 1; overflow-y: auto; }
     Screen.compact #sidebar, Screen.compact #view-title,
@@ -525,7 +543,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                             id="log-source",
                         )
                         yield Label("Follow")
-                        yield Switch(
+                        yield RoundedSwitch(
                             value=DEFAULT_SETTINGS["log_follow"], id="log-follow"
                         )
                         yield Button("Load Podman logs…", id="load-podman")

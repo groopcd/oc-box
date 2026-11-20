@@ -441,6 +441,10 @@ class ClipboardActions:
         except Exception:
             self._clipboard_notice("Clipboard copy is unavailable.")
             return False
+        if text:
+            self._clipboard_notice(
+                "Copied text. Desktop clipboard delivery depends on your terminal."
+            )
         return True
 
     def _write_clipboard(self, text):
@@ -461,9 +465,6 @@ class ClipboardActions:
         except Exception:  # Never expose private clipboard text or driver errors.
             self._clipboard_notice("Clipboard copy is unavailable.")
             return
-        self._clipboard_notice(
-            "Copied text. Desktop clipboard delivery depends on your terminal."
-        )
 
     def action_copy_selection(self, text=None):
         if self._clipboard_private():
@@ -649,7 +650,8 @@ class ClipboardHelp(ModalScreen):
             "Ctrl+Shift+C       Copy selected text\n"
             "Ctrl+Shift+Y       Copy screen (visible text only)\n"
             "Ctrl+Shift+Insert  Paste copied text into the focused input or connected shell\n\n"
-            "Completed user text-selection gestures copy selected text. Merely "
+            "Completed user text-selection gestures copy selected text and show "
+            "a confirmation. Merely "
             "refreshing, focusing or programmatically selecting text never copies it.\n\n"
             "Paste copied uses only this dashboard's in-app cache, not the current "
             "desktop clipboard. For desktop text, use your terminal's paste command. "

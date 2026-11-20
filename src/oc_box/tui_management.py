@@ -33,10 +33,11 @@ SCOPES = [
 
 
 class ActionReview(ModalScreen):
+    AUTO_FOCUS = "#operation-cancel"
     CSS = """
     ActionReview { align: center middle; }
     ActionReview > Vertical { width: 82; max-width: 95%; height: 85%;
-      padding: 1 2; border: thick $warning; background: $surface; }
+      padding: 1 2; border: round $warning; background: $surface; }
     #operation-review-text { height: 1fr; }
     ActionReview Horizontal { height: 3; }
     """

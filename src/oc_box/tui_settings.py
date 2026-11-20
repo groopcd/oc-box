@@ -2,6 +2,7 @@
 
 from types import MappingProxyType
 
+from rich.text import Text
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.validation import Integer
@@ -38,6 +39,16 @@ DEFAULT_SETTINGS = MappingProxyType(
 )
 
 
+class RoundedSwitch(Switch):
+    """Keep the native toggle and expose its state without relying on color."""
+
+    def __init__(self, value=False, **kwargs):
+        super().__init__(value, animate=False, **kwargs)
+
+    def render(self):
+        return Text("ON  ●" if self.value else "● OFF")
+
+
 class SettingsPanel(Vertical):
     """One inline draft; only Apply changes the dashboard's active preferences."""
 
@@ -50,9 +61,8 @@ class SettingsPanel(Vertical):
       padding: 0 1; margin-bottom: 1; }
     SettingsPanel .settings-topic-title { height: auto; text-style: bold; }
     SettingsPanel .settings-row { height: auto; min-height: 3; }
-    SettingsPanel .settings-row Label { width: 24; padding: 1 0; }
-    SettingsPanel .settings-toggle-row { min-height: 1; height: 1; }
-    SettingsPanel .settings-toggle-row Label { padding: 0; }
+    SettingsPanel .settings-row Label { width: 24; height: 3;
+      content-align: left middle; }
     SettingsPanel .settings-row Select, SettingsPanel .settings-row Input { width: 1fr; }
     SettingsPanel .settings-row SelectCurrent > #label {
       height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
@@ -89,7 +99,7 @@ class SettingsPanel(Vertical):
                     yield Label("Monitoring", classes="settings-topic-title")
                     with Horizontal(classes="settings-row settings-toggle-row"):
                         yield Label("Automatic refresh")
-                        yield Switch(
+                        yield RoundedSwitch(
                             self.values["auto_refresh"], id="pref-auto-refresh"
                         )
                     with Horizontal(classes="settings-row"):
@@ -118,7 +128,7 @@ class SettingsPanel(Vertical):
                         )
                     with Horizontal(classes="settings-row settings-toggle-row"):
                         yield Label("Workspace details")
-                        yield Switch(self.values["details"], id="pref-details")
+                        yield RoundedSwitch(self.values["details"], id="pref-details")
                     yield Static(
                         "Meters and trends use fixed scales; missing readings are not zero.",
                         markup=False,
@@ -146,7 +156,9 @@ class SettingsPanel(Vertical):
                     yield Label("Logs", classes="settings-topic-title")
                     with Horizontal(classes="settings-row settings-toggle-row"):
                         yield Label("Follow new entries")
-                        yield Switch(self.values["log_follow"], id="pref-log-follow")
+                        yield RoundedSwitch(
+                            self.values["log_follow"], id="pref-log-follow"
+                        )
                     with Horizontal(classes="settings-row"):
                         yield Label("Visible source")
                         yield Select(

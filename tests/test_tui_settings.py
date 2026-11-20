@@ -15,6 +15,7 @@ if AVAILABLE:
     from textual.widgets import (
         Button,
         Input,
+        Label,
         Select,
         Static,
         Switch,
@@ -282,7 +283,7 @@ class InlineSettingsTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 app._pending_cancel = app._pending_connection = None
 
-    async def test_all_switches_are_compact_visible_and_keep_native_click_and_space(
+    async def test_rounded_switches_align_labels_and_keep_native_click_and_space(
         self,
     ):
         app = DashboardApp(SettingsDemo(), read_only=True, demo=True)
@@ -300,29 +301,39 @@ class InlineSettingsTests(unittest.IsolatedAsyncioTestCase):
                     toggle.scroll_visible(animate=False, force=True)
                     await pilot.pause()
                     self.assert_visible(app, toggle)
-                    self.assertEqual(toggle.region.height, 1)
+                    self.assertEqual(toggle.region.height, 3)
                     self.assertEqual(toggle.region.width, 8)
+                    label = toggle.parent.query_one(Label)
+                    strips = app.screen._compositor.render_strips()
+                    middle = toggle.region.y + 1
+                    self.assertIn(str(label.render()), strips[middle].text)
+                    self.assertIn(
+                        "ON  ●" if toggle.value else "● OFF", strips[middle].text
+                    )
                     # No overlap with the following form row.
                     self.assertLessEqual(
                         toggle.region.bottom, toggle.parent.region.bottom
                     )
                     before = toggle.value
-                    await pilot.click(toggle)
-                    await pilot.pause(0.35)
+                    await pilot.click(toggle, offset=(3, 1))
+                    await pilot.pause()
                     self.assertEqual(toggle.value, not before)
                     self.assertTrue(toggle.has_focus)
-                    self.assertEqual(toggle.styles.border.top[0], "")
-                    self.assertEqual(toggle.styles.border.bottom[0], "")
-                    self.assertEqual(toggle.styles.border.left[0], "solid")
-                    self.assertEqual(toggle.styles.border.right[0], "solid")
-                    focused_background = toggle.styles.background
-                    self.assertEqual(toggle.region.height, 1)
+                    for side in (
+                        toggle.styles.border.top,
+                        toggle.styles.border.bottom,
+                        toggle.styles.border.left,
+                        toggle.styles.border.right,
+                    ):
+                        self.assertEqual(side[0], "round")
+                    focus_border = toggle.styles.border.top
+                    self.assertEqual(toggle.region.height, 3)
                     position = toggle._slider_position
                     await pilot.press("space")
-                    await pilot.pause(0.35)
+                    await pilot.pause()
                     self.assertEqual(toggle.value, before)
                     self.assertNotEqual(toggle._slider_position, position)
-                    self.assertEqual(toggle.styles.background, focused_background)
+                    self.assertEqual(toggle.styles.border.top, focus_border)
                     self.assertTrue(toggle.has_focus)
                     self.assertTrue(app.read_only)
                     self.assertTrue(app.query_one("#terminal-owner", Button).disabled)
