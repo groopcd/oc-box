@@ -5231,9 +5231,10 @@ def _help_requested(arguments):
         if flag.startswith("--"):
             if "--help".startswith(flag):
                 return True
-        elif flag.startswith("-") and "h" in flag[1:]:
-            # Argparse can dispatch help from a short switch cluster (e.g. -yh).
-            # The actual parser still decides whether the syntax is valid.
+        elif "h" in argument and re.fullmatch(r"-(?:[hy]+|[hy]=[hy]*)", argument):
+            # Only -h and -y are launcher short switches. Older argparse also
+            # treats -y=h as -y -h. Leave validity to the parser, and do not
+            # mistake a value such as '-draft checkout' for a flag cluster.
             return True
     return False
 

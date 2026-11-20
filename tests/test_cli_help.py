@@ -8,7 +8,9 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+from oc_box import activity_log
 from oc_box import oc_box as box
 
 _COMMANDS = (
@@ -122,6 +124,46 @@ class CliHelpTests(unittest.TestCase):
         prog = "oc-box" if command is None else f"oc-box {command}"
         self.assertRegex(result.stdout, rf"\Ausage:\s+{re.escape(prog)}(?:\s|$)")
         return result.stdout
+
+    def test_equals_short_help_cluster_never_journals(self):
+        argv = ["purge", "-y=h"]
+        # Older argparse interprets this as '-y -h'; newer versions can
+        # reject it. Preserve the parser result and avoid either journal write.
+        with (
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as parsed,
+        ):
+            box.parser().parse_args(argv)
+        with (
+            patch.object(sys, "argv", ["oc-box", *argv]),
+            patch.object(activity_log, "record_event") as journal,
+            patch.object(box, "check_backend", side_effect=AssertionError("Podman")),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as launched,
+        ):
+            box.entrypoint()
+        self.assertEqual(launched.exception.code, parsed.exception.code)
+        journal.assert_not_called()
+
+    def test_dash_prefixed_project_value_does_not_disable_lifecycle_reporting(self):
+        def launch():
+            self.assertTrue(box.lifecycle_output.concise())
+            return 0
+
+        with (
+            patch.object(
+                sys, "argv", ["oc-box", "start", "--project", "-draft checkout"]
+            ),
+            patch.object(box, "main", side_effect=launch),
+            patch.object(activity_log, "record_event", return_value=True) as journal,
+        ):
+            self.assertEqual(box.entrypoint(), 0)
+        self.assertEqual(
+            [call.args[0] for call in journal.call_args_list],
+            ["command.started", "command.finished"],
+        )
 
     def assert_options(self, output, *, show="", hide=""):
         # Match complete flag names in both usage and the body: --new is not
