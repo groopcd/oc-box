@@ -42,9 +42,11 @@ class ActivityJournalFixture(unittest.TestCase):
         self.log = self.root / "log"
         self.active = self.log / "activity.jsonl"
         self.config = self.base / "config" / "oc-box" / "config.json"
-        self.enterContext(
-            patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.config.parents[1])})
+        config_environment = patch.dict(
+            os.environ, {"XDG_CONFIG_HOME": str(self.config.parents[1])}
         )
+        config_environment.start()
+        self.addCleanup(config_environment.stop)
 
     def configure(self, **logs):
         self.config.parent.mkdir(parents=True, exist_ok=True)

@@ -541,7 +541,8 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                 app.query_one("#content", TabbedContent).active, "settings"
             )
             panel = app.query_one(SettingsPanel)
-            self.assertEqual(len(app.screen.query(".settings-topic")), 6)
+            self.assertEqual(len(app.screen.query(".settings-topic")), 7)
+            self.assertTrue(app.screen.query("#host-logging-settings.settings-topic"))
             self.assertEqual(app.screen.query_one("#pref-interval", Input).value, "1")
             app.screen.query_one("#pref-interval", Input).value = "17"
             app.screen.query_one("#pref-auto-refresh", Switch).value = False
