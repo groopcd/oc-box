@@ -405,7 +405,7 @@ The categorized inline form is also usable without a current workspace:
 **Reset to defaults** stages factory dashboard preferences without immediately
 changing the active dashboard. Defaults are automatic
 one-second refresh, `oc-box-navy`, collapsed details, global session scope,
-following all loaded log sources, and empty session/log filters. **Apply** makes
+following ordinary log sources, and empty session/log filters. **Apply** makes
 them active; **Escape** or **Revert** discards the reset. No reset touches containers,
 resource limits, history, favorites or retained log entries, and it cannot weaken
 the CLI-selected read-only mode.
@@ -417,10 +417,11 @@ settings, workspace resources or credential snapshots. There are no CPU/RAM/
 storage edit controls, resource-control RPCs, implicit resets or storage
 migrations. A settings Apply is not a resource Apply or native service reload.
 
-The **Host logging** card has a separate save action. Its directory field points
-to a private directory, not a file; use the default to fall back to the effective
-oc-box state root. Changing that setting does not move or delete old journals,
-and saving creates no log directory. Use a dedicated directory. An existing
+The **Host logging** card has a separate **Save Host Logging** action. Its
+directory field points to a private directory, not a file; **Use default** clears
+the override on save and falls back to the effective oc-box state root. Changing
+that setting does not move or delete old journals, and saving creates no log
+directory. Use a dedicated directory. An existing
 unsafe directory or an unrecognized file with a reserved activity name is
 refused rather than being adopted as a log. The journald switch is off by default.
 When enabled, successfully written, validated private activity events may also
@@ -583,9 +584,10 @@ The case-insensitive **literal** log search stays visible across all seven tabs.
 `Ctrl+L` opens Logs and focuses it. Search applies to retained entries and can be
 changed at any time, including while follow is paused. Source filtering and
 follow/pause controls never disable search; it is not a regular-expression or
-shell-command field. Follow uses the same best-effort refresh interval as Status
-(default one second); pausing follow leaves retained entries searchable. Search
-text and settings changes are never saved or written to the activity journal.
+shell-command field. Ordinary follow uses the same best-effort refresh interval
+as Status (default one second); pausing follow leaves retained entries searchable.
+Log view filters and search text are session-only and never written to the
+activity journal.
 
 The table sorts by time, source, severity or message. Click a heading to sort
 and click again to reverse; optional metadata columns can be hidden without
@@ -593,8 +595,9 @@ changing the source. Open a row to read its full message. **RAW** shows the
 matching retained entries without table formatting, independent of the table's
 sort and visible columns. Each record occupies one line; scroll horizontally
 for long lines. **Copy all** copies matching retained records subject to the same
-1 MiB UTF-8 limit and shows a clipboard notification. If matches contain output
-from multiple Podman workspaces, select a scoped source before bulk copying.
+1 MiB UTF-8 limit, refusing an oversized result rather than truncating it, and
+shows a clipboard notification. If matches contain output from multiple Podman
+workspaces, select a scoped source before bulk copying.
 RAW never bypasses validation or redaction: it does not recover discarded bytes,
 arbitrary system journal fields, or pre-redaction Podman output.
 
@@ -605,7 +608,10 @@ calls.
 Hover for an explanation. The double-width red **❌**, with a two-cell click
 target, clears only the input/filter,
 restoring the unfiltered count rather than deleting logs. Search feedback stays
-current while a selected output snapshot is held still for copying.
+current while a same-source output selection is held still for copying. Changing
+the source clears its old selection. A changed private journal location or a
+fresh empty snapshot also clears the old private rows, rather than leaving them
+available to copy under the current source.
 
 The default oc-box activity source is the private rotating JSON-lines journal
 `log/activity.jsonl` under the configured oc-box state root:
@@ -619,10 +625,11 @@ that bare `oc-box logs` uses. Run `oc-box logs --path` to see that private
 pathname. A lifecycle command's one-off `--log-dir PATH` does not change the
 dashboard source; use `oc-box logs --log-dir PATH` to inspect that private
 journal. Optional system journal mirroring does not change the dashboard source.
-Reading the **System journal mirror** is a separate explicit action, independent
-of whether mirroring is currently enabled, and uses the same bounded current-user
-reader as `oc-box logs --journald`. It does not merge mirrored duplicates into
-the default view or silently fall back to private files if unavailable.
+Use **Load mirror** to read or refresh the **System journal mirror** snapshot,
+independently of whether mirroring is currently enabled. It uses the same
+bounded current-user reader as `oc-box logs --journald`. Ordinary follow does
+not refresh this snapshot, and **All sources** does not include it. If
+the reader is unavailable, the dashboard does not fall back to private files.
 
 The dashboard's oc-box source shares validated severity and message formatting
 with the read-only host command [`oc-box logs`](cli.md#logs). The dashboard
@@ -634,10 +641,11 @@ Entries contain fixed event categories and allowlisted metadata. Reason codes
 and metric names come from fixed lists, and metric values are bounded integers.
 Entries contain **no raw arguments, environment values, errors, stdout/stderr,
 prompts, conversation transcripts, pairing links, authentication or clipboard
-data, or other free-form text**. The UI retains at most 2000 log entries globally
-and displays at most 1000 generated-journal entries per refresh. The journal is
-not a terminal recording, a native OpenCode logfile or a permanent audit archive.
-Demo mode reads none of these files.
+data, or other free-form text**. The ordinary dashboard buffer retains up to
+2,000 entries across its sources, with up to 1,000 private-journal entries read
+per refresh. The explicit mirror snapshot holds up to 1,000 entries separately.
+The journal is not a terminal recording, a native OpenCode logfile or a
+permanent audit archive. Demo mode reads none of these sources.
 
 **Podman container logs are a separate, explicit opt-in source.** Only a selected
 verified oc-box-owned container may be queried: `--tail` 500 lines, a 1 MiB byte
@@ -648,7 +656,9 @@ have been removed**.
 Container output can contain private text or unrecognized credentials. Treat
 that display as sensitive; do not share screenshots or terminal recordings
 without your own review. Opting in is not permission to read unrelated
-containers or unlimited historical output.
+containers or unlimited historical output. If the selected container is no
+longer available, the dashboard reports that separately and can still refresh
+the private journal.
 
 ### 6. Storage
 

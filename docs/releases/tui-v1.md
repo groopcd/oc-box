@@ -14,6 +14,36 @@ actual frozen successor, not reuse the earlier `1.7.110+g5573965` identity. Thes
 are the detailed manager notes for the combined
 [1.7 development release](1.7.md), including source-qualified sharing evidence.
 
+## Logs and controls after v1.7.249.dev0
+
+This is a later development update, not a revision of the earlier manager
+release or its acceptance record below.
+
+- **Structured and RAW logs:** sort the table by heading, hide optional metadata
+  columns or inspect a row. **RAW** shows matching retained records in source
+  order without table formatting. Both views use source, severity and literal
+  search filters. **Copy all** refuses a result over 1 MiB UTF-8 rather than
+  silently truncating it. It cannot retrieve discarded or pre-redaction input.
+- **Separate journal sources:** the private oc-box activity view includes
+  `debug`, even though the CLI defaults to `info`. The ordinary log buffer holds
+  up to 2,000 entries. **Load mirror** explicitly reads a separate snapshot of up
+  to 1,000 validated same-user system-journal records; it is not part of the
+  ordinary buffer or automatic follow. Podman output remains an explicit,
+  bounded, in-memory source with best-effort redaction.
+- **Save Host Logging:** change the host's private log directory and optional
+  journal mirror without moving or deleting existing journals. This
+  separate action preserves unrelated host configuration and is unavailable in
+  demo or read-only mode. Ordinary **Apply** still changes only this dashboard
+  session; searches are not persisted.
+- **Rounded, keyboard-operable controls:** compact switches show ON/OFF and
+  visible focus. Clipboard notices cover explicit actions such as RAW bulk copy
+  and completed user selections; redraws do not trigger clipboard writes.
+
+See the [current Settings](../tui.md#2-settings) and [Logs](../tui.md#5-logs)
+guides. Headless checks and injected journal responses do not establish new
+interactive manager, real system-journal or rootless-Podman acceptance. The
+historical restore-verifier refusal and unperformed checks below remain open.
+
 ## Development-channel interaction follow-ups
 
 The follow-up work branches from published `v1.7.117.dev0` (`2f113ff`) and is
@@ -50,6 +80,9 @@ identity and unfinished UI qualification below; headless redesign tests do not
 relabel them.
 
 ## Manager highlights
+
+The following describes the earlier manager release. See the later logging and
+controls notes above for changes to Logs and the separate host logging save.
 
 The optional `oc-box tui` manager adds **Status, Settings, Sessions, Terminals,
 Logs, Storage and Backup/restore**. It is separate from OpenCode's native conversation TUI and does not

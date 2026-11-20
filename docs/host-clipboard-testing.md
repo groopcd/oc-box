@@ -48,11 +48,14 @@ test worktree. From your normal oc-box repository on the host:
 git fetch origin devel
 git worktree add --detach ../oc-box-host-clipboard-test origin/devel
 cd ../oc-box-host-clipboard-test
-uv run --no-project --refresh-package oc-box --with '.[vault]' python -I -m oc_box --help
+uv run --no-project --refresh-package oc-box --with '.[vault]' python -I -m oc_box start --help
 ```
 
 Confirm the help lists `--host-clipboard`, `--no-host-clipboard` and both symlink
 flags **before** launching a workspace.
+For a release check, replace `origin/devel` in the worktree command with the
+exact candidate commit, and use a disposable registered workspace with
+synthetic clipboard contents.
 If the test directory already exists, do not overwrite or force-remove it;
 use another new directory or verify its revision. `--refresh-package oc-box`
 also avoids reusing an older local package build when testing branch updates.
@@ -178,15 +181,20 @@ If it does nothing, don't remap ordinary Ctrl+V or enable broad filesystem/socke
 mounts. Report the terminal and native versions so the binding can be adjusted
 in development.
 
-To check relay recovery, paste more than 16 KiB of ordinary synthetic text
-without sending it. After its valid paste end, clear the draft and try Ctrl+Y
-with a known supported clip. The ordinary paste should be unchanged and the
-shortcut should still work. A fixed `input-framing` warning at client exit
-means interception was disabled because the relay could no longer trust its
-input boundary. A fresh client can attach if the owner is still running.
-An unexpected read error may permit one later qualifying Ctrl+Y event if the
-helper was reaped. There is no automatic retry or restart. If staging or
-cleanup cannot be verified, do not repeat it in that client.
+On a revision that includes relay recovery, paste more than 16 KiB of ordinary
+synthetic text as a single bracketed paste, without sending it. After its valid
+paste end, clear the draft and try Ctrl+Y with a known supported clip. The
+ordinary paste should be unchanged, and the shortcut should still work. Do not
+deliberately feed malformed terminal traffic to a real workspace. An
+`input-framing` or `input-incomplete` warning at client exit means interception
+was disabled because the relay could not trust the input boundary. A fresh
+client can attach if the owner is still running.
+
+If `clipboard-unexpected-read` occurs, recovery can use only a later qualifying
+Ctrl+Y event after verified helper reaping. A successful read does not restore
+that allowance. There is no automatic retry, input replay or restart. If
+staging or helper cleanup cannot be verified, do not try again in that client.
+This procedure records an observation only when run on the intended revision.
 
 ## What to report
 

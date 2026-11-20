@@ -1300,9 +1300,11 @@ can retain its legacy permissions; it is not automatically chmodded.
 Readers do not create files. The dashboard shares validated severity and
 message formatting with `oc-box logs`, but displays all retained levels,
 including `debug`. Generated entries include only fixed categories and
-allowlisted metadata. The UI retains at most 2000 log entries globally and
-displays at most 1000 generated-journal entries per refresh. There is no
-native OpenCode logfile reader in this first stage.
+allowlisted metadata. The ordinary log buffer retains up to 2,000 entries,
+with up to 1,000 private-journal entries read per refresh. **Load mirror**
+explicitly reads a separate snapshot of up to 1,000 current-user system-journal
+entries; the mirror does not participate in ordinary follow or the ordinary
+buffer's cap. There is no native OpenCode logfile reader.
 Podman logs are a separate explicit opt-in for a selected verified owned
 container: tail 500 lines, 1 MiB byte cap, 10-second timeout, memory only. Common
 credential redaction is best-effort, not proof that arbitrary secrets are absent.
@@ -2728,20 +2730,23 @@ strict mode.
 
 An ordinary paste above the 16 KiB pathname-capture limit passes through
 unchanged. While it is still framed as paste, it cannot trigger clipboard
-reads or pathname imports. The relay resumes interception only after an exact,
-valid paste end. Ambiguous or malformed input instead keeps interception
-disabled; an unfinished terminal reply or paste also cannot grant a read.
+reads or pathname imports. Only an exact, valid paste end lets interception
+resume for later input. Ambiguous or malformed input instead disables
+interception for the client; an unfinished terminal reply or paste also cannot
+grant a read.
 The relay reports a fixed reason on client exit. Open a fresh native TUI client
 if that happens; the relay does not restart OpenCode or the workspace.
 
 After an unexpected clipboard-read error, one later qualifying Ctrl+Y key
-event may try again if no desktop helper is still outstanding. There is no
-automatic retry, and a success does not refill the per-client allowance.
+event may try again only if desktop helper reaping was verified. There is no
+automatic retry or replay of the failed shortcut or paste, and a success does
+not refill the per-client allowance.
 Encodings without an event type cannot distinguish repeat from a new press.
 A second unexpected read failure or unverified helper cleanup or staging
 disables clipboard imports for that client. Unverified staging also stops
-pathname and Kitty file imports in the same client. Refusals use fixed
-categories; input and clipboard contents are not logged.
+pathname and Kitty file imports in the same client and cancels pending Kitty
+requests. Refusals use fixed categories; input and clipboard contents are not
+logged.
 
 No packages are installed automatically.
 Missing helpers name the selected utility and its host package explicitly:
@@ -3660,9 +3665,13 @@ Use `--log-dir PATH` to override only `logs.directory` for one lifecycle
 invocation or private `oc-box logs` read. A custom directory must be absolute
 after `~` expansion. oc-box can create it privately on append; it won't fix
 unsafe permissions or follow symlinks. Use a dedicated directory: oc-box
-refuses to rotate or prune an unrecognized file with a reserved activity
-filename. A dashboard save checks an existing custom directory without
-creating it; writes recheck the selected directory. Changing the directory
+refuses to append to an unrecognized active file or rotate or prune an
+unrecognized archive. Don't precreate `activity.jsonl`. Custom rotations
+never overwrite an occupied destination. An interrupted or unverified prune
+can leave a reserved `.activity.prune` file that blocks later custom writes;
+it is retained for inspection, not automatically deleted. These checks do not
+isolate files from other processes running as your user. A dashboard save
+checks an existing custom directory without creating it. Changing the directory
 does not move or delete the previous journal, alter rotation settings, or
 change which workspace registry is used.
 

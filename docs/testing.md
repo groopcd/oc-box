@@ -142,6 +142,14 @@ override individual fields. Confirm no writes to saved config, no changes
 to the process environment or to XDG and `OC_BOX_STATE_HOME` selection, and
 that the former environment switches do not alter launcher or reader behavior.
 
+For custom journals, inject a rotation-destination collision, a changed source,
+and uncertain prune cleanup. Check that the existing destination is not
+overwritten and that an unverified quarantine is not deleted or reused on
+retry. Refuse pre-existing empty or malformed active data on repeated appends.
+Keep default-journal partial-tail recovery and successful-append-only mirroring
+covered separately. These fault tests do not establish protection from
+arbitrary mutations by processes running as the same user.
+
 Check lifecycle flag scope for `start` (including the implicit command),
 `reset`, `stop`, `sync`, `terminal`, and `web`. Check `--lifecycle-diagnostics`
 separately from the quiet default; it must not persist to later invocations.
@@ -194,6 +202,19 @@ explicit startup flags. Neither startup nor preference changes may read the
 clipboard or persist helper paths/content. These are policy regressions, not new
 live desktop/native-composition or rootless-Podman acceptance. The historical
 reports below predate persistent policy and retain their original scopes.
+
+The relay recovery in `12bc3d5` adds offline framing and helper/transfer
+failure cases in `tests/test_host_drop_input.py`, `tests/test_host_drop.py` and
+`tests/test_host_clipboard.py`. Check that over-limit ordinary paste streams
+byte-for-byte, holds at most a possible closing-delimiter prefix after overflow,
+and does not authorize an import until new input after the exact valid end.
+Malformed or incomplete framing must not look inside the paste for an import
+trigger; reserved Kitty replies remain private. Verify that only a later
+qualifying shortcut can recover from a first unexpected read with confirmed
+helper reaping, a success does not replenish that allowance, and unverified
+transfer stops all import routes in that client. Check fixed refusal categories
+and bounded cleanup without restart, replay or automatic prompt admission.
+The earlier human observations do not test this recovery behavior.
 
 The owner's earlier "it worked" report covers the PNG workflow on native 2.3.2.
 On diagnostic revision `af73035d848daa93ca832351564ba9635082568c`, the owner
@@ -737,8 +758,9 @@ removed. This stage has no native OpenCode logfile reader.
 `Ctrl+L`, `s`/`F2` and focused-terminal routing with Textual's headless behavior
 tools. Check the wide rail and compact header section picker without hiding log
 search. Search must stay visible and case-insensitive/literal across tabs, source
-changes, follow and pause. Check global retention of at most 2000 entries and
-the 1000-generated-entry display bound per refresh.
+changes, follow and pause. Check the ordinary 2,000-entry buffer, the private
+1,000-entry read bound and the separate explicit mirror snapshot of up to
+1,000 entries.
 Verify that input-clear controls are double-width error-colored crosses in
 reserved padding, excluded from copied field contents. Both icon cells must
 clear exactly once; crops through either half must preserve terminal-cell
@@ -747,7 +769,11 @@ wide and one-row compact headers restores the source-scoped entry count, never
 deletes entries or triggers backend/native work. Distinguish unfiltered entries
 from filtered matches, including zero and singular counts. A selected log
 viewport stays frozen while its fixed-size count updates without relayout or
-extra searches for unchanged snapshots.
+extra searches for unchanged same-source snapshots. Switch source while RAW
+or table output is selected; stale rows must not be copied or opened as
+details for the new source. Cover successful empty private reads, a changed
+directory with a read in flight while follow is paused, an unavailable Podman
+target, and a private tail refilled after eviction without refill oscillation.
 
 Verify bounded host resource cards and the selected-workspace inspector,
 compact resource-strip rendering and short fixed 0–100% CPU/RAM
@@ -869,7 +895,12 @@ The Logs table and RAW view use synthetic records for header sorting, column
 visibility, row inspection, source filtering and the bounded clipboard copy.
 Check that view choices never mutate logging policy or implicitly read either
 external source, and that switching between table and RAW does not reconstruct
-unvalidated text. Host logging settings use a private temporary config to
+unvalidated text. Exercise the 2,000-entry ordinary buffer independently of
+the explicitly loaded mirror snapshot (up to 1,000 entries); the latter is
+neither merged into ordinary sources nor refreshed by ordinary follow. Check
+that table, RAW, count and clipboard actions stay consistent with the selected
+source and filters when log policy or workspace context changes.
+Host logging settings use a private temporary config to
 exercise explicit saves, preservation of unrelated values, unsafe/stale-file
 refusals and demo/read-only guards. System-journal tests in this suite use
 injected reader results; they are not acceptance on a real host journal.
