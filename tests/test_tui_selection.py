@@ -178,6 +178,7 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
                     # The normal tab binding must work, not only direct widget access.
                     await pilot.press("5")
                     self.assertEqual(app.query_one(TabbedContent).active, "logs")
+                    await pilot.click("#log-mode")
                     log = app.query_one("#log-output")
                     span = self.visible_span(app, log, "2026-01-01T12:00:00Z")
                     original = app.screen._compositor.render_strips()[span[0][1]]
@@ -218,6 +219,7 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(outcome=outcome):
                 async with self.dashboard() as (app, pilot, copies, _):
                     await pilot.press("5")
+                    await pilot.click("#log-mode")
                     span = self.visible_span(
                         app, app.query_one("#log-output"), "2026-01-01T12:00:00Z"
                     )
@@ -579,6 +581,7 @@ class DashboardSelectionTests(unittest.IsolatedAsyncioTestCase):
             app._clipboard = "retained synthetic copy"
             app.action_tab("logs")
             await pilot.pause()
+            await pilot.click("#log-mode")
             log = app.query_one("#log-output")
             app.screen.selections = {log: Selection(Offset(0, 0), Offset(5, 0))}
             await pilot.pause()

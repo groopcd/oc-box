@@ -56,7 +56,7 @@ class LogFeedbackTests(unittest.IsolatedAsyncioTestCase):
                                 await pilot.pause(0.2)
                             self.assertEqual((field.value, app.log_query), ("", ""))
                             self.assertEqual(self.feedback(app), "2 log entries")
-                            self.assertEqual(len(app._rendered_logs), 2)
+                            self.assertEqual(len(app.logs.search()), 2)
                             self.assertIs(app.focused, field)
                             collect.assert_not_called()
                             logs.assert_not_called()
@@ -88,7 +88,9 @@ class LogFeedbackTests(unittest.IsolatedAsyncioTestCase):
             await self.ready(app, pilot)
             app.action_tab("logs")
             await pilot.pause()
+            await pilot.click("#log-mode")
             output = app.query_one("#log-output", RichLog)
+            self.assertTrue(output.display)
             selection = Selection(Offset(0, 0), Offset(5, 0))
             app.screen.selections = {output: selection}
             await pilot.pause()

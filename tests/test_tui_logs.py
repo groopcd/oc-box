@@ -141,6 +141,35 @@ class LogBufferTests(unittest.TestCase):
             buffer.append(entry)
         self.assertEqual(buffer.search(), [early, equivalent, late])
 
+    def test_source_order_and_minimum_severity_are_independent_of_table_sort(self):
+        buffer = logs.LogBuffer()
+        newer = self.entry("Zulu", timestamp="2026-11-10T12:01:00Z", level="debug")
+        older = self.entry(
+            "alpha", timestamp="2026-11-10T13:00:00+01:00", level="error"
+        )
+        unknown = self.entry("unknown", timestamp="", source="podman", level="")
+        warning = self.entry("Warning", source="podman", level="warning")
+        for entry in (newer, older, unknown, warning):
+            buffer.append(entry)
+        raw = buffer.search(source_order=True)
+        self.assertEqual(raw, [newer, older, unknown, warning])
+        self.assertEqual(
+            logs.sort_entries(raw, "timestamp"), [older, warning, newer, unknown]
+        )
+        self.assertEqual(
+            logs.sort_entries(raw, "level", True), [older, warning, newer, unknown]
+        )
+        self.assertEqual(
+            logs.sort_entries(raw, "message"), [older, unknown, warning, newer]
+        )
+        self.assertEqual(
+            buffer.search(level="info", source_order=True), [older, warning]
+        )
+        self.assertEqual(
+            buffer.search(level="debug", source_order=True), [newer, older, warning]
+        )
+        self.assertEqual(buffer.search("UNKNOWN", source_order=True), [unknown])
+
     def test_terminal_controls_and_field_sizes_are_sanitized(self):
         buffer = logs.LogBuffer()
         buffer.append(
@@ -268,8 +297,33 @@ class ActivityEntriesTests(unittest.TestCase):
             self.assertEqual(entry.message, activity_log.format_event(record))
             buffer = logs.LogBuffer()
             buffer.append(entry)
+            self.assertEqual(json.loads(buffer.search()[0].raw_line()), record)
             for query in ("WARN", "reason=time", "jobs_running=1"):
                 self.assertEqual(buffer.search(query), [entry])
+
+    def test_mirror_admits_only_safe_activity_fields_and_uses_bounded_default_reader(
+        self,
+    ):
+        record = {"event": "history.wait", "timestamp": "2026-11-10T12:00:00.000Z"}
+        invalid = {**record, "_CMDLINE": "synthetic arbitrary journal metadata"}
+        with patch.object(
+            logs.journal_output, "read_events", return_value=[invalid, record]
+        ) as read:
+            [entry] = logs.journal_entries()
+        read.assert_called_once_with(limit=logs.JOURNAL_LIMIT, level=None)
+        self.assertEqual((entry.source, entry.level), (logs.JOURNAL_SOURCE, "debug"))
+        self.assertEqual(json.loads(entry.raw_line()), record)
+        with (
+            patch.object(
+                logs.journal_output,
+                "read_events",
+                side_effect=logs.journal_output.JournalError("missing-tool"),
+            ),
+            patch.object(logs.activity_log, "read_events") as read_private,
+            self.assertRaises(logs.journal_output.JournalError),
+        ):
+            logs.journal_entries()
+        read_private.assert_not_called()
 
 
 class PodmanEntriesTests(unittest.TestCase):
@@ -300,6 +354,30 @@ class PodmanEntriesTests(unittest.TestCase):
         self.assertEqual(entries[1].timestamp, "")
         self.assertNotIn("synthetic-secret", str(entries))
         self.assertTrue(all(entry.source == "podman" for entry in entries))
+        self.assertEqual([entry.level for entry in entries], ["", ""])
+        self.assertEqual(
+            entries[0].raw_line(), "2026-11-10T12:00:01+00:00 Authorization: [REDACTED]"
+        )
+        self.assertEqual(entries[1].raw_line(), "untimed")
+
+    def test_raw_keeps_sanitized_source_spacing_and_omits_incomplete_byte_fragment(
+        self,
+    ):
+        line = "2026-11-10T12:00:00Z    \x1b[31mliteral [red]\x1b[0m  "
+        output = (
+            line + "\n2026-02-31T12:00:00Z invalid date\nincomplete password=sensitive"
+        )
+        with patch.object(logs, "_podman_output", return_value=(output, True)):
+            entries = logs.podman_entries(self.box, self.data)
+        self.assertEqual(
+            [entry.raw_line() for entry in entries],
+            [
+                "2026-11-10T12:00:00Z    literal [red]  ",
+                "2026-02-31T12:00:00Z invalid date",
+                "Podman log output truncated (byte limit).",
+            ],
+        )
+        self.assertEqual(entries[1].timestamp, "")
 
     def test_normal_ownership_helper_uses_only_readonly_inspection(self):
         from oc_box import oc_box as box

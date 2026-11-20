@@ -637,7 +637,9 @@ class DisplayPerformanceTests(unittest.IsolatedAsyncioTestCase):
             await self.ready(app, pilot)
             app.action_logs()
             await pilot.pause()
+            await pilot.click("#log-mode")
             output = app.query_one("#log-output", RichLog)
+            self.assertTrue(output.display)
             # Replace the source with a short tail first; then append one line
             # while staying under the existing bounded retention limit.
             entries = backend.logs()[:100]

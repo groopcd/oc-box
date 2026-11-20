@@ -138,10 +138,6 @@ async def benchmark():
             "ten_unchanged_session_renders",
             lambda: [app._render_sessions() for _ in range(10)],
         )
-        await measure(
-            "five_unchanged_log_snapshots",
-            lambda: [app._apply_logs(entries) for _ in range(5)],
-        )
 
         def burst(ident, final):
             field = app.query_one(ident, Input)
@@ -155,6 +151,13 @@ async def benchmark():
             "session_typing_burst",
             lambda: burst("#session-search", "Synthetic 099"),
             settle=True,
+        )
+        app.action_tab("logs")
+        await pilot.pause()
+        await pilot.click("#log-mode")
+        await measure(
+            "five_unchanged_log_snapshots",
+            lambda: [app._apply_logs(entries) for _ in range(5)],
         )
         await measure(
             "log_typing_burst",

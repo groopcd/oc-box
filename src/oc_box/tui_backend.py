@@ -549,3 +549,12 @@ class DashboardBackend:
             _, data = self.selected(workspace)
             result.extend(podman_entries(self._queries, data))
         return result
+
+    def journal_mirror_logs(self):
+        if __package__:
+            from .tui_logs import journal_entries
+        else:
+            from tui_logs import journal_entries
+
+        # This source is never included in the private/Podman refresh path.
+        return journal_entries()

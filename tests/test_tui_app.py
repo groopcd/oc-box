@@ -1129,7 +1129,9 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             await self.settle(app, pilot)
             app.action_tab("logs")
             await pilot.pause()
+            await pilot.click("#log-mode")
             output = app.query_one("#log-output", RichLog)
+            self.assertTrue(output.display)
             with (
                 patch.object(output, "clear", wraps=output.clear) as clear,
                 patch.object(output, "write", wraps=output.write) as write,

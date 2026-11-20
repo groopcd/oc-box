@@ -10,8 +10,10 @@ from textual.widgets import Button, Input, Label, Select, Static, Switch
 
 if __package__:
     from .tui_clipboard import ClipboardInput
+    from .tui_logs import JOURNAL_SOURCE
 else:
     from tui_clipboard import ClipboardInput
+    from tui_logs import JOURNAL_SOURCE
 
 REFRESH_INTERVALS = tuple(range(1, 61))
 SESSION_SCOPES = (
@@ -23,6 +25,14 @@ LOG_SOURCES = (
     ("All sources", "all"),
     ("oc-box activity", "oc-box"),
     ("Selected Podman container", "podman"),
+    ("System journal mirror", JOURNAL_SOURCE),
+)
+LOG_LEVELS = (
+    ("All severities", "all"),
+    ("Debug and higher", "debug"),
+    ("Info and higher", "info"),
+    ("Warn and higher", "warn"),
+    ("Error only", "error"),
 )
 DEFAULT_SETTINGS = MappingProxyType(
     {
@@ -34,6 +44,7 @@ DEFAULT_SETTINGS = MappingProxyType(
         "session_filter": "",
         "log_follow": True,
         "log_source": "all",
+        "log_level": "all",
         "log_query": "",
     }
 )
@@ -168,13 +179,23 @@ class SettingsPanel(Vertical):
                             id="pref-log-source",
                         )
                     with Horizontal(classes="settings-row"):
+                        yield Label("Minimum severity")
+                        yield Select(
+                            list(LOG_LEVELS),
+                            value=self.values["log_level"],
+                            allow_blank=False,
+                            id="pref-log-level",
+                        )
+                    with Horizontal(classes="settings-row"):
                         yield Label("Log search")
                         yield ClipboardInput(
                             self.values["log_query"], id="pref-log-query"
                         )
                     yield Static(
-                        "Search stays available while paused. Retention: 2,000 entries / eight sources in memory; "
-                        "Podman logs require explicit Load. Search text is not saved to disk.",
+                        "Search stays available while paused. Retention: 2,000 entries / eight sources "
+                        "plus a separate 1,000-entry mirror snapshot in memory. "
+                        "Podman and journal mirror logs require explicit Load. "
+                        "Search text is not saved to disk.",
                         markup=False,
                     )
                 with Vertical(classes="settings-topic"):
@@ -218,6 +239,7 @@ class SettingsPanel(Vertical):
             "session_filter": self.query_one("#pref-session-filter", Input).value,
             "log_follow": self.query_one("#pref-log-follow", Switch).value,
             "log_source": self.query_one("#pref-log-source", Select).value,
+            "log_level": self.query_one("#pref-log-level", Select).value,
             "log_query": self.query_one("#pref-log-query", Input).value,
         }
 
@@ -241,6 +263,7 @@ class SettingsPanel(Vertical):
             ("theme", "#pref-theme"),
             ("session_scope", "#pref-session-scope"),
             ("log_source", "#pref-log-source"),
+            ("log_level", "#pref-log-level"),
         ):
             self.query_one(selector, Select).value = values[key]
         for key, selector in (
@@ -267,6 +290,7 @@ class SettingsPanel(Vertical):
         for key, selector in (
             ("session_scope", "#pref-session-scope"),
             ("log_source", "#pref-log-source"),
+            ("log_level", "#pref-log-level"),
         ):
             self.query_one(selector, Select).value = DEFAULT_SETTINGS[key]
         self.query_one("#pref-interval", Input).value = str(

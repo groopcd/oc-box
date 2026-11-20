@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import threading
 from copy import deepcopy
+from dataclasses import replace
 from pathlib import Path
 
 from rich.text import Text
@@ -27,6 +28,7 @@ from textual.widgets import (
     LoadingIndicator,
     RichLog,
     Select,
+    SelectionList,
     Static,
     Switch,
     TabbedContent,
@@ -36,7 +38,13 @@ from textual.widgets import (
 if __package__:
     from . import status_report
     from .tui_backend import plain, TerminalAttachmentError
-    from .tui_logs import LogBuffer, LogEntry
+    from .tui_logs import (
+        JOURNAL_LIMIT,
+        JOURNAL_SOURCE,
+        LOG_COLUMNS,
+        LogBuffer,
+        sort_entries,
+    )
     from .tui_sessions import FavoriteStore, SessionCatalog
     from .tui_notifications import failure_notice
     from .tui_terminal import NativeTerminal
@@ -56,16 +64,24 @@ if __package__:
         percentage,
     )
     from .tui_settings import (
-        SettingsPanel,
-        RoundedSwitch,
-        REFRESH_INTERVALS,
         DEFAULT_SETTINGS,
+        LOG_LEVELS,
+        LOG_SOURCES,
+        REFRESH_INTERVALS,
+        RoundedSwitch,
+        SettingsPanel,
     )
     from .tui_management import ManagementActions, StoragePanel, BackupPanel
 else:
     import status_report
     from tui_backend import plain, TerminalAttachmentError
-    from tui_logs import LogBuffer, LogEntry
+    from tui_logs import (
+        JOURNAL_LIMIT,
+        JOURNAL_SOURCE,
+        LOG_COLUMNS,
+        LogBuffer,
+        sort_entries,
+    )
     from tui_sessions import FavoriteStore, SessionCatalog
     from tui_notifications import failure_notice
     from tui_terminal import NativeTerminal
@@ -85,10 +101,12 @@ else:
         percentage,
     )
     from tui_settings import (
-        SettingsPanel,
-        RoundedSwitch,
-        REFRESH_INTERVALS,
         DEFAULT_SETTINGS,
+        LOG_LEVELS,
+        LOG_SOURCES,
+        REFRESH_INTERVALS,
+        RoundedSwitch,
+        SettingsPanel,
     )
     from tui_management import ManagementActions, StoragePanel, BackupPanel
 
@@ -143,6 +161,77 @@ class Confirm(ModalScreen):
                 self.app._show_failure_notice(notice)
                 return
             self.dismiss(True)
+
+
+class LogColumns(ModalScreen):
+    BINDINGS = [("escape", "dismiss", "Cancel")]
+    CSS = """
+    LogColumns { align: center middle; }
+    LogColumns > Vertical { width: 40; max-width: 95%; height: auto;
+      padding: 1 2; border: round $primary; background: $surface; }
+    LogColumns SelectionList { height: 5; }
+    LogColumns Horizontal { height: 3; }
+    """
+
+    def __init__(self, columns):
+        super().__init__()
+        self.columns = columns
+
+    def compose(self):
+        with Vertical():
+            yield Label("Visible metadata columns")
+            yield SelectionList(
+                *(
+                    (label, key, key in self.columns)
+                    for key, label, _ in LOG_COLUMNS
+                    if key != "message"
+                ),
+                id="log-column-options",
+            )
+            with Horizontal():
+                yield Button("Cancel", id="log-columns-cancel")
+                yield Button("Apply", id="log-columns-apply", variant="primary")
+
+    def on_button_pressed(self, event):
+        event.stop()
+        if event.button.id == "log-columns-apply":
+            self.dismiss(frozenset(self.query_one(SelectionList).selected))
+        else:
+            self.dismiss(None)
+
+
+class LogDetails(ModalScreen):
+    BINDINGS = [("escape", "dismiss", "Close")]
+    CSS = """
+    LogDetails { align: center middle; }
+    LogDetails > Vertical { width: 96; max-width: 95%; height: 80%; max-height: 36;
+      padding: 1 2; border: round $primary; background: $surface; }
+    LogDetails VerticalScroll { height: 1fr; }
+    LogDetails Button { height: 3; }
+    """
+
+    def __init__(self, entry):
+        super().__init__()
+        self.entry = entry
+
+    def compose(self):
+        with Vertical():
+            yield Label("Log entry")
+            with VerticalScroll():
+                yield Static(
+                    Text(
+                        f"Time: {self.entry.timestamp or 'Unavailable'}\n"
+                        f"Source: {self.entry.source or 'Unavailable'}\n"
+                        f"Severity: {self.entry.level or 'Unavailable'}\n\n"
+                        f"{self.entry.message}"
+                    ),
+                    id="log-detail-text",
+                )
+            yield Button("Close", id="log-detail-close")
+
+    def on_button_pressed(self, event):
+        event.stop()
+        self.dismiss()
 
 
 class DashboardApp(ManagementActions, ClipboardActions, App):
@@ -224,7 +313,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     #session-spinner { display: none; width: 5; height: 1; }
     #session-progress-text { width: 1fr; height: auto; }
     #session-details { height: auto; max-height: 7; }
-    #log-output { height: 1fr; }
+    #log-table, #log-output { height: 1fr; min-height: 4; }
+    #log-source { width: 26; }
+    #log-level { width: 21; margin-left: 1; }
+    #log-view-tools Button { width: auto; min-width: 8; padding: 0 1; }
+    #log-help, #log-target { height: auto; color: $text-muted; }
+    #log-mirror-status { height: auto; color: $text-muted; }
     #notice { height: auto; max-height: 3; color: $warning; }
     .toolbar { height: auto; min-height: 3; overflow-x: auto; }
     .toolbar Button { margin-right: 1; }
@@ -312,6 +406,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._associations = []
         self.sessions, self.visible_sessions = [], []
         self.logs = LogBuffer(max_entries=2000)
+        self._mirror_logs = LogBuffer(max_entries=JOURNAL_LIMIT)
         self.log_query = ""
         self.podman_workspace = None
         self.favorites = (
@@ -324,8 +419,18 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._rendered_logs = None
         self._log_snapshot = None
         self._log_revision = 0
-        self._log_render_key = None
+        self._raw_render_key = None
         self._log_search_snapshot = None
+        self._log_table_render_key = None
+        self._log_mode = "table"
+        self._log_sort = ("timestamp", False)
+        self._log_columns = frozenset(key for key, _, _ in LOG_COLUMNS)
+        self._mounted_log_columns = None
+        self._log_table_entries = {}
+        self._log_row_keys = {}
+        self._log_row_sequence = 0
+        self._podman_request = 0
+        self._mirror_loading = False
         self._filter_timers = {}
         self._filter_generations = {}
         self._table_snapshots = {}
@@ -531,39 +636,64 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                     self._terminal_widget = NativeTerminal(id="native-terminal")
                     yield self._terminal_widget
                 with TabPane("Logs", id="logs"):
-                    with Horizontal(classes="toolbar"):
+                    with Horizontal(classes="toolbar", id="log-filter-tools"):
                         yield Select(
-                            [
-                                ("All sources", "all"),
-                                ("oc-box activity", "oc-box"),
-                                ("Selected Podman container", "podman"),
-                            ],
+                            LOG_SOURCES,
                             value=DEFAULT_SETTINGS["log_source"],
                             allow_blank=False,
                             id="log-source",
+                        )
+                        yield Select(
+                            LOG_LEVELS,
+                            value=DEFAULT_SETTINGS["log_level"],
+                            allow_blank=False,
+                            id="log-level",
                         )
                         yield Label("Follow")
                         yield RoundedSwitch(
                             value=DEFAULT_SETTINGS["log_follow"], id="log-follow"
                         )
-                        yield Button("Load Podman logs…", id="load-podman")
+                    with Horizontal(classes="toolbar", id="log-view-tools"):
+                        yield Button("RAW", id="log-mode")
+                        yield Button("Columns…", id="log-columns")
+                        yield Button("Details…", id="log-details", disabled=True)
+                        copy_all = Button("Copy all", id="log-copy-all")
+                        copy_all.display = False
+                        yield copy_all
+                        yield Button("Load Podman…", id="load-podman")
+                        yield Button("Load mirror", id="load-journald")
                     yield Static(
-                        "Generated oc-box events contain fixed categories only. External container logs "
-                        "may contain private data: redaction is best-effort, and they are never copied to disk.",
+                        "Click a header to sort. Choose a row, then Details.",
+                        id="log-help",
                         markup=False,
                     )
                     yield Static(
-                        "No external container log source selected.",
+                        "Podman output may contain private data; redaction is best-effort. "
+                        "External logs are kept in memory only.",
                         id="log-target",
                         markup=False,
                     )
-                    yield SelectableRichLog(
+                    mirror_status = Static(
+                        "Mirror not loaded. Load mirror reads one same-user snapshot.",
+                        id="log-mirror-status",
+                        markup=False,
+                    )
+                    mirror_status.display = False
+                    yield mirror_status
+                    yield SelectableDataTable(
+                        id="log-table",
+                        cursor_type="row",
+                        zebra_stripes=True,
+                    )
+                    output = SelectableRichLog(
                         id="log-output",
                         max_lines=2000,
                         wrap=True,
                         markup=False,
                         highlight=False,
                     )
+                    output.display = False
+                    yield output
                 with TabPane("Storage", id="storage"):
                     yield StoragePanel(read_only=self.read_only, demo=self.demo)
                 with TabPane("Backup/restore", id="backups"):
@@ -695,6 +825,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             panel = self.query_one(SettingsPanel)
             if not panel.dirty:
                 panel.load_values(self._settings_snapshot())
+        elif tab == "logs":
+            self._render_logs()
 
     def on_tabbed_content_tab_activated(self, event):
         if event.tabbed_content.id == "content" and event.tabbed_content.is_attached:
@@ -812,6 +944,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             "session_filter": self.query_one("#session-search", Input).value,
             "log_follow": self.query_one("#log-follow", Switch).value,
             "log_source": self.query_one("#log-source", Select).value,
+            "log_level": self.query_one("#log-level", Select).value,
             "log_query": self.query_one("#log-search", Input).value,
         }
 
@@ -855,7 +988,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             and isinstance(values.get("theme"), str)
             and values.get("theme") in self.available_themes
             and values.get("session_scope") in ("global", "project", "workspace")
-            and values.get("log_source") in ("all", "oc-box", "podman")
+            and values.get("log_source") in tuple(value for _, value in LOG_SOURCES)
+            and values.get("log_level") in tuple(value for _, value in LOG_LEVELS)
             and all(
                 type(values.get(key)) is bool
                 for key in ("auto_refresh", "details", "log_follow")
@@ -881,6 +1015,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self.query_one("#session-search", Input).value = values["session_filter"]
         self.query_one("#log-follow", Switch).value = values["log_follow"]
         self.query_one("#log-source", Select).value = values["log_source"]
+        self.query_one("#log-level", Select).value = values["log_level"]
         self.query_one("#log-search", Input).value = values["log_query"]
         self.query_one(SettingsPanel).load_values(self._settings_snapshot())
         self._render_monitoring_state()
@@ -1048,7 +1183,9 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             # Storage scans update an existing report in place.
             self._monitor_snapshots[selector] = deepcopy(state)
 
-    def _update_table(self, selector, rows, *, selected=None, source=None):
+    def _update_table(
+        self, selector, rows, *, selected=None, source=None, append_only=False
+    ):
         """Only changed cells touch Textual; structural changes retain the view.
 
         A source switch is a new selection namespace even when native IDs match.
@@ -1066,7 +1203,22 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         same_source = had_view and bool(previous) and previous_source == source
         old_ids = tuple(key for key, _ in previous)
         new_ids = tuple(key for key, _ in rows)
-        if same_source and old_ids == new_ids:
+        appended = (
+            append_only
+            and same_source
+            and rows[: len(previous)] == previous
+            and len(rows) > len(previous)
+        )
+        if appended:
+            for key, cells in rows[len(previous) :]:
+                table.add_row(
+                    *(
+                        self._table_text(selector, i, cell)
+                        for i, cell in enumerate(cells)
+                    ),
+                    key=key,
+                )
+        elif same_source and old_ids == new_ids:
             columns = tuple(table.columns)
             for (key, old), (_, new) in zip(previous, rows):
                 for index, (column, before, after) in enumerate(zip(columns, old, new)):
@@ -1103,7 +1255,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             if same_source:
                 table.scroll_to(x=scroll.x, y=scroll.y, animate=False, force=True)
         self._table_snapshots[selector] = (source, rows)
-        if same_source and old_ids != new_ids:
+        if same_source and old_ids != new_ids and not appended:
             # DataTable's coordinate watcher queues its own cursor-into-view
             # after rebuilding dimensions, even with move_cursor(scroll=False).
             # Restore after that callback, but never over a newer view or user
@@ -1184,6 +1336,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             if isinstance(widget, DataTable) and widget.id in (
                 "workspaces",
                 "session-table",
+                "log-table",
             ):
                 selector = "#" + widget.id
                 self._table_scroll_generations[selector] = (
@@ -1365,7 +1518,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                 return
             if event.value != self.query_one("#content", TabbedContent).active:
                 self.action_tab(event.value)
-        elif event.select.id == "log-source":
+        elif event.select.id in {"log-source", "log-level"}:
             self._render_logs()
         elif event.select.id == "session-scope":
             self._session_source_changed()
@@ -1398,6 +1551,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         elif action == "delete":
             self.prepare_delete(self._session(), self.catalog)
         elif action == "load-podman":
+            if self._clipboard_private():
+                return
             target = self.selected
             self.push_screen(
                 Confirm(
@@ -1405,6 +1560,24 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                     "private application output. Redaction is best-effort; no copy is saved."
                 ),
                 lambda ok: self._load_podman(target) if ok else None,
+            )
+        elif action == "load-journald" and not self._clipboard_private():
+            self._load_mirror()
+        elif action == "log-mode" and not self._clipboard_private():
+            self._switch_log_mode()
+        elif action == "log-columns" and not self._clipboard_private():
+            self.push_screen(LogColumns(self._log_columns), self._choose_log_columns)
+        elif action == "log-details" and not self._clipboard_private():
+            self._show_log_details()
+        elif (
+            action == "log-copy-all"
+            and self._log_mode == "raw"
+            and not self._clipboard_private()
+        ):
+            # Use the current input even before the debounced paint.
+            _, entries = self._matching_logs(self.query_one("#log-search", Input).value)
+            self.action_copy_selection(
+                text="\n".join(entry.raw_line() for entry in entries)
             )
         elif action in ("terminal-owner", "terminal-selected"):
             self._confirm_terminal(action == "terminal-selected")
@@ -1456,9 +1629,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             )
             return
         self.podman_workspace = workspace
-        self.query_one("#log-target", Static).update(
-            f"External container logs: workspace {workspace}. Source changes only on explicit Load."
+        self._podman_request += 1
+        self._update_text(
+            "#log-target",
+            f"Podman workspace: {workspace} · memory only; redaction is best-effort.",
         )
+        self._render_logs()
         self.refresh_logs()
 
     @work(thread=True, group="logs", exit_on_error=False)
@@ -1467,6 +1643,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             return
         self._logging = True
         self._last_logs = time.monotonic()
+        request = self._podman_request
         workspace = self.podman_workspace
         try:
             entries = self.backend.logs(workspace)
@@ -1481,30 +1658,78 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         finally:
             self._logging = False
             self._log_lock.release()
+            # An explicit Load racing a slow follow must not be lost when
+            # Follow is paused. Coalesce only to the latest reviewed target.
+            if self.is_running and request != self._podman_request:
+                self.call_from_thread(self.refresh_logs)
 
     def _apply_logs(self, entries, workspace=None):
-        if workspace != self.podman_workspace:
-            entries = [entry for entry in entries if entry.source != "podman"]
-        if workspace:
-            entries = [
-                LogEntry(
-                    entry.timestamp, "podman:" + workspace, entry.level, entry.message
-                )
-                if entry.source == "podman"
-                else entry
-                for entry in entries
-            ]
-        snapshot = (workspace, tuple(entries))
-        if snapshot != self._log_snapshot:
-            for source in {entry.source for entry in entries}:
-                self.logs.replace(
-                    source, [entry for entry in entries if entry.source == source]
-                )
-            self._log_snapshot = snapshot
-            self._log_revision += 1
+        sources = {}
+        for entry in entries:
+            if entry.source == JOURNAL_SOURCE:
+                continue
+            if entry.source == "podman":
+                if workspace != self.podman_workspace:
+                    continue
+                if workspace:
+                    entry = replace(entry, source="podman:" + workspace)
+            sources.setdefault(entry.source, []).append(entry)
+        if sources != self._log_snapshot:
+            old = self._log_snapshot or {}
+            changed = False
+            for source, snapshot in sources.items():
+                if old.get(source) != snapshot:
+                    self.logs.replace(source, snapshot)
+                    changed = True
+            self._log_snapshot = sources
+            if changed:
+                self._log_revision += 1
         self._render_logs()
         if self._activity_revision != self._log_revision:
             self._render_overview_activity()
+
+    def _load_mirror(self):
+        source = self.query_one("#log-source", Select)
+        source.value = JOURNAL_SOURCE
+        if self.demo:
+            self._update_text(
+                "#log-mirror-status", "Synthetic demo does not read the system journal."
+            )
+        elif not self._mirror_loading:
+            self._mirror_loading = True
+            self.query_one("#load-journald", Button).disabled = True
+            self._update_text(
+                "#log-mirror-status", "Loading a same-user mirror snapshot…"
+            )
+            self._read_mirror()
+
+    @work(thread=True, group="log-mirror", exit_on_error=False)
+    def _read_mirror(self):
+        try:
+            entries = self.backend.journal_mirror_logs()
+        except Exception:
+            entries = None
+        if self.is_running:
+            self.call_from_thread(self._apply_mirror, entries)
+
+    def _apply_mirror(self, entries):
+        self._mirror_loading = False
+        self.query_one("#load-journald", Button).disabled = False
+        if entries is None:
+            self._update_text(
+                "#log-mirror-status",
+                "Journal mirror unavailable. Any earlier snapshot remains; "
+                "select oc-box activity for the private log.",
+            )
+        else:
+            if self._mirror_logs.search(source_order=True) != entries:
+                self._mirror_logs.replace(JOURNAL_SOURCE, entries)
+                self._log_revision += 1
+            self._update_text(
+                "#log-mirror-status",
+                "Same-user mirror snapshot · Load mirror to refresh.",
+            )
+        self._render_logs()
 
     def _render_overview_activity(self):
         output = self.query_one("#overview-activity", Static)
@@ -1520,21 +1745,27 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         )
         self._activity_revision = self._log_revision
 
-    def _render_logs(self):
+    def _matching_logs(self, query):
         source = self.query_one("#log-source", Select).value
         if source == "podman" and self.podman_workspace:
             source = "podman:" + self.podman_workspace
-        output = self.query_one("#log-output", RichLog)
-        key = (self._log_revision, source, self.log_query.casefold())
+        level = self.query_one("#log-level", Select).value
+        key = (self._log_revision, source, level, query.casefold())
         if self._log_search_snapshot is None or self._log_search_snapshot[0] != key:
+            buffer = self._mirror_logs if source == JOURNAL_SOURCE else self.logs
             entries = tuple(
-                self.logs.search(
-                    self.log_query, source=None if source == "all" else source
+                buffer.search(
+                    query,
+                    source=None if source == "all" else source,
+                    level=None if level == "all" else level,
+                    source_order=True,
                 )
             )
             self._log_search_snapshot = (key, entries)
-        else:
-            entries = self._log_search_snapshot[1]
+        return self._log_search_snapshot
+
+    def _render_logs(self):
+        key, entries = self._matching_logs(self.log_query)
         count = len(entries)
         noun = (
             ("match" if count == 1 else "matches")
@@ -1544,13 +1775,152 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         # This fixed-size label must not request layout and invalidate the
         # separate log viewport's selection while its contents remain frozen.
         self._update_text("#log-hits", f"{count} log {noun}", layout=False)
+        self.query_one("#log-mirror-status", Static).display = key[1] == JOURNAL_SOURCE
+        if self.query_one("#content", TabbedContent).active != "logs":
+            return
+        if self._log_mode == "table":
+            self._render_log_table(key, entries)
+        else:
+            self._render_log_raw(key, entries)
+
+    def _switch_log_mode(self):
+        raw = self._log_mode != "raw"
+        self._log_mode = "raw" if raw else "table"
+        self.screen.clear_selection()
+        self.query_one("#log-mode", Button).label = "Table" if raw else "RAW"
+        self.query_one("#log-table", DataTable).display = not raw
+        self.query_one("#log-output", RichLog).display = raw
+        self.query_one("#log-columns", Button).display = not raw
+        self.query_one("#log-details", Button).display = not raw
+        self.query_one("#log-copy-all", Button).display = raw
+        self._render_logs()
+
+    def _choose_log_columns(self, columns):
+        if columns is not None:
+            self._log_columns = columns | {"message"}
+            self._render_logs()
+
+    def on_data_table_header_selected(self, event):
+        if (
+            event.data_table.id != "log-table"
+            or self._log_mode != "table"
+            or self._clipboard_private()
+        ):
+            return
+        self.screen.clear_selection()
+        column = event.column_key.value
+        current, descending = self._log_sort
+        if column in self._log_columns:
+            self._log_sort = (column, not descending if column == current else False)
+            self._render_logs()
+
+    def _show_log_details(self):
+        table = self.query_one("#log-table", DataTable)
+        rows = self._table_snapshots.get("#log-table", (None, ()))[1]
+        if self._log_mode == "table" and 0 <= table.cursor_row < len(rows):
+            entry = self._log_table_entries[rows[table.cursor_row][0]]
+            self.push_screen(LogDetails(entry))
+
+    def _render_log_table(self, key, entries):
+        table = self.query_one("#log-table", DataTable)
+        column, descending = self._log_sort
+        label = next(label for name, label, _ in LOG_COLUMNS if name == column)
+        self._update_text(
+            "#log-help",
+            f"{label} {'↓' if descending else '↑'} · Click a header to sort. "
+            "Choose a row, then Details.",
+        )
+        render_key = (key, self._log_sort, self._log_columns)
+        if table.text_selection is not None or render_key == self._log_table_render_key:
+            return
+        previous = self._log_table_render_key
+        follow_tail = (
+            previous is not None
+            and previous[0][1:] == key[1:]
+            and previous[1:] == render_key[1:]
+            and self._log_sort == ("timestamp", False)
+            and table.is_vertical_scroll_end
+            and self.query_one("#log-follow", Switch).value
+        )
+        columns = tuple(item for item in LOG_COLUMNS if item[0] in self._log_columns)
+        selected = None
+        if columns != self._mounted_log_columns:
+            old_rows = self._table_snapshots.get("#log-table", (None, ()))[1]
+            if previous is not None and previous[0][1] == key[1]:
+                if 0 <= table.cursor_row < len(old_rows):
+                    selected = old_rows[table.cursor_row][0]
+            table.clear(columns=True)
+            for name, label, width in columns:
+                table.add_column(label, key=name, width=width)
+            self._mounted_log_columns = columns
+
+        # Duplicate lines need different row keys. Keep stable prior keys for
+        # identical occurrences so normal sort/follow preserves the cursor.
+        keys, items, rows, occurrences = {}, {}, [], {}
+        for entry in sort_entries(entries, column, descending):
+            ordinal = occurrences.get(entry, 0)
+            occurrences[entry] = ordinal + 1
+            identity = (entry, ordinal)
+            row_key = self._log_row_keys.get(identity)
+            if row_key is None:
+                self._log_row_sequence += 1
+                row_key = str(self._log_row_sequence)
+            keys[identity] = row_key
+            items[row_key] = entry
+            cells = []
+            for name, _, _ in columns:
+                value = getattr(entry, name)
+                if name == "source":
+                    if value == JOURNAL_SOURCE:
+                        value = "Journal mirror"
+                    elif value.startswith("podman:"):
+                        value = value[:13]
+                cells.append(value or ("—" if name != "message" else ""))
+            rows.append((row_key, tuple(cells)))
+        self._log_row_keys, self._log_table_entries = keys, items
+        changed = self._update_table(
+            "#log-table",
+            tuple(rows),
+            source=(key[1], self._log_columns),
+            append_only=True,
+            selected=selected,
+        )
+        self.query_one("#log-details", Button).disabled = not rows
+        self._log_table_render_key = render_key
+        if changed and follow_tail:
+            table.call_after_refresh(
+                self._follow_log_tail,
+                render_key,
+                self._table_scroll_generations.get("#log-table", 0),
+            )
+
+    def _follow_log_tail(self, key, generation):
+        if (
+            not self.is_running
+            or key != self._log_table_render_key
+            or generation != self._table_scroll_generations.get("#log-table", 0)
+            or self._log_mode != "table"
+            or self.query_one("#content", TabbedContent).active != "logs"
+            or not self.query_one("#log-follow", Switch).value
+        ):
+            return
+        table = self.query_one("#log-table", DataTable)
+        if table.text_selection is None:
+            table.scroll_to(y=table.max_scroll_y, animate=False, force=True)
+
+    def _render_log_raw(self, key, entries):
+        self._update_text(
+            "#log-help",
+            "RAW · Source order, independent of table sort. Copy all includes off-screen matches.",
+        )
+        output = self.query_one("#log-output", RichLog)
         # Keep a highlighted log snapshot in place while it is being copied.
         # Search feedback still follows the current query/source while copying.
         if output.text_selection is not None:
             return
-        if key == self._log_render_key:
+        if key == self._raw_render_key:
             return
-        self._log_render_key = key
+        self._raw_render_key = key
         rendered = entries
         if rendered == self._rendered_logs:
             return
@@ -1565,9 +1935,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             output.clear()
         for entry in entries[len(previous) if appended else 0 :]:
             output.write(
-                text(
-                    f"{entry.timestamp} [{entry.source}] {entry.level}: {entry.message}"
-                ),
+                Text(entry.raw_line()),
                 scroll_end=at_end,
             )
         if not at_end:

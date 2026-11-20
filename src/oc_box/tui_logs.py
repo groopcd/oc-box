@@ -7,6 +7,7 @@ Podman is queried with the maintenance environment and a verified immutable ID;
 no container is started, entered, or otherwise changed by these readers.
 """
 
+import json
 import os
 import re
 import selectors
@@ -18,15 +19,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 if __package__:
-    from . import activity_log
+    from . import activity_log, journal_output
 else:
     import activity_log
+    import journal_output
 
 
 _MAX_ENTRIES = 10000
 _MAX_SOURCES = 8
 _MAX_OUTPUT_BYTES = 1024 * 1024
 _MAX_MESSAGE_CHARS = 4096
+_MAX_RAW_CHARS = _MAX_MESSAGE_CHARS + 80
 _PODMAN_TIMEOUT = 10
 _LABEL = "io.oc-box.workspace"
 _WORKSPACE = re.compile(r"[0-9a-f]{32}\Z")
@@ -57,6 +60,17 @@ _TOKEN = re.compile(
 )
 _URL_AUTH = re.compile(r"(?i)\b(https?://)[^\s/@:]+:[^\s/@]+@")
 
+JOURNAL_SOURCE = "journald"
+JOURNAL_LIMIT = 1000
+LOG_COLUMNS = (
+    ("timestamp", "Time", 26),
+    ("source", "Source", 13),
+    ("level", "Severity", 9),
+    ("message", "Message", 68),
+)
+_LEVEL_RANK = {level: rank for rank, level in enumerate(activity_log.LEVELS)}
+_LEVEL_RANK["warning"] = _LEVEL_RANK["warn"]
+
 
 @dataclass(frozen=True)
 class LogEntry:
@@ -64,6 +78,13 @@ class LogEntry:
     source: str
     level: str
     message: str
+    raw: str | None = None
+
+    def raw_line(self):
+        if self.raw is not None:
+            return self.raw
+        # Local diagnostics and synthetic samples may have no source record.
+        return " ".join(field for field in (self.timestamp, self.message) if field)
 
 
 def _clean(value, limit):
@@ -73,7 +94,8 @@ def _clean(value, limit):
     value = "".join(
         " " if char == "\t" else char
         for char in value
-        if char == "\t" or not unicodedata.category(char).startswith("C")
+        if char == "\t"
+        or unicodedata.category(char) not in {"Cc", "Cf", "Cn", "Co", "Cs", "Zl", "Zp"}
     )
     value = _URL_AUTH.sub(r"\1[REDACTED]@", value)
     value = _AUTH.sub(r"\1[REDACTED]", value)
@@ -91,6 +113,7 @@ def _entry(entry, *, source=None):
         _clean(entry.source if source is None else source, 64),
         _clean(entry.level, 16),
         _clean(entry.message, _MAX_MESSAGE_CHARS),
+        None if entry.raw is None else _clean(entry.raw, _MAX_RAW_CHARS),
     )
 
 
@@ -107,6 +130,26 @@ def _timestamp_key(timestamp):
         except (ValueError, OverflowError):
             pass
     return (0, datetime.min.replace(tzinfo=timezone.utc), 0)
+
+
+def sort_entries(entries, column, descending=False):
+    """Sort the table only, with stable ties and missing metadata last."""
+    known, unknown = [], []
+    for entry in entries:
+        if column == "timestamp":
+            present, *value = _timestamp_key(entry.timestamp)
+        elif column == "level":
+            value = _LEVEL_RANK.get(entry.level.casefold())
+            present = value is not None
+        else:
+            value = getattr(entry, column).casefold()
+            present = bool(value)
+        if present:
+            known.append((value, entry))
+        else:
+            unknown.append(entry)
+    known.sort(key=lambda item: item[0], reverse=descending)
+    return [entry for _, entry in known] + unknown
 
 
 class LogBuffer:
@@ -159,47 +202,82 @@ class LogBuffer:
         """Append a displayed entry, regardless of current filters."""
         self._put(_entry(entry))
 
-    def search(self, query="", source=None) -> list[LogEntry]:
-        """Case-insensitive literal matching over every LogEntry field."""
-        if not isinstance(query, str) or (
-            source is not None and not isinstance(source, str)
+    def search(
+        self,
+        query="",
+        source=None,
+        *,
+        level=None,
+        source_order=False,
+    ) -> list[LogEntry]:
+        """Filter display fields; RAW preserves the original order within each source."""
+        if (
+            not isinstance(query, str)
+            or (source is not None and not isinstance(source, str))
+            or (level is not None and level not in activity_log.LEVELS)
         ):
             return []
         query = query.casefold()
+        minimum = _LEVEL_RANK[level] if level is not None else -1
+        # A combined RAW view has no original inter-source ordering. Keep
+        # deterministic source groups even when one snapshot refreshes alone.
+        sources = (
+            sorted(self._sources.items()) if source_order else self._sources.items()
+        )
         rows = [
             row
-            for name, items in self._sources.items()
+            for name, items in sources
             if source is None or name == source
             for row in items
         ]
-        rows.sort(key=lambda row: (_timestamp_key(row[1].timestamp), row[0]))
+        if not source_order:
+            rows.sort(key=lambda row: (_timestamp_key(row[1].timestamp), row[0]))
         return [
             entry
             for _, entry in rows
-            if not query
-            or any(
-                query in field.casefold()
-                for field in (
-                    entry.timestamp,
-                    entry.source,
-                    entry.level,
-                    entry.message,
+            if _LEVEL_RANK.get(entry.level.casefold(), -1) >= minimum
+            and (
+                not query
+                or any(
+                    query in field.casefold()
+                    for field in (
+                        entry.timestamp,
+                        entry.source,
+                        entry.level,
+                        entry.message,
+                    )
                 )
             )
         ]
 
 
+def _activity_entries(records, source):
+    entries = []
+    for record in records:
+        clean = activity_log._sanitize(record)
+        if clean is not None:
+            entries.append(
+                LogEntry(
+                    clean["timestamp"],
+                    source,
+                    activity_log.event_level(clean),
+                    activity_log.format_event(clean),
+                    json.dumps(clean, ensure_ascii=True, separators=(",", ":")),
+                )
+            )
+    return entries
+
+
 def activity_entries(root=None, limit=1000) -> list[LogEntry]:
-    """Render only the journal's already-validated metadata as oc-box entries."""
-    return [
-        LogEntry(
-            record["timestamp"],
-            "oc-box",
-            activity_log.event_level(record),
-            activity_log.format_event(record),
-        )
-        for record in activity_log.read_events(root, limit=limit)
-    ]
+    """Read the private activity snapshot, with only validated JSONL in RAW."""
+    return _activity_entries(activity_log.read_events(root, limit=limit), "oc-box")
+
+
+def journal_entries(limit=JOURNAL_LIMIT) -> list[LogEntry]:
+    """Read only the same-UID mirror as a distinct, explicitly loaded source."""
+    return _activity_entries(
+        journal_output.read_events(limit=limit, level=None), JOURNAL_SOURCE
+    )
 
 
 class _LogUnavailable(Exception):
@@ -289,12 +367,20 @@ def podman_entries(box, data, tail=500) -> list[LogEntry]:
             ["logs", "--timestamps", "--tail", str(tail), ident],
             env,
         )
+        if truncated:
+            # Do not publish a byte-limited fragment that could end midway
+            # through a control sequence or a recognizable credential.
+            output = output[: output.rfind("\n") + 1]
         entries = []
         for line in output.splitlines()[-tail:]:
-            match = _TIME.match(line)
+            raw = _clean(line, _MAX_RAW_CHARS)
+            match = _TIME.match(raw)
+            if match and not _timestamp_key(match[1])[0]:
+                match = None
             timestamp = match[1] if match else ""
-            message = line[match.end() :] if match else line
-            entries.append(_entry(LogEntry(timestamp, "podman", "info", message)))
+            message = raw[match.end() :] if match else raw
+            # Podman does not provide authoritative severity in this format.
+            entries.append(_entry(LogEntry(timestamp, "podman", "", message, raw)))
         if truncated:
             entries.append(
                 LogEntry(
