@@ -2117,12 +2117,38 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             entry = self._log_table_entries[rows[table.cursor_row][0]]
             self.push_screen(LogDetails(entry))
 
+    def copy_to_clipboard(self, text):
+        # Native Screen copy joins rejected log selections into an empty
+        # string. Do not clear the app cache or send an empty OSC 52 write.
+        if (
+            text == ""
+            and self.screen_stack
+            and any(
+                isinstance(widget, _CurrentLogSelection)
+                for widget in self.screen.selections
+            )
+        ):
+            return False
+        return super().copy_to_clipboard(text)
+
     def action_copy_view(self):
-        if self.query_one(
-            "#content", TabbedContent
-        ).active == "logs" and not isinstance(self.screen, ModalScreen):
-            widget_id = "log-table" if self._log_mode == "table" else "log-output"
-            if not self._log_view_is_current(widget_id):
+        if not isinstance(self.screen, ModalScreen):
+            widget_id = None
+            if self.query_one("#content", TabbedContent).active == "logs":
+                widget_id = "log-table" if self._log_mode == "table" else "log-output"
+                if not self._log_view_is_current(widget_id):
+                    return
+            try:
+                # The widget render key can advance before Textual lays out
+                # the new mode or tab. Check the same compositor map that
+                # Copy View uses, not the widgets' requested visibility.
+                if any(
+                    isinstance(widget, _CurrentLogSelection) and widget.id != widget_id
+                    for widget in self.screen._compositor.visible_widgets
+                ):
+                    return
+            except (AttributeError, TypeError):
+                self._clipboard_notice("Visible screen copy is unavailable.")
                 return
         super().action_copy_view()
 
