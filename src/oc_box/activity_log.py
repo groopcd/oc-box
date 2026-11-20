@@ -301,9 +301,14 @@ def _locked(directory, *, write, custom=False):
         admitted = None
     else:
         admitted = _custom_lock_snapshot(directory)
+        if admitted is None and write and _empty_active_exists(directory):
+            # A cooperating writer may have created both entries since the
+            # first lookup. Wait on its lock before inspecting the active file.
+            admitted = _custom_lock_snapshot(directory)
+            if admitted is None:
+                # Never mint a lock alongside an unrecognized empty file.
+                raise ValueError("Unrecognized empty activity journal")
         if admitted is None and write:
-            # Do not mint a lock alongside an unrecognized empty active file.
-            _reject_empty_active(directory)
             try:
                 fd = _open_file(
                     directory, _LOCK, create=True, writable=True, exclusive=True
@@ -499,13 +504,11 @@ def _custom_lock_snapshot(directory):
     return info
 
 
-def _reject_empty_active(directory):
+def _empty_active_exists(directory):
     try:
-        info = _activity_stat(directory, _FILE)
+        return _activity_stat(directory, _FILE).st_size == 0
     except FileNotFoundError:
-        return
-    if not info.st_size:
-        raise ValueError("Unrecognized empty activity journal")
+        return False
 
 
 def _custom_inventory(directory):

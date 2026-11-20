@@ -809,6 +809,81 @@ class ActivityRotationTests(ActivityJournalFixture):
         self.assertFalse(self.record())
         self.assertEqual((custom / self.active.name).read_bytes(), b"")
 
+    def test_custom_lock_bootstrap_waits_for_cooperating_writer(self):
+        def verify(case, owner_bytes, expected):
+            custom = self.base / case
+            active = custom / self.active.name
+            self.configure(directory=str(custom))
+            lock_snapshot = journal._custom_lock_snapshot
+            lock_fd = active_fd = None
+
+            with contextlib.ExitStack() as owner:
+
+                def start_owner_after_missing_lock(directory):
+                    nonlocal lock_fd, active_fd
+                    snapshot = lock_snapshot(directory)
+                    if lock_fd is None:
+                        self.assertIsNone(snapshot)
+                        # B creates and holds the lock after A observes absence,
+                        # then exclusively creates the still-empty active file.
+                        lock_fd = journal._open_file(
+                            directory,
+                            journal._LOCK,
+                            create=True,
+                            writable=True,
+                            exclusive=True,
+                        )
+                        owner.callback(os.close, lock_fd)
+                        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        active_fd = journal._open_file(
+                            directory,
+                            journal._FILE,
+                            create=True,
+                            writable=True,
+                            exclusive=True,
+                        )
+                        owner.callback(os.close, active_fd)
+                    return snapshot
+
+                def finish_owner_on_wait(_delay):
+                    # The real nonblocking flock must first report contention.
+                    self.assertEqual(active.read_bytes(), b"")
+                    if owner_bytes:
+                        self.assertEqual(
+                            os.write(active_fd, owner_bytes), len(owner_bytes)
+                        )
+                        os.fsync(active_fd)
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+
+                with (
+                    patch.object(
+                        journal,
+                        "_custom_lock_snapshot",
+                        side_effect=start_owner_after_missing_lock,
+                    ) as snapshot,
+                    patch.object(journal, "_LOCK_TIMEOUT", 5),
+                    patch.object(
+                        journal.time, "sleep", side_effect=finish_owner_on_wait
+                    ) as wait,
+                ):
+                    self.assertEqual(self.record(duration_ms=2), expected)
+                    self.assertEqual(snapshot.call_count, 2)
+                    wait.assert_called_once()
+
+            if expected:
+                self.assertEqual(self.durations(strict_snapshot=True), [1, 2])
+            else:
+                self.assertFalse(self.record(duration_ms=3))
+                self.assertEqual(active.read_bytes(), owner_bytes)
+
+        for case, owner_bytes, expected in (
+            ("valid", self.legacy_row(), True),
+            ("empty", b"", False),
+            ("malformed", b"{}\n", False),
+        ):
+            with self.subTest(case=case):
+                verify(case, owner_bytes, expected)
+
     def test_quiet_custom_append_checks_active_once_without_reading_archives(self):
         custom = self.custom_journal(SystemMaxFileSize="4M", MaxFileSec="1d")
         self.assertTrue(self.record(duration_ms=1))
