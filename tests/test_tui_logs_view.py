@@ -24,7 +24,7 @@ if AVAILABLE:
         Switch,
     )
 
-    from oc_box import activity_log, journal_output, tui_logs
+    from oc_box import activity_log, journal_output, log_config, tui_logs
     from oc_box.tui import DemoBackend
     from oc_box.tui_app import DashboardApp
     from oc_box.tui_logs import (
@@ -148,14 +148,14 @@ class LogViewTests(unittest.IsolatedAsyncioTestCase):
                 super().__init__([])
                 self.entered, self.finish = threading.Event(), threading.Event()
 
-            def logs(self, workspace=None):
-                entries = tui_logs.activity_entries()
+            def private_logs(self):
+                snapshot = tui_logs.activity_snapshot()
                 if self.hold:
                     self.hold = False
                     self.entered.set()
                     if not self.finish.wait(5):
                         raise TimeoutError
-                return entries
+                return snapshot
 
             def podman_logs(self, workspace):
                 raise AssertionError("No Podman target was requested")
@@ -219,6 +219,35 @@ class LogViewTests(unittest.IsolatedAsyncioTestCase):
                     self.assertEqual(self.messages(table), ["session.archived"])
                     self.assertFalse(app.query_one("#log-follow", Switch).value)
 
+                # Another process already changed to the entered path. The
+                # optimistic save must still refuse, but both config samples
+                # now agree and the old paused snapshot must be revoked.
+                await app.workers.wait_for_complete()
+                self.assertEqual(
+                    [e.message for e in app.logs.search(source="oc-box")],
+                    ["session.archived"],
+                )
+                external = Path(temporary) / "external-log"
+                _, changed = log_config.save_host_settings(
+                    log_config.load_host_settings(),
+                    directory=str(external),
+                    journald=False,
+                )
+                self.assertTrue(changed)
+                app.action_settings()
+                panel.query_one("#host-logging-directory", Input).value = str(external)
+                app.on_settings_panel_save_host_logging_requested(
+                    SettingsPanel.SaveHostLoggingRequested(panel)
+                )
+                self.assertIn(
+                    "Host config changed",
+                    str(panel.query_one("#host-logging-result", Static).render()),
+                )
+                self.assertFalse(app.logs.search(source="oc-box"))
+                app.action_tab("logs")
+                self.assertEqual(table.row_count, 0)
+                self.assertFalse(external.exists())
+
     async def test_unavailable_podman_clears_selected_rows_without_blocking_private_refresh(
         self,
     ):
@@ -231,6 +260,9 @@ class LogViewTests(unittest.IsolatedAsyncioTestCase):
             def __init__(self):
                 super().__init__([LogEntry("", "oc-box", "info", "private before")])
                 self.entered, self.finish = threading.Event(), threading.Event()
+
+            def private_logs(self):
+                return Path("/synthetic/log"), self.entries
 
             def podman_logs(self, target):
                 if target != workspace:
@@ -274,6 +306,13 @@ class LogViewTests(unittest.IsolatedAsyncioTestCase):
                         [e.message for e in app.logs.search(source="oc-box")],
                         ["private after"],
                     )
+                    with patch.object(
+                        backend,
+                        "private_logs",
+                        return_value=(Path("/synthetic/superseded"), backend.entries),
+                    ):
+                        await app.refresh_logs().wait()
+                    self.assertFalse(app.logs.search(source="oc-box"))
                 finally:
                     backend.finish.set()
                 await app.workers.wait_for_complete()

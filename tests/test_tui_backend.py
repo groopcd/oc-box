@@ -80,6 +80,9 @@ class DashboardBackendTests(unittest.TestCase):
                 self.assertTrue(activity_log.record_event("tui.started"))
                 [entry] = self.backend.logs()
                 self.assertEqual(entry.message, "tui.started")
+                path, entries = self.backend.private_logs()
+                self.assertEqual(path, state / "log" / "activity.jsonl")
+                self.assertEqual(entries, [entry])
 
             data = {"id": "a" * 32}
             external_entry = tui_logs.LogEntry("", "podman", "info", "synthetic output")

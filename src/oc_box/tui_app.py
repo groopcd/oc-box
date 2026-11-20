@@ -1021,7 +1021,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         previous = activity_path()
         event.panel.save_host_logging()
         current = activity_path()
-        if current != previous:
+        if current != previous or current != self._private_log_path:
             self._private_log_request += 1
             self._reset_private_logs(current)
             if not self._log_lock.locked():
@@ -1717,17 +1717,16 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         private_request = self._private_log_request
         podman_request = self._podman_request
         workspace = self.podman_workspace
-        split = hasattr(self.backend, "podman_logs")
+        split = hasattr(self.backend, "private_logs")
         try:
             if split:
-                before = activity_path()
-                entries = self.backend.logs()
-                after = activity_path()
+                path, entries = self.backend.private_logs()
+                current = activity_path()
                 if self.is_running:
                     self.call_from_thread(
                         self._apply_private_logs,
-                        entries if before == after else [],
-                        after,
+                        entries if path is not None and path == current else (),
+                        current,
                         private_request,
                     )
             else:

@@ -549,6 +549,13 @@ class DashboardBackend:
             result.extend(self.podman_logs(workspace))
         return result
 
+    def private_logs(self):
+        if __package__:
+            from .tui_logs import activity_snapshot
+        else:
+            from tui_logs import activity_snapshot
+        return activity_snapshot()
+
     def podman_logs(self, workspace):
         """Independently refresh a consented, currently registered target."""
         if __package__:

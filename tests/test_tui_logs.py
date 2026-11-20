@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from oc_box import activity_log
+from oc_box import activity_log, log_config
 from oc_box import tui_logs as logs
 
 
@@ -267,6 +267,29 @@ class LogBufferTests(unittest.TestCase):
 
 
 class ActivityEntriesTests(unittest.TestCase):
+    def test_activity_snapshot_uses_one_policy_to_identify_and_read_records(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            policy_a, policy_b = (
+                log_config._policy({"logs": {"directory": temporary + "/" + name}})
+                for name in ("journal-a", "journal-b")
+            )
+            for policy, event in (
+                (policy_a, "history.wait"),
+                (policy_b, "session.archived"),
+            ):
+                with patch.object(activity_log, "_policy", return_value=policy):
+                    self.assertTrue(activity_log.record_event(event))
+
+            # A second policy load could choose B before an observer sees A
+            # again. Path and records must come from the one policy selected.
+            with patch.object(
+                activity_log, "_policy", side_effect=[policy_a, policy_b, policy_a]
+            ) as load:
+                path, entries = logs.activity_snapshot()
+                load.assert_called_once_with()
+            self.assertEqual(path, policy_a.directory / "activity.jsonl")
+            self.assertEqual([entry.message for entry in entries], ["history.wait"])
+
     def test_validated_activity_metadata_and_failure_levels(self):
         with tempfile.TemporaryDirectory(prefix="oc-box-log-render-") as temporary:
             root = Path(temporary) / "state"

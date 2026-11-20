@@ -359,6 +359,11 @@ def activity_entries(root=None, limit=1000) -> list[LogEntry]:
     return _activity_entries(activity_log.read_events(root, limit=limit), "oc-box")
 
 
+def activity_snapshot():
+    path, records = activity_log.read_snapshot()
+    return path, _activity_entries(records, "oc-box")
+
+
 def activity_path():
     """Identify the effective private reader path without opening the log."""
     try:

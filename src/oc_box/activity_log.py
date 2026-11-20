@@ -195,7 +195,11 @@ def _policy():
 
 def log_path(root=None) -> Path:
     """Return the selected active path without opening or creating any log files."""
-    override = _policy().directory
+    return _log_path(root, _policy())
+
+
+def _log_path(root, policy):
+    override = policy.directory
     return (override if override is not None else _root(root) / "log") / _FILE
 
 
@@ -953,6 +957,30 @@ def read_events(
     reads are capped at 16 files, 4 MiB/file, 16 MiB total and 10,000 records.
     Invalid filters and read failures return an empty list.
     """
+    return _read_events(
+        root,
+        limit=limit,
+        level=level,
+        workspace=workspace,
+        strict_snapshot=strict_snapshot,
+    )
+
+
+def read_snapshot(root=None, *, limit=1000) -> tuple[Path | None, list[dict]]:
+    """Read an unfiltered private snapshot and its exact effective log path."""
+    try:
+        policy = _policy()
+        if policy.directory is None:
+            root = _root(root)
+        path = _log_path(root, policy)
+    except Exception:  # noqa: BLE001 - malformed/unavailable diagnostics fail closed.
+        return None, []
+    return path, _read_events(root, limit=limit, policy=policy)
+
+
+def _read_events(
+    root, *, limit, level=None, workspace=None, strict_snapshot=False, policy=None
+):
     if (
         type(limit) is not int
         or limit <= 0
@@ -963,7 +991,8 @@ def read_events(
     minimum = LEVELS.index(level) if level is not None else None
     records = deque(maxlen=min(limit, _MAX_READ_EVENTS))
     try:
-        policy = _policy()
+        if policy is None:
+            policy = _policy()
         with (
             _log_directory(root, create=False, policy=policy) as directory,
             _locked(directory, write=False),
