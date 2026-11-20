@@ -59,6 +59,10 @@ class _CommitUnconfirmed(Exception):
     pass
 
 
+class _UnsafeLogDirectory(Exception):
+    pass
+
+
 @dataclass(frozen=True)
 class LogPolicy:
     directory: Path | None
@@ -489,15 +493,17 @@ def _check_write_lock(parent, fd):
         raise ValueError
 
 
-def _publish_config(parent, name, *, missing):
-    if not missing:
-        os.replace(name, _CONFIG_NAME, src_dir_fd=parent, dst_dir_fd=parent)
-        return
-    # First save must not overwrite an entry that appeared even after the
-    # final check. Linux renameat2 avoids a crash window with two hard links.
-    import ctypes
+def _rename_config_noreplace(parent, name):
+    """Prefer Linux no-replace semantics without an intermediate hardlink."""
+    try:
+        import ctypes
+    except ImportError:
+        return False
 
-    rename = ctypes.CDLL(None, use_errno=True).renameat2
+    try:
+        rename = ctypes.CDLL(None, use_errno=True).renameat2
+    except (AttributeError, OSError):
+        return False
     rename.argtypes = [
         ctypes.c_int,
         ctypes.c_char_p,
@@ -507,10 +513,53 @@ def _publish_config(parent, name, *, missing):
     ]
     rename.restype = ctypes.c_int
     no_replace = 1  # Linux RENAME_NOREPLACE
-    if rename(parent, os.fsencode(name), parent, os.fsencode(_CONFIG_NAME), no_replace):
-        if ctypes.get_errno() == errno.EEXIST:
-            raise _ConfigChanged
-        raise OSError
+    if not rename(
+        parent, os.fsencode(name), parent, os.fsencode(_CONFIG_NAME), no_replace
+    ):
+        return True
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        raise _ConfigChanged
+    if error in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+        return False
+    raise OSError(error, "Config publication refused")
+
+
+def _publish_config(parent, name, *, missing):
+    if not missing:
+        os.replace(name, _CONFIG_NAME, src_dir_fd=parent, dst_dir_fd=parent)
+        return
+    if _rename_config_noreplace(parent, name):
+        return
+    # linkat installs the same fsynced 0600 inode without replacing a
+    # competing entry. A failed/interrupted cleanup can leave both names;
+    # config readers continue to refuse multlinked config files.
+    staged = _stat_entry(parent, name)
+    _check_config_file(staged)
+    if stat.S_IMODE(staged.st_mode) != 0o600:
+        raise ValueError
+    try:
+        os.link(
+            name,
+            _CONFIG_NAME,
+            src_dir_fd=parent,
+            dst_dir_fd=parent,
+            follow_symlinks=False,
+        )
+    except FileExistsError:
+        raise _ConfigChanged from None
+    try:
+        earlier = _stat_entry(parent, name)
+        installed = _stat_entry(parent, _CONFIG_NAME)
+        if (
+            _identity(earlier) != _identity(staged)
+            or _stamp(earlier) != _stamp(installed)
+            or installed.st_nlink != 2
+        ):
+            raise _CommitUnconfirmed
+        os.unlink(name, dir_fd=parent)
+    except OSError:
+        raise _CommitUnconfirmed from None
 
 
 def _verify_parent(path, parent):
@@ -544,7 +593,13 @@ def _commit_config(parent, path, lock, expected, raw):
             raise _ConfigChanged
         # The protected ancestry and shared lock exclude other UID and
         # cooperating writers, not same-UID editors ignoring this lock.
-        _publish_config(parent, name, missing=old_entry is None)
+        try:
+            _publish_config(parent, name, missing=old_entry is None)
+        except _CommitUnconfirmed:
+            # The fallback reached linkat success; don't undo an uncertain
+            # publication or try to unlink a name that no longer correlates.
+            published = True
+            raise
         published = True
         try:
             os.fsync(parent)
@@ -563,6 +618,20 @@ def _commit_config(parent, path, lock, expected, raw):
             except OSError:
                 pass
         os.close(fd)
+
+
+def _verify_log_directory(directory):
+    if directory is None:
+        return
+    # Imported only for explicit saves; the journal itself reads this policy.
+    if __package__:
+        from .activity_log import validate_custom_directory
+    else:
+        from activity_log import validate_custom_directory
+    try:
+        validate_custom_directory(directory)
+    except (OSError, ValueError, RuntimeError):
+        raise _UnsafeLogDirectory from None
 
 
 def _save_host_settings(settings, directory, journald):
@@ -584,13 +653,15 @@ def _save_host_settings(settings, directory, journald):
     if journald != saved.journald:
         logs["journald"] = journald
     if logs == config.get("logs", {}):
+        _verify_log_directory(saved.effective_directory)
         return saved, False
     config["logs"] = logs
     candidate = _encode_config(config)
     verified = _parse_config(candidate)
-    _policy(verified)
+    policy = _policy(verified)
     if verified != config:
         raise ValueError
+    _verify_log_directory(policy.directory)
     with (
         _open_config_directory(path, writer=True, create=True) as parent,
         _config_write_lock(parent) as lock,
@@ -627,6 +698,8 @@ def save_host_settings(
             message = "Host config changed. Reopen the dashboard before saving."
         except _CommitUnconfirmed:
             message = "Host logging save could not be verified. Reopen the dashboard to check."
+        except _UnsafeLogDirectory:
+            message = "The private log directory is unsafe or contains unrecognized activity files."
         except (AttributeError, OSError, ValueError, TypeError, RuntimeError):
             message = "Could not safely save host logging settings."
         raise LogConfigError(message) from None

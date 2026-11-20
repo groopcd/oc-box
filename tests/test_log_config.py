@@ -1,4 +1,6 @@
 import argparse
+import ctypes
+import errno
 import fcntl
 import io
 import json
@@ -10,9 +12,9 @@ from contextlib import redirect_stderr
 from contextvars import Context
 from dataclasses import FrozenInstanceError
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from oc_box import log_config
+from oc_box import activity_log, log_config
 from oc_box.log_config import (
     LogConfigError,
     LogPolicy,
@@ -642,6 +644,152 @@ class LogConfigTests(unittest.TestCase):
             self.assert_save_refused(settings, "Host config changed")
         self.assertTrue(self.config.is_symlink())
         self.assertEqual(other.read_bytes(), b"unchanged")
+
+    def test_first_save_uses_dirfd_hardlink_if_renameat2_is_unavailable(self):
+        for unavailable in ("libc", errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+            with self.subTest(unavailable=unavailable):
+                settings = load_host_settings()
+                libc = (
+                    object()
+                    if unavailable == "libc"
+                    else Mock(renameat2=Mock(return_value=-1))
+                )
+                with (
+                    patch.object(ctypes, "CDLL", return_value=libc),
+                    patch.object(ctypes, "get_errno", return_value=unavailable),
+                    patch.object(log_config.os, "link", wraps=os.link) as link,
+                ):
+                    saved, changed = save_host_settings(
+                        settings, directory=None, journald=True
+                    )
+                self.assertTrue(changed)
+                self.assertEqual(load_host_settings(), saved)
+                self.assertTrue(load().journald)
+                self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
+                self.assertEqual(self.config.stat().st_nlink, 1)
+                link.assert_called_once()
+                options = link.call_args.kwargs
+                self.assertEqual(options["src_dir_fd"], options["dst_dir_fd"])
+                self.assertIsInstance(options["src_dir_fd"], int)
+                self.assertFalse(options["follow_symlinks"])
+                self.assertFalse(list(self.config.parent.glob(".host-logging.*.tmp")))
+                self.config.unlink()
+
+    def test_link_fallback_never_clobbers_a_last_instant_config(self):
+        settings = load_host_settings()
+        other = self.base / "unrelated"
+        other.write_bytes(b"untouched")
+        real_link = os.link
+
+        def inject(*args, **kwargs):
+            self.config.symlink_to(other)
+            return real_link(*args, **kwargs)
+
+        with (
+            patch.object(log_config, "_rename_config_noreplace", return_value=False),
+            patch.object(log_config.os, "link", side_effect=inject),
+        ):
+            self.assert_save_refused(settings, "Host config changed")
+        self.assertTrue(self.config.is_symlink())
+        self.assertEqual(other.read_bytes(), b"untouched")
+
+    def test_link_fallback_unavailable_or_uncertain_after_install(self):
+        settings = load_host_settings()
+        private_error = OSError(errno.EOPNOTSUPP, str(self.config))
+        with patch.object(log_config, "_rename_config_noreplace", return_value=False):
+            with patch.object(log_config.os, "link", side_effect=private_error):
+                self.assert_save_refused(settings, "Could not safely save")
+            self.assertFalse(self.config.exists())
+            settings = load_host_settings()
+            with (
+                patch.object(log_config.os, "unlink", side_effect=private_error),
+                self.assertRaisesRegex(
+                    LogConfigError, "save could not be verified"
+                ) as caught,
+            ):
+                save_host_settings(settings, directory=None, journald=True)
+        self.assertNotIn(str(self.config), str(caught.exception))
+        [staging] = self.config.parent.glob(".host-logging.*.tmp")
+        self.assertEqual(staging.stat().st_ino, self.config.stat().st_ino)
+        self.assertEqual(stat.S_IMODE(staging.stat().st_mode), 0o600)
+        self.assertEqual(staging.stat().st_nlink, 2)
+        self.assert_invalid()
+
+    def test_save_preflight_refuses_known_unsafe_custom_paths_without_writes(self):
+        settings = load_host_settings()
+        target = self.base / "private"
+        target.mkdir(mode=0o755)
+        alias = self.base / "alias"
+        alias.symlink_to(target, target_is_directory=True)
+        for invalid in (target, alias, alias / "new"):
+            self.assert_save_refused(
+                settings, "directory is unsafe", directory=str(invalid)
+            )
+            self.assertEqual(list(target.iterdir()), [])
+        target.chmod(0o700)
+        for name in (
+            "activity.jsonl",
+            "activity.jsonl.1",
+            "activity.jsonl.15",
+            "activity.lock",
+        ):
+            with self.subTest(name=name):
+                entry = target / name
+                original = b"unrelated private data\n"
+                entry.write_bytes(original)
+                entry.chmod(0o600)
+                before = entry.stat()
+                self.assert_save_refused(
+                    settings, "directory is unsafe", directory=str(target)
+                )
+                self.assertEqual(entry.read_bytes(), original)
+                self.assertEqual(entry.stat().st_ino, before.st_ino)
+                self.assertEqual(list(target.iterdir()), [entry])
+                entry.unlink()
+        self.assertEqual(list(self.home.iterdir()), [])
+
+    def test_save_accepts_existing_legacy_custom_jsonl_without_mutating_it(self):
+        directory = self.base / "private"
+        directory.mkdir(mode=0o700)
+        fingerprint = (
+            b'{"timestamp":"2000-01-01T00:00:00.000Z","event":"command.finished"}'
+        )
+        files = {
+            directory / "activity.jsonl": fingerprint + b"\r\n",
+            directory / "activity.jsonl.1": fingerprint,
+            directory / "unrelated.txt": b"leave alone",
+        }
+        for path, data in files.items():
+            path.write_bytes(data)
+            path.chmod(0o600)
+        saved, changed = save_host_settings(
+            load_host_settings(), directory=str(directory), journald=False
+        )
+        self.assertTrue(changed)
+        self.assertEqual(saved.effective_directory, directory)
+        self.assertEqual(
+            {path: path.read_bytes() for path in directory.iterdir()}, files
+        )
+
+    def test_append_rechecks_custom_after_save_and_reset_can_leave_it_untouched(self):
+        directory = self.base / "not-yet-created" / "journal"
+        saved, changed = save_host_settings(
+            load_host_settings(), directory=str(directory), journald=False
+        )
+        self.assertTrue(changed)
+        self.assertFalse(directory.parent.exists())
+
+        directory.mkdir(mode=0o700, parents=True)
+        active = directory / "activity.jsonl"
+        active.write_bytes(b"synthetic unrelated data\n")
+        active.chmod(0o600)
+        self.assertFalse(activity_log.record_event("command.finished", command="stop"))
+        self.assertEqual(active.read_bytes(), b"synthetic unrelated data\n")
+
+        reset, changed = save_host_settings(saved, directory=None, journald=False)
+        self.assertTrue(changed)
+        self.assertIsNone(reset.directory)
+        self.assertEqual(active.read_bytes(), b"synthetic unrelated data\n")
 
     def test_publication_and_durability_failures_report_fixed_distinct_errors(self):
         path = self.write({})

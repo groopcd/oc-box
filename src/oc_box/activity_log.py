@@ -14,7 +14,7 @@ import re
 import stat
 import time
 from collections import deque
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -213,9 +213,7 @@ def _private_directory(fd, *, state_root=False):
 
 
 @contextmanager
-def _log_directory(root, *, create, policy=None):
-    override = (_policy() if policy is None else policy).directory
-    path = override if override is not None else _root(root)
+def _open_directory(path, *, create, allow_missing=False):
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
     fd = os.open(path.anchor, flags)
     try:
@@ -225,9 +223,25 @@ def _log_directory(root, *, create, policy=None):
                     os.mkdir(component, 0o700, dir_fd=fd)
                 except FileExistsError:
                     pass
-            child = os.open(component, flags, dir_fd=fd)
+            try:
+                child = os.open(component, flags, dir_fd=fd)
+            except FileNotFoundError:
+                if not allow_missing:
+                    raise
+                yield None
+                return
             os.close(fd)
             fd = child
+        yield fd
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def _log_directory(root, *, create, policy=None):
+    override = (_policy() if policy is None else policy).directory
+    path = override if override is not None else _root(root)
+    with _open_directory(path, create=create) as fd:
         if override is None:
             # Older registrations can have an owned 0755 state root. Preserve it;
             # the journal itself remains in a strictly private child directory.
@@ -237,13 +251,16 @@ def _log_directory(root, *, create, policy=None):
                     os.mkdir("log", 0o700, dir_fd=fd)
                 except FileExistsError:
                     pass
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
             child = os.open("log", flags, dir_fd=fd)
-            os.close(fd)
-            fd = child
-        _private_directory(fd)
-        yield fd
-    finally:
-        os.close(fd)
+            try:
+                _private_directory(child)
+                yield child
+            finally:
+                os.close(child)
+        else:
+            _private_directory(fd)
+            yield fd
 
 
 def _check_file(info):
@@ -277,9 +294,13 @@ def _open_file(directory, name, *, create=False, writable=False, exclusive=False
 
 
 @contextmanager
-def _locked(directory, *, write):
+def _locked(directory, *, write, custom=False):
+    if custom:
+        _custom_lock_exists(directory)
     fd = _open_file(directory, _LOCK, create=write, writable=write)
     try:
+        if custom and os.fstat(fd).st_size:
+            raise ValueError("Unexpected activity lock")
         deadline = time.monotonic() + _LOCK_TIMEOUT
         operation = fcntl.LOCK_EX if write else fcntl.LOCK_SH
         while True:
@@ -391,6 +412,17 @@ def _same_file(first, second):
     return (first.st_dev, first.st_ino) == (second.st_dev, second.st_ino)
 
 
+def _check_snapshot(current, info):
+    _check_file(current)
+    if (
+        not _same_file(current, info)
+        or current.st_size != info.st_size
+        or current.st_mtime_ns != info.st_mtime_ns
+        or current.st_ctime_ns != info.st_ctime_ns
+    ):
+        raise ValueError("Changed activity journal")
+
+
 def _read_file(fd, info):
     """Read exactly the admitted bytes, with no extra read past the budget."""
     data = io.BytesIO()
@@ -401,25 +433,150 @@ def _read_file(fd, info):
             raise ValueError("Incomplete activity journal")
         data.write(chunk)
         remaining -= len(chunk)
-    after = os.fstat(fd)
-    _check_file(after)
-    if (
-        after.st_size != info.st_size
-        or after.st_mtime_ns != info.st_mtime_ns
-        or after.st_ctime_ns != info.st_ctime_ns
-    ):
-        raise ValueError("Changed activity journal")
+    _check_snapshot(os.fstat(fd), info)
     data.seek(0)
     return data
 
 
-def _parse_record(line):
-    if len(line.rstrip(b"\r\n")) > _MAX_RECORD_BYTES:
+def _unique_fields(pairs):
+    fields = dict(pairs)
+    if len(fields) != len(pairs):
+        raise ValueError("Duplicate activity fields")
+    return fields
+
+
+def _parse_record(line, *, strict=False):
+    if (strict and len(line) > _MAX_RECORD_BYTES + 2) or len(
+        line.rstrip(b"\r\n")
+    ) > _MAX_RECORD_BYTES:
         return None
     try:
-        return _sanitize(json.loads(line))
+        return _sanitize(
+            json.loads(
+                line.decode("utf-8") if strict else line,
+                object_pairs_hook=_unique_fields if strict else None,
+            )
+        )
     except (ValueError, UnicodeError, RecursionError):
         return None
+
+
+def _activity_stat(directory, name):
+    return os.stat(name, dir_fd=directory, follow_symlinks=False)
+
+
+def _custom_lock_exists(directory):
+    try:
+        info = _activity_stat(directory, _LOCK)
+    except FileNotFoundError:
+        return False
+    _check_file(info)
+    if info.st_size:
+        raise ValueError("Unexpected activity lock")
+    return True
+
+
+def _custom_inventory(directory):
+    files = {}
+    remaining = _HARD_TOTAL_BYTES
+    for index in range(_HARD_FILE_COUNT):
+        try:
+            info = _activity_stat(directory, _filename(index))
+        except FileNotFoundError:
+            continue
+        _check_file(info)
+        if not 0 <= info.st_size <= min(_HARD_FILE_BYTES, remaining):
+            raise ValueError("Oversized activity journal")
+        remaining -= info.st_size
+        files[index] = info
+    return files
+
+
+def _verify_custom_candidates(directory, files, candidates):
+    """Prove every candidate has managed content before any ring changes."""
+    for index in candidates:
+        info = files[index]
+        if not info.st_size:
+            # A crash can leave an empty newly opened active file. Rotation
+            # never creates an empty archive.
+            if index:
+                raise ValueError("Unrecognized activity archive")
+            continue
+        fd = _open_file(directory, _filename(index))
+        try:
+            _check_snapshot(os.fstat(fd), info)
+            for line in _read_file(fd, info):
+                if _parse_record(line, strict=True) is None:
+                    raise ValueError("Unrecognized activity record")
+        finally:
+            os.close(fd)
+    for index in candidates:
+        _check_snapshot(_activity_stat(directory, _filename(index)), files[index])
+
+
+def validate_custom_directory(path):
+    """Validate existing reserved entries without creating anything."""
+    with _open_directory(path, create=False, allow_missing=True) as directory:
+        if directory is None:
+            return
+        _private_directory(directory)
+        lock = (
+            _locked(directory, write=False, custom=True)
+            if _custom_lock_exists(directory)
+            else nullcontext()
+        )
+        with lock:
+            files = _custom_inventory(directory)
+            _verify_custom_candidates(directory, files, files)
+
+
+def _inspect_custom_files(directory, policy, now):
+    files = _custom_inventory(directory)
+    active = files.get(0)
+    if active is None or not active.st_size:
+        return files, b"", False
+
+    fd = _open_file(directory, _FILE)
+    try:
+        _check_snapshot(os.fstat(fd), active)
+        size = active.st_size
+        window = _MAX_RECORD_BYTES + 2  # Maximum record plus CRLF.
+        first = os.pread(fd, min(size, window), 0)
+        if len(first) != min(size, window):
+            raise ValueError("Incomplete activity journal")
+        head, newline, _ = first.partition(b"\n")
+        record = (
+            _parse_record(head, strict=True) if newline or size == len(first) else None
+        )
+        if record is None:
+            raise ValueError("Unrecognized activity record")
+
+        prefix = b""
+        last = first[-1:] if len(first) == size else os.pread(fd, 1, size - 1)
+        if last != b"\n":
+            # A complete final record without LF can be separated on append.
+            # For custom paths, never turn unrecognizable partial bytes into
+            # another log line or move/discard them as managed content.
+            start = max(0, size - window)
+            tail = first if not start else os.pread(fd, size - start, start)
+            _, separator, final = tail.rpartition(b"\n")
+            if (
+                len(tail) != size - start
+                or (start and not separator)
+                or _parse_record(final if separator else tail, strict=True) is None
+            ):
+                raise ValueError("Unrecognized activity record")
+            prefix = b"\n"
+        _check_snapshot(os.fstat(fd), active)
+    finally:
+        os.close(fd)
+    _check_snapshot(_activity_stat(directory, _FILE), active)
+
+    aged = False
+    if policy.max_file_sec:
+        opened = datetime.fromisoformat(record["timestamp"][:-1] + "+00:00").timestamp()
+        aged = now - opened >= policy.max_file_sec
+    return files, prefix, aged
 
 
 def _inspect_files(directory, policy, now):
@@ -530,8 +687,27 @@ def _prepare_append(directory, files, policy, now, rotate, final_size, append_si
 
     required = policy.keep_free + append_size
     available = _available_bytes(directory, required) if policy.keep_free else None
+    kept_archives = [index for index in keep if index]
+    discarded = set(archives) - set(kept_archives)
+    if policy.directory is not None:
+        if rotate:
+            affected = files.keys()
+        elif available is not None and (available < required or discarded):
+            # Available blocks are measured again after pruning and may stay
+            # low. Prove every archive that the fallback could then discard.
+            affected = archives
+        else:
+            affected = sorted(
+                discarded
+                | {
+                    source
+                    for target, source in enumerate(kept_archives, 1)
+                    if source != target
+                }
+            )
+        _verify_custom_candidates(directory, files, affected)
     for index in reversed(archives):
-        if index not in keep:
+        if index in discarded:
             _discard_archive(directory, files, index)
     # Close any pre-existing gaps without changing the order.
     for target, source in enumerate(sorted(index for index in files if index), 1):
@@ -613,10 +789,13 @@ def record_event(
             return False
         with (
             _log_directory(root, create=True, policy=policy) as directory,
-            _locked(directory, write=True),
+            _locked(directory, write=True, custom=policy.directory is not None),
         ):
             now = time.time()
-            files, prefix, aged = _inspect_files(directory, policy, now)
+            inspect = (
+                _inspect_files if policy.directory is None else _inspect_custom_files
+            )
+            files, prefix, aged = inspect(directory, policy, now)
             size = files[0].st_size if 0 in files else 0
             final_size = size + len(prefix) + len(payload)
             rotate = bool(size) and (
@@ -639,8 +818,11 @@ def record_event(
                 writable=True,
             )
             try:
-                if active is not None and not _same_file(os.fstat(fd), active):
-                    raise ValueError("Changed activity journal")
+                if active is not None:
+                    if policy.directory is not None:
+                        _check_snapshot(os.fstat(fd), active)
+                    elif not _same_file(os.fstat(fd), active):
+                        raise ValueError("Changed activity journal")
                 if os.lseek(fd, 0, os.SEEK_END) != final_size - len(pending):
                     raise ValueError("Changed activity journal")
                 while pending:

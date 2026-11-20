@@ -731,6 +731,130 @@ class ActivityRotationTests(ActivityJournalFixture):
                 self.assertFalse(self.root.exists())
         self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
 
+    def custom_journal(self, **policy):
+        custom = self.base / "custom"
+        custom.mkdir(mode=0o700, exist_ok=True)
+        self.configure(directory=str(custom), **policy)
+        return custom
+
+    def custom_file(self, custom, index, raw):
+        path = custom / (self.active.name + (f".{index}" if index else ""))
+        path.write_bytes(raw)
+        path.chmod(0o600)
+        return path
+
+    def legacy_row(self, duration=1, *, terminator=b"\n"):
+        return (
+            json.dumps(
+                {
+                    "timestamp": "2000-01-01T00:00:00.000Z",
+                    "event": "command.finished",
+                    "command": "status",
+                    "duration_ms": duration,
+                }
+            ).encode("ascii")
+            + terminator
+        )
+
+    def test_custom_active_refuses_unrecognized_first_record_without_appending(self):
+        custom = self.custom_journal(journald=True)
+        valid = self.legacy_row()
+        for raw in (
+            b"unrelated private data\n" + valid,
+            b"{}\n" + valid,
+            valid.replace(
+                b'"duration_ms": 1', b'"duration_ms": "foreign", "duration_ms": 1'
+            ),
+        ):
+            with self.subTest(raw=raw):
+                active = self.custom_file(custom, 0, raw)
+                with patch.object(journal_output, "emit") as mirror:
+                    self.assertFalse(self.record(duration_ms=2))
+                    mirror.assert_not_called()
+                self.assertEqual(active.read_bytes(), raw)
+                self.assertFalse((custom / "activity.jsonl.1").exists())
+
+    def test_quiet_custom_append_uses_bounded_active_guard_and_no_full_scan(self):
+        # A sizeable valid ring and active age policy must not turn every
+        # ordinary append into a full-content read.
+        custom = self.custom_journal(SystemMaxFileSize="4M", MaxFileSec="1d")
+        self.assertTrue(self.record(duration_ms=1))
+        active = custom / self.active.name
+        raw = active.read_bytes()
+        active.write_bytes(raw * 4096)
+        archive = self.custom_file(custom, 1, self.legacy_row() * 4096)
+        with (
+            patch.object(
+                journal, "_read_file", side_effect=AssertionError("full scan")
+            ),
+            patch.object(journal.os, "pread", wraps=os.pread) as pread,
+        ):
+            self.assertTrue(self.record(duration_ms=2))
+        self.assertLessEqual(sum(call.args[1] for call in pread.call_args_list), 1027)
+        self.assertEqual(active.stat().st_size, len(raw) * 4097)
+        self.assertEqual(archive.read_bytes(), self.legacy_row() * 4096)
+
+    def test_custom_transactions_prove_all_potential_mutation_candidates_first(self):
+        def verify(operation, settings, foreign_index):
+            custom = self.custom_journal(**settings)
+            valid = self.legacy_row()
+            foreign = valid + b"unrelated private data\n"
+            files = {
+                self.custom_file(custom, 0, valid): valid,
+                self.custom_file(custom, foreign_index, foreign): foreign,
+            }
+            if operation in ("rotation", "keep-free"):
+                files[self.custom_file(custom, 2, valid)] = valid
+            with (
+                patch.object(journal.os, "rename", wraps=os.rename) as rename,
+                patch.object(journal.os, "unlink", wraps=os.unlink) as unlink,
+                patch.object(journal, "_available_bytes", return_value=0),
+            ):
+                self.assertFalse(self.record(duration_ms=2))
+                rename.assert_not_called()
+                unlink.assert_not_called()
+            self.assertEqual(
+                {path: path.read_bytes() for path in custom.glob("activity.jsonl*")},
+                files,
+            )
+            for path in files:
+                path.unlink()
+
+        for operation, settings, foreign_index in (
+            ("rotation", {"MaxFileSec": "1h", "SystemMaxFiles": 2}, 1),
+            ("active rotation", {"MaxFileSec": "1h"}, 0),
+            ("prune", {"SystemMaxFiles": 1}, 1),
+            ("gap", {}, 2),
+            ("keep-free", {"SystemKeepFree": "1K", "SystemMaxFiles": 2}, 1),
+        ):
+            with self.subTest(operation=operation):
+                verify(operation, settings, foreign_index)
+
+    def test_custom_accepts_legacy_and_complete_no_lf_but_preserves_partial_record(
+        self,
+    ):
+        custom = self.custom_journal()
+        full = self.legacy_row(1, terminator=b"\r\n") + self.legacy_row(
+            2, terminator=b""
+        )
+        active = self.custom_file(custom, 0, full)
+        self.assertTrue(self.record(duration_ms=3))
+        self.assertTrue(active.read_bytes().startswith(full + b"\n"))
+        self.assertEqual(self.durations(strict_snapshot=True), [1, 2, 3])
+        self.configure(directory=str(custom), MaxFileSec="1h")
+        previous = active.read_bytes()
+        self.assertTrue(self.record(duration_ms=4))
+        archive = custom / "activity.jsonl.1"
+        self.assertEqual(archive.read_bytes(), previous)
+        self.assertEqual(self.durations(strict_snapshot=True), [1, 2, 3, 4])
+        partial = self.legacy_row(5).split(b'"duration_ms"')[0]
+        damaged = active.read_bytes() + partial
+        active.write_bytes(damaged)
+        self.assertFalse(self.record(duration_ms=6))
+        self.assertEqual(active.read_bytes(), damaged)
+        self.assertEqual(archive.read_bytes(), previous)
+        self.assertEqual(self.durations(), [1, 2, 3, 4])
+
     def test_invalid_policy_refuses_all_private_access_with_fixed_path_error(self):
         self.seed()
         before = self.files()
