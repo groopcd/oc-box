@@ -72,26 +72,37 @@ for all methods.
 curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-vault --with-tui
 ```
 
-**Alternative — install from [PyPI](https://pypi.org/project/oc-box/) with pipx:**
+**Alternative — install from [PyPI](https://pypi.org/project/oc-box/) with pipx or uv:**
 
 Stable with vault support (no dashboard):
 
 ```sh
 pipx install 'oc-box[vault]'
+# Or:
+uv tool install 'oc-box[vault]'
 ```
 
 Development prerelease with vault and TUI:
 
 ```sh
 pipx install --pip-args='--pre' 'oc-box[vault,tui]'
+# Or:
+uv tool install --prerelease allow 'oc-box[vault,tui]'
+```
+
+To try oc-box without a persistent tool installation:
+
+```sh
+uvx oc-box --version
+uvx --prerelease allow --from 'oc-box[vault,tui]' oc-box tui --help
 ```
 
 Choose one installation command. The GitHub one-liner explicitly selects a
 **published development release**, because stable does not yet include the
 dashboard. Dependencies stay private to the GitHub installation. The one-liner
 downloads and runs the public installer; review it first if preferred.
-Neither method initializes or unlocks a vault, changes credential policy,
-launches the dashboard or starts a workspace.
+These commands do not initialize or unlock a vault, change credential policy,
+launch the dashboard or start a workspace.
 
 After installing, check your launcher and host prerequisites:
 
@@ -117,7 +128,7 @@ removed, the same release can gain extras, and repeating a satisfied request is
 a no-op. The command uses the verified existing installation owner; it does not
 create a second copy.
 
-For uv, pip in a dedicated environment, or other options, see the
+For pip in a dedicated environment or other options, see the
 [installation alternatives](docs/installation.md). Do not install a second copy
 just to enable optional features. Genuinely pre-channel launchers have a separate
 [bootstrap compatibility route](docs/update-channels.md#bootstrap-and-older-installations).
