@@ -865,6 +865,15 @@ dashboard discovery path, real history, inference, Podman or interactive termina
 rendering. The UI tests also cover bounded favorites locking, malformed colors,
 stale connections, typed deletion, source identity and searchable paused logs.
 
+The Logs table and RAW view use synthetic records for header sorting, column
+visibility, row inspection, source filtering and the bounded clipboard copy.
+Check that view choices never mutate logging policy or implicitly read either
+external source, and that switching between table and RAW does not reconstruct
+unvalidated text. Host logging settings use a private temporary config to
+exercise explicit saves, preservation of unrelated values, unsafe/stale-file
+refusals and demo/read-only guards. System-journal tests in this suite use
+injected reader results; they are not acceptance on a real host journal.
+
 Run the encrypted session-history engine and actual native CLI-body transport
 fixtures separately; both require native 2.2.6 and host age tools:
 

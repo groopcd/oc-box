@@ -31,6 +31,11 @@ class ManagementCardTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(widget.visible)
         x, y = widget.region.center
         self.assertIs(widget.screen.get_widget_at(x, y)[0], widget)
+        if isinstance(widget, Button):
+            # A horizontal scrollbar must not cover the button's lower border.
+            self.assertIs(
+                widget.screen.get_widget_at(x, widget.region.bottom - 1)[0], widget
+            )
 
     async def test_path_first_cards_keep_all_fields_and_actions_reachable(self):
         app = DashboardApp(DemoBackend(), read_only=True)

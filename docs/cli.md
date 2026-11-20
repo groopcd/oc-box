@@ -1087,8 +1087,10 @@ also copy (`Ctrl+A`/`Ctrl+Shift+A` select all field text). Refresh, focus,
 programmatic selection and container output never
 trigger copying. Forwarded `Ctrl+Shift+C` can repeat a copy;
 `Ctrl+Shift+Y` copies the whole visible screen. The same shortcuts work in ordinary
-dialogs; Copy/Paste buttons are removed. `F1` explains clipboard shortcuts and
-terminal paste behavior. This is visible-viewport copying, not offscreen history export.
+dialogs and successful copies show a confirmation. `F1` explains clipboard
+shortcuts and terminal paste behavior. Mouse selections copy the visible
+viewport, not offscreen history. The Logs RAW view has a separate **Copy all**
+action for matching retained entries, within the same clipboard limit.
 **Paste copied** (`Ctrl+Shift+Insert`, shortcut only) uses only the last text copied inside the
 dashboard and targets the focused text field or connected shell. For the desktop
 clipboard, use the host terminal's paste command, commonly `Ctrl+Shift+V` or
@@ -1139,7 +1141,7 @@ All preferences appear directly in the Settings tab, without an extra window
 or duplicate monitoring controls. The categorized inline form covers
 Monitoring (auto-refresh/interval), Display
 (built-in Textual theme/details), Sessions (scope/text filter only, no automatic
-connection), Logs (follow/source/search), read-only Resources (saved/observed),
+connection), Logs (follow/source/severity/search), read-only Resources (saved/observed),
 and read-only Safety/terminals (CLI-selected mode). **Reset to defaults** fills
 the form with factory dashboard preferences; click Apply to activate them, or
 Revert/Escape to discard the reset. Defaults include one-second automatic refresh,
@@ -1159,8 +1161,22 @@ default 1. Invalid or blank entries show inline feedback and apply none of the
 pending edits. Reset fills 1; Apply activates it, and Revert discards the draft.
 Unapplied monitoring edits do not change the running refresh cadence. Drafts
 survive tab switches and background refreshes; resource context updates without
-overwriting them. On/off switches use compact single-row controls with visible
-keyboard focus, including Logs Follow.
+overwriting them. Narrow rounded switches show their ON/OFF state as text and
+align with their labels and visible keyboard focus.
+
+The separate **Host logging** card can save the private log directory and the
+optional journald mirror without changing session preferences. Demo and
+read-only modes cannot save host logging settings. The private file remains
+primary, prior data is not moved, and systemd configuration is unchanged. For
+rotation, retention and one-off CLI overrides, see
+[Dashboard state and activity journal](#dashboard-state-and-activity-journal).
+
+**Logs** offers sortable columns, optional column visibility, row details and
+RAW copy of the matching retained snapshot without table formatting. RAW
+preserves the safely retained representation, not unvalidated or unredacted input.
+An explicit system journal mirror read uses the bounded same-user reader; it
+does not enable journald mirroring, merge duplicate private events, or fall back
+to a different source. Loading external Podman logs remains separately explicit.
 
 The Sessions tab uses manual Connect/refresh. Host global discovery consumes the
 complete paginated native V2 API across projects, children and archived sessions. Host

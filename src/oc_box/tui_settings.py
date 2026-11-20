@@ -84,7 +84,7 @@ class SettingsPanel(Vertical):
     SettingsPanel #pref-interval-error { height: auto; color: $error; }
     SettingsPanel #preferences-actions, SettingsPanel #host-logging-actions { height: 3; }
     SettingsPanel #preferences-actions Button, SettingsPanel #host-logging-actions Button {
-      width: auto; min-width: 8; margin-right: 1;
+      width: auto; min-width: 8; padding: 0; margin-right: 1;
     }
     """
 
@@ -114,7 +114,7 @@ class SettingsPanel(Vertical):
 
     def _host_logging_view(self):
         if self.demo:
-            return "/home/demo/.local/state/oc-box/log", "Off (default)"
+            return "/home/demo/.local/state/oc-box/log/activity.jsonl", "Off (default)"
         settings = self._host_logging
         if settings is None:
             return "Unavailable", "Unavailable"
@@ -124,7 +124,7 @@ class SettingsPanel(Vertical):
                 directory = _activity_state_root(None) / "log"
             except (OSError, RuntimeError, ValueError):
                 pass
-        shown = str(directory) if directory is not None else ""
+        shown = str(directory / "activity.jsonl") if directory is not None else ""
         if not shown.isprintable():
             shown = "Unavailable"
         mirror = (
@@ -159,7 +159,7 @@ class SettingsPanel(Vertical):
         with Vertical(classes="settings-topic", id="host-logging-settings"):
             yield Label("Host logging", classes="settings-topic-title")
             yield Static(
-                f"Effective private log directory: {directory}",
+                f"Effective private log file: {directory}",
                 id="host-logging-directory-status",
                 markup=False,
             )
@@ -176,9 +176,9 @@ class SettingsPanel(Vertical):
                     id="host-logging-directory",
                     disabled=disabled,
                 )
-            yield Label("Mirror oc-box activity to system journal")
             with Horizontal(classes="settings-row settings-toggle-row"):
-                yield Switch(
+                yield Label("Mirror to journald")
+                yield RoundedSwitch(
                     saved.journald if saved else False,
                     id="host-logging-mirror",
                     disabled=disabled,
@@ -191,6 +191,10 @@ class SettingsPanel(Vertical):
             yield Static(
                 "Use default clears the directory override after Save. Saving affects future activity and "
                 "does not create a log directory or move existing logs. Rotation and retention are config-only.",
+                markup=False,
+            )
+            yield Static(
+                "Close other editors of the host config before saving.",
                 markup=False,
             )
             with Horizontal(id="host-logging-actions"):
@@ -403,7 +407,7 @@ class SettingsPanel(Vertical):
             self._host_logging = settings
             effective, configured = self._host_logging_view()
             self.query_one("#host-logging-directory-status", Static).update(
-                f"Effective private log directory: {effective}"
+                f"Effective private log file: {effective}"
             )
             self.query_one("#host-logging-mirror-status", Static).update(
                 f"System journal mirror: {configured}"

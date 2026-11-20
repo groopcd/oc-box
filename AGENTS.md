@@ -110,8 +110,15 @@ their checkout ownership distinct from unrelated source and flat installations.
   pairing links, authentication, clipboard data or other free-form text.
   Dashboard external-log redaction remains best-effort, not a guarantee of
   arbitrary-secret removal.
+  RAW dashboard output uses only validated/retained display data and follows
+  source/query filters without table formatting. Explicit bulk copy stays
+  clipboard-bounded and never exposes pre-redaction input. System-journal
+  browsing is explicit, never merged into the default source view.
   `log_config.py` loads bounded host `logs` policy without writes or following
-  config symlinks. Logger flags are invocation-local, never environment
+  config symlinks. Only a separate, explicit Host logging save may persist
+  the private directory and mirror choice, preserving all other configuration.
+  Demo and read-only views cannot save; there is no log migration or setup
+  during config edits. Logger flags are invocation-local, never environment
   switches or config edits; invalid saved policy fails closed even with
   explicit overrides. Only default/start, reset, stop, sync, terminal and web
   accept launcher `--log-dir PATH`, `--journald` / `--no-journald`, and

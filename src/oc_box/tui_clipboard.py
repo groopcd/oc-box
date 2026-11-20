@@ -18,7 +18,7 @@ from textual.binding import Binding
 from textual.content import Content
 from textual.containers import Horizontal
 from textual.errors import NoWidget
-from textual.geometry import Offset, Region
+from textual.geometry import Region
 from textual.screen import ModalScreen
 from textual.strip import Strip
 from textual.widget import Widget

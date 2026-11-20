@@ -258,6 +258,8 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     Button.-style-default:focus, Input:focus, Select:focus > SelectCurrent,
     SelectOverlay:focus, Checkbox:focus, TextArea:focus {
       border: round $accent; background-tint: transparent; }
+    Input.-invalid { border: round $error 60%; }
+    Input.-invalid:focus { border: round $error; }
     Button.-style-default.-error:focus { border: round $error; }
     Button.-style-default:disabled { border: round $primary 18%; }
     #dashboard-header { height: 3; background: $surface; }
@@ -322,6 +324,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     #notice { height: auto; max-height: 3; color: $warning; }
     .toolbar { height: auto; min-height: 3; overflow-x: auto; }
     .toolbar Button { margin-right: 1; }
+    #log-view-tools Button { padding: 0; }
     .toolbar Button:last-child { margin-right: 0; }
     .toolbar Select { width: 24; }
     #session-source-tools Select { width: 1fr; min-width: 12; }
@@ -350,6 +353,13 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     Screen.compact #log-search { height: 1; border: none; padding: 0 2 0 1; }
     Screen.compact #log-hits { height: 1; padding: 0 1; }
     Screen.compact #log-tools Button { height: 1; border: none; padding: 0 1; }
+    Screen.compact #dashboard-header Select:focus > SelectCurrent,
+    Screen.compact #log-search:focus {
+      border: none; background-tint: $accent 22%; }
+    Screen.compact .management-tools { height: 4; min-height: 4; }
+    Screen.compact #log-filter-tools Select { width: 20; }
+    Screen.compact #log-view-tools { min-height: 4; }
+    Screen.compact.settings-view ToastRack { margin-bottom: 5; }
     Screen.compact #overview-body { layout: vertical; }
     Screen.compact #workspace-card { width: 1fr; height: 11; margin-right: 0; }
     Screen.compact #workspace-inspector { width: 1fr; }
@@ -812,6 +822,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         labels = dict((key, label) for label, key in self.SECTIONS)
         if tab not in labels:
             return
+        self.query_one("#body").screen.set_class(tab == "settings", "settings-view")
         for _, key in self.SECTIONS:
             # "-active" belongs to Button's transient press-feedback timer.
             self.query_one(f"#nav-{key}", Button).set_class(key == tab, "-selected")

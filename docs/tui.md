@@ -245,7 +245,8 @@ Drag to select visible text throughout the dashboard: diagnostics, tables,
 logs, graphs, the embedded terminal and control labels. The highlight remains
 visible over colored logs, row cursors and meters. **Releasing the mouse copies
 the completed selection immediately**; no extra Copy click is required. A successful
-copy shows a Clipboard notification. There are no Copy or Paste buttons. A label
+copy shows a Clipboard notification. The Logs RAW view also offers explicit
+**Copy all**; ordinary controls and dialogs do not need Copy or Paste buttons. A label
 drag never presses its button, changes its tab/dropdown, or activates a footer
 shortcut. Normal clicks still operate those controls. Scrollbar drags still
 scroll. Panel captions and settings group titles are selectable text as well.
@@ -268,8 +269,9 @@ plain text; it is not required for selecting control labels. The same shortcuts
 work in ordinary settings and review dialogs without adding clipboard buttons.
 `F1` explains them. Copying is available in read-only
 mode and never confirms a dialog, changes a session, or starts a connection.
-Table/log/terminal selections cover the displayed viewport, not offscreen
-history. Scroll to the desired text before selecting. Followed-log display stays
+Mouse selections in tables, logs and terminals cover the displayed viewport, not
+offscreen history. Scroll to the desired text before selecting, or use Logs RAW
+**Copy all** for matching retained entries. Followed-log display stays
 in place while its text is highlighted; bounded collection continues in memory.
 
 For text from your desktop clipboard, focus a text field or the connected shell
@@ -381,7 +383,7 @@ filesystem capacity does not authorize changing it. See the
 <!-- tui-screenshot:settings -->
 ![Settings section showing Monitoring, Display, Sessions, Logs, Resources and Safety groups in one inline page](assets/tui/settings.png)
 
-*Expanded-height capture of all six settings groups, with Apply, Reset and Revert.*
+*Earlier expanded-height capture of the session preferences, with Apply, Reset and Revert.*
 
 <!-- /tui-screenshot -->
 
@@ -395,7 +397,8 @@ The categorized inline form is also usable without a current workspace:
 | Monitoring | Auto-refresh and a custom shared Status/followed-log interval: any whole number from 1 to 60 seconds; default 1. |
 | Display | Built-in Textual theme and expanded/collapsed diagnostics details. |
 | Sessions | Scope and text filter only; changing them never connects or refreshes a native inventory automatically. |
-| Logs | Follow, source and literal search; searches stay in memory and are never persisted or journaled. External sources retain their explicit opt-in and ownership guards. |
+| Logs | Follow, source, severity and literal search; these filter the dashboard, not what the logger writes. Searches stay in memory and are never persisted or journaled. External sources retain their explicit opt-in and ownership guards. |
+| Host logging | Separate host-wide **Private log directory** and **Mirror to journald** controls, saved independently of session preferences. |
 | Resources | Read-only saved limits and observed values. |
 | Safety/terminals | Read-only information about the CLI-selected mode and terminal safety; the `--read-only` fence cannot be weakened here. |
 
@@ -409,18 +412,32 @@ the CLI-selected read-only mode.
 
 **Escape** or **Revert** discards pending form edits. **Apply** accepts only the
 allowlisted dashboard preferences, for **this dashboard session only**. Changes
-are neither persisted nor logged; they do not modify OpenCode `cli.json`, host
+are neither persisted nor logged; Apply does not modify OpenCode `cli.json`, host
 settings, workspace resources or credential snapshots. There are no CPU/RAM/
 storage edit controls, resource-control RPCs, implicit resets or storage
 migrations. A settings Apply is not a resource Apply or native service reload.
+
+The **Host logging** card has a separate save action. Its directory field points
+to a private directory, not a file; use the default to fall back to the effective
+oc-box state root. Changing that setting does not move or delete old journals,
+and saving creates no log directory. The journald switch is off by default.
+When enabled, successfully written, validated private activity events may also
+be mirrored to the local system journal. The private file remains primary, and
+authorized system-journal viewers may see the mirrored metadata. Saving never
+changes systemd configuration. It preserves unrelated JSON values and writes
+changed settings in a private `0600` replacement file. Close other manual config
+editors before saving; they need not respect the application's write lock.
+Existing rotation and retention policy remains in host config, not the dashboard
+form. Demo and read-only views cannot save host logging settings.
 
 Enter refresh seconds directly in the Monitoring field. Blank, fractional or
 out-of-range values show inline feedback and do not apply any other draft
 preferences. Unapplied changes do not alter monitoring cadence. Drafts survive
 tab changes, background refreshes and workspace selection; resource information
 updates separately. There is only one monitoring form, not duplicate quick
-controls. Settings and Logs Follow use compact single-row native switches,
-retaining click/Space operation, spatial on/off state and visible keyboard focus.
+controls. Settings and Logs Follow use narrow rounded switches with explicit
+ON/OFF text centered beside each label. Click, Space and Enter retain their
+native toggle behavior; focus is visible on the border.
 
 If you deliberately need different create-time limits, exit the relevant
 clients/owner and use the existing CLI workflow outside the manager:
@@ -556,7 +573,7 @@ unconfirmed manager Quit.
 <!-- tui-screenshot:logs -->
 ![Logs section filtering fixed synthetic activity entries and showing a source-scoped log-match count](assets/tui/logs.png)
 
-*Fixed activity examples; no external container logs were loaded.*
+*Earlier view of fixed activity examples; no external container logs were loaded.*
 
 <!-- /tui-screenshot -->
 
@@ -567,6 +584,15 @@ follow/pause controls never disable search; it is not a regular-expression or
 shell-command field. Follow uses the same best-effort refresh interval as Status
 (default one second); pausing follow leaves retained entries searchable. Search
 text and settings changes are never saved or written to the activity journal.
+
+The table sorts by time, source, severity or message. Click a heading to sort
+and click again to reverse; optional metadata columns can be hidden without
+changing the source. Open a row to read its full message. **RAW** shows the
+matching retained entries without table formatting, independent of the table's
+sort and visible columns. **Copy all** copies that snapshot subject to the same
+1 MiB UTF-8 limit and shows a clipboard notification. RAW never bypasses
+validation or redaction: it does not recover discarded bytes, arbitrary system
+journal fields, or pre-redaction Podman output.
 
 The header shows **N log entries** when search is empty and **N log matches**
 when filtering, with singular forms for one result. These are retained log
@@ -588,9 +614,11 @@ files. The dashboard uses the saved host
 that bare `oc-box logs` uses. Run `oc-box logs --path` to see that private
 pathname. A lifecycle command's one-off `--log-dir PATH` does not change the
 dashboard source; use `oc-box logs --log-dir PATH` to inspect that private
-journal. Optional system journal mirroring does not change the dashboard
-source either. To read the mirror, use the separate `oc-box logs --journald`
-command.
+journal. Optional system journal mirroring does not change the dashboard source.
+Reading the **System journal mirror** is a separate explicit action, independent
+of whether mirroring is currently enabled, and uses the same bounded current-user
+reader as `oc-box logs --journald`. It does not merge mirrored duplicates into
+the default view or silently fall back to private files if unavailable.
 
 The dashboard's oc-box source shares validated severity and message formatting
 with the read-only host command [`oc-box logs`](cli.md#logs). The dashboard

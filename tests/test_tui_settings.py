@@ -351,6 +351,43 @@ class InlineSettingsTests(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(app._settings_snapshot()["details"])
                         self.assertTrue(app._settings_snapshot()["log_follow"])
 
+    async def test_compact_focus_validation_and_copy_toast_keep_controls_usable(self):
+        app = DashboardApp(SettingsDemo(), read_only=True, demo=True)
+        async with app.run_test(size=(80, 24), notifications=True) as pilot:
+            await self.ready(app, pilot)
+            for ident in ("section-picker", "workspace-picker", "log-search"):
+                with self.subTest(header=ident):
+                    widget = app.query_one(f"#{ident}")
+                    widget.focus()
+                    await pilot.pause()
+                    self.assertIs(app.focused, widget)
+                    drawn = (
+                        widget.query_one("SelectCurrent")
+                        if isinstance(widget, Select)
+                        else widget
+                    )
+                    self.assertGreater(drawn.styles.background_tint.a, 0)
+
+            app.action_tab("settings")
+            field = app.query_one("#pref-interval", Input)
+            field.value = "61"
+            field.focus()
+            await pilot.pause()
+            self.assertTrue(field.has_class("-invalid"))
+            border, color = field.styles.border.top
+            self.assertEqual(border, "round")
+            self.assertGreater(color.r, max(color.g, color.b) + 30)
+
+            revert = app.query_one("#preferences-cancel", Button)
+            with patch.object(app, "_write_clipboard"):
+                self.assertTrue(app.copy_to_clipboard("synthetic copied text"))
+                await pilot.pause()
+                toast = app.screen.query_one("Toast")
+                self.assertIn("Copied text", toast.render().plain)
+                self.assertFalse(revert.region.intersection(toast.region))
+                self.assertTrue(await pilot.click(revert))
+            self.assertEqual(field.value, "1")
+
     async def test_invalid_non_interval_preferences_leave_all_applied_values_unchanged(
         self,
     ):
@@ -562,8 +599,16 @@ class InlineSettingsTests(unittest.IsolatedAsyncioTestCase):
             result = panel.query_one("#host-logging-result", Static)
             self.assertFalse(directory.disabled)
             self.assertEqual(directory.value, "/synthetic/old")
-            self.assertIn("/synthetic/old", str(status.render()))
+            self.assertIn("/synthetic/old/activity.jsonl", str(status.render()))
             self.assertIn("Off (default)", str(mirror_status.render()))
+            mirror.scroll_visible(animate=False)
+            await pilot.pause()
+            label = mirror.parent.query_one(Label)
+            row = app.screen._compositor.render_strips()[mirror.region.y + 1].text
+            self.assertIn(str(label.render()), row)
+            self.assertIn("● OFF", row)
+            self.assertEqual(mirror.region.width, 8)
+            self.assertEqual(mirror.styles.border.top[0], "round")
             chosen = str(root / "custom logs")
             directory.value = chosen
             mirror.value = True

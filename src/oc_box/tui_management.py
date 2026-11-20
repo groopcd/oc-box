@@ -103,7 +103,7 @@ class StoragePanel(Vertical):
     StoragePanel SelectCurrent > #label { height: 1; text-wrap: nowrap;
       text-overflow: ellipsis; }
     StoragePanel .management-tools Button { width: auto; min-width: 10;
-      padding: 0 1; margin-right: 1; }
+      padding: 0; margin-right: 1; }
     StoragePanel #storage-table { height: 10; min-height: 5; margin-top: 1; }
     StoragePanel #storage-details { height: auto; padding: 0; margin-bottom: 1; }
     StoragePanel #storage-session-delete { margin-left: 3; }
@@ -184,7 +184,7 @@ class BackupPanel(Vertical):
     BackupPanel SelectCurrent > #label { height: 1; text-wrap: nowrap;
       text-overflow: ellipsis; }
     BackupPanel .management-tools Button { width: auto; min-width: 10;
-      padding: 0 1; margin-right: 1; }
+      padding: 0; margin-right: 1; }
     BackupPanel #backup-table { height: 6; min-height: 4; }
     BackupPanel #backup-details { height: auto; padding: 0; margin-bottom: 1; }
     BackupPanel #backup-delete { margin-left: 3; }

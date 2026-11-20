@@ -142,14 +142,15 @@ navigation rail on narrow terminals. The workspace picker stays in the header.
   activity card shows only already-retained oc-box categories, not external
   output or agent/token/GPU telemetry. `Ctrl+L` opens Logs; search remains
   available while follow is paused.
-- **Settings last only for this session.** `s` or `F2` opens the Settings tab,
+- **Dashboard preferences last only for this session.** `s` or `F2` opens the Settings tab,
   not another window. Apply activates edits, Reset stages defaults, and
-  Revert/Escape discards drafts. Compact single-row switches retain ordinary
-  mouse/keyboard behavior. Preferences cannot weaken CLI `--read-only`.
+  Revert/Escape discards drafts. Narrow rounded switches show ON/OFF beside
+  their labels. The separate Host logging save action controls the private
+  directory and optional journald mirror; it is unavailable in read-only mode.
 - **Copy is explicit.** Visible text is drag-selectable, including logs, graphs
   and control labels; releasing the mouse immediately copies the selection
-  without activating the control. Graph bars use copyable text glyphs. There
-  are no Copy/Paste buttons: `Ctrl+Shift+C` repeats a selection copy,
+  without activating the control. Graph bars use copyable text glyphs. Logs
+  RAW can explicitly copy all matching retained entries. `Ctrl+Shift+C` repeats a selection copy,
   `Ctrl+Shift+Y` copies the visible screen, and `F1` explains shortcuts.
   **Paste copied** (`Ctrl+Shift+Insert`) uses only text copied inside this
   dashboard; use the terminal's ordinary paste for the desktop clipboard.
