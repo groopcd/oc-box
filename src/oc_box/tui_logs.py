@@ -15,7 +15,7 @@ import subprocess
 import time
 import unicodedata
 from collections import OrderedDict, deque
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 
 if __package__:
@@ -86,6 +86,17 @@ class LogEntry:
             return self.raw
         # Local diagnostics and synthetic samples may have no source record.
         return " ".join(field for field in (self.timestamp, self.message) if field)
+
+
+PODMAN_UNAVAILABLE = LogEntry("", "podman", "warning", "Podman logs unavailable.")
+
+
+class _PodmanEntries(list[LogEntry]):
+    """Keep immutable container provenance with a verified reader snapshot."""
+
+    def __init__(self, entries, container_id):
+        super().__init__(entries)
+        self.container_id = container_id
 
 
 def raw_copy_text(entries, max_bytes):
@@ -225,6 +236,54 @@ class LogBuffer:
         for item in tail:
             self._put(item)
 
+    def refresh(self, source, entries, *, preserve=()):
+        """Replace only when the actual retained tail differs.
+
+        Higher-priority sources in this refresh keep their allocation. Refill
+        from the reader after eviction, but only to the capacity left after
+        those sources, so two unchanged readers cannot evict each other.
+        """
+        source = _clean(source, 64)
+        protected = {
+            name for name in preserve if name != source and self._sources.get(name)
+        }
+        capacity = self.max_entries - sum(len(self._sources[n]) for n in protected)
+        if len(protected) >= _MAX_SOURCES:
+            capacity = 0
+        tail = deque(entries, maxlen=capacity)
+        current = tuple(entry for _, entry in self._sources.get(source, ()))
+        # Already validated reader snapshots normally match retained display
+        # rows exactly; only re-run hygiene when the bounded candidate changed.
+        if len(tail) == len(current) and all(
+            isinstance(item, LogEntry)
+            and (item if item.source == source else replace(item, source=source)) == old
+            for item, old in zip(tail, current)
+        ):
+            return False
+        tail = tuple(_entry(item, source=source) for item in tail)
+        if tail == current:
+            return False
+        self._sources.pop(source, None)
+        if tail:
+            while len(self._sources) >= _MAX_SOURCES:
+                self._sources.pop(next(n for n in self._sources if n not in protected))
+            excess = (
+                sum(map(len, self._sources.values())) + len(tail) - self.max_entries
+            )
+            for _ in range(excess):
+                oldest = min(
+                    (
+                        n
+                        for n, items in self._sources.items()
+                        if items and n not in protected
+                    ),
+                    key=lambda n: self._sources[n][0][0],
+                )
+                self._sources[oldest].popleft()
+            for item in tail:
+                self._put(item)
+        return True
+
     def append(self, entry):
         """Append a displayed entry, regardless of current filters."""
         self._put(_entry(entry))
@@ -300,6 +359,14 @@ def activity_entries(root=None, limit=1000) -> list[LogEntry]:
     return _activity_entries(activity_log.read_events(root, limit=limit), "oc-box")
 
 
+def activity_path():
+    """Identify the effective private reader path without opening the log."""
+    try:
+        return activity_log.log_path()
+    except (OSError, ValueError):
+        return None
+
+
 def journal_entries(limit=JOURNAL_LIMIT) -> list[LogEntry]:
     """Read only the same-UID mirror as a distinct, explicitly loaded source."""
     return _activity_entries(
@@ -358,7 +425,7 @@ def _podman_output(arguments, env):
 
 
 def _unavailable():
-    return [LogEntry("", "podman", "warning", "Podman logs unavailable.")]
+    return [PODMAN_UNAVAILABLE]
 
 
 def _podman_record(line):
@@ -443,6 +510,6 @@ def podman_entries(box, data, tail=500) -> list[LogEntry]:
                     "", "podman", "warning", "Podman log output truncated (byte limit)."
                 )
             )
-        return entries
+        return _PodmanEntries(entries, ident)
     except Exception:  # noqa: BLE001 - never expose backend exception text to the UI.
         return _unavailable()

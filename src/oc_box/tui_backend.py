@@ -540,15 +540,34 @@ class DashboardBackend:
 
     def logs(self, workspace=None):
         if __package__:
-            from .tui_logs import activity_entries, podman_entries
+            from .tui_logs import activity_entries
         else:
-            from tui_logs import activity_entries, podman_entries
+            from tui_logs import activity_entries
         # Let the journal validate the raw state path, including every ancestor.
         result = list(activity_entries())
         if workspace:
-            _, data = self.selected(workspace)
-            result.extend(podman_entries(self._queries, data))
+            result.extend(self.podman_logs(workspace))
         return result
+
+    def podman_logs(self, workspace):
+        """Independently refresh a consented, currently registered target."""
+        if __package__:
+            from .tui_logs import PODMAN_UNAVAILABLE, podman_entries
+        else:
+            from tui_logs import PODMAN_UNAVAILABLE, podman_entries
+        try:
+            _, data = self.selected(workspace)
+            if isinstance(data, dict) and data.get("id") == workspace:
+                return podman_entries(self._queries, data)
+        except (
+            DashboardError,
+            self.box.BoxError,
+            OSError,
+            ValueError,
+            subprocess.SubprocessError,
+        ):
+            pass
+        return [PODMAN_UNAVAILABLE]
 
     def journal_mirror_logs(self):
         if __package__:

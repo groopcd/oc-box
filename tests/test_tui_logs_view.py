@@ -1,7 +1,12 @@
 """Headless log-view actions with synthetic data and no real external reads."""
 
+import asyncio
 import importlib.util
+import os
+import tempfile
+import threading
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -19,10 +24,16 @@ if AVAILABLE:
         Switch,
     )
 
-    from oc_box import journal_output, tui_logs
+    from oc_box import activity_log, journal_output, tui_logs
     from oc_box.tui import DemoBackend
     from oc_box.tui_app import DashboardApp
-    from oc_box.tui_logs import JOURNAL_SOURCE, LogEntry, journal_entries
+    from oc_box.tui_logs import (
+        JOURNAL_SOURCE,
+        PODMAN_UNAVAILABLE,
+        LogEntry,
+        journal_entries,
+    )
+    from oc_box.tui_settings import SettingsPanel
 
 
 if AVAILABLE:
@@ -50,6 +61,228 @@ class LogViewTests(unittest.IsolatedAsyncioTestCase):
 
     def messages(self, table):
         return [str(table.get_row_at(i)[-1]) for i in range(table.row_count)]
+
+    def select_log_text(self, app, viewport):
+        app.screen.selections = {viewport: Selection(Offset(1, 0), Offset(7, 1))}
+        self.assertTrue(app.screen.get_selected_text())
+
+    def viewport_messages(self, viewport):
+        if isinstance(viewport, RichLog):
+            return [line.text.rstrip() for line in viewport.lines]
+        return self.messages(viewport)
+
+    async def test_source_switch_revokes_old_selection_and_details_in_both_modes(self):
+        private = LogEntry("", "oc-box", "info", "old private")
+        mirror = LogEntry("", JOURNAL_SOURCE, "info", "new mirror")
+        app = DashboardApp(LogFixture([private]), demo=True, read_only=True)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.ready(app, pilot)
+            source = app.query_one("#log-source", Select)
+            app._apply_mirror([mirror])
+            with patch.object(app, "_write_clipboard") as write:
+                for mode in ("table", "raw"):
+                    with self.subTest(mode=mode):
+                        if mode == "raw":
+                            await pilot.click("#log-mode")
+                        viewport = app.query_one(
+                            "#log-table" if mode == "table" else "#log-output"
+                        )
+                        source.value = "oc-box"
+                        await pilot.pause()
+                        self.select_log_text(app, viewport)
+                        screen = app.screen
+                        source.value = JOURNAL_SOURCE
+                        # The control value changes before Select.Changed runs.
+                        self.assertFalse(app.screen.get_selected_text())
+                        app.action_copy_selection()
+                        app.action_copy_view()
+                        app._show_log_details()
+                        self.assertIs(app.screen, screen)
+                        await pilot.pause()
+                        self.assertIsNone(viewport.text_selection)
+                        self.assertEqual(
+                            self.viewport_messages(viewport), ["new mirror"]
+                        )
+                write.assert_not_called()
+                await pilot.click("#log-copy-all")
+                write.assert_called_once_with("new mirror")
+
+    async def test_empty_private_snapshot_clears_selected_rows_in_paused_all_view(self):
+        entries = [
+            LogEntry("", "oc-box", "info", "private row"),
+            LogEntry("", "podman", "info", "other source"),
+        ]
+        app = DashboardApp(LogFixture(entries), demo=True, read_only=True)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.ready(app, pilot)
+            app.query_one("#log-follow", Switch).value = False
+            with patch.object(app, "_write_clipboard") as write:
+                for mode in ("table", "raw"):
+                    with self.subTest(mode=mode):
+                        if mode == "raw":
+                            await pilot.click("#log-mode")
+                        app._apply_logs(entries)
+                        viewport = app.query_one(
+                            "#log-table" if mode == "table" else "#log-output"
+                        )
+                        await pilot.pause()
+                        self.select_log_text(app, viewport)
+                        app._apply_logs(entries[1:])
+                        self.assertIsNone(viewport.text_selection)
+                        self.assertEqual(
+                            self.viewport_messages(viewport), ["other source"]
+                        )
+                        self.assertIn(
+                            "No retained oc-box activity",
+                            str(app.query_one("#overview-activity", Static).render()),
+                        )
+                write.assert_not_called()
+
+    async def test_saving_directory_clears_paused_private_rows_and_drops_inflight_read(
+        self,
+    ):
+        class HeldPrivate(LogFixture):
+            hold = False
+
+            def __init__(self):
+                super().__init__([])
+                self.entered, self.finish = threading.Event(), threading.Event()
+
+            def logs(self, workspace=None):
+                entries = tui_logs.activity_entries()
+                if self.hold:
+                    self.hold = False
+                    self.entered.set()
+                    if not self.finish.wait(5):
+                        raise TimeoutError
+                return entries
+
+            def podman_logs(self, workspace):
+                raise AssertionError("No Podman target was requested")
+
+        with (
+            tempfile.TemporaryDirectory() as temporary,
+            patch.dict(
+                os.environ,
+                XDG_CONFIG_HOME=temporary + "/config",
+                OC_BOX_STATE_HOME=temporary + "/state",
+            ),
+        ):
+            self.assertTrue(activity_log.record_event("history.wait"))
+            backend = HeldPrivate()
+            app = DashboardApp(backend)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await self.ready(app, pilot)
+                table = app.query_one("#log-table", DataTable)
+                self.assertEqual(self.messages(table), ["history.wait"])
+                stale = app.logs.search(source="oc-box")
+                request = app._private_log_request
+                app.query_one("#log-follow", Switch).value = False
+                self.select_log_text(app, table)
+                backend.hold = True
+                worker = app.refresh_logs()
+                try:
+                    self.assertTrue(await asyncio.to_thread(backend.entered.wait, 3))
+                    app.action_settings()
+                    panel = app.query_one(SettingsPanel)
+                    new = Path(temporary) / "new-log"
+                    panel.query_one("#host-logging-directory", Input).value = str(new)
+                    app.on_settings_panel_save_host_logging_requested(
+                        SettingsPanel.SaveHostLoggingRequested(panel)
+                    )
+                    self.assertFalse(new.exists())
+                    self.assertFalse(app.logs.search(source="oc-box"))
+                    self.assertIsNone(table.text_selection)
+                    app.action_tab("logs")
+                    self.assertEqual(table.row_count, 0)
+                    app._apply_private_logs(stale, new / "activity.jsonl", request)
+                    self.assertEqual(table.row_count, 0)
+                    self.assertTrue(activity_log.record_event("session.archived"))
+                finally:
+                    backend.finish.set()
+                accepted = asyncio.Event()
+                apply = app._apply_logs
+
+                def check_applied(entries, *args, **kwargs):
+                    self.assertNotIn("history.wait", [e.message for e in entries])
+                    apply(entries, *args, **kwargs)
+                    if [e.message for e in app.logs.search(source="oc-box")] == [
+                        "session.archived"
+                    ]:
+                        accepted.set()
+
+                with patch.object(app, "_apply_logs", side_effect=check_applied):
+                    await worker.wait()
+                    await asyncio.wait_for(accepted.wait(), 3)
+                    await pilot.pause()
+                    app.action_tab("logs")
+                    self.assertEqual(self.messages(table), ["session.archived"])
+                    self.assertFalse(app.query_one("#log-follow", Switch).value)
+
+    async def test_unavailable_podman_clears_selected_rows_without_blocking_private_refresh(
+        self,
+    ):
+        workspace = "a" * 32
+
+        class HeldTarget(LogFixture):
+            hold = False
+            container = "b" * 64
+
+            def __init__(self):
+                super().__init__([LogEntry("", "oc-box", "info", "private before")])
+                self.entered, self.finish = threading.Event(), threading.Event()
+
+            def podman_logs(self, target):
+                if target != workspace:
+                    raise AssertionError("Unexpected Podman target")
+                if self.hold:
+                    self.entered.set()
+                    self.finish.wait(5)
+                    return [PODMAN_UNAVAILABLE]
+                return tui_logs._PodmanEntries(
+                    [LogEntry("", "podman", "info", "container " + self.container[0])],
+                    self.container,
+                )
+
+        backend = HeldTarget()
+        app = DashboardApp(backend, read_only=True)
+        with patch("oc_box.tui_app.activity_path", return_value=Path("/synthetic/log")):
+            async with app.run_test(size=(80, 24)) as pilot:
+                await self.ready(app, pilot)
+                app.query_one("#log-follow", Switch).value = False
+                app.query_one("#log-source", Select).value = "podman"
+                app._load_podman(workspace)
+                await pilot.pause()
+                await app.workers.wait_for_complete()
+                table = app.query_one("#log-table", DataTable)
+                self.assertEqual(self.messages(table), ["container b"])
+                self.select_log_text(app, table)
+                backend.container = "c" * 64
+                await app.refresh_logs().wait()
+                await app.workers.wait_for_complete()
+                self.assertEqual(self.messages(table), ["container c"])
+                self.assertIsNone(table.text_selection)
+                self.select_log_text(app, table)
+                backend.hold = True
+                # Private refresh schedules the optional Podman query.
+                await app.refresh_logs().wait()
+                try:
+                    self.assertTrue(await asyncio.to_thread(backend.entered.wait, 3))
+                    backend.entries = [LogEntry("", "oc-box", "info", "private after")]
+                    await app.refresh_logs().wait()
+                    self.assertEqual(
+                        [e.message for e in app.logs.search(source="oc-box")],
+                        ["private after"],
+                    )
+                finally:
+                    backend.finish.set()
+                await app.workers.wait_for_complete()
+                self.assertIsNone(table.text_selection)
+                self.assertEqual(self.messages(table), [PODMAN_UNAVAILABLE.message])
+                self.assertIn(
+                    "unavailable; no current logs",
+                    str(app.query_one("#log-target", Static).render()),
+                )
 
     async def test_table_sort_columns_details_and_filter_survive_tab_switch(self):
         entries = [

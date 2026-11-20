@@ -115,6 +115,30 @@ class LogBufferTests(unittest.TestCase):
         )
         self.assertLessEqual(len(buffer._sources), 2)
 
+    def test_refresh_refills_evicted_rows_without_oscillating_under_pressure(self):
+        buffer = logs.LogBuffer(max_entries=3)
+        private = [self.entry("private first"), self.entry("private last")]
+        podman = [self.entry("podman first"), self.entry("podman last")]
+        self.assertTrue(buffer.refresh("oc-box", private))
+        buffer.replace("old source", [self.entry(str(i)) for i in range(3)])
+        self.assertFalse(buffer.search(source="oc-box"))
+        self.assertTrue(buffer.refresh("oc-box", private))
+        self.assertEqual(buffer.search(source="oc-box"), private)
+        self.assertTrue(buffer.refresh("podman", podman, preserve=("oc-box",)))
+        self.assertEqual(
+            [e.message for e in buffer.search(source="podman")], ["podman last"]
+        )
+        for _ in range(2):
+            self.assertFalse(buffer.refresh("oc-box", private))
+            self.assertFalse(buffer.refresh("podman", podman, preserve=("oc-box",)))
+            self.assertEqual(len(buffer.search()), 3)
+        self.assertTrue(buffer.refresh("oc-box", []))
+        self.assertTrue(buffer.refresh("podman", podman, preserve=("oc-box",)))
+        self.assertEqual(
+            [e.message for e in buffer.search(source="podman")],
+            ["podman first", "podman last"],
+        )
+
     def test_timestamp_order_is_stable_and_returns_independent_list(self):
         buffer = logs.LogBuffer()
         late = self.entry("late", timestamp="2026-11-10T12:01:00Z")
@@ -362,6 +386,7 @@ class PodmanEntriesTests(unittest.TestCase):
             ["logs", "--timestamps", "--tail", "2", "b" * 64], self.env
         )
         self.assertEqual(len(entries), 2)
+        self.assertEqual(entries.container_id, self.info["Id"])
         self.assertEqual(entries[0].timestamp, "2026-11-10T12:00:01+00:00")
         self.assertEqual(entries[1].timestamp, "")
         self.assertNotIn("synthetic-secret", str(entries))

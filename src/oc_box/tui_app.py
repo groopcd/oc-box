@@ -5,7 +5,6 @@ from __future__ import annotations
 import time
 import threading
 from copy import deepcopy
-from dataclasses import replace
 from pathlib import Path
 
 from rich.text import Text
@@ -42,7 +41,9 @@ if __package__:
         JOURNAL_LIMIT,
         JOURNAL_SOURCE,
         LOG_COLUMNS,
+        PODMAN_UNAVAILABLE,
         LogBuffer,
+        activity_path,
         fifo_tail_drop,
         raw_copy_text,
         sort_entries,
@@ -82,7 +83,9 @@ else:
         JOURNAL_LIMIT,
         JOURNAL_SOURCE,
         LOG_COLUMNS,
+        PODMAN_UNAVAILABLE,
         LogBuffer,
+        activity_path,
         fifo_tail_drop,
         raw_copy_text,
         sort_entries,
@@ -118,6 +121,23 @@ else:
 
 def text(value):
     return Text(plain(value))
+
+
+class _CurrentLogSelection:
+    def get_selection(self, selection):
+        # A Select change can be observed before its queued Changed message.
+        # Never extract text from the previous source in that gap.
+        if self.app._log_view_is_current(self.id):
+            return super().get_selection(selection)
+        return None
+
+
+class LogTable(_CurrentLogSelection, SelectableDataTable):
+    pass
+
+
+class LogRaw(_CurrentLogSelection, SelectableRichLog):
+    pass
 
 
 class Confirm(ModalScreen):
@@ -432,7 +452,14 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         )
         self._last_report = self._last_logs = 0
         self._rendered_logs = None
-        self._log_snapshot = None
+        self._log_scope_versions = dict.fromkeys(
+            ("oc-box", "podman", JOURNAL_SOURCE), 0
+        )
+        self._private_log_request = 0
+        self._private_log_path = None
+        self._private_logs_empty = True
+        self._podman_log_state = None
+        self._podman_container_id = None
         self._log_revision = 0
         self._raw_render_key = None
         self._log_search_snapshot = None
@@ -466,6 +493,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._terminal_target = None
         self._status_lock = threading.Lock()
         self._log_lock = threading.Lock()
+        self._podman_log_lock = threading.Lock()
         self._operation_lock = threading.Lock()
         self._storage_lock = threading.Lock()
         self._pending_lock = threading.Lock()
@@ -697,12 +725,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                     )
                     mirror_status.display = False
                     yield mirror_status
-                    yield SelectableDataTable(
+                    yield LogTable(
                         id="log-table",
                         cursor_type="row",
                         zebra_stripes=True,
                     )
-                    output = SelectableRichLog(
+                    output = LogRaw(
                         id="log-output",
                         max_lines=2000,
                         wrap=False,
@@ -990,7 +1018,14 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             or self.query_one("#content", TabbedContent).active != "settings"
         ):
             return
+        previous = activity_path()
         event.panel.save_host_logging()
+        current = activity_path()
+        if current != previous:
+            self._private_log_request += 1
+            self._reset_private_logs(current)
+            if not self._log_lock.locked():
+                self.refresh_logs()
 
     def _admit_settings_request(self, event):
         panel = event.panel
@@ -1661,9 +1696,14 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             return
         self.podman_workspace = workspace
         self._podman_request += 1
+        self._podman_log_state = None
+        self._podman_container_id = None
+        if self.logs.refresh("podman:" + workspace, ()):
+            self._log_revision += 1
+        self._log_scope_versions["podman"] += 1
         self._update_text(
             "#log-target",
-            f"Podman workspace: {workspace} · memory only; redaction is best-effort.",
+            f"Loading Podman workspace: {workspace} · redaction is best-effort.",
         )
         self._render_logs()
         self.refresh_logs()
@@ -1674,12 +1714,32 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             return
         self._logging = True
         self._last_logs = time.monotonic()
-        request = self._podman_request
+        private_request = self._private_log_request
+        podman_request = self._podman_request
         workspace = self.podman_workspace
+        split = hasattr(self.backend, "podman_logs")
         try:
-            entries = self.backend.logs(workspace)
-            if self.is_running:
-                self.call_from_thread(self._apply_logs, entries, workspace)
+            if split:
+                before = activity_path()
+                entries = self.backend.logs()
+                after = activity_path()
+                if self.is_running:
+                    self.call_from_thread(
+                        self._apply_private_logs,
+                        entries if before == after else [],
+                        after,
+                        private_request,
+                    )
+            else:
+                entries = self.backend.logs(workspace)
+                if self.is_running:
+                    self.call_from_thread(
+                        self._apply_combined_logs,
+                        entries,
+                        workspace,
+                        private_request,
+                        podman_request,
+                    )
         except Exception:
             if self.is_running:
                 self.call_from_thread(
@@ -1689,34 +1749,119 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         finally:
             self._logging = False
             self._log_lock.release()
-            # An explicit Load racing a slow follow must not be lost when
-            # Follow is paused. Coalesce only to the latest reviewed target.
-            if self.is_running and request != self._podman_request:
-                self.call_from_thread(self.refresh_logs)
+            if self.is_running:
+                if private_request != self._private_log_request or (
+                    not split and podman_request != self._podman_request
+                ):
+                    # Explicit changes racing a slow read are not lost when
+                    # Follow is paused. Coalesce to the latest reviewed source.
+                    self.call_from_thread(self.refresh_logs)
+                if split:
+                    self.call_from_thread(self._queue_podman_logs)
 
-    def _apply_logs(self, entries, workspace=None):
-        sources = {}
+    def _reset_private_logs(self, path):
+        self._private_log_path = path
+        self._apply_logs((), reset_private=True)
+
+    def _apply_private_logs(self, entries, path, request):
+        if request == self._private_log_request:
+            reset = path != self._private_log_path
+            self._private_log_path = path
+            self._apply_logs(entries, reset_private=reset)
+
+    def _apply_combined_logs(self, entries, workspace, private_request, podman_request):
+        if private_request != self._private_log_request:
+            return
+        if podman_request != self._podman_request:
+            entries = (entry for entry in entries if entry.source != "podman")
+            workspace = None
+        self._apply_logs(entries, workspace)
+
+    def _queue_podman_logs(self):
+        if self.podman_workspace and not self._podman_log_lock.locked():
+            self._refresh_podman_logs(self.podman_workspace, self._podman_request)
+
+    @work(thread=True, group="podman-logs", exit_on_error=False)
+    def _refresh_podman_logs(self, workspace, request):
+        if not self._podman_log_lock.acquire(blocking=False):
+            return
+        try:
+            if request == self._podman_request:
+                try:
+                    entries = self.backend.podman_logs(workspace)
+                except Exception:
+                    entries = [PODMAN_UNAVAILABLE]
+                if self.is_running:
+                    self.call_from_thread(
+                        self._apply_podman_logs, entries, workspace, request
+                    )
+        finally:
+            self._podman_log_lock.release()
+            if self.is_running and request != self._podman_request:
+                self.call_from_thread(self._queue_podman_logs)
+
+    def _apply_podman_logs(self, entries, workspace, request):
+        if request == self._podman_request and workspace == self.podman_workspace:
+            container_id = getattr(entries, "container_id", None)
+            if container_id != self._podman_container_id:
+                # The same registration can now refer to a replacement
+                # container. A selected viewport must not freeze its old logs.
+                self._podman_container_id = container_id
+                self._log_scope_versions["podman"] += 1
+            self._apply_logs(entries, workspace, private=False)
+
+    def _apply_logs(
+        self, entries, workspace=None, *, private=True, reset_private=False
+    ):
+        scoped = (
+            "podman:" + workspace
+            if workspace and workspace == self.podman_workspace
+            else None
+        )
+        sources = {"oc-box": []} if private else {}
+        if scoped:
+            sources[scoped] = []
         for entry in entries:
             if entry.source == JOURNAL_SOURCE:
                 continue
+            source = entry.source
             if entry.source == "podman":
-                if workspace != self.podman_workspace:
+                if workspace and scoped is None:
                     continue
-                if workspace:
-                    entry = replace(entry, source="podman:" + workspace)
-            sources.setdefault(entry.source, []).append(entry)
-        if sources != self._log_snapshot:
-            old = self._log_snapshot or {}
-            changed = False
-            for source, snapshot in sources.items():
-                if old.get(source) != snapshot:
-                    self.logs.replace(source, snapshot)
-                    changed = True
-            self._log_snapshot = sources
-            if changed:
-                self._log_revision += 1
+                source = scoped or source
+            sources.setdefault(source, []).append(entry)
+        if private:
+            empty = not sources["oc-box"]
+            reset_private |= empty and not self._private_logs_empty
+            self._private_logs_empty = empty
+            if reset_private:
+                self._log_scope_versions["oc-box"] += 1
+        if scoped:
+            snapshot = sources[scoped]
+            state = (
+                "Podman logs unavailable; no current logs."
+                if snapshot == [PODMAN_UNAVAILABLE]
+                else "No current verified container logs."
+                if not snapshot
+                else "Memory only; redaction is best-effort."
+            )
+            if state != self._podman_log_state:
+                self._podman_log_state = state
+                self._log_scope_versions["podman"] += 1
+                self._update_text(
+                    "#log-target", f"Podman workspace: {workspace} · {state}"
+                )
+        changed = False
+        preserve = [] if private else ["oc-box"]
+        for source, snapshot in sources.items():
+            changed |= self.logs.refresh(source, snapshot, preserve=preserve)
+            preserve.append(source)
+        if changed:
+            self._log_revision += 1
         self._render_logs()
-        if self._activity_revision != self._log_revision:
+        if reset_private or self._activity_revision != self._log_revision:
+            if reset_private:
+                self._clear_log_selection(self.query_one("#overview-activity", Static))
             self._render_overview_activity()
 
     def _load_mirror(self):
@@ -1753,9 +1898,10 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                 "select oc-box activity for the private log.",
             )
         else:
-            if self._mirror_logs.search(source_order=True) != entries:
-                self._mirror_logs.replace(JOURNAL_SOURCE, entries)
+            if self._mirror_logs.refresh(JOURNAL_SOURCE, entries):
                 self._log_revision += 1
+                if not entries:
+                    self._log_scope_versions[JOURNAL_SOURCE] += 1
             self._update_text(
                 "#log-mirror-status",
                 "Same-user mirror snapshot · Load mirror to refresh.",
@@ -1776,12 +1922,28 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         )
         self._activity_revision = self._log_revision
 
-    def _matching_logs(self, query):
+    def _log_scope(self):
         source = self.query_one("#log-source", Select).value
-        if source == "podman" and self.podman_workspace:
-            source = "podman:" + self.podman_workspace
+        if source == "all":
+            version = tuple(self._log_scope_versions[s] for s in ("oc-box", "podman"))
+        else:
+            version = self._log_scope_versions.get(source, 0)
+            if source == "podman" and self.podman_workspace:
+                source = "podman:" + self.podman_workspace
+        return source, version
+
+    def _log_view_is_current(self, widget_id, scope=None):
+        if widget_id == "log-table":
+            table = self._log_table_render_key
+            painted = table[0] if table else None
+        else:
+            painted = self._raw_render_key
+        return painted is not None and painted[1:3] == (scope or self._log_scope())
+
+    def _matching_logs(self, query):
+        source, version = self._log_scope()
         level = self.query_one("#log-level", Select).value
-        key = (self._log_revision, source, level, query.casefold())
+        key = (self._log_revision, source, version, level, query.casefold())
         if self._log_search_snapshot is None or self._log_search_snapshot[0] != key:
             buffer = self._mirror_logs if source == JOURNAL_SOURCE else self.logs
             entries = tuple(
@@ -1829,6 +1991,9 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         # separate log viewport's selection while its contents remain frozen.
         self._update_text("#log-hits", f"{count} log {noun}", layout=False)
         self.query_one("#log-mirror-status", Static).display = key[1] == JOURNAL_SOURCE
+        for widget_id in ("log-table", "log-output"):
+            if not self._log_view_is_current(widget_id, key[1:3]):
+                self._clear_log_selection(self.query_one("#" + widget_id))
         if self.query_one("#content", TabbedContent).active != "logs":
             return
         if self._log_mode == "table":
@@ -1836,10 +2001,19 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         else:
             self._render_log_raw(key, entries)
 
-    def _log_paint_blocked(self, viewport, unchanged):
+    def _clear_log_selection(self, viewport):
+        gesture = getattr(self, "_selection_gesture", None)
+        if gesture is not None and gesture[2] is viewport:
+            self._cancel_selection_gesture()
+        elif viewport.text_selection is not None:
+            viewport.screen.clear_selection()
+
+    def _log_paint_blocked(self, viewport, unchanged, same_view):
         if not unchanged and viewport.text_selection is not None:
-            self._log_deferred_viewport = viewport
-            return True
+            if same_view:
+                self._log_deferred_viewport = viewport
+                return True
+            self._clear_log_selection(viewport)
         self._log_deferred_viewport = None
         return unchanged
 
@@ -1895,9 +2069,22 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     def _show_log_details(self):
         table = self.query_one("#log-table", DataTable)
         rows = self._table_snapshots.get("#log-table", (None, ()))[1]
-        if self._log_mode == "table" and 0 <= table.cursor_row < len(rows):
+        if (
+            self._log_mode == "table"
+            and self._log_view_is_current("log-table")
+            and 0 <= table.cursor_row < len(rows)
+        ):
             entry = self._log_table_entries[rows[table.cursor_row][0]]
             self.push_screen(LogDetails(entry))
+
+    def action_copy_view(self):
+        if self.query_one(
+            "#content", TabbedContent
+        ).active == "logs" and not isinstance(self.screen, ModalScreen):
+            widget_id = "log-table" if self._log_mode == "table" else "log-output"
+            if not self._log_view_is_current(widget_id):
+                return
+        super().action_copy_view()
 
     def _render_log_table(self, key, entries):
         table = self.query_one("#log-table", DataTable)
@@ -1909,14 +2096,16 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             "Choose a row, then Details.",
         )
         render_key = (key, self._log_sort, self._log_columns)
-        if self._log_paint_blocked(table, render_key == self._log_table_render_key):
-            return
         previous = self._log_table_render_key
         same_view = (
             previous is not None
             and previous[0][1:] == key[1:]
             and previous[1:] == render_key[1:]
         )
+        if self._log_paint_blocked(
+            table, render_key == previous, same_view and bool(entries)
+        ):
+            return
         follow_tail = (
             same_view
             and self._log_sort == ("timestamp", False)
@@ -1979,7 +2168,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         changed = self._update_table(
             "#log-table",
             tuple(rows),
-            source=(key[1], self._log_columns),
+            source=(key[1:3], self._log_columns),
             tail_drop=drop,
             selected=selected,
         )
@@ -2012,9 +2201,13 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             "RAW · Source order. Scroll sideways for long lines. Copy all includes off-screen matches.",
         )
         output = self.query_one("#log-output", RichLog)
-        # Keep a highlighted log snapshot in place while it is being copied.
-        # Search feedback still follows the current query/source while copying.
-        if self._log_paint_blocked(output, key == self._raw_render_key):
+        # A same-view follow may keep a highlighted snapshot in place while
+        # it is being copied. New source/filter choices render immediately.
+        previous_key = self._raw_render_key
+        same_view = (
+            bool(entries) and previous_key is not None and previous_key[1:] == key[1:]
+        )
+        if self._log_paint_blocked(output, key == previous_key, same_view):
             return
         self._raw_render_key = key
         rendered = entries

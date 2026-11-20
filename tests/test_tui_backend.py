@@ -102,6 +102,29 @@ class DashboardBackendTests(unittest.TestCase):
                 podman.assert_called_once_with(self.backend._queries, data)
             self.box.state_root.assert_not_called()
 
+    def test_missing_or_mismatched_podman_target_does_not_discard_private_logs(self):
+        from oc_box import tui_logs
+
+        private = tui_logs.LogEntry("", "oc-box", "info", "synthetic activity")
+        with (
+            patch.object(tui_logs, "activity_entries", return_value=[private]),
+            patch.object(tui_logs, "podman_entries") as podman,
+            patch.object(self.backend, "selected") as selected,
+        ):
+            selected.side_effect = backend.DashboardError("synthetic private refusal")
+            self.assertEqual(
+                self.backend.logs("a" * 32), [private, tui_logs.PODMAN_UNAVAILABLE]
+            )
+            selected.side_effect = None
+            selected.return_value = (
+                Path("/synthetic/workspace.json"),
+                {"id": "b" * 32},
+            )
+            self.assertEqual(
+                self.backend.logs("a" * 32), [private, tui_logs.PODMAN_UNAVAILABLE]
+            )
+            podman.assert_not_called()
+
     def test_real_json_wrapper_failure_is_isolated_from_valid_registrations(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
