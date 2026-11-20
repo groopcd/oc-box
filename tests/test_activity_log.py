@@ -6,11 +6,14 @@ import multiprocessing
 import os
 import stat
 import tempfile
+import time
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
 from oc_box import activity_log as journal
+from oc_box.log_config import LogConfigError
 
 
 def _writer(root, start, count, ready, result):
@@ -29,7 +32,7 @@ def _writer(root, start, count, ready, result):
         )
 
 
-class ActivityLogTests(unittest.TestCase):
+class ActivityJournalFixture(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="oc-box-activity-")
         self.addCleanup(self.temporary.cleanup)
@@ -37,6 +40,11 @@ class ActivityLogTests(unittest.TestCase):
         self.root = self.base / "state"
         self.log = self.root / "log"
         self.active = self.log / "activity.jsonl"
+        self.config = self.base / "config" / "oc-box" / "config.json"
+        self.enterContext(
+            patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.config.parents[1])})
+        )
+        os.environ.pop("OC_BOX_LOG_DIR", None)
 
     def record(self, **kwargs):
         return journal.record_event(
@@ -68,6 +76,8 @@ class ActivityLogTests(unittest.TestCase):
             )
         ]
 
+
+class ActivityLogTests(ActivityJournalFixture):
     def test_roundtrip_private_permissions_and_fixed_schema(self):
         record = self.seed()
         self.assertEqual(
@@ -611,6 +621,315 @@ class ActivityLogTests(unittest.TestCase):
                             process.kill()
                             process.join(timeout=5)
                     result.close()
+
+
+class ActivityRotationTests(ActivityJournalFixture):
+    def configure(self, **logs):
+        self.config.parent.mkdir(parents=True, exist_ok=True)
+        self.config.write_text(json.dumps({"logs": logs}))
+        self.config.chmod(0o600)
+
+    def files(self):
+        return {
+            path.name: path.read_bytes() for path in self.log.glob("activity.jsonl*")
+        }
+
+    def record_range(self, start, stop):
+        for duration in range(start, stop):
+            self.assertTrue(self.record(duration_ms=duration))
+
+    def test_custom_path_is_selected_without_creating_log_or_workspace_state(self):
+        custom = self.base / "private" / "journal"
+        alternate = self.base / "alternate"
+        self.assertEqual(journal.log_path(self.root), self.active)
+        self.configure(directory=str(custom))
+        with patch.object(journal, "_log_directory") as open_log:
+            self.assertEqual(journal.log_path(self.root), custom / self.active.name)
+            open_log.assert_not_called()
+        self.assertEqual(self.durations(strict_snapshot=True), [])
+        self.assertFalse(custom.parent.exists())
+        self.assertFalse(self.root.exists())
+
+        self.assertTrue(self.record(duration_ms=1))
+        self.assertEqual(self.durations(strict_snapshot=True), [1])
+        self.assertFalse(self.root.exists())
+        for name, mode in ((custom, 0o700), (custom / self.active.name, 0o600)):
+            self.assertEqual(stat.S_IMODE(name.stat().st_mode), mode)
+        with patch.dict(os.environ, {"OC_BOX_LOG_DIR": str(alternate)}):
+            self.assertEqual(journal.log_path(self.root), alternate / self.active.name)
+            self.assertEqual(self.durations(strict_snapshot=True), [])
+            self.assertFalse(alternate.exists())
+            self.assertTrue(self.record(duration_ms=2))
+            self.assertEqual(self.durations(strict_snapshot=True), [2])
+        self.assertEqual(self.durations(strict_snapshot=True), [1])
+        self.assertFalse(self.root.exists())
+
+    def test_custom_path_refuses_symlink_ancestors_and_nonprivate_leaf(self):
+        target = self.base / "target"
+        target.mkdir(mode=0o700)
+        link = self.base / "link"
+        link.symlink_to(target, target_is_directory=True)
+        target.chmod(0o755)
+        for custom in (link, link / "subdir", target):
+            with self.subTest(custom=custom):
+                self.configure(directory=str(custom))
+                self.assertEqual(journal.log_path(self.root), custom / self.active.name)
+                self.assertEqual(self.durations(strict_snapshot=True), [])
+                self.assertFalse(self.record())
+                self.assertEqual(list(target.iterdir()), [])
+                self.assertFalse(self.root.exists())
+        self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o755)
+
+    def test_invalid_policy_refuses_all_private_access_with_fixed_path_error(self):
+        self.seed()
+        before = self.files()
+        self.configure(SystemMaxFiles="synthetic-private-value")
+        with self.assertRaisesRegex(
+            LogConfigError, "^Activity log configuration is invalid or unsafe\\.$"
+        ):
+            journal.log_path(self.root)
+        self.assertFalse(self.record())
+        self.assertEqual(self.durations(), [])
+        self.assertEqual(self.files(), before)
+
+    def test_size_and_count_rotation_read_latest_in_order(self):
+        self.configure(SystemMaxFileSize="1K", SystemMaxFiles=2)
+        self.record_range(1000, 1001)
+        rows_per_file = 1024 // self.active.stat().st_size
+        end = 1000 + 3 * rows_per_file + 2
+        self.record_range(1001, end)
+
+        self.assertEqual(sorted(self.files()), ["activity.jsonl", "activity.jsonl.1"])
+        self.assertTrue(all(len(data) <= 1024 for data in self.files().values()))
+        self.assertEqual(
+            self.durations(strict_snapshot=True),
+            list(range(end - rows_per_file - 2, end)),
+        )
+
+    def test_total_use_prunes_and_can_force_rotation_below_file_size(self):
+        self.configure(SystemMaxFileSize="1K", SystemMaxFiles=8, SystemMaxUse="2K")
+        self.record_range(1000, 1001)
+        rows_per_file = 1024 // self.active.stat().st_size
+        end = 1000 + 3 * rows_per_file + 2
+        self.record_range(1001, end)
+        self.assertEqual(sorted(self.files()), ["activity.jsonl", "activity.jsonl.1"])
+        self.assertLessEqual(sum(map(len, self.files().values())), 2048)
+        self.assertEqual(
+            self.durations(strict_snapshot=True),
+            list(range(end - rows_per_file - 2, end)),
+        )
+
+        self.configure(SystemMaxFileSize="8K", SystemMaxFiles=8, SystemMaxUse="1K")
+        self.record_range(end, end + 2 * rows_per_file)
+        self.assertLessEqual(sum(map(len, self.files().values())), 1024)
+        retained = self.durations(strict_snapshot=True)
+        self.assertEqual(
+            retained,
+            list(
+                range(end + 2 * rows_per_file - len(retained), end + 2 * rows_per_file)
+            ),
+        )
+
+    def test_smaller_limits_do_not_make_valid_existing_history_unreadable(self):
+        self.configure(SystemMaxFileSize="8K", SystemMaxUse="32K")
+        self.record_range(1000, 1020)
+        existing = self.active.read_bytes()
+        self.assertGreater(len(existing), 1024)
+        self.configure(SystemMaxFileSize="1K", SystemMaxUse="32K")
+        self.assertEqual(self.durations(strict_snapshot=True), list(range(1000, 1020)))
+        self.assertEqual(self.files(), {self.active.name: existing})
+
+        self.assertTrue(self.record(duration_ms=1020))
+        self.assertEqual(self.durations(strict_snapshot=True), list(range(1000, 1021)))
+        self.assertEqual(self.files()["activity.jsonl.1"], existing)
+        before = self.files()
+        self.configure(SystemMaxFileSize="1K", SystemMaxFiles=1)
+        self.assertEqual(self.durations(strict_snapshot=True), list(range(1000, 1021)))
+        self.assertEqual(self.files(), before)
+        self.assertTrue(self.record(duration_ms=1021))
+        self.assertEqual(self.durations(strict_snapshot=True), [1020, 1021])
+        self.assertEqual(sorted(self.files()), ["activity.jsonl"])
+
+    def test_active_file_age_comes_from_first_valid_event_not_recent_mtime(self):
+        seed = self.seed()
+        old = {**seed, "duration_ms": 24, "timestamp": "2000-01-01T00:00:00.000Z"}
+        recent = self.active.read_bytes()
+        original = b"{\n" + json.dumps(old).encode("ascii") + b"\n" + recent
+        self.active.write_bytes(original)
+        os.utime(self.active, None)
+        self.configure(MaxFileSec="1h")
+        self.assertEqual(self.durations(strict_snapshot=True), [24, 25])
+        self.assertEqual(self.files(), {self.active.name: original})
+        self.assertTrue(self.record(duration_ms=26))
+        self.assertEqual(self.files()["activity.jsonl.1"], original)
+        self.assertEqual(self.durations(strict_snapshot=True), [24, 25, 26])
+
+    def test_expired_active_is_eligible_for_pruning_only_after_rotation(self):
+        seed = self.seed()
+        seed["timestamp"] = "2000-01-01T00:00:00.000Z"
+        self.active.write_bytes(json.dumps(seed).encode("ascii") + b"\n")
+        old = time.time() - 100
+        os.utime(self.active, (old, old))
+        self.configure(MaxFileSec="30s", MaxRetentionSec="30s")
+        self.assertEqual(self.durations(strict_snapshot=True), [25])
+        self.assertTrue(self.record(duration_ms=26))
+        self.assertEqual(sorted(self.files()), [self.active.name])
+        self.assertEqual(self.durations(strict_snapshot=True), [26])
+
+    def test_expiry_runs_only_on_append_and_preserves_a_suffix_for_follow(self):
+        middle = self.rotated_journal()
+        now = time.time()
+        os.utime(middle, (now - 100, now - 100))
+        oldest = self.log / "activity.jsonl.2"
+        os.utime(oldest, (now, now))
+        self.configure(MaxRetentionSec="30s")
+        before = self.files()
+        self.assertEqual(self.durations(strict_snapshot=True), [1, 2, 3])
+        self.assertEqual(self.files(), before)
+
+        # An expired mtime on an interior file cannot create a follow gap.
+        self.assertTrue(self.record(duration_ms=4))
+        self.assertEqual(self.durations(strict_snapshot=True), [1, 2, 3, 4])
+        self.assertEqual(self.files()[middle.name], before[middle.name])
+        self.assertEqual(self.files()[oldest.name], before[oldest.name])
+
+        os.utime(oldest, (now - 101, now - 101))
+        self.assertTrue(self.record(duration_ms=5))
+        self.assertFalse(oldest.exists())
+        self.assertFalse(middle.exists())
+        self.assertEqual(self.durations(strict_snapshot=True), [3, 4, 5])
+
+    @staticmethod
+    def filesystem(available, *, blocks=100):
+        # Reserved blocks must not count towards free space for the caller.
+        return SimpleNamespace(
+            f_bavail=available,
+            f_bfree=blocks,
+            f_frsize=512,
+            f_bsize=4096,
+            f_blocks=blocks,
+        )
+
+    def test_keep_free_prunes_oldest_and_remeasures_actual_available_blocks(self):
+        self.rotated_journal()
+        self.configure(SystemKeepFree="1K")
+        measured = []
+        block_counts = iter((1, 2, 4))
+
+        def statvfs(fd):
+            self.assertTrue(stat.S_ISDIR(os.fstat(fd).st_mode))
+            measured.append(sorted(self.files()))
+            return self.filesystem(next(block_counts))
+
+        with patch.object(journal.os, "fstatvfs", side_effect=statvfs):
+            self.assertTrue(self.record(duration_ms=4))
+        self.assertEqual(
+            measured,
+            [
+                ["activity.jsonl", "activity.jsonl.1", "activity.jsonl.2"],
+                ["activity.jsonl", "activity.jsonl.1"],
+                ["activity.jsonl"],
+            ],
+        )
+        self.assertEqual(self.durations(strict_snapshot=True), [3, 4])
+
+    def test_impossible_keep_free_reservation_refuses_before_other_policy_pruning(self):
+        self.rotated_journal()
+        before = self.files()
+        self.configure(SystemMaxFiles=1, SystemKeepFree="1K")
+        # Capacity can hold the reservation by itself but not one more append.
+        with patch.object(
+            journal.os, "fstatvfs", return_value=self.filesystem(2, blocks=2)
+        ):
+            self.assertFalse(self.record(duration_ms=4))
+        self.assertEqual(self.files(), before)
+
+    def test_keep_free_refusal_and_unsynced_appends_do_not_mirror(self):
+        self.rotated_journal()
+        before = self.active.read_bytes()
+        self.configure(SystemKeepFree="1K")
+        emit = Mock()
+        with (
+            patch("oc_box.journal_output", SimpleNamespace(emit=emit), create=True),
+            patch.dict(os.environ, {"OC_BOX_JOURNALD": "1", "OC_BOX_CONTAINER": "0"}),
+        ):
+            with patch.object(journal.os, "fstatvfs", return_value=self.filesystem(1)):
+                self.assertFalse(self.record(duration_ms=4))
+            self.assertEqual(self.files(), {self.active.name: before})
+            emit.assert_not_called()
+
+            self.configure()
+            with patch.object(journal.os, "fsync", side_effect=OSError):
+                self.assertFalse(self.record(duration_ms=5))
+            emit.assert_not_called()
+            self.assertTrue(self.record(duration_ms=6))
+        emit.assert_called_once()
+        self.assertEqual(emit.call_args.args[0]["duration_ms"], 6)
+
+    def test_single_file_rotation_does_not_discard_outgoing_active_on_sync_failure(
+        self,
+    ):
+        with (
+            patch.object(journal, "_MAX_FILE_BYTES", 160),
+            patch.object(journal, "_BACKUP_COUNT", 0),
+        ):
+            self.assertTrue(self.record(duration_ms=1))
+            before = self.active.read_bytes()
+            with patch.object(journal.os, "fsync", side_effect=OSError):
+                self.assertFalse(self.record(duration_ms=2))
+            self.assertEqual(self.files()["activity.jsonl.1"], before)
+            self.assertTrue(self.record(duration_ms=3))
+        self.assertEqual(sorted(self.files()), [self.active.name])
+        self.assertEqual(self.durations(strict_snapshot=True), [3])
+
+    def test_fixed_filename_bound_and_safe_pruning_even_after_count_decrease(self):
+        with (
+            patch.object(journal, "_MAX_FILE_BYTES", 160),
+            patch.object(journal, "_BACKUP_COUNT", 15),
+        ):
+            self.record_range(1000, 1018)
+        self.assertEqual(len(self.files()), 16)
+        self.assertEqual(self.durations(strict_snapshot=True), list(range(1002, 1018)))
+        last = self.log / "activity.jsonl.15"
+        unmanaged = self.log / "activity.jsonl.16"
+        unmanaged.write_bytes(self.active.read_bytes())
+        unmanaged.chmod(0o600)
+        extra_link = self.base / "archive-hardlink"
+        os.link(last, extra_link)
+
+        self.configure(SystemMaxFiles=1)
+        before = self.files()
+        self.assertFalse(self.record(duration_ms=1018))
+        self.assertEqual(self.files(), before)
+        self.assertEqual(extra_link.read_bytes(), before[last.name])
+        extra_link.unlink()
+        self.assertTrue(self.record(duration_ms=1018))
+        self.assertEqual(sorted(self.files()), [self.active.name, unmanaged.name])
+        self.assertEqual(unmanaged.read_bytes(), before[unmanaged.name])
+        self.assertEqual(self.durations(strict_snapshot=True), [1017, 1018])
+
+    def test_absolute_file_and_total_bounds_are_independent_of_policy(self):
+        self.assertEqual(journal._HARD_FILE_BYTES, 4 * 1024 * 1024)
+        self.assertEqual(journal._HARD_TOTAL_BYTES, 16 * 1024 * 1024)
+        self.rotated_journal()
+        before = self.files()
+        two_latest_bytes = len(before[self.active.name]) + len(
+            before["activity.jsonl.1"]
+        )
+        with patch.object(journal, "_HARD_TOTAL_BYTES", two_latest_bytes):
+            self.assertEqual(self.durations(strict_snapshot=True), [])
+            self.assertEqual(self.durations(), [2, 3])
+            self.assertFalse(self.record(duration_ms=4))
+        self.assertEqual(self.files(), before)
+
+        self.configure(SystemMaxFileSize="4M")
+        with self.active.open("r+b") as output:
+            output.truncate(journal._HARD_FILE_BYTES + 1)
+        with patch.object(journal, "_read_file") as read_file:
+            self.assertEqual(self.durations(strict_snapshot=True), [])
+            self.assertFalse(self.record(duration_ms=4))
+            read_file.assert_not_called()
+        self.assertEqual(self.active.stat().st_size, journal._HARD_FILE_BYTES + 1)
 
 
 if __name__ == "__main__":
