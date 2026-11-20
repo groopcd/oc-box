@@ -570,7 +570,8 @@ text and settings changes are never saved or written to the activity journal.
 
 The header shows **N log entries** when search is empty and **N log matches**
 when filtering, with singular forms for one result. These are retained log
-entries in the selected Logs source, not sessions, workspaces or agent calls.
+entries visible in the selected Logs source, not sessions, workspaces or agent
+calls.
 Hover for an explanation. The double-width red **❌**, with a two-cell click
 target, clears only the input/filter,
 restoring the unfiltered count rather than deleting logs. Search feedback stays
@@ -584,13 +585,20 @@ the file is `~/.local/state/oc-box/log/activity.jsonl`. Rotations are
 Files use mode 0600 and private directories 0700; readers never create journal
 files.
 
-Entries contain fixed event categories and allowlisted metadata, **not raw argv,
-environment values, native stdout/stderr, error messages, prompts, or
-conversation transcripts**. The UI retains at most 2000 log entries globally
-and displays at most 1000 generated-journal entries per refresh. Rotation means
-this is not a permanent audit archive. It is not a terminal recording, and this
-first stage adds no native OpenCode logfile reader. Demo mode reads none of
-these files.
+The dashboard's oc-box source shares validated severity and message formatting
+with the read-only host command [`oc-box logs`](cli.md#logs). The dashboard
+shows all retained levels, including `debug`; only the CLI defaults to `info`
+or higher. Valid older entries without a severity remain readable with a
+derived level. Missing or unsafe journal data is treated as empty.
+
+Entries contain fixed event categories and allowlisted metadata. Reason codes
+and metric names come from fixed lists, and metric values are bounded integers.
+Entries contain **no raw arguments, environment values, errors, stdout/stderr,
+prompts, conversation transcripts, pairing links, authentication or clipboard
+data, or other free-form text**. The UI retains at most 2000 log entries globally
+and displays at most 1000 generated-journal entries per refresh. The journal is
+not a terminal recording, a native OpenCode logfile or a permanent audit archive.
+Demo mode reads none of these files.
 
 **Podman container logs are a separate, explicit opt-in source.** Only a selected
 verified oc-box-owned container may be queried: `--tail` 500 lines, a 1 MiB byte

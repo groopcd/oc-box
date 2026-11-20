@@ -543,7 +543,8 @@ class DashboardBackend:
             from .tui_logs import activity_entries, podman_entries
         else:
             from tui_logs import activity_entries, podman_entries
-        result = list(activity_entries(root=self.box.state_root()))
+        # Let the journal validate the raw state path, including every ancestor.
+        result = list(activity_entries())
         if workspace:
             _, data = self.selected(workspace)
             result.extend(podman_entries(self._queries, data))

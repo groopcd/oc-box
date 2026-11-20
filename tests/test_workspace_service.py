@@ -1477,7 +1477,7 @@ class WorkspaceServiceTests(unittest.TestCase):
         stages, active = [], []
 
         @contextlib.contextmanager
-        def stage(label):
+        def stage(label, **_options):
             stages.append(label)
             active.append(label)
             try:

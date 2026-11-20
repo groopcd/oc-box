@@ -238,6 +238,39 @@ class ActivityEntriesTests(unittest.TestCase):
             self.assertEqual(logs.activity_entries(root, limit=1), entries[-1:])
             self.assertEqual(logs.activity_entries(root / "missing"), [])
 
+    def test_structured_history_is_rendered_and_searchable_with_shared_level(self):
+        with tempfile.TemporaryDirectory(prefix="oc-box-log-render-") as temporary:
+            root = Path(temporary) / "state"
+            self.assertTrue(
+                activity_log.record_event(
+                    "history.wait",
+                    command="stop",
+                    outcome="failure",
+                    level="warn",
+                    stage="history-wait",
+                    reason="timeout",
+                    metrics={
+                        "remaining_ms": 0,
+                        "jobs_running": 1,
+                        "foreground_queries": 3,
+                    },
+                    root=root,
+                )
+            )
+            [record] = activity_log.read_events(root)
+            [entry] = logs.activity_entries(root)
+            self.assertEqual(entry.level, "warn")
+            self.assertEqual(
+                entry.message,
+                "history.wait command=stop stage=history-wait outcome=failure "
+                "reason=timeout foreground_queries=3 jobs_running=1 remaining_ms=0",
+            )
+            self.assertEqual(entry.message, activity_log.format_event(record))
+            buffer = logs.LogBuffer()
+            buffer.append(entry)
+            for query in ("WARN", "reason=time", "jobs_running=1"):
+                self.assertEqual(buffer.search(query), [entry])
+
 
 class PodmanEntriesTests(unittest.TestCase):
     def setUp(self):

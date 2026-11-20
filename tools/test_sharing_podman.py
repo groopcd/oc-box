@@ -420,6 +420,84 @@ def validate_journal(directory):
         "session.unarchived",
         "session.deleted",
         "session.favorited",
+        "lifecycle.stage",
+        "lifecycle.notice",
+        "history.wait",
+        "history.pass",
+        "history.recovery",
+        "history.result",
+    }
+    fixed_choices = {
+        "level": {"debug", "info", "warn", "error"},
+        "stage": {
+            "backend",
+            "version",
+            "workspace",
+            "container",
+            "credentials",
+            "configuration",
+            "bootstrap",
+            "dependencies",
+            "service",
+            "session",
+            "client",
+            "history-wait",
+            "history-sync",
+            "history-recovery",
+            "shutdown",
+            "standalone",
+            "private-endpoint",
+            "post-stop-reader",
+            "foreground-query",
+            "background-query",
+            "poll-delay",
+        },
+        "reason": {
+            "timeout",
+            "transport",
+            "pending",
+            "verification",
+            "unsupported-version",
+            "cleanup-unverified",
+            "cancelled",
+            "refused",
+            "startup-failed",
+            "holder-active",
+            "schema",
+            "io",
+            "interrupted",
+            "not-needed",
+            "sync-failed",
+            "scope-unavailable",
+            "client-failed",
+            "source-unavailable",
+            "stop-requested",
+        },
+    }
+    metric_names = {
+        "sessions",
+        "exported",
+        "unchanged",
+        "updated",
+        "pending",
+        "interrupted",
+        "foreground",
+        "jobs_running",
+        "jobs_completed",
+        "jobs_error",
+        "jobs_cancelled",
+        "shell",
+        "subagent",
+        "image",
+        "complete_pairs",
+        "foreground_queries",
+        "background_queries",
+        "foreground_total_ms",
+        "foreground_max_ms",
+        "background_total_ms",
+        "background_max_ms",
+        "remaining_ms",
+        "last_complete_age_ms",
     }
 
     def pairs(items):
@@ -476,6 +554,10 @@ def validate_journal(directory):
                     "outcome",
                     "exit_code",
                     "duration_ms",
+                    "level",
+                    "stage",
+                    "reason",
+                    "metrics",
                 },
                 "journal",
             )
@@ -521,6 +603,21 @@ def validate_journal(directory):
                     or (type(value[key]) is int and low <= value[key] <= high),
                     "journal",
                 )
+            for key, choices in fixed_choices.items():
+                require(
+                    key not in value
+                    or (isinstance(value[key], str) and value[key] in choices),
+                    "journal",
+                )
+            metrics = value.get("metrics", {})
+            require(
+                type(metrics) is dict
+                and all(
+                    name in metric_names and type(number) is int and 0 <= number < 2**31
+                    for name, number in metrics.items()
+                ),
+                "journal",
+            )
             count += 1
     require(count > 0, "journal")
     return count
@@ -1267,17 +1364,23 @@ def child(args, loaded, *, control=None):
                 ):
                     operation = "reset" if args.reset else "start"
                     owner_stage(control, "owner-launch")
-                    code = entrypoint(
-                        box,
-                        [
-                            operation,
-                            "--project",
-                            str(root / args.project_name),
-                            "--distro",
-                            args.distro,
-                            "--no-vault",
-                        ],
-                    )
+                    # The explicit-stop oracle checks one legacy pending line.
+                    with (
+                        patch.dict(os.environ, {"OC_BOX_LIFECYCLE_DIAGNOSTICS": "1"})
+                        if args.expect_stop
+                        else contextlib.nullcontext()
+                    ):
+                        code = entrypoint(
+                            box,
+                            [
+                                operation,
+                                "--project",
+                                str(root / args.project_name),
+                                "--distro",
+                                args.distro,
+                                "--no-vault",
+                            ],
+                        )
                     if code != 0:
                         sys.stderr.flush()
                         descriptor = sys.stderr.fileno()

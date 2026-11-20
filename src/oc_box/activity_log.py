@@ -1,9 +1,9 @@
 """Private, bounded activity metadata; never a transcript or error log.
 
-Only fixed event/command/outcome names, workspace IDs and numeric measurements
-are accepted. Diagnostic failures are deliberately silent and cannot turn a
-successful lifecycle operation into a failure. ``root`` is the *state* root;
-the journal lives in its private ``log/`` directory. No reader creates files.
+Only fixed event categories, workspace IDs and bounded numeric measurements are
+accepted. Diagnostic failures are deliberately silent and cannot turn a successful
+lifecycle operation into a failure. ``root`` is the *state* root; the journal
+lives in its private ``log/`` directory. No reader creates files.
 """
 
 import fcntl
@@ -28,6 +28,12 @@ EVENTS = frozenset(
         "session.unarchived",
         "session.deleted",
         "session.favorited",
+        "lifecycle.stage",
+        "lifecycle.notice",
+        "history.wait",
+        "history.pass",
+        "history.recovery",
+        "history.result",
     }
 )
 COMMANDS = frozenset(
@@ -56,6 +62,83 @@ COMMANDS = frozenset(
     }
 )
 OUTCOMES = frozenset({"success", "failure", "cancelled", "refused", "unavailable"})
+LEVELS = ("debug", "info", "warn", "error")
+STAGES = frozenset(
+    {
+        "backend",
+        "version",
+        "workspace",
+        "container",
+        "credentials",
+        "configuration",
+        "bootstrap",
+        "dependencies",
+        "service",
+        "session",
+        "client",
+        "history-wait",
+        "history-sync",
+        "history-recovery",
+        "standalone",
+        "private-endpoint",
+        "post-stop-reader",
+        "foreground-query",
+        "background-query",
+        "poll-delay",
+        "shutdown",
+    }
+)
+REASONS = frozenset(
+    {
+        "timeout",
+        "transport",
+        "pending",
+        "verification",
+        "unsupported-version",
+        "cleanup-unverified",
+        "cancelled",
+        "refused",
+        "startup-failed",
+        "holder-active",
+        "schema",
+        "io",
+        "interrupted",
+        "not-needed",
+        "sync-failed",
+        "scope-unavailable",
+        "client-failed",
+        "source-unavailable",
+        "stop-requested",
+    }
+)
+METRICS = frozenset(
+    {
+        "sessions",
+        "exported",
+        "unchanged",
+        "updated",
+        "pending",
+        "interrupted",
+        "foreground",
+        "jobs_running",
+        "jobs_completed",
+        "jobs_error",
+        "jobs_cancelled",
+        "shell",
+        "subagent",
+        "image",
+        "complete_pairs",
+        "foreground_queries",
+        "background_queries",
+        "foreground_total_ms",
+        "foreground_max_ms",
+        "background_total_ms",
+        "background_max_ms",
+        "remaining_ms",
+        "last_complete_age_ms",
+    }
+)
+MAX_METRIC_VALUE = 2**31 - 1
 
 _FILE = "activity.jsonl"
 _LOCK = "activity.lock"
@@ -64,17 +147,16 @@ _BACKUP_COUNT = 3
 _MAX_RECORD_BYTES = 1024
 _MAX_READ_EVENTS = 10000
 _LOCK_TIMEOUT = 0.25
-_FIELDS = frozenset(
-    {
-        "timestamp",
-        "event",
-        "command",
-        "workspace",
-        "outcome",
-        "exit_code",
-        "duration_ms",
-    }
+_DISPLAY_FIELDS = (
+    "command",
+    "workspace",
+    "stage",
+    "outcome",
+    "reason",
+    "exit_code",
+    "duration_ms",
 )
+_FIELDS = frozenset({"timestamp", "event", "level", "metrics", *_DISPLAY_FIELDS})
 _WORKSPACE = re.compile(r"[0-9a-f]{32}\Z")
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\Z")
 
@@ -195,6 +277,10 @@ def _integer(value, minimum, maximum):
     return type(value) is int and minimum <= value <= maximum
 
 
+def _workspace_id(value):
+    return isinstance(value, str) and _WORKSPACE.fullmatch(value) is not None
+
+
 def _sanitize(record):
     if not isinstance(record, dict) or set(record) - _FIELDS:
         return None
@@ -207,20 +293,68 @@ def _sanitize(record):
         datetime.fromisoformat(timestamp[:-1] + "+00:00")
     except ValueError:
         return None
-    if "command" in record and not _choice(record["command"], COMMANDS):
-        return None
-    if "outcome" in record and not _choice(record["outcome"], OUTCOMES):
-        return None
-    workspace = record.get("workspace")
-    if "workspace" in record and not (
-        isinstance(workspace, str) and _WORKSPACE.fullmatch(workspace)
+    for name, choices in (
+        ("command", COMMANDS),
+        ("outcome", OUTCOMES),
+        ("level", LEVELS),
+        ("stage", STAGES),
+        ("reason", REASONS),
     ):
+        if name in record and not _choice(record[name], choices):
+            return None
+    if "workspace" in record and not _workspace_id(record["workspace"]):
         return None
     if "exit_code" in record and not _integer(record["exit_code"], -255, 255):
         return None
     if "duration_ms" in record and not _integer(record["duration_ms"], 0, 2**53 - 1):
         return None
-    return dict(record)
+    cleaned = dict(record)
+    if "metrics" in record:
+        metrics = record["metrics"]
+        if type(metrics) is not dict or len(metrics) > len(METRICS):
+            return None
+        metrics = metrics.copy()
+        if any(
+            type(name) is not str
+            or name not in METRICS
+            or not _integer(value, 0, MAX_METRIC_VALUE)
+            for name, value in metrics.items()
+        ):
+            return None
+        cleaned["metrics"] = metrics
+    return cleaned
+
+
+def event_level(record) -> str:
+    """Return stored severity or the fixed default for an unlevelled record."""
+    level = record.get("level")
+    if _choice(level, LEVELS):
+        return level
+    event = record.get("event")
+    if event == "command.failed" or record.get("outcome") in (
+        "failure",
+        "refused",
+        "unavailable",
+    ):
+        return "error"
+    if event in ("lifecycle.stage", "history.wait", "history.pass"):
+        return "debug"
+    if event == "lifecycle.notice":
+        return "warn"
+    return "info"
+
+
+def format_event(record) -> str:
+    """Render fixed journal metadata without the timestamp or severity prefix."""
+    record = _sanitize(record)
+    if record is None:
+        return ""
+    parts = [record["event"]]
+    parts.extend(f"{name}={record[name]}" for name in _DISPLAY_FIELDS if name in record)
+    parts.extend(
+        f"{name}={value}" for name, value in sorted(record.get("metrics", {}).items())
+    )
+    return " ".join(parts)
 
 
 def _validate_files(directory):
@@ -255,11 +389,15 @@ def record_event(
     outcome=None,
     exit_code=None,
     duration_ms=None,
+    level=None,
+    stage=None,
+    reason=None,
+    metrics=None,
     root=None,
 ) -> bool:
     """Append allowlisted metadata; return False silently on invalid/unsafe I/O.
 
-    Files are 0600, state/log directories are 0700, and symlinks, hardlinks,
+    Files are 0600, the log directory is 0700, and symlinks, hardlinks,
     foreign ownership and unsafe existing permissions are refused, not repaired.
     A shared lock serializes append/rotation. Retention is four 256-KiB files.
     No exception text or arbitrary caller field is ever written.
@@ -277,6 +415,10 @@ def record_event(
             ("outcome", outcome),
             ("exit_code", exit_code),
             ("duration_ms", duration_ms),
+            ("level", level),
+            ("stage", stage),
+            ("reason", reason),
+            ("metrics", metrics),
         ):
             if value is not None:
                 record[name] = value
@@ -315,6 +457,19 @@ def record_event(
             finally:
                 if fd is not None:
                     os.close(fd)
+        if (
+            os.environ.get("OC_BOX_JOURNALD") == "1"
+            and os.environ.get("OC_BOX_CONTAINER") != "1"
+        ):
+            try:
+                if __package__:
+                    from . import journal_output
+                else:
+                    import journal_output
+                journal_output.emit(record)
+            except Exception:  # noqa: BLE001, S110 - the optional sink is silent.
+                # The optional sink cannot change the private append result.
+                pass
         return True
     except Exception:  # noqa: BLE001 - optional diagnostics must never abort callers.
         # Diagnostics must not change lifecycle outcomes, including unavailable
@@ -322,14 +477,27 @@ def record_event(
         return False
 
 
-def read_events(root=None, *, limit=1000) -> list[dict]:
+def read_events(
+    root=None, *, limit=1000, level=None, workspace=None, strict_snapshot=False
+) -> list[dict]:
     """Return the latest valid records oldest-first, without creating anything.
 
-    Malformed/oversized records and unsafe files are ignored. The read is bounded
-    by four journal files and at most 10,000 returned records. Failure is empty.
+    Match at least ``level`` and exactly ``workspace`` before applying ``limit``.
+    Malformed/oversized records are ignored. Normally unsafe files are skipped;
+    ``strict_snapshot`` instead returns an empty list on any unsafe, unreadable,
+    oversized or missing file, except for an absent oldest prefix of rotations.
+    This lets a follower retain its previous snapshot rather than replay after a
+    partial read. Reads remain bounded by four files and 10,000 returned records.
+    Invalid filters and read failures return an empty list.
     """
-    if type(limit) is not int or limit <= 0:
+    if (
+        type(limit) is not int
+        or limit <= 0
+        or (level is not None and not _choice(level, LEVELS))
+        or (workspace is not None and not _workspace_id(workspace))
+    ):
         return []
+    minimum = LEVELS.index(level) if level is not None else None
     records = deque(maxlen=min(limit, _MAX_READ_EVENTS))
     try:
         with (
@@ -340,13 +508,24 @@ def read_events(root=None, *, limit=1000) -> list[dict]:
                 *(f"{_FILE}.{index}" for index in range(_BACKUP_COUNT, 0, -1)),
                 _FILE,
             ]
+            found = False
             for name in names:
                 try:
                     fd = _open_file(directory, name)
-                except (OSError, ValueError):
+                except FileNotFoundError:
+                    if strict_snapshot and found:
+                        return []
                     continue
+                except (OSError, ValueError):
+                    if strict_snapshot:
+                        return []
+                    continue
+                found = True
                 try:
-                    if os.fstat(fd).st_size > _MAX_FILE_BYTES:
+                    size = os.fstat(fd).st_size
+                    if size > _MAX_FILE_BYTES:
+                        if strict_snapshot:
+                            return []
                         continue
                     data = bytearray()
                     while len(data) <= _MAX_FILE_BYTES:
@@ -354,7 +533,11 @@ def read_events(root=None, *, limit=1000) -> list[dict]:
                         if not chunk:
                             break
                         data.extend(chunk)
-                    if len(data) > _MAX_FILE_BYTES:
+                    if len(data) > _MAX_FILE_BYTES or (
+                        strict_snapshot and len(data) != size
+                    ):
+                        if strict_snapshot:
+                            return []
                         continue
                     for line in data.splitlines():
                         if len(line) > _MAX_RECORD_BYTES:
@@ -363,7 +546,17 @@ def read_events(root=None, *, limit=1000) -> list[dict]:
                             record = _sanitize(json.loads(line))
                         except (ValueError, UnicodeError, RecursionError):
                             continue
-                        if record is not None:
+                        if (
+                            record is not None
+                            and (
+                                workspace is None
+                                or record.get("workspace") == workspace
+                            )
+                            and (
+                                minimum is None
+                                or LEVELS.index(event_level(record)) >= minimum
+                            )
+                        ):
                             records.append(record)
                 finally:
                     os.close(fd)

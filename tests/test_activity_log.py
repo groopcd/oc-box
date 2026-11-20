@@ -51,6 +51,23 @@ class ActivityLogTests(unittest.TestCase):
         )
         return journal.read_events(self.root)[0]
 
+    def rotated_journal(self):
+        # A small write bound puts one distinguishable record in each file.
+        with patch.object(journal, "_MAX_FILE_BYTES", 160):
+            for duration in (1, 2, 3):
+                self.assertTrue(self.record(duration_ms=duration))
+        self.assertFalse((self.log / "activity.jsonl.3").exists())
+        self.assertTrue((self.log / "activity.jsonl.2").is_file())
+        return self.log / "activity.jsonl.1"
+
+    def durations(self, *, strict_snapshot=False):
+        return [
+            record["duration_ms"]
+            for record in journal.read_events(
+                self.root, strict_snapshot=strict_snapshot
+            )
+        ]
+
     def test_roundtrip_private_permissions_and_fixed_schema(self):
         record = self.seed()
         self.assertEqual(
@@ -91,10 +108,90 @@ class ActivityLogTests(unittest.TestCase):
             len(journal.EVENTS) + len(journal.COMMANDS) + len(journal.OUTCOMES),
         )
 
+    def test_structured_history_record_fits_existing_journal_bounds(self):
+        metrics = {name: journal.MAX_METRIC_VALUE for name in journal.METRICS}
+        self.assertTrue(
+            journal.record_event(
+                "history.recovery",
+                command="start",
+                workspace="a" * 32,
+                outcome="failure",
+                exit_code=1,
+                duration_ms=2**53 - 1,
+                level="warn",
+                stage="history-recovery",
+                reason="cleanup-unverified",
+                metrics=metrics,
+                root=self.root,
+            )
+        )
+        payload = self.active.read_bytes()
+        self.assertLessEqual(len(payload), journal._MAX_RECORD_BYTES)
+        [record] = journal.read_events(self.root)
+        self.assertEqual(record, json.loads(payload))
+        self.assertEqual(record["stage"], "history-recovery")
+        self.assertEqual(record["reason"], "cleanup-unverified")
+        self.assertEqual(record["metrics"], metrics)
+        self.assertEqual(journal.event_level(record), "warn")
+        self.assertEqual(
+            sorted(path.name for path in self.log.iterdir()),
+            [
+                "activity.jsonl",
+                "activity.lock",
+            ],
+        )
+
+    def test_derived_levels_keep_legacy_behavior_and_allow_stored_override(self):
+        self.assertEqual(journal.LEVELS, ("debug", "info", "warn", "error"))
+        for event, fields, expected in (
+            ("command.started", {}, "info"),
+            ("command.failed", {}, "error"),
+            ("command.failed", {"level": "warn"}, "warn"),
+            ("command.finished", {"outcome": "failure"}, "error"),
+            ("command.finished", {"outcome": "refused"}, "error"),
+            ("command.finished", {"outcome": "unavailable"}, "error"),
+            ("command.finished", {"outcome": "cancelled"}, "info"),
+            ("lifecycle.stage", {}, "debug"),
+            ("lifecycle.notice", {}, "warn"),
+            ("history.wait", {}, "debug"),
+            ("history.pass", {}, "debug"),
+            ("history.recovery", {}, "info"),
+            ("history.result", {}, "info"),
+        ):
+            with self.subTest(event=event, fields=fields):
+                self.assertEqual(
+                    journal.event_level({"event": event, **fields}), expected
+                )
+
+    def test_history_diagnostic_stage_and_stop_reason_are_persisted(self):
+        events = (
+            ("history.pass", "standalone", None),
+            ("history.pass", "private-endpoint", None),
+            ("history.pass", "post-stop-reader", None),
+            ("history.wait", "foreground-query", None),
+            ("history.wait", "background-query", None),
+            ("history.wait", "poll-delay", None),
+            ("history.recovery", "history-recovery", "stop-requested"),
+        )
+        for event, stage, reason in events:
+            with self.subTest(stage=stage):
+                self.assertTrue(
+                    journal.record_event(
+                        event, stage=stage, reason=reason, root=self.root
+                    )
+                )
+        self.assertEqual(
+            [
+                (record["event"], record["stage"], record.get("reason"))
+                for record in journal.read_events(self.root, strict_snapshot=True)
+            ],
+            list(events),
+        )
+
     def test_invalid_freeform_fields_do_not_create_or_write_a_journal(self):
         sensitive = "synthetic-private-value"
         for field, values in {
-            "command": ["status --token=" + sensitive, sensitive, [], 1],
+            "command": ["status --token=" + sensitive, sensitive, "logs", [], 1],
             "workspace": [
                 sensitive,
                 "A" * 32,
@@ -106,6 +203,23 @@ class ActivityLogTests(unittest.TestCase):
             "outcome": [sensitive, "success\n" + sensitive, {}],
             "exit_code": [True, "0", 1.0, -256, 256, sensitive],
             "duration_ms": [True, -1, 0.1, 2**53, sensitive],
+            "level": [sensitive, "warning", "WARN", "warn\n", [], 1],
+            "stage": [sensitive, "/project/configuration", "shutdown\n", {}],
+            "reason": [sensitive, "timeout: " + sensitive, ["timeout"]],
+            "metrics": [
+                sensitive,
+                [("sessions", 1)],
+                {sensitive: 1},
+                {"sessions": 1, "raw": 0},
+                {"sessions": sensitive},
+                {"sessions": {"total": 1}},
+                {"sessions": True},
+                {"sessions": None},
+                {"sessions": 1.0},
+                {"sessions": -1},
+                {"sessions": journal.MAX_METRIC_VALUE + 1},
+                {1: 1},
+            ],
         }.items():
             for value in values:
                 with self.subTest(field=field, value=value):
@@ -144,6 +258,9 @@ class ActivityLogTests(unittest.TestCase):
 
     def test_read_missing_state_is_empty_without_creating_directories(self):
         self.assertEqual(journal.read_events(self.root), [])
+        self.assertEqual(
+            journal.read_events(self.root, level="warn", workspace="a" * 32), []
+        )
         self.assertFalse(self.root.exists())
 
     def test_rotation_retention_byte_limits_and_latest_oldest_first(self):
@@ -165,6 +282,109 @@ class ActivityLogTests(unittest.TestCase):
                 all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in files)
             )
 
+    def test_strict_snapshot_allows_absent_oldest_prefix_but_refuses_holes(self):
+        middle = self.rotated_journal()
+        self.assertEqual(self.durations(strict_snapshot=True), [1, 2, 3])
+        for path, surviving in ((middle, [1, 3]), (self.active, [1, 2])):
+            with self.subTest(missing=path.name):
+                aside = self.base / "aside"
+                path.rename(aside)
+                self.assertEqual(self.durations(), surviving)
+                self.assertEqual(self.durations(strict_snapshot=True), [])
+                aside.rename(path)
+                self.assertEqual(self.durations(strict_snapshot=True), [1, 2, 3])
+
+    def test_strict_snapshot_refuses_unsafe_or_oversized_rotation_fds(self):
+        middle = self.rotated_journal()
+        link = self.base / "second-link"
+        # Open succeeds, but validation must reject this checked descriptor.
+        os.link(middle, link)
+        self.assertEqual(self.durations(), [1, 3])
+        self.assertEqual(self.durations(strict_snapshot=True), [])
+        link.unlink()
+        self.assertEqual(self.durations(strict_snapshot=True), [1, 2, 3])
+
+        payload = middle.read_bytes()
+        with patch.object(journal, "_MAX_FILE_BYTES", 160):
+            middle.write_bytes(b"x" * 161)
+            self.assertEqual(self.durations(), [1, 3])
+            self.assertEqual(self.durations(strict_snapshot=True), [])
+            middle.write_bytes(payload)
+        self.assertEqual(self.durations(strict_snapshot=True), [1, 2, 3])
+
+    def test_strict_snapshot_refuses_unreadable_or_short_rotation(self):
+        middle = self.rotated_journal()
+        real_open = journal._open_file
+
+        def guarded_open(directory, name, **kwargs):
+            if name == middle.name:
+                raise PermissionError("synthetic read refusal")
+            return real_open(directory, name, **kwargs)
+
+        with patch.object(journal, "_open_file", side_effect=guarded_open):
+            self.assertEqual(self.durations(), [1, 3])
+            self.assertEqual(self.durations(strict_snapshot=True), [])
+
+        inode = middle.stat().st_ino
+        real_read = os.read
+
+        def early_eof(fd, length):
+            if os.fstat(fd).st_ino == inode:
+                return b""
+            return real_read(fd, length)
+
+        with patch.object(journal.os, "read", side_effect=early_eof):
+            self.assertEqual(self.durations(), [1, 3])
+            self.assertEqual(self.durations(strict_snapshot=True), [])
+        self.assertEqual(self.durations(strict_snapshot=True), [1, 2, 3])
+
+    def test_severity_and_workspace_filter_before_tail_across_rotations(self):
+        selected, other = "a" * 32, "b" * 32
+        with patch.object(journal, "_MAX_FILE_BYTES", 512):
+            for index, (event, level, workspace) in enumerate(
+                (
+                    ("command.failed", None, selected),
+                    ("lifecycle.notice", "warn", selected),
+                    ("history.wait", "debug", selected),
+                    ("command.finished", "info", other),
+                    ("command.failed", None, other),
+                    ("command.failed", None, None),
+                    ("command.finished", "info", selected),
+                ),
+                start=1,
+            ):
+                self.assertTrue(
+                    journal.record_event(
+                        event,
+                        level=level,
+                        workspace=workspace,
+                        command="start",
+                        duration_ms=index,
+                        root=self.root,
+                    )
+                )
+            self.assertTrue((self.log / "activity.jsonl.1").exists())
+
+            def durations(**filters):
+                return [
+                    record["duration_ms"]
+                    for record in journal.read_events(self.root, **filters)
+                ]
+
+            self.assertEqual(durations(level="debug"), list(range(1, 8)))
+            self.assertEqual(durations(level="info", workspace=selected), [1, 2, 7])
+            self.assertEqual(durations(level="warn"), [1, 2, 5, 6])
+            self.assertEqual(durations(workspace=selected), [1, 2, 3, 7])
+            self.assertEqual(
+                durations(level="warn", workspace=selected, limit=2), [1, 2]
+            )
+            self.assertEqual(durations(level="error", workspace=selected, limit=1), [1])
+            self.assertEqual(durations(workspace="c" * 32), [])
+            for value in ("warning", "", True, []):
+                self.assertEqual(durations(level=value), [])
+            for value in (selected[:-1], selected.upper(), selected + "\n", [], 1):
+                self.assertEqual(durations(workspace=value), [])
+
     def test_invalid_and_unknown_record_fields_never_reach_readers(self):
         valid = self.seed()
         malformed = [
@@ -185,8 +405,19 @@ class ActivityLogTests(unittest.TestCase):
             {"duration_ms": float("nan")},
             {"timestamp": "2026-99-99T12:00:00.000Z"},
             {"timestamp": "\x1b[31m2026-11-01T12:00:00.000Z"},
+            {"level": "error\nsynthetic-private-value"},
+            {"level": None},
+            {"stage": "private path"},
+            {"reason": "raw error text"},
+            {"metrics": None},
+            {"metrics": {"raw": 42}},
+            {"metrics": {"sessions": "synthetic-private-value"}},
+            {"metrics": {"sessions": True}},
+            {"metrics": {"sessions": journal.MAX_METRIC_VALUE + 1}},
         ):
-            malformed.append(json.dumps({**valid, **extra}).encode())
+            injected = {**valid, **extra}
+            malformed.append(json.dumps(injected).encode())
+            self.assertEqual(journal.format_event(injected), "")
         self.active.write_bytes(
             b"\n".join(
                 [json.dumps(valid).encode(), *malformed, json.dumps(valid).encode()]

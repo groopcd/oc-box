@@ -11,6 +11,7 @@ import threading
 import time
 import unittest
 from unittest import mock
+from oc_box import lifecycle_output
 from oc_box import oc_box as box, sync_config as sync, terminal_ui as ui
 
 APP = Path(__file__).resolve().parents[1]
@@ -211,7 +212,172 @@ class ConfigCacheTests(unittest.TestCase):
                 "package.json": '{"dependencies":{"@opencode-ai/plugin":"1.15.11","custom":"2"}}'
             }
             self.assertFalse(sync.sync_config(root, archive(host), "1.19.5"))
-            self.assertFalse(plugin.exists())
+        self.assertFalse(plugin.exists())
+
+
+class StartupOutputTests(unittest.TestCase):
+    def test_scoped_runtime_keeps_plugin_warning_and_installer_streams(self):
+        for config_message, install in (
+            (b"Reusing container plugin dependencies.\n", False),
+            (b"Plugin dependencies will be resolved by OpenCode if needed.\n", True),
+            (b"new configuration warning\n", True),
+        ):
+            with (
+                self.subTest(message=config_message),
+                tempfile.TemporaryDirectory() as name,
+            ):
+                root = Path(name)
+                out, errors = io.StringIO(), io.StringIO()
+
+                def run(command, **_options):
+                    if "--version" in command:
+                        output = "2.2.6"
+                    elif "auth" in command and "export" in command:
+                        output = "[]"
+                    elif "plugins" in command:
+                        output = "oc-box: OpenCode 2.x plugin unavailable: example\n"
+                    else:
+                        output = ""
+                    return subprocess.CompletedProcess(command, 0, output, "")
+
+                with (
+                    lifecycle_output.invocation("start", root),
+                    contextlib.redirect_stdout(out),
+                    contextlib.redirect_stderr(errors),
+                    mock.patch.dict(os.environ, {"OPENCODE_AUTH_CONTENT": ""}),
+                    mock.patch.object(lifecycle_output, "record"),
+                    mock.patch.object(box, "config_archive", return_value=b"archive"),
+                    mock.patch.object(box, "private_host_env", return_value={}),
+                    mock.patch.object(
+                        box,
+                        "exec_command",
+                        side_effect=lambda _data, command: box.ContainerCommand(
+                            command, {}
+                        ),
+                    ),
+                    mock.patch.object(
+                        box, "host_command", side_effect=lambda _, *args: args
+                    ),
+                    mock.patch.object(box, "run", side_effect=run) as execute,
+                    mock.patch.object(
+                        box.subprocess,
+                        "run",
+                        return_value=subprocess.CompletedProcess(
+                            [], 0, config_message, b""
+                        ),
+                    ),
+                ):
+                    box.prepare_runtime(
+                        root / "workspace.json", {"home": "/root"}, "2.2.6"
+                    )
+                calls = [
+                    call for call in execute.call_args_list if call.args[0][0] == "npm"
+                ]
+                self.assertEqual(len(calls), int(install))
+                if install:
+                    self.assertEqual(calls[0].kwargs, {"timeout": 600})
+                self.assertEqual(
+                    out.getvalue(),
+                    "oc-box: new configuration warning\n"
+                    if config_message.startswith(b"new")
+                    else "",
+                )
+                self.assertEqual(
+                    errors.getvalue(),
+                    "oc-box: OpenCode 2.x plugin unavailable: example\n",
+                )
+
+    def test_cold_bootstrap_changes_only_its_routine_completion_banner(self):
+        for verbose in (False, True):
+            with (
+                self.subTest(verbose=verbose),
+                tempfile.TemporaryDirectory() as name,
+            ):
+                root = Path(name)
+                data = {
+                    "project": str(root),
+                    "container": "box-example",
+                    "distro": "alpine",
+                }
+                path = root / "workspace.json"
+                info = {
+                    "State": {"Running": True},
+                    "Mounts": [{"Source": str(root), "Destination": str(root)}],
+                }
+                with (
+                    lifecycle_output.invocation("start", root, verbose=verbose),
+                    mock.patch.object(lifecycle_output, "record"),
+                    mock.patch.object(box, "validate_project", return_value=root),
+                    mock.patch.object(box, "find_workspace", return_value=(path, data)),
+                    mock.patch.object(
+                        box.workspace_identity, "same_project", return_value=True
+                    ),
+                    mock.patch.object(box, "check_resource_controllers"),
+                    mock.patch.object(box, "inspect_owned", return_value=info),
+                    mock.patch.object(
+                        box, "podman", return_value=subprocess.CompletedProcess([], 0)
+                    ) as podman,
+                ):
+                    self.assertIs(box.start_container(path, data), info)
+                installer, bootstrap, _ = podman.call_args_list
+                self.assertEqual(
+                    installer,
+                    mock.call(
+                        "exec",
+                        data["container"],
+                        "/bin/sh",
+                        "-c",
+                        box.DISTROS[data["distro"]][1],
+                        timeout=1800,
+                    ),
+                )
+                self.assertEqual(
+                    bootstrap.args,
+                    ("exec", "-i", data["container"], "python3", "-")
+                    + (() if verbose else ("--quiet-ready",)),
+                )
+                self.assertEqual(bootstrap.kwargs.keys(), {"input", "timeout"})
+                self.assertEqual(bootstrap.kwargs["timeout"], 600)
+                self.assertTrue(data["ready"])
+
+    def test_routine_pre_client_banner_is_quiet_without_changing_native_output(self):
+        out, errors = io.StringIO(), io.StringIO()
+
+        def native(*_args, **_kwargs):
+            self.assertEqual(out.getvalue(), "")
+            self.assertEqual(errors.getvalue(), "")
+            print("native stdout")
+            print("native stderr", file=sys.stderr)
+            return 7
+
+        with (
+            tempfile.TemporaryDirectory() as name,
+            lifecycle_output.invocation("start"),
+            contextlib.redirect_stdout(out),
+            contextlib.redirect_stderr(errors),
+            mock.patch.object(lifecycle_output, "record"),
+            mock.patch.object(
+                box, "refresh_sessions", return_value={"last": "ses_demo"}
+            ),
+            mock.patch.object(
+                box, "exec_command", side_effect=lambda _d, command, **_: command
+            ),
+            mock.patch.object(box, "run_native_tui", side_effect=native) as client,
+            mock.patch.object(box, "sync_sessions"),
+        ):
+            project = Path(name)
+            data = {"distro": "alpine", "project": str(project)}
+            args = box.parser().parse_args(["start"])
+            self.assertEqual(
+                box.launch_client(
+                    project / "workspace.json", data, args, "1.19.5", None
+                ),
+                7,
+            )
+        self.assertIn("ses_demo", client.call_args.args[1])
+        self.assertEqual(out.getvalue(), "native stdout\n")
+        # History owns later console output; only the handoff above is in scope.
+        self.assertTrue(errors.getvalue().startswith("native stderr\n"))
 
 
 class StartupProgressTests(unittest.TestCase):
@@ -470,6 +636,128 @@ class StartupProgressTests(unittest.TestCase):
                             raise failure
                     self.assertTrue(all(not worker.is_alive() for worker in workers))
                 self.assertIs(raised.exception, failure)
+
+    def test_concise_tty_keeps_one_heartbeat_clears_and_keeps_warnings(self):
+        output = self.TTY()
+        with (
+            self.terminal(),
+            lifecycle_output.invocation("start"),
+            mock.patch.object(lifecycle_output, "record"),
+            mock.patch.object(sys, "stdout", output),
+            mock.patch.object(sys, "stderr", output),
+            mock.patch.object(box.threading, "Thread") as worker,
+            mock.patch.object(box.threading, "Event") as event,
+        ):
+            with box.loading_stage("Preparing configuration", stage="configuration"):
+                heartbeat = worker.call_args.kwargs["target"]
+
+                def tick():
+                    event.return_value.wait.side_effect = [False, True]
+                    heartbeat()
+
+                with box.loading_stage("Checking dependencies", stage="dependencies"):
+                    tick()
+                    self.assertEqual(
+                        output.getvalue().count("Checking dependencies"), 2
+                    )
+                    print("plugin refused to load", file=sys.stderr)
+                    with box._startup_tool_output():
+                        snapshot = output.getvalue()
+                        tick()
+                        self.assertEqual(snapshot, output.getvalue())
+                        # The mock child writes to the original (unproxied) stream.
+                        output.write("native installer warning\n")
+                tick()
+                self.assertEqual(output.getvalue().count("Preparing configuration"), 2)
+                self.assertIsNot(sys.stderr, output)
+            self.assertIs(sys.stdout, output)
+            self.assertIs(sys.stderr, output)
+            worker.assert_called_once()
+            worker.return_value.join.assert_called_once()
+        rendered = output.getvalue()
+        self.assertIn("\r\x1b[Kplugin refused to load\n", rendered)
+        self.assertIn("native installer warning\n", rendered)
+        self.assertTrue(rendered.endswith("\r\x1b[K"), rendered)
+        self.assertEqual(rendered.count("\n"), 2)
+
+    def test_concise_pipes_and_dumb_terminals_log_only_fixed_metadata(self):
+        for stage, term, failure, outcome, level in (
+            ("version", "xterm", None, "success", "debug"),
+            ("version", "xterm", ValueError("private error"), "failure", "error"),
+            ("history-wait", "xterm", ValueError("private error"), "failure", "debug"),
+            ("version", "dumb", KeyboardInterrupt(), "cancelled", "debug"),
+        ):
+            output = self.TTY() if term == "dumb" else io.StringIO()
+            with (
+                self.subTest(stage=stage, outcome=outcome),
+                mock.patch.dict(os.environ, {"TERM": term}),
+                lifecycle_output.invocation("start"),
+                mock.patch.object(lifecycle_output, "record") as record,
+                mock.patch.object(box.time, "monotonic", side_effect=[10.0, 12.5]),
+                mock.patch.object(box.threading, "Thread") as worker,
+            ):
+                if failure is None:
+                    with box.loading_stage("private label", stage=stage, stream=output):
+                        pass
+                else:
+                    with self.assertRaises(type(failure)) as caught:
+                        with box.loading_stage(
+                            "private label", stage=stage, stream=output
+                        ):
+                            raise failure
+                    self.assertIs(caught.exception, failure)
+                self.assertEqual(output.getvalue(), "")
+                worker.assert_not_called()
+                record.assert_called_once_with(
+                    "lifecycle.stage",
+                    level=level,
+                    stage=stage,
+                    reason="startup-failed" if level == "error" else None,
+                    outcome=outcome,
+                    duration_ms=2500,
+                )
+
+    def test_concise_tty_cancellation_clears_without_losing_partial_output(self):
+        for warning in ("", "existing partial warning"):
+            output = self.TTY()
+            failure = KeyboardInterrupt()
+            with (
+                self.subTest(warning=warning),
+                self.terminal(),
+                self.workers() as workers,
+                lifecycle_output.invocation("start"),
+                mock.patch.object(lifecycle_output, "record"),
+                mock.patch.object(sys, "stderr", output),
+                self.assertRaises(KeyboardInterrupt) as caught,
+            ):
+                try:
+                    with box.loading_stage(
+                        "Preparing configuration", stage="configuration"
+                    ):
+                        if warning:
+                            sys.stderr.write(warning)
+                        raise failure
+                finally:
+                    self.assertIs(sys.stderr, output)
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(len(workers), 1)
+            self.assertTrue(output.getvalue().endswith("\r\x1b[K" + warning))
+            self.assertNotIn("\n", output.getvalue())
+
+    def test_untagged_and_verbose_stages_keep_diagnostic_console_lines(self):
+        for verbose, stage in ((False, None), (True, "configuration")):
+            output = io.StringIO()
+            with (
+                lifecycle_output.invocation("start", verbose=verbose),
+                mock.patch.object(lifecycle_output, "record") as record,
+                box.loading_stage(
+                    "Preparing configuration", stage=stage, stream=output
+                ),
+            ):
+                pass
+            self.assertIn("Preparing configuration...\n", output.getvalue())
+            self.assertIn("Preparing configuration done", output.getvalue())
+            self.assertEqual(record.call_count, int(stage is not None))
 
     @unittest.skipUnless(sys.platform == "linux", "Linux PTY/termios integration")
     def test_loading_stage_pty_resize_has_one_final_newline(self):

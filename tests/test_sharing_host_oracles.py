@@ -94,6 +94,76 @@ class JournalOracleTests(LocalCase):
         )
         self.assertEqual(runner.validate_journal(directory), 2)
 
+    def test_real_writer_structured_lifecycle_rows_are_accepted(self):
+        directory = self.journal()
+        structured = [
+            {"event": "lifecycle.stage", "level": "debug", "stage": "backend"},
+            {
+                "event": "lifecycle.notice",
+                "level": "warn",
+                "stage": "service",
+                "reason": "holder-active",
+            },
+            {
+                "event": "history.wait",
+                "level": "debug",
+                "stage": "history-wait",
+                "metrics": {"complete_pairs": 2, "foreground_total_ms": 2**31 - 1},
+            },
+            {
+                "event": "history.pass",
+                "level": "debug",
+                "stage": "history-sync",
+                "metrics": {"sessions": 3, "pending": 0},
+            },
+            {
+                "event": "history.recovery",
+                "level": "info",
+                "stage": "history-recovery",
+                "reason": "interrupted",
+            },
+            {
+                "event": "history.result",
+                "level": "error",
+                "outcome": "failure",
+                "reason": "cleanup-unverified",
+            },
+        ]
+        for fields in structured:
+            self.assertTrue(activity_log.record_event(root=directory.parent, **fields))
+        lines = (directory / "activity.jsonl").read_bytes().splitlines()
+        rows = [json.loads(line) for line in lines[1:]]
+        for row in rows:
+            row.pop("timestamp")
+        self.assertEqual(rows, structured)
+        self.assertEqual(runner.validate_journal(directory), 1 + len(structured))
+
+    def test_literal_history_source_and_wait_phase_rows_are_accepted(self):
+        directory = self.journal()
+        cases = {
+            "history.pass": ("standalone", "private-endpoint", "post-stop-reader"),
+            "history.wait": ("foreground-query", "background-query", "poll-delay"),
+        }
+        rows = [
+            {"event": event, "level": "debug", "stage": stage}
+            for event, stages in cases.items()
+            for stage in stages
+        ]
+        rows.append(
+            {
+                "event": "history.result",
+                "level": "error",
+                "outcome": "cancelled",
+                "reason": "stop-requested",
+            }
+        )
+        with (directory / "activity.jsonl").open("a") as stream:
+            for row in rows:
+                stream.write(
+                    json.dumps({"timestamp": "2026-01-02T03:04:05.000Z", **row}) + "\n"
+                )
+        self.assertEqual(runner.validate_journal(directory), 1 + len(rows))
+
     def test_real_writer_four_rotated_files_plus_lock_are_accepted(self):
         directory = self.journal()
         # Exercise real rotation cheaply, without constructing fake log files.
@@ -165,6 +235,47 @@ class JournalOracleTests(LocalCase):
                 directory = self.journal("malformed-" + str(index))
                 (directory / "activity.jsonl").write_bytes(raw)
                 self.reject(directory)
+
+    def test_malformed_structured_rows_are_fixed_refusals(self):
+        valid = {
+            "event": "history.wait",
+            "timestamp": "2026-01-02T03:04:05.000Z",
+            "level": "debug",
+            "stage": "history-wait",
+            "reason": "timeout",
+            "metrics": {"remaining_ms": 12},
+        }
+        cases = [
+            ("event", "history.unknown"),
+            ("level", "warning"),
+            ("level", 1),
+            ("stage", PRIVATE),
+            ("stage", []),
+            ("reason", PRIVATE),
+            ("reason", {}),
+            ("metrics", None),
+            ("metrics", [["remaining_ms", 0]]),
+            ("metrics", {PRIVATE: 1}),
+            ("metrics", {"remaining_ms": PRIVATE}),
+            ("metrics", {"remaining_ms": {"pending": 1}}),
+            ("metrics", {"remaining_ms": True}),
+            ("metrics", {"remaining_ms": 1.0}),
+            ("metrics", {"remaining_ms": -1}),
+            ("metrics", {"remaining_ms": 2**31}),
+        ]
+        directory = self.journal()
+        journal = directory / "activity.jsonl"
+        journal.write_text(json.dumps(valid) + "\n")
+        self.assertEqual(runner.validate_journal(directory), 1)
+        for index, (field, invalid) in enumerate(cases):
+            with self.subTest(field=field, case=index):
+                journal.write_text(json.dumps({**valid, field: invalid}) + "\n")
+                self.reject(directory)
+        duplicate = json.dumps(valid).replace(
+            '"remaining_ms": 12', '"remaining_ms": 12, "remaining_ms": 0'
+        )
+        journal.write_text(duplicate + "\n")
+        self.reject(directory)
 
     def test_private_fields_and_raw_contents_never_pass_or_echo(self):
         for field in ("argv", "env", "stderr", "prompt", "content", "password"):
@@ -279,6 +390,75 @@ class HarnessCase(LocalCase):
             self.root,
         )
         self.harness.output = io.StringIO()
+
+
+class ChildDiagnosticsTests(LocalCase):
+    def test_only_explicit_stop_owner_entrypoint_opts_in(self):
+        flag = "OC_BOX_LIFECYCLE_DIAGNOSTICS"
+        for child, expect_stop in (("owner", True), ("owner", False), ("share", False)):
+            with self.subTest(child=child, expect_stop=expect_stop):
+                observed = []
+
+                def observe(stage):
+                    observed.append((stage, os.environ.get(flag)))
+
+                records = {"source-a": (self.parent, {"id": "a" * 32})}
+                fixture = SimpleNamespace(
+                    private_output=contextlib.nullcontext,
+                    temporary_location=contextlib.nullcontext,
+                    no_vault_probe=contextlib.nullcontext,
+                    no_symlinks=lambda path: path,
+                    validate_store=lambda *a, **kw: observe("store"),
+                    private_json=lambda *_: {"native": {"path": "unused"}},
+                    check_native_version=Mock(),
+                    workspace_records=lambda _: records,
+                    verify_owned_resources=lambda *a, **kw: observe("resources"),
+                    record_ids=Mock(),
+                )
+                box = SimpleNamespace(
+                    run_tui=Mock(), entrypoint=lambda: observe("entrypoint") or 0
+                )
+                service = SimpleNamespace(
+                    Owner=SimpleNamespace(wait_clients=Mock()),
+                    controller_running=Mock(return_value=True),
+                )
+                loaded = SimpleNamespace(
+                    fixture=fixture,
+                    box=box,
+                    service=service,
+                    identity="source",
+                    history_identity=lambda: "source",
+                )
+                args = SimpleNamespace(
+                    child=child,
+                    fixture=self.parent,
+                    project_name="source-a",
+                    input_name="share-input-a",
+                    single_file=False,
+                    protected=False,
+                    acknowledge_risk=False,
+                    reset=False,
+                    distro="synthetic",
+                    expect_stop=expect_stop,
+                )
+                with (
+                    patch.dict(os.environ, {flag: "parent-only"}, clear=True),
+                    patch.object(runner, "fixture_environment", return_value={}),
+                    patch.object(
+                        runner, "validate_root", return_value=(self.parent, records)
+                    ),
+                    patch.object(runner, "observe_refresh", contextlib.nullcontext),
+                    patch.object(os, "isatty", return_value=False),
+                ):
+                    control = io.StringIO() if child == "owner" else None
+                    self.assertEqual(runner.child(args, loaded, control=control), 0)
+                    self.assertEqual(os.environ.get(flag), "parent-only")
+                entry = ("entrypoint", "1" if expect_stop else None)
+                resources = ("resources", None)
+                expected = (
+                    [entry, resources] if child == "owner" else [resources, entry]
+                )
+                self.assertEqual(observed, [("store", None), *expected])
 
 
 class InputAndRegrantOracleTests(HarnessCase):

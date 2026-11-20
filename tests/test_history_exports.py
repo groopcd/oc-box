@@ -294,6 +294,26 @@ class HistoryExportsTests(unittest.TestCase):
         child.stdout.close.assert_called_once()
         self.assertIsNone(stream.child)
 
+    def test_concise_double_failure_retains_original_and_marks_unverified_cleanup(self):
+        from oc_box import lifecycle_output
+
+        primary = box.HistoryPending("synthetic-original")
+        stream = SimpleNamespace(
+            close=Mock(side_effect=box.BoxError("synthetic-cleanup"))
+        )
+        with (
+            patch.object(reader, "_Exports", return_value=stream),
+            lifecycle_output.invocation("sync", self.path.parent),
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+            self.assertRaises(box.HistoryPending) as raised,
+        ):
+            with reader.export_pass(box, self.data):
+                raise primary
+        self.assertIs(raised.exception, primary)
+        self.assertTrue(primary.history_source_cleanup_failed)
+        self.assertEqual(errors.getvalue(), "")
+        self.assertIsNone(reader.EXPORTS.get())
+
     def test_non_reader_pass_does_not_create_helper(self):
         token = reader.CURRENT.set(None)
         try:

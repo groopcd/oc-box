@@ -1,5 +1,6 @@
 """Multi-session discovery, archive isolation and source-deletion regressions."""
 
+import contextlib
 import copy
 import io
 import json
@@ -7,10 +8,16 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from oc_box import oc_box as box, opencode_v2_io as v2, workspace_service
+from oc_box import (
+    lifecycle_output,
+    oc_box as box,
+    opencode_v2_io as v2,
+    workspace_service,
+)
 
 
 class SessionSyncTests(unittest.TestCase):
@@ -42,6 +49,202 @@ class SessionSyncTests(unittest.TestCase):
 
     def result(self, value):
         return subprocess.CompletedProcess([], 0, json.dumps(value), "")
+
+    def test_concise_outcome_waits_for_native_verification_source_and_final_stop(self):
+        cases = {
+            "live": ("start", "History synced.", None),
+            "empty": ("sync", "No history to sync.", None),
+            "partial": (
+                "sync",
+                "History partially synced: some sessions were still unsettled.",
+                box.HistoryPending,
+            ),
+            "unsettled": (
+                "sync",
+                "History not synced: some sessions were still unsettled.",
+                box.HistoryPending,
+            ),
+            "unverified": (
+                "sync",
+                "History not synced: verification did not finish.",
+                box.BoxError,
+            ),
+            "source-close": (
+                "sync",
+                "History sync cleanup could not be verified.",
+                box.BoxError,
+            ),
+            "owner-close": (
+                "start",
+                "History sync cleanup could not be verified.",
+                box.BoxError,
+            ),
+            "owner-exit": (
+                "start",
+                "History sync cleanup could not be verified.",
+                None,
+            ),
+            "final-stop": (
+                "start",
+                "History sync cleanup could not be verified.",
+                box.BoxError,
+            ),
+            "interrupt": (
+                "start",
+                "History not synced: the operation was interrupted.",
+                KeyboardInterrupt,
+            ),
+        }
+        for case, (command, message, error) in cases.items():
+            with self.subTest(case=case):
+                events, host = [], {}
+                args = SimpleNamespace(
+                    command=command,
+                    import_session=None,
+                    _opencode_release="2.2.6",
+                    resume=True,
+                    new=False,
+                    model=None,
+                )
+                good = self.session("ses_good_" + case.replace("-", "_"))
+                pending = self.session("ses_pending_private")
+                infos = [] if case == "empty" else [good]
+                if case == "partial":
+                    infos.insert(0, pending)
+                elif case == "unsettled":
+                    infos = [pending]
+                owner = SimpleNamespace(
+                    connection={"url": "http://127.0.0.1:7777"},
+                    publish=Mock(),
+                    wait_clients=Mock(),
+                    clients=0,
+                    child=SimpleNamespace(returncode=7 if case == "owner-exit" else 0),
+                )
+
+                @contextlib.contextmanager
+                def source(*_args, **_kwargs):
+                    token = workspace_service.CONNECTION.set(owner.connection)
+                    try:
+                        yield owner
+                    finally:
+                        workspace_service.CONNECTION.reset(token)
+                        events.append("lease closed")
+                        if case in ("source-close", "owner-close"):
+                            raise box.BoxError("private-lease-error")
+
+                def export(_data, ident):
+                    if ident == pending["id"]:
+                        raise box.HistoryPending("private-pending-error")
+                    return {"info": copy.deepcopy(good), "messages": []}
+
+                def host_run(argv, **_kwargs):
+                    if "import" in argv:
+                        archived = box.read_json(Path(argv[-2]))
+                        archived["info"]["location"] = {
+                            "directory": str(self.path.parent / "controller")
+                        }
+                        host[archived["info"]["id"]] = archived
+                        events.append("imported")
+                    elif "export" in argv:
+                        archived = copy.deepcopy(host[argv[-2]])
+                        if case == "unverified":
+                            archived["info"]["title"] = "private-verification-mismatch"
+                        events.append("host export checked")
+                        return self.result(archived)
+                    else:
+                        self.fail("Unexpected native command.")
+                    return self.result(None)
+
+                def stop(_data):
+                    events.append("final stop")
+                    self.assertIsNone(workspace_service.live_connection())
+                    self.assertFalse(stdout.getvalue().startswith("History synced."))
+                    self.assertEqual(stderr.getvalue(), "")
+                    if case == "final-stop":
+                        raise box.BoxError("private-stop-error")
+
+                def record(event, **details):
+                    if event == "history.result":
+                        events.append(event)
+                        self.assertEqual(events[-2], "final stop")
+
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with (
+                    lifecycle_output.invocation(command, self.root / "state"),
+                    contextlib.redirect_stdout(stdout),
+                    contextlib.redirect_stderr(stderr),
+                    patch.object(
+                        lifecycle_output, "record", side_effect=record
+                    ) as journal,
+                    patch.object(
+                        box, "loading_stage", return_value=contextlib.nullcontext()
+                    ),
+                    patch.object(box, "check_private_output"),
+                    patch.object(box, "start_container"),
+                    patch.object(box, "prepare_runtime"),
+                    patch.object(box, "run_native_tui", return_value=0),
+                    patch.object(workspace_service, "Owner", side_effect=source),
+                    patch.object(workspace_service, "client_command", return_value=[]),
+                    patch.object(
+                        workspace_service, "history_source", side_effect=source
+                    ),
+                    patch.object(
+                        workspace_service,
+                        "wait_history",
+                        side_effect=KeyboardInterrupt if case == "interrupt" else None,
+                    ),
+                    patch.object(box, "list_container_sessions", return_value=infos),
+                    patch.object(box, "export_container_session", side_effect=export),
+                    patch.object(box, "run", side_effect=host_run),
+                    patch.object(box, "stop_container", side_effect=stop),
+                ):
+                    if error is None:
+                        self.assertEqual(
+                            box.launch_environment(self.path, self.data, args), 0
+                        )
+                    else:
+                        with self.assertRaises(error) as raised:
+                            box.launch_environment(self.path, self.data, args)
+                        self.assertTrue(raised.exception.history_outcome_reported)
+                lines = [
+                    line
+                    for line in stdout.getvalue().splitlines()
+                    if not line.startswith("oc-box: ")
+                ] + stderr.getvalue().splitlines()
+                self.assertEqual(len(lines), 1)
+                self.assertTrue(lines[0].startswith(message), lines)
+                self.assertNotIn("private-", lines[0])
+                self.assertEqual(
+                    events[-3:], ["lease closed", "final stop", "history.result"]
+                )
+                self.assertEqual(events.count("history.result"), 1)
+                for sentinel in (
+                    "private-pending-error",
+                    "private-lease-error",
+                    "private-stop-error",
+                    "private-verification-mismatch",
+                    good["id"],
+                    pending["id"],
+                ):
+                    self.assertNotIn(sentinel, repr(journal.call_args_list))
+                passes = [
+                    call.kwargs
+                    for call in journal.call_args_list
+                    if call.args == ("history.pass",)
+                ]
+                if case == "interrupt":
+                    self.assertEqual(passes, [])
+                else:
+                    self.assertEqual(passes[0]["stage"], "private-endpoint")
+                    self.assertEqual(
+                        passes[0]["metrics"]["updated"],
+                        int(case not in ("empty", "unsettled", "unverified")),
+                    )
+                    state = box.session_state(self.path)
+                    self.assertEqual(
+                        good["id"] in state.get("synced", {}),
+                        bool(passes[0]["metrics"]["updated"]),
+                    )
 
     def test_inventory_pages_include_children_and_archived_sessions(self):
         root = self.session("ses_root")

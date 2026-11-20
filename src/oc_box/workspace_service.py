@@ -30,6 +30,11 @@ import time
 from urllib.parse import urlparse
 from urllib.request import Request, build_opener, ProxyHandler
 
+if __package__:
+    from . import lifecycle_output
+else:
+    import lifecycle_output
+
 CONNECTION = contextvars.ContextVar("oc_box_v2_connection")
 MAX_CONTROL = 16384
 PROXY = """import os,select,socket,sys
@@ -693,6 +698,7 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
     phase = "foreground-query"
     observation = "unavailable"
     kind_observation = "unavailable"
+    last_counts = {}
     profile = history_reader.snapshot_profile(data.get("opencode_version"))
     kinds = history_reader.SNAPSHOT_JOB_KINDS.get(profile, frozenset(("shell",)))
     insufficient = (
@@ -731,6 +737,31 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             for query in (queries[name + "-query"],)
         )
         age = None if last_complete is None else time.monotonic() - last_complete
+        metrics = {
+            "complete_pairs": min(complete_pairs, 9999),
+            **last_counts,
+        }
+        for name in ("foreground", "background"):
+            query = queries[name + "-query"]
+            metrics[name + "_queries"] = min(query["count"], 9999)
+            for aggregate in ("total", "max"):
+                metrics[name + "_" + aggregate + "_ms"] = int(
+                    max(0, min(query[aggregate], 9999)) * 1000
+                )
+        for name, value in (
+            ("remaining_ms", last_query_budget),
+            ("last_complete_age_ms", age),
+        ):
+            if value is not None:
+                metrics[name] = int(max(0, min(value, 9999)) * 1000)
+        lifecycle_output.record(
+            "history.wait",
+            level="debug",
+            stage=phase,
+            reason="timeout",
+            outcome="failure",
+            metrics=metrics,
+        )
         return (
             f"History wait timing: complete-pairs={count(complete_pairs)}; {summary}; "
             f"last-query={last_query}, remaining-at-start={duration(last_query_budget)}, "
@@ -766,6 +797,19 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             error.history_compatibility_category = category
         elif compatibility_reason is not None:
             error.history_compatibility_category = compatibility_reason
+        lifecycle_output.record(
+            "history.wait",
+            level="debug",
+            stage=phase,
+            reason=(
+                "schema"
+                if getattr(error, "history_compatibility_category", None) is not None
+                else "transport"
+                if category == "activity-api-failed"
+                else "refused"
+            ),
+            outcome="failure",
+        )
         raise error from None
 
     if (
@@ -913,11 +957,18 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
             f"{name}={value if value < 10000 else '9999+'}"
             for name, value in counts.items()
         )
+        kind_counts = {
+            kind: sum(job["kind"] == kind for job in jobs)
+            for kind in ("shell", "subagent", "image")
+        }
         kind_observation = ", ".join(
             f"{kind}={count if count < 10000 else '9999+'}"
-            for kind in ("shell", "subagent", "image")
-            for count in (sum(job["kind"] == kind for job in jobs),)
+            for kind, count in kind_counts.items()
         )
+        last_counts = {
+            name.replace("-", "_"): min(count, 9999)
+            for name, count in (counts | kind_counts).items()
+        }
         complete_pairs += 1
         last_complete = time.monotonic()
         # This requests only a post-STOP snapshot, never a live readiness waiver.
@@ -1163,10 +1214,22 @@ class Owner:
         assert self.child is not None
         with self.condition:
             if self.clients:
-                print(
-                    "oc-box: Attached web/terminal/file-sharing clients are still active; waiting before history sync and container stop. Close those clients or use 'oc-box stop'.",
-                    flush=True,
-                )
+                if lifecycle_output.concise():
+                    lifecycle_output.record(
+                        "lifecycle.notice",
+                        level="info",
+                        stage="shutdown",
+                        reason="holder-active",
+                    )
+                    print(
+                        "oc-box: Waiting for attached clients. Close them to finish shutdown, or use 'oc-box stop'.",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        "oc-box: Attached web/terminal/file-sharing clients are still active; waiting before history sync and container stop. Close those clients or use 'oc-box stop'.",
+                        flush=True,
+                    )
             while self.clients and self.child.poll() is None:
                 self.condition.wait(timeout=0.2)
             self.closing = True

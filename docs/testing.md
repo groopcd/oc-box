@@ -23,6 +23,7 @@ reports. Source/native identities below retain their original wording and scope.
 | --- | --- |
 | Browser clients and selection reports | [Browser attachments](#experimental-browser-attachment-adapter) · [Web sessions](#open-tui-sessions-in-the-web-interface) · [Native TUI selection reports](#cooperative-native-tui-selection-reports) |
 | Host files and dashboard | [Temporary host-file tools](#experimental-temporary-host-file-tools) · [Host-image attachments](#experimental-host-image-attachments) · [Native TUI host drops](#experimental-transparent-native-tui-host-drops) · [Workspace manager](#experimental-workspace-manager) |
+| Launcher output and activity journal | [Quiet lifecycle and severity-based logs](#quiet-lifecycle-and-severity-based-logs) |
 | History and readiness | [V2 history synchronization](#v2-session-history-synchronization) · [Focused host runner](#focused-historyreadiness-host-runner) |
 | Host-only fixture guidance | [Vault edges](#fresh-provider-free-vault-edges-host-only) · [Manual UI observation](#fresh-manual-ui-observation-host-only) · [Home-component ownership](#shared-home-component-ownership-fresh-host-only-image-free) |
 | CI and announcements | [Ubuntu CI bootstrap](#ubuntu-ci-package-bootstrap) · [Optional social announcements](#optional-social-release-announcements) |
@@ -70,6 +71,57 @@ not a deprecated feature that can be removed from the regression suite.
   encrypted backup/restore. Never run these fixtures inside this container or use
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
+
+### Quiet lifecycle and severity-based logs
+
+Check the default launcher display on a PTY and through pipes or `TERM=dumb`.
+TTY progress must be transient and cleared before native output, actionable
+warnings or prompts; redirected output must have no routine per-stage
+start/done lines. Keep native UI output unmodified. Check one final history
+result for verified live or manual sync, recovered history, partial progress,
+failure, an empty inventory and unverified cleanup. A recovered result must
+carry the applicable interruption and unconfirmed-completion caution. Keep
+retry guidance, raw nonzero client results, guarded routing and cleanup/exit
+policy unchanged. Losing the optional diagnostics must not change the result.
+
+Check `oc-box logs` as a read-only host command with no optional dashboard
+imports, Podman/native calls or vault access. Cover the `info` threshold and
+100-entry default, all four severity thresholds, selectors and their mutual
+exclusion, limits after filtering, one validated JSON object per line, empty
+JSON Lines output for no matches, and bounded follow across appends and
+rotation. Missing or unsafe journal data must fail closed to empty. No reader
+should create journal files or locks, emit its own activity events, or change
+workspace or history state. Keep readable legacy rows without a severity,
+malformed/oversized-row handling and private-file/rotation guards. Check that
+the dashboard's oc-box source shares severity and message formatting but still
+displays all levels, including `debug`, without expanding external log access.
+Check the closed reason-code and metric-name lists and bounded integer metric
+values. Use synthetic sentinels to verify that raw argv, errors, environment,
+output, prompts, pairing links, credentials, clipboard contents and other
+free-form text cannot enter the journal.
+
+For the optional system journal backend, use mocked local sink and
+`journalctl` checks. Mirror only with `OC_BOX_JOURNALD=1` in the host launcher
+environment and only after a validated private append succeeds. Check native
+priorities and the fixed identifier and format marker, and verify that the
+mirror cannot carry raw output, auth or secrets. A failed or unavailable sink
+must not roll back a successful private append or change the lifecycle
+outcome. Ordinary installs and default reads must not require systemd.
+
+For `oc-box logs --journald`, check explicit backend selection, current-user
+record filtering, validation of returned activity records, and parity for
+severity thresholds, workspace selectors, initial limit, follow and JSON
+Lines. An unavailable reader must give fixed private-reader guidance without
+automatically falling back or exposing raw errors. Mocked backend checks do
+not establish access, delivery, retention or priority behavior on a real host
+journal.
+
+For version-pinned scripted checks that parse legacy launcher output, use
+`OC_BOX_LIFECYCLE_DIAGNOSTICS=1` explicitly on the launcher under test.
+Check the opt-in separately from the quiet default. Keep historical reports,
+exact revision/native identities, original exits and failed/refused checks
+intact. Local unit, process and native fixtures do not establish a new
+external-host acceptance; do not replay retained fixtures for this change.
 
 ### Experimental host clipboard attachment shortcut
 

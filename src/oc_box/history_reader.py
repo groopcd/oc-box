@@ -1010,11 +1010,17 @@ def export_pass(box, data):
                 raise
             # Keep the original error/interruption authoritative, but never
             # silently turn uncertain helper cleanup into an apparent success.
-            print(
-                "oc-box: History export helper cleanup unverified. "
-                "Container data retained; retry with 'oc-box sync'.",
-                file=sys.stderr,
-            )
+            original.history_source_cleanup_failed = True
+            if __package__:
+                from . import lifecycle_output
+            else:
+                import lifecycle_output
+            if not lifecycle_output.concise():
+                print(
+                    "oc-box: History export helper cleanup unverified. "
+                    "Container data retained; retry with 'oc-box sync'.",
+                    file=sys.stderr,
+                )
 
 
 class Reader:

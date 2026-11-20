@@ -17,6 +17,7 @@ from oc_box import (
     backups,
     dependencies,
     installation,
+    logs_cli,
     oc_box as box,
     sharing,
     vault,
@@ -91,6 +92,7 @@ fi
             ("doctor", dependencies.parser()),
             ("web", workspace_service.web_parser()),
             ("completion", box.completion_parser()),
+            ("logs", logs_cli.parser()),
             ("share", sharing.parser()),
             ("attach", attachments.parser()),
         ):
@@ -105,6 +107,12 @@ fi
         self.assertEqual(
             set(self.complete("doctor", "--feature", "")), set(dependencies.FEATURES)
         )
+        self.assertEqual(
+            self.complete("logs", "--level", ""), ["debug", "info", "warn", "error"]
+        )
+        self.assertEqual(self.complete("logs", "--level=w"), ["warn"])
+        self.assertEqual(self.complete("logs", "--limit", ""), [])
+        self.assertEqual(self.complete("sync", "--fo"), [])
         credential_modes = next(
             action.choices
             for action in box.parser()._actions

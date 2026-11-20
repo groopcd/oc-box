@@ -645,12 +645,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             workspace = (
                 catalog.store if catalog and catalog.origin == "workspace" else None
             )
+            # The journal must open the raw state path without following links.
             record_event(
                 event,
                 command="tui",
                 workspace=workspace,
                 outcome="success",
-                root=self.backend.box.state_root(),
             )
         except Exception:
             pass

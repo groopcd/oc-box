@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
-from oc_box import oc_box as box, tui_backend as backend
+from oc_box import activity_log, oc_box as box, tui_backend as backend
 
 
 class HostSamplerTests(unittest.TestCase):
@@ -58,6 +58,45 @@ class DashboardBackendTests(unittest.TestCase):
     def test_construction_and_empty_inventory_never_discover_or_start_services(self):
         self.assertEqual(self.backend.inventory(), [])
         self.box.run.assert_not_called()
+
+    def test_activity_logs_refuse_symlink_state_while_external_selection_is_unchanged(
+        self,
+    ):
+        from oc_box import tui_logs
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            state = root / "state"
+            linked = root / "linked-state"
+            linked.symlink_to(state, target_is_directory=True)
+            self.box.state_root = Mock(return_value=state)
+            with patch.dict(
+                os.environ, {"OC_BOX_STATE_HOME": str(state), "OC_BOX_JOURNALD": "0"}
+            ):
+                self.assertTrue(activity_log.record_event("tui.started"))
+                [entry] = self.backend.logs()
+                self.assertEqual(entry.message, "tui.started")
+
+            data = {"id": "a" * 32}
+            external_entry = tui_logs.LogEntry("", "podman", "info", "synthetic output")
+            with (
+                patch.dict(os.environ, {"OC_BOX_STATE_HOME": str(linked)}),
+                patch.object(
+                    self.backend,
+                    "selected",
+                    return_value=(state / "workspace.json", data),
+                ) as select,
+                patch.object(
+                    tui_logs, "podman_entries", return_value=[external_entry]
+                ) as podman,
+            ):
+                self.assertEqual(self.backend.logs(), [])
+                select.assert_not_called()
+                podman.assert_not_called()
+                self.assertEqual(self.backend.logs(data["id"]), [external_entry])
+                select.assert_called_once_with(data["id"])
+                podman.assert_called_once_with(self.backend._queries, data)
+            self.box.state_root.assert_not_called()
 
     def test_real_json_wrapper_failure_is_isolated_from_valid_registrations(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -191,26 +191,15 @@ class LogBuffer:
 
 def activity_entries(root=None, limit=1000) -> list[LogEntry]:
     """Render only the journal's already-validated metadata as oc-box entries."""
-    entries = []
-    for record in activity_log.read_events(root, limit=limit):
-        parts = [record["event"]]
-        for name in ("command", "workspace", "outcome", "exit_code", "duration_ms"):
-            if name in record:
-                parts.append(f"{name}={record[name]}")
-        failed = record["event"] == "command.failed" or record.get("outcome") in {
-            "failure",
-            "refused",
-            "unavailable",
-        }
-        entries.append(
-            LogEntry(
-                record["timestamp"],
-                "oc-box",
-                "error" if failed else "info",
-                " ".join(parts),
-            )
+    return [
+        LogEntry(
+            record["timestamp"],
+            "oc-box",
+            activity_log.event_level(record),
+            activity_log.format_event(record),
         )
-    return entries
+        for record in activity_log.read_events(root, limit=limit)
+    ]
 
 
 class _LogUnavailable(Exception):

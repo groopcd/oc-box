@@ -1,13 +1,20 @@
 import copy
 import importlib.util
+import os
 import sys
+import tempfile
 import threading
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from urllib.parse import urlparse
 
+from oc_box import activity_log
+from oc_box import oc_box as box
 from oc_box.tui import DemoBackend
 from oc_box.tui_backend import (
+    DashboardBackend,
     SessionConnection,
     TerminalAttachmentError,
     TerminalHandle,
@@ -154,6 +161,31 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             app.query_one("#log-search", Input).value = "dashboard"
             await pilot.pause()
             self.assertEqual(len(app.logs.search(app.log_query)), 1)
+
+    def test_session_journal_refuses_resolved_state_symlink_without_changing_ui_paths(
+        self,
+    ):
+        with tempfile.TemporaryDirectory() as temporary:
+            state = Path(temporary) / "state"
+            state.mkdir(mode=0o700)
+            linked = state.with_name("linked-state")
+            linked.symlink_to(state, target_is_directory=True)
+            catalog = SimpleNamespace(origin="workspace", store="a" * 32)
+            with patch.dict(
+                os.environ, {"OC_BOX_STATE_HOME": str(linked), "OC_BOX_JOURNALD": "0"}
+            ):
+                app = DashboardApp(DashboardBackend(box))
+                self.assertEqual(app.favorites.root, state / "ui")
+                app._journal("session.archived", catalog)
+                self.assertFalse((state / "log").exists())
+            with patch.dict(
+                os.environ, {"OC_BOX_STATE_HOME": str(state), "OC_BOX_JOURNALD": "0"}
+            ):
+                app._journal("session.archived", catalog)
+                [record] = activity_log.read_events()
+            self.assertEqual(record["event"], "session.archived")
+            self.assertEqual(record["command"], "tui")
+            self.assertEqual(record["workspace"], catalog.store)
 
     async def test_session_disconnect_is_beside_connect_and_search_clear_is_local(self):
         for size in ((140, 45), (80, 24)):

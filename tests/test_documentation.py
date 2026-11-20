@@ -13,6 +13,7 @@ from oc_box import (
     attachments,
     backups,
     dependencies,
+    logs_cli,
     oc_box as box,
     tui,
     workspace_service,
@@ -71,6 +72,7 @@ class DocumentationTests(unittest.TestCase):
         parsers = [
             parser,
             dependencies.parser(),
+            logs_cli.parser(),
             workspace_service.web_parser(),
             tui.parser(),
             box.secrets_parser(),

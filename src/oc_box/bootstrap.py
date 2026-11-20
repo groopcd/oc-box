@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import sys
 import tarfile
 import urllib.request
 
@@ -40,4 +41,5 @@ for name in ("uv", "uvx"):
 home = Path(os.environ["HOME"])
 for name in (".config", ".cache", ".local/share", ".local/state"):
     (home / name).mkdir(parents=True, exist_ok=True)
-print("Container baseline ready: Node/npm, Python/uv, Git, ripgrep, and PDF tools.")
+if "--quiet-ready" not in sys.argv[1:]:
+    print("Container baseline ready: Node/npm, Python/uv, Git, ripgrep, and PDF tools.")

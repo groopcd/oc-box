@@ -41,7 +41,15 @@ their checkout ownership distinct from unrelated source and flat installations.
 - `oc_box.py`: external rootless-Podman launcher and workspace lifecycle.
 - `bootstrap.py`: baseline tools installed inside the container.
 - `sync_config.py`: container-only config refresh with dependency-cache reuse.
-- `terminal_ui.py`: native TUI relay and startup loading indicator.
+- `terminal_ui.py`: native TUI relay and startup loading indicator. Keep native
+  OpenCode output/UI unchanged. Launcher stage progress is transient on a
+  capable TTY and has no default start/done lines in pipes or `TERM=dumb`.
+  Preserve actionable warnings/prompts and one final history result per attempt,
+  with interruption/unconfirmed-completion cautions on recovery. Report partial
+  or uncertain cleanup honestly; do not change lifecycle, eligibility or exits.
+  `OC_BOX_LIFECYCLE_DIAGNOSTICS=1` explicitly opts in to expanded launcher
+  messages for troubleshooting and legacy scripted checks. Keep historical
+  reports intact; offline output checks are not new host acceptance.
 - `status_report.py`: read-only host resource and storage reporting.
 - `tui.py` / `tui_app.py` / `tui_backend.py`: optional, host-side Textual manager.
   Keep ordinary CLI imports stdlib-only, demo strictly synthetic, browsing free
@@ -81,11 +89,32 @@ their checkout ownership distinct from unrelated source and flat installations.
   clipboard requests stay stripped.
   Paste copied is the in-app cache, not the current desktop clipboard. Preserve
   focused shell control keys, byte/queue bounds and CLI read-only fences.
-- `activity_log.py` / `tui_logs.py`: private bounded fixed-category activity
-  journal plus explicit in-memory external log views. Never journal raw argv,
-  env, errors, prompts or stdout/stderr. Preserve legitimate owned legacy state
-  permissions while keeping log directories/files private. External-log
-  redaction is best-effort, not a guarantee of arbitrary-secret removal.
+- `activity_log.py` / `logs_cli.py` / `tui_logs.py`: private bounded
+  fixed-category activity journal plus explicit in-memory dashboard external
+  log views. `oc-box logs` is host-only and read-only, with a stdlib-only
+  private default. It must not write journal, workspace or history state or
+  read native OpenCode or container logs.
+  CLI and dashboard share validated severity and message formatting; only the
+  CLI defaults to `info` and higher. The dashboard includes `debug`. Valid
+  legacy rows remain readable. Missing or unsafe journal data fails closed to
+  empty; JSON Lines with no matches emits nothing. Preserve legitimate owned
+  legacy state permissions while keeping log directories/files private. Reason
+  codes and metric names use closed sets; metric values are bounded integers.
+  Never journal raw argv, errors, env, stdout/stderr, prompts, transcripts,
+  pairing links, authentication, clipboard data or other free-form text.
+  Dashboard external-log redaction remains best-effort, not a guarantee of
+  arbitrary-secret removal.
+  `OC_BOX_JOURNALD=1` opts the host launcher into best-effort mirroring of only
+  successfully appended, validated activity events to existing local
+  systemd-journald with native priorities. The private file remains primary;
+  sink errors cannot affect lifecycle results. Do not start/configure daemons
+  or add ordinary systemd dependencies. System journal visibility and
+  retention follow host policy. `oc-box logs --journald` expressly selects the
+  current user's mirror via local `journalctl`, with the same severity and
+  workspace filters, limit, follow and JSON Lines support. On unavailability
+  give fixed safe guidance to use the private default, never fall back
+  automatically or expose raw errors. Mock backends are not host journal
+  acceptance.
 - `tui_storage.py` / `tui_operations.py` / `tui_management.py`: three distinct
   host/selected/all-workspace scopes, canonical bounded registry reads and explicit
   operation reviews, typed only for destructive actions. Host operations target

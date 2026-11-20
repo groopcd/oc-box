@@ -62,6 +62,7 @@ oc-box completion bash
 oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
+oc-box logs [--journald] [--project PATH | --workspace ID] [--level debug|info|warn|error] [--limit N] [--follow] [--json]
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
 oc-box upgrade --auto-update on|off
@@ -88,6 +89,14 @@ The container HOME has the host user's home pathname but uses a private named vo
 On normal exit, oc-box exports conversation history to separate archive sessions in the normal host OpenCode database, then stops the container. Launching oc-box again restores the native terminal's saved open-session set when supported; closing a tab does not delete its synchronized history. Running processes do not survive a stop. Host OpenCode and its configuration are unchanged. On V2, ordinary tool permission asks for the actual container Build agent are auto-allowed; explicit session/mandatory-policy denials remain denied, and Plan/subagents retain their own rules. Copied ordinary global/Build-agent rules are overridden by the existing final Build wildcard, as before. V1's existing Build permission behavior is unchanged.
 
 The default resource limits are 4 CPU cores, 8 GiB RAM, and 2048 processes. These are ceilings, not reservations: resources are consumed dynamically up to those limits, and OpenCode itself has no fixed 4/8 GiB minimum requirement. There is no disk quota. Containers share the host kernel and can reach network services, including configured host services at @code{host.containers.internal}. The project is intentionally writable and can be deleted by container commands. Additional Podman options and devices explicitly extend these defaults.
+
+@section Lifecycle output
+
+Startup and shutdown are quiet by default. On an interactive terminal, oc-box shows transient stage progress on one line and clears it instead of leaving a transcript of each step. Noninteractive output, including pipes and @code{TERM=dumb}, does not get routine stage start/done lines. Actionable warnings, errors and confirmation or credential prompts remain visible. Native OpenCode output and the native terminal and browser UIs are not changed.
+
+After a history sync or recovery attempt, oc-box reports one final history result: saved normally, recovered after stop, partial, failed, empty, or cleanup unverified. The recovery result itself carries the interruption and unconfirmed-background-completion caution; archived history does not prove work finished. Incomplete results retain guidance for retrying @code{oc-box sync} when appropriate. The presentation does not change lifecycle steps, recovery eligibility, history verification or exit codes.
+
+Use @code{oc-box logs --level debug} to inspect retained stage details. For additional launcher messages on a particular invocation, see [@code{OC_BOX_LIFECYCLE_DIAGNOSTICS=1}](#launcher-diagnostics).
 
 @section OpenCode versions
 
@@ -143,7 +152,7 @@ oc-box --project ~/devel/demo --host-drop
 
 For V2, initialize and populate the host vault **before the first project launch** to use the global default immediately; see secrets below for installation and masked input. No per-project credential registration is needed. Each new owner unlocks once and delivers all current entries unless an explicit env/selected policy overrides it. Changes to vault values/names apply on the next new owner, not to attached clients. With no vault, env-file fallback remains available with concise setup guidance. Native OpenCode saved/OAuth credential refresh/copy remains independent in every mode. @code{--no-vault} opts out for one owning V2 launch without saving policy. Configured vault failures abort before setup; they do not silently fall back to the environment.
 
-Cold startup includes image/package/plugin downloads. Interactive stage feedback, including history sync, uses one width-bounded spinning line with elapsed time; completion or failure replaces that line with one final result. Noninteractive or @code{TERM=dumb} output stays plain, with start/final lines and no periodic repeats. The live-readiness wait is labeled separately from actual history archive copying; a successful checked post-stop copy is not reported as an overall sync failure. A separate loading line covers blank TUI startup frames and disappears when OpenCode draws text. Warm launches retain compatible caches. The container OpenCode version is verified against the host on every launch; exact upgrades and downgrades are supported, with no fallback to another release. With a V2 release supporting image previews, @code{--image-preview} enables prompt and transcript image previews through an ephemeral native-CLI overlay for this owning TUI generation, without replacing saved private preferences. See the option below for compatibility and lifetime.
+Cold startup includes image/package/plugin downloads; warm launches retain compatible caches. See [Lifecycle output](#lifecycle-output) for transient progress and the final history result. The progress display distinguishes waiting for live activity to settle from copying history archives. A separate loading line covers blank TUI startup frames and disappears when OpenCode draws text. The container OpenCode version is verified against the host on every launch; exact upgrades and downgrades are supported, with no fallback to another release. With a V2 release supporting image previews, @code{--image-preview} enables prompt and transcript image previews through an ephemeral native-CLI overlay for this owning TUI generation, without replacing saved private preferences. See the option below for compatibility and lifetime.
 
 Native V2 terminal preferences are container-local. Host @code{cli.json} seeds an absent private file, but later config refreshes preserve the container's existing file, including explicit permission, notification, theme and tab-scope choices. Use Ctrl+P → Open settings inside that container to change them. Normal server configuration, authentication and plugin refreshes remain separate. oc-box does not force autoaccept or copy the container's preferences back to the host.
 
@@ -254,7 +263,7 @@ An active oc-box launcher holds a workspace lock, so exit it before syncing. Use
 
 This optimization does not apply to existing owners or post-stop recovery readers, and does not change their readiness/stop guarantees. Destination replacement, child guards and fresh-native verification remain serialized and unchanged. No metadata timestamp shortcut or parallel database mutation is used. Overall success is announced only after the private source lease closes cleanly.
 
-The sync summary reports only aggregate session, exported, unchanged, updated and pending counts, elapsed time and a fixed source mode (@code{post-stop-reader}, @code{private-endpoint} or @code{standalone}). It does not include session IDs, titles, commands/argv, environment values, native errors or model values. This feedback does not speed up source exports or archive writes; further optimization is deferred.
+The [final history result](#lifecycle-output) distinguishes partial or unverified work from success. Detailed sync diagnostics use aggregate session, exported, unchanged, updated and pending counts, elapsed time and a fixed source mode (@code{post-stop-reader}, @code{private-endpoint} or @code{standalone}), not session IDs, titles, commands/argv, environment values, native errors or model values. This feedback does not speed up source exports or archive writes; further optimization is deferred.
 
 V2 exports are checked against the paginated projected transcript. An unfinished tail assistant, running user shell/compaction, or changing transcript leaves that session pending, while other sessions can still synchronize. In an inactive session, an unfinished assistant followed by settled messages is superseded: sync mirrors native's export and annotates the omitted count. The exception is refused while that session is active. See the Sessions and recovery section. History archives are not full backups of pending input, execution state, or persistent shell terminals; use encrypted workspace backup for full private state.
 
@@ -307,7 +316,7 @@ Spectacle/browser/Wayland/X11/portal combinations can expose a temporary file as
 
 Native browser draft storage, including **IndexedDB**, still stores attachment data. Sending can retain it in container history and disclose it to the selected provider; ordinary history synchronization still applies. Removal/detach is not guaranteed erasure or recall. Pairing/session cookies remain governed by native authentication; the adapter does not put the controller password into a URL, HTML, JavaScript, files or browser storage. Standard browser file authorization or desktop portal UI may still be required by the browser/desktop itself. Synthetic DOM/API checks are not an interactive Spectacle/browser or live rootless-Podman acceptance claim.
 
-After the last client exits, V2 final sync waits up to 30 seconds for the same private server's foreground sessions and unconsumed background jobs to settle. An idle persistent shell terminal does not block this wait. Timeout or an invalid activity response refuses live history export. Unless the guarded post-stop path below completes in full, history remains pending and the command returns nonzero. Normal cleanup still stops the container, so running work is not promised to continue. This is bounded checking, not an atomic freeze of every possible history producer. On timeout, the existing @code{History wait timeout:} diagnostic reports the wait phase (@code{foreground-query}, @code{background-query} or @code{poll-delay}) and counts from the last complete, validated activity/job observation. Job counts distinguish running, completed, error and cancelled entries, with separate allowlisted shell/subagent/image kind counts; counts above 9999 appear as @code{9999+}. If no complete pair was validated, the observation is @code{unavailable}, not zero. These are previous observations, not proof of the current state or that a native request succeeded: a request failure at the deadline also retains the @code{activity-timeout} category. Its output remains byte-compatible. A separate @code{History wait timing:} line is emitted only for @code{activity-timeout}, not on normal success:
+After the last client exits, V2 final sync waits up to 30 seconds for the same private server's foreground sessions and unconsumed background jobs to settle. An idle persistent shell terminal does not block this wait. Timeout or an invalid activity response refuses live history export. Unless the guarded post-stop path below completes in full, history remains pending and the command returns nonzero. Normal cleanup still stops the container, so running work is not promised to continue. This is bounded checking, not an atomic freeze of every possible history producer. With [@code{OC_BOX_LIFECYCLE_DIAGNOSTICS=1}](#launcher-diagnostics), the @code{History wait timeout:} diagnostic reports the wait phase (@code{foreground-query}, @code{background-query} or @code{poll-delay}) and counts from the last complete, validated activity/job observation. Job counts distinguish running, completed, error and cancelled entries, with separate allowlisted shell/subagent/image kind counts; counts above 9999 appear as @code{9999+}. If no complete pair was validated, the observation is @code{unavailable}, not zero. These are previous observations, not proof of the current state or that a native request succeeded: a request failure at the deadline also retains the @code{activity-timeout} category. In this diagnostic mode the existing line keeps its format. A separate @code{History wait timing:} line is emitted only for @code{activity-timeout}, not on normal success:
 
 @itemize @bullet
 @item
@@ -324,7 +333,7 @@ After the last client exits, V2 final sync waits up to 30 seconds for the same p
 
 Counts are capped at @code{9999+} and durations at @code{9999+s}. Query times are wall-clock measurements around the existing native API helper, including Podman, Python and native CLI startup and JSON decoding; they are not pure server latency. Late or partial responses do not manufacture a complete pair. Neither diagnostic emits session/job identifiers, paths, commands, payloads, native errors, environment values or credentials. Timing does not track job identity, distinguish live from durable jobs, or prove that a job is stuck or orphaned. Timing itself adds no probes or job cleanup and changes neither validation, the 30-second grace, polling interval, 60-second request cap, recovery guards nor exit policy.
 
-If automatic post-stop recovery is not attempted, a separate fixed-category line explains its routing guards. For example, @code{custom-podman-options} means the container baseline is outside this conservative path; @code{non-shell-jobs} is the legacy fixed label for jobs outside that native version's audited snapshot profile, including image jobs on 2.3.x. @code{insufficient-shell-observations} or the 2.3.x counterpart @code{insufficient-job-observations} means fewer than two qualifying pairs were retained. Stable native 2.3.x uses the guarded retained-subagent storage profile; unsupported job kinds still refuse automatic recovery. Control-state, attached-client and unverified-owner-close refusals are also distinguished. These labels do not waive any guard or establish that a job completed. Do not clear control markers, remove job rows or reset a workspace merely to bypass a refusal.
+If automatic post-stop recovery is not attempted, diagnostics can explain its routing guards with fixed categories. For example, @code{custom-podman-options} means the container baseline is outside this conservative path; @code{non-shell-jobs} is the legacy fixed label for jobs outside that native version's audited snapshot profile, including image jobs on 2.3.x. @code{insufficient-shell-observations} or the 2.3.x counterpart @code{insufficient-job-observations} means fewer than two qualifying pairs were retained. Stable native 2.3.x uses the guarded retained-subagent storage profile; unsupported job kinds still refuse automatic recovery. Control-state, attached-client and unverified-owner-close refusals are also distinguished. These labels do not waive any guard or establish that a job completed. Do not clear control markers, remove job rows or reset a workspace merely to bypass a refusal.
 
 The 30 seconds are oc-box's live-readiness grace, not a native export/import timeout or a duration limit for the entire synchronization. This grace remains unchanged. The two paths differ:
 
@@ -364,7 +373,7 @@ This conservative path requires a passive container entrypoint, no custom Podman
 
 Snapshots retain the existing complete-inventory, checked-export, pending-session and verified-host-import safeguards. Pending sessions do not prevent checked progress on other sessions; their prior archives/checkpoints remain intact. If any remain unsettled, @code{snapshot-incomplete} reports the partial result with an interruption warning, never an all-history success. Native startup/projection can maintain its database; this is not a byte-read-only database backup. No native job is deleted, rewritten or declared completed, and no queued input is acknowledged.
 
-**A raw client exit of @code{0} can return CLI status @code{0} after an eligible live-sync failure only when the existing guarded reader completes every checked export, import and native verification, recovery cleanup succeeds, the final stop is verified, and the foreground-interruption hint was not used.** Saving history after a foreground-interruption timeout still returns nonzero, even if all archives were saved and the raw client exited @code{0}. Archive-sync success is reported only after clean stops; it is not work-completion success. The warning still states that execution was interrupted and background completion is unconfirmed: completion notices or final results may be missing. This policy is the same for owning native TUI and web launches. Actual raw client failures, including exit @code{7} or cancellation, are never converted to success. Unknown raw client status, pending/partial history, any sync/recovery failure or failed/uncertain cleanup remains nonzero. Guidance to retry @code{oc-box sync} remains when automatic archival cannot safely finish, not as the first response to an eligible live failure. Resolve the refusal before retrying, without resetting or purging the workspace.
+**A raw client exit of @code{0} can return CLI status @code{0} after an eligible live-sync failure only when the existing guarded reader completes every checked export, import and native verification, recovery cleanup succeeds, the final stop is verified, and the foreground-interruption hint was not used.** Saving history after a foreground-interruption timeout still returns nonzero, even if all archives were saved and the raw client exited @code{0}. Archive-sync success is reported only after clean stops; it is not work-completion success. The recovery result still states that execution was interrupted and background completion is unconfirmed: completion notices or final results may be missing. This policy is the same for owning native TUI and web launches. Actual raw client failures, including exit @code{7} or cancellation, are never converted to success. Unknown raw client status, pending/partial history, any sync/recovery failure or failed/uncertain cleanup remains nonzero. Guidance to retry @code{oc-box sync} remains when automatic archival cannot safely finish, not as the first response to an eligible live failure. Resolve the refusal before retrying, without resetting or purging the workspace.
 
 Historical job rows can remain running-looking on the next owner; the same bounded post-stop path may save another snapshot, but does not make the underlying native owner healthy. Neither job age nor a terminal-looking status is a recovery exemption. Recovery evidence and release-validation requirements are documented in the [test strategy](testing.md#reviewed-focused-recovery-host-acceptance).
 
@@ -443,7 +452,7 @@ Delete backup file is a separate typed action for one selected, owned, private, 
 
 The Terminals tab embeds the existing native persistent-session terminal client through a local PTY and optional @code{pyte} emulator, not a new container shell. Attachment validates the selected source's membership; a foreign session/host archive is not authority for a workspace shell. Create/takeover requires explicit confirmation. Closing the dashboard closes its clients/leases only, not the workspace owner or native persistent PTY. This is not a complete xterm implementation: no mouse, images, complex-grapheme or extended-keyboard support is promised. Actual embedded rendering/input/resize/detach acceptance still needs a new clean-host interactive run. Immediate attachment refusals include fixed categories such as @code{workspace-not-running}, @code{workspace-identity}, @code{owner-unavailable}, @code{session-unavailable} or @code{client-launch}. They identify the failed stage without printing native output, credentials or control replies. Compare the ordinary @code{oc-box terminal --project PATH} attach-only path for the same running workspace; do not reset, repair or start a replacement merely to bypass a refusal.
 
-The Logs tab defaults to @code{log/activity.jsonl} under the configured state root, with rotations @code{.1} through @code{.3}: four files capped at 256 KiB each, private files 0600/log directory 0700. An existing owned, non-group/world-writable state root can retain its legacy permissions; it is not automatically chmodded. Readers do not create files. Generated entries contain fixed categories and allowlisted metadata, never raw argv/environment, stdout/stderr, error messages, prompts or transcripts. The UI retains at most 2000 log entries globally and displays at most 1000 generated-journal entries per refresh. There is no native OpenCode logfile reader in this first stage. Podman logs are a separate explicit opt-in for a selected verified owned container: tail 500 lines, 1 MiB byte cap, 10-second timeout, memory only. Common credential redaction is best-effort, not proof that arbitrary secrets are absent. Source filters/follow controls do not disable search. See @code{docs/tui.md} for design, installation and safety boundaries. Demo/headless/native offline checks are not host acceptance.
+The Logs tab defaults to @code{log/activity.jsonl} under the configured state root, with rotations @code{.1} through @code{.3}: four files capped at 256 KiB each, private files 0600/log directory 0700. An existing owned, non-group/world-writable state root can retain its legacy permissions; it is not automatically chmodded. Readers do not create files. The dashboard shares validated severity and message formatting with @code{oc-box logs}, but displays all retained levels, including @code{debug}. Generated entries include only fixed categories and allowlisted metadata. The UI retains at most 2000 log entries globally and displays at most 1000 generated-journal entries per refresh. There is no native OpenCode logfile reader in this first stage. Podman logs are a separate explicit opt-in for a selected verified owned container: tail 500 lines, 1 MiB byte cap, 10-second timeout, memory only. Common credential redaction is best-effort, not proof that arbitrary secrets are absent. Source filters/follow controls do not disable search. See @code{docs/tui.md} for design, installation and safety boundaries. Demo/headless/native offline checks are not host acceptance.
 
 @section terminal
 
@@ -550,6 +559,21 @@ Alias of @code{--status}. Report all registered environments unless @code{--proj
 oc-box status
 oc-box --status --project ~/devel/demo
 oc-box --status --json
+@end example
+
+@section logs
+
+Read the [oc-box activity journal](#dashboard-state-and-activity-journal) on the host. The default private-file reader uses only the Python standard library; no systemd, dashboard extras, Podman, native OpenCode, vault unlock or running workspace is needed. The command does not create, trim or rotate logs, start a container, or modify the workspace registry, project files or session history. It does not read Podman output or native OpenCode logfiles.
+
+By default, show the latest 100 retained entries at @code{info} or above. @code{--level debug} includes lower-severity stage detail; @code{--level warn} or @code{--level error} narrows the output. @code{--project PATH} and @code{--workspace ID} are mutually exclusive filters and require a valid workspace registration. With neither, show entries across workspaces, including entries with no workspace. Severity and workspace filters apply before the limit. Use @code{--follow} to keep watching after the initial output, and Ctrl-C to stop. Use @code{--json} for one validated event per line (JSON Lines), including when following. With no matches, JSON Lines output is empty, not @code{[]} or a placeholder. The default reader treats missing or unsafe private journal data as empty. Lifecycle detail can appear after the invocation finishes: history and shutdown diagnostics are queued so journal writes do not run inside verification deadlines or while a client lease is held.
+
+Use @code{--journald} to explicitly read this user's mirrored oc-box activity events through local @code{journalctl} with @code{--output-fields} support (systemd 236+). The same workspace selectors, severity thresholds, limit, follow and JSON Lines settings still apply; the system journal reader uses native journal priorities for severity. An unavailable reader reports fixed guidance to run @code{oc-box logs} without @code{--journald}; it never falls back automatically. The writer opt-in and system retention limits are described under [Dashboard state and activity journal](#dashboard-state-and-activity-journal).
+
+@example
+oc-box logs
+oc-box logs --project ~/devel/demo --level debug --limit 50
+oc-box logs --workspace WORKSPACE_ID --level warn --follow --json
+oc-box logs --journald --level warn --follow --json
 @end example
 
 @section upgrade
@@ -808,7 +832,7 @@ Share and direct attach-only. Replace typed host disclosure confirmation for exp
 
 @section --project PATH
 
-Select an existing project directory; relative paths resolve from the host working directory. Quote paths containing spaces. For lifecycle commands the default is the current directory. For status, omission means all workspaces. For @code{tui}, it narrows the dashboard to an existing project; omit both selectors for the registered workspace overview. @code{tui} accepts only one selector. The project must not be the host home, @code{/}, @code{/home}, the oc-box registry, or a directory containing trusted launcher/state files. Colons, commas, and line breaks in the project path are unsupported because of Podman mount syntax.
+Select an existing project directory; relative paths resolve from the host working directory. Quote paths containing spaces. For lifecycle commands the default is the current directory. For status, omission means all workspaces. For @code{tui}, it narrows the dashboard to an existing project; omit both selectors for the registered workspace overview. @code{tui} accepts only one selector. For @code{logs}, it filters journal entries by a registered project path, cannot be combined with @code{--workspace}, and does not default to the current directory. The project must not be the host home, @code{/}, @code{/home}, the oc-box registry, or a directory containing trusted launcher/state files. Colons, commas, and line breaks in the project path are unsupported because of Podman mount syntax.
 
 @example
 oc-box --project "$HOME/devel/my project"
@@ -816,7 +840,7 @@ oc-box --project "$HOME/devel/my project"
 
 @section --workspace ID
 
-Select an existing workspace by its full 32-character ID from @code{oc-box list}. This works from another directory and allows cleanup after the project is deleted. Starting, syncing, or resetting still needs its original project directory. The identity marker and registry are not interchangeable with OpenCode session IDs. Example: @code{oc-box --status --workspace WORKSPACE_ID}.
+Select an existing workspace by its full 32-character ID from @code{oc-box list}. This works from another directory and allows cleanup after the project is deleted. Starting, syncing, or resetting still needs its original project directory. The identity marker and registry are not interchangeable with OpenCode session IDs. Example: @code{oc-box --status --workspace WORKSPACE_ID}. For @code{logs}, this is an exact workspace ID filter and cannot be combined with @code{--project}.
 
 @section --status
 
@@ -824,13 +848,27 @@ Report CPU, RAM, storage, state, limits, and sessions without opening OpenCode. 
 
 @section --json
 
-Doctor also accepts this flag to emit its versioned feature/dependency report.
-
-Emit status as one JSON object with @code{sampled_at} and @code{workspaces}. Sizes are numeric bytes and unavailable values are @code{null}; notes explain partial results. Progress goes to stderr, not the JSON stream. Status uses this schema; doctor uses the feature/dependency schema described under that command.
+Emit status as one JSON object with @code{sampled_at} and @code{workspaces}. Sizes are numeric bytes and unavailable values are @code{null}; notes explain partial results. Progress goes to stderr, not the JSON stream. Doctor uses its own versioned feature/dependency schema. @code{logs} instead emits JSON Lines, one event per line, not a single JSON object or array.
 
 @example
 oc-box --status --json > status.json
 @end example
+
+@section --level debug|info|warn|error
+
+For @code{logs}, set the minimum severity displayed, from @code{debug} (all levels) to @code{error} (errors only). Default: @code{info}. This is a read filter; it does not change what gets journaled or what an owning launcher prints.
+
+@section --limit N
+
+For @code{logs}, set the maximum number of matching retained entries in the initial output, from 1 to 10,000. Default: 100. Rotation may leave fewer entries available.
+
+@section --follow
+
+For @code{logs}, keep displaying newly retained matching entries after the initial output. Follow is best-effort: entries rotated out before they are read cannot be recovered. Stop following with Ctrl-C.
+
+@section --journald
+
+For @code{logs}, read this user's mirrored activity events from the local system journal instead of the private file. Requires a usable local @code{journalctl} and access to those records. It does not enable mirroring, change journal settings or fall back to the private file.
 
 @section --about
 
@@ -1307,6 +1345,10 @@ HTTP endpoint keys in global config using localhost, 127.0.0.1, or ::1 are rewri
 
 @code{OC_BOX_STATE_HOME} overrides the host workspace registry root. Otherwise it is @code{$XDG_STATE_HOME/oc-box}, defaulting to @code{~/.local/state/oc-box}. Use the same registry when looking up existing workspace IDs; changing it does not migrate old resources automatically.
 
+@code{OC_BOX_LIFECYCLE_DIAGNOSTICS=1} opts the host launcher into expanded lifecycle messages for troubleshooting or compatible scripted checks. It is an output setting, not a lifecycle, history or credential option. See [Launcher diagnostics](#launcher-diagnostics).
+
+@code{OC_BOX_JOURNALD=1} opts the host launcher into best-effort mirroring of successfully appended activity events to existing local systemd-journald. It does not replace the private file or change the default @code{oc-box logs} reader.
+
 @code{XDG_CONFIG_HOME} selects the source global OpenCode/oc-box configuration; default @code{~/.config}. @code{XDG_DATA_HOME} selects the normal host OpenCode data root; default @code{~/.local/share}. The installer itself uses fixed @code{~/.local} paths. Container XDG paths use the private home, not host XDG directories.
 
 Without an explicit workspace policy, normal V2 owning launches use all current host vault entries. A present vault replaces ambient automatic @code{_API_KEY}/ @code{_TOKEN} and @code{pass_env} forwarding, including legacy @code{OPENCODE_AUTH_CONTENT} overrides; no vault present retains env-file fallback with setup guidance. Ordinary native OpenCode saved/OAuth credential refresh/copy remains independent in every mode. V1 and explicit @code{env} policy retain the legacy rules below; @code{selected} policy instead uses only selected credential names. @code{--no-vault} is a one-owning-invocation V2 compatibility opt-out, not a saved default or a way to refresh an attached service.
@@ -1400,7 +1442,19 @@ The normal host OpenCode database, usually under @code{~/.local/share/opencode/}
 
 @section Dashboard state and activity journal
 
-The experimental dashboard keeps favorites as private UI state, not native OpenCode pins. Its generated activity journal is @code{log/activity.jsonl} under @code{OC_BOX_STATE_HOME}, or @code{$XDG_STATE_HOME/oc-box} (default @code{~/.local/state/oc-box/log/activity.jsonl}). It rotates to @code{activity.jsonl.1} through @code{.3}, with four 256 KiB files, files mode 0600 and private directories 0700. Readers do not create files. Generated entries use only fixed categories and allowlisted metadata, not raw argv/environment, native output/errors, prompts or transcripts. Opt-in bounded Podman log content stays in memory and is never written into this journal; best-effort credential redaction is not a guarantee that arbitrary secrets are absent. No native OpenCode logfile reader is added in the first stage.
+The experimental dashboard keeps favorites as private UI state, not native OpenCode pins. The oc-box activity journal is @code{log/activity.jsonl} under @code{OC_BOX_STATE_HOME}, or @code{$XDG_STATE_HOME/oc-box} (default @code{~/.local/state/oc-box/log/activity.jsonl}). It rotates to @code{activity.jsonl.1} through @code{.3}, with four 256 KiB files, files mode 0600 and private directories 0700. Readers do not create files. @code{oc-box logs} and the dashboard's oc-box source share the same validated severity and message formatting. Only the CLI defaults to @code{info} or higher; the dashboard includes @code{debug}. Retained valid older entries without a severity remain readable with a derived level.
+
+Generated entries use fixed categories and allowlisted metadata, such as a workspace ID, stage, duration, or aggregate count. Reason codes and metric names come from fixed lists, and metric values are bounded integers. Entries do not record raw arguments, environment values, errors, stdout/stderr, prompts, transcripts, pairing links, authentication or clipboard data, or other free-form text. This is bounded activity metadata, not a terminal recording or a permanent audit archive. The dashboard's separate opt-in Podman log view stays in memory and never adds content to the journal; its best-effort credential redaction cannot guarantee that arbitrary secrets are absent.
+
+**Optional system journal mirror.** Set @code{OC_BOX_JOURNALD=1} in the host launcher's environment. oc-box mirrors only validated activity events after they have been successfully appended to the private file. The file remains the primary journal. Mirroring uses native journal priorities and never includes raw output, authentication data or secrets. A missing sink or delivery error cannot change lifecycle results. No daemon is started, installed or reconfigured; an ordinary installation does not require systemd.
+
+The system journal can be visible to administrators and other authorized journal viewers. It follows system retention and priority policy, which may discard @code{debug} entries, so it need not contain the same history as the file. On the host, read the mirror explicitly with @code{oc-box logs --journald}, or query the matching records directly:
+
+@example
+OC_BOX_JOURNALD=1 oc-box start --project ~/devel/demo
+oc-box logs --journald
+journalctl SYSLOG_IDENTIFIER=oc-box "_UID=$(id -u)" OC_BOX_FORMAT=oc-box-activity-v1
+@end example
 
 @section Container data
 
@@ -1432,6 +1486,7 @@ The second launch resumes work. A new conversation does not reset files or insta
 @example
 oc-box list
 oc-box --status
+oc-box logs --project ~/devel/demo --level warn
 oc-box --status --project ~/devel/demo --json > status.json
 podman ps -a --filter label=io.oc-box.managed=true
 @end example
@@ -1481,9 +1536,19 @@ The last command deletes its remaining managed resources and recorded host archi
 @node Troubleshooting
 @chapter Troubleshooting
 
+@section Launcher diagnostics
+
+Use @code{oc-box logs --level debug} to inspect retained activity details without restarting a workspace. To see the launcher's expanded stage messages and fixed-category diagnostics during an invocation, opt in explicitly:
+
+@example
+OC_BOX_LIFECYCLE_DIAGNOSTICS=1 oc-box start --project ~/devel/demo
+@end example
+
+Scripts that consume older verbose lifecycle messages should opt in explicitly instead of expecting routine start/done text in a pipe. The setting does not enable native debug logging, add raw child output to the journal or change lifecycle behavior. Continue to treat native output and interactive prompts as separate from the activity journal.
+
 @section Private output capture and uv Python
 
-V2 startup copies native OpenCode saved/OAuth credentials independently of the oc-box vault. @code{--no-vault} skips vault entries, not native authentication or the private output capture that protects it. There is currently no oc-box @code{--verbose} flag; the final error after cleanup explains a failed startup stage.
+V2 startup copies native OpenCode saved/OAuth credentials independently of the oc-box vault. @code{--no-vault} skips vault entries, not native authentication or the private output capture that protects it. There is no oc-box @code{--verbose} flag; the final error after cleanup explains a failed startup stage. Use the launcher diagnostic setting above for additional stage details.
 
 Some older uv-managed Python builds omit @code{os.memfd_create} even on capable Linux hosts. oc-box first uses the Python binding, or, when it is absent, lazily calls libc's @code{memfd_create} with close-on-exec enabled. Both paths use the same kernel facility, never disk-backed temporary files or architecture-specific raw syscalls. A denied/failed native call is not retried through libc. Capability checks happen before container startup or reset deletion; preflight failures leave the existing container and workspace intact.
 

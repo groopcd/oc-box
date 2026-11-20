@@ -1,0 +1,312 @@
+"""Read the private activity journal, without lifecycle or native log access."""
+
+import argparse
+import json
+import os
+import re
+import stat
+import sys
+import time
+from contextlib import ExitStack
+from pathlib import Path
+
+if __package__:
+    from . import activity_log
+else:
+    import activity_log
+
+
+_DEFAULT_LIMIT = 100
+_MAX_LIMIT = 10_000
+_POLL_SECONDS = 0.5
+_WORKSPACE_ID = re.compile(r"[0-9a-f]{32}")
+_REGISTRATION_BYTES = 1024 * 1024
+_DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+
+
+def _limit(value):
+    try:
+        number = int(value)
+        if 1 <= number <= _MAX_LIMIT:
+            return number
+    except ValueError:
+        pass
+    raise argparse.ArgumentTypeError(f"must be an integer from 1 to {_MAX_LIMIT}")
+
+
+def parser():
+    result = argparse.ArgumentParser(
+        prog="oc-box logs",
+        description="Read the private host activity journal (not native or container logs).",
+        epilog="Follow may miss records that rotate out between polls or are indistinguishable from old records after rotation.",
+        allow_abbrev=False,
+    )
+    selectors = result.add_mutually_exclusive_group()
+    selectors.add_argument("--project", help="registered project directory")
+    selectors.add_argument("--workspace", help="registered workspace ID")
+    result.add_argument(
+        "--level",
+        choices=activity_log.LEVELS,
+        default="info",
+        help="minimum severity (default: %(default)s)",
+    )
+    result.add_argument(
+        "--limit",
+        type=_limit,
+        default=_DEFAULT_LIMIT,
+        help=f"maximum records in the initial view (default: %(default)s; max: {_MAX_LIMIT})",
+    )
+    result.add_argument(
+        "--follow", action="store_true", help="keep printing new retained records"
+    )
+    result.add_argument(
+        "--json", action="store_true", help="emit one JSON object per line"
+    )
+    result.add_argument(
+        "--journald",
+        action="store_true",
+        help="read this user's oc-box entries from the local system journal",
+    )
+    return result
+
+
+def _owner_controlled(info):
+    return info.st_uid == os.getuid() and not info.st_mode & 0o022
+
+
+def _bounded_read(directory, name, maximum, *, private=False):
+    def valid(info):
+        return (
+            stat.S_ISREG(info.st_mode)
+            and info.st_size <= maximum
+            and (not private or (_owner_controlled(info) and info.st_nlink == 1))
+        )
+
+    if not valid(os.stat(name, dir_fd=directory, follow_symlinks=False)):
+        raise ValueError
+    with os.fdopen(os.open(name, _READ_FLAGS, dir_fd=directory), "rb") as stream:
+        if not valid(os.fstat(stream.fileno())):
+            raise ValueError
+        data = stream.read(maximum + 1)
+    if len(data) > maximum:
+        raise ValueError
+    return data
+
+
+def _open_registry_root(root):
+    # The journal's raw configured state path must not be resolved. Open every
+    # ancestor from / without following links, keeping only the current fd.
+    directory = os.open("/", _DIRECTORY_FLAGS)
+    try:
+        for component in root.parts[1:]:
+            child = os.open(component, _DIRECTORY_FLAGS, dir_fd=directory)
+            os.close(directory)
+            directory = child
+    except BaseException:
+        os.close(directory)
+        raise
+    return directory
+
+
+def _registration(root, workspace):
+    def unique_keys(pairs):
+        record = dict(pairs)
+        if len(record) != len(pairs):
+            raise ValueError
+        return record
+
+    with ExitStack() as stack:
+        directory = _open_registry_root(root)
+        stack.callback(os.close, directory)
+        if not _owner_controlled(os.fstat(directory)):
+            raise ValueError
+        for component in ("workspaces", workspace):
+            directory = os.open(component, _DIRECTORY_FLAGS, dir_fd=directory)
+            stack.callback(os.close, directory)
+            if not _owner_controlled(os.fstat(directory)):
+                raise ValueError
+        return json.loads(
+            _bounded_read(
+                directory, "workspace.json", _REGISTRATION_BYTES, private=True
+            ),
+            object_pairs_hook=unique_keys,
+        )
+
+
+def _journal_scope(box, args):
+    if args.project is None and args.workspace is None:
+        # With no workspace registry to check, use the normal journal reader's
+        # raw state resolution and fail-closed behavior directly.
+        return None, None
+    try:
+        with ExitStack() as stack:
+            root = activity_log._root(None)
+            project = None
+            workspace = args.workspace
+            if args.project is not None:
+                if not args.project:
+                    raise ValueError
+                project = Path(args.project).expanduser().resolve(strict=True)
+                directory = os.open(project, _DIRECTORY_FLAGS)
+                stack.callback(os.close, directory)
+                workspace = (
+                    _bounded_read(directory, box.MARKER, 128).decode("ascii").strip()
+                )
+            if not _WORKSPACE_ID.fullmatch(workspace):
+                raise ValueError
+            record = _registration(root, workspace)
+            if not isinstance(record, dict) or record.get("id") != workspace:
+                raise ValueError
+            registered = record.get("project")
+            if not isinstance(registered, str) or "\0" in registered:
+                raise ValueError
+            registered_path = Path(registered)
+            if (
+                registered_path.anchor != "/"
+                or str(registered_path) != registered
+                or ".." in registered_path.parts
+            ):
+                raise ValueError
+            if project is not None:
+                if __package__:
+                    from . import workspace_identity
+                else:
+                    import workspace_identity
+                identity, stable = workspace_identity.snapshot_fd(directory)
+                if project != registered_path or not workspace_identity.matches(
+                    record, identity, stable
+                ):
+                    raise ValueError
+                # The marker and identity both came from the pinned directory.
+                # Refuse if its canonical entry now names something else.
+                entry = project.lstat()
+                if not stat.S_ISDIR(entry.st_mode) or identity != [
+                    entry.st_dev,
+                    entry.st_ino,
+                ]:
+                    raise ValueError
+            return root, workspace
+    except (OSError, ValueError, RuntimeError):
+        # Never echo selector values, filesystem exceptions, or registry contents.
+        raise box.BoxError(
+            "The logs selector requires an existing valid workspace registration."
+        ) from None
+
+
+def _new_records(previous, current):
+    """Find the longest suffix/prefix overlap in linear time.
+
+    Compare whole records in order, not timestamps or sets: repeated identical
+    records within a retained overlap can still be new. A snapshot entirely
+    contained in the previous one may be a temporary loss of readable files;
+    do not replay it. Events already rotated out (or indistinguishable from an
+    old overlap after rotation) cannot be recovered by a read-only follower.
+    """
+    if not previous or not current:
+        return current
+    if previous == current:
+        return []
+    failure = [0] * len(current)
+    matched = 0
+    for index in range(1, len(current)):
+        while matched and current[matched] != current[index]:
+            matched = failure[matched - 1]
+        if current[matched] == current[index]:
+            matched += 1
+        failure[index] = matched
+
+    matched = 0
+    for record in previous:
+        while matched and current[matched] != record:
+            matched = failure[matched - 1]
+        if current[matched] == record:
+            matched += 1
+            if matched == len(current):
+                return []
+    return current[matched:]
+
+
+def _emit(records, *, json_lines):
+    if not records:
+        return
+    for record in records:
+        level = activity_log.event_level(record)
+        if json_lines:
+            entry = {**record, "level": level}
+            print(json.dumps(entry, separators=(",", ":"), ensure_ascii=True))
+        else:
+            print(
+                f"{record['timestamp']} {level.upper():5} {activity_log.format_event(record)}"
+            )
+    sys.stdout.flush()
+
+
+def _silence_broken_pipe():
+    # A failed buffered flush can be retried at interpreter shutdown. Replace
+    # the broken destination so that retry does not print an ignored exception.
+    try:
+        destination = sys.stdout.fileno()
+        fd = os.open(os.devnull, os.O_WRONLY)
+        try:
+            os.dup2(fd, destination)
+        finally:
+            os.close(fd)
+    except (OSError, AttributeError, ValueError):
+        pass
+
+
+def _read_events(box, root, *, journald, follow, limit, level, workspace):
+    if not journald:
+        options = {"limit": limit, "level": level, "workspace": workspace}
+        if follow:
+            options["strict_snapshot"] = True
+        return activity_log.read_events(root, **options)
+    if __package__:
+        from . import journal_output
+    else:
+        import journal_output
+    try:
+        return journal_output.read_events(limit=limit, level=level, workspace=workspace)
+    except journal_output.JournalError:
+        raise box.BoxError(
+            "The local system journal is unavailable. Use 'oc-box logs' to read the private activity journal."
+        ) from None
+
+
+def cli(box, arguments):
+    try:
+        try:
+            args = parser().parse_args(arguments)
+        except SystemExit as error:
+            if error.code == 0:
+                sys.stdout.flush()
+            raise
+        if os.environ.get("OC_BOX_CONTAINER") == "1":
+            raise box.BoxError("Run 'oc-box logs' on the host, not inside a container.")
+        root, workspace = _journal_scope(box, args)
+        selectors = {
+            "level": args.level,
+            "workspace": workspace,
+            "journald": args.journald,
+            "follow": args.follow,
+        }
+        limit = _MAX_LIMIT if args.follow else args.limit
+        previous = _read_events(box, root, limit=limit, **selectors)
+        _emit(previous[-args.limit :], json_lines=args.json)
+        while args.follow:
+            time.sleep(_POLL_SECONDS)
+            current = _read_events(box, root, limit=limit, **selectors)
+            if not current:
+                # A busy or incomplete snapshot is not a new follow baseline.
+                continue
+            new = _new_records(previous, current)
+            if new:
+                _emit(new, json_lines=args.json)
+                previous = current
+        return 0
+    except KeyboardInterrupt:
+        return 130
+    except BrokenPipeError:
+        _silence_broken_pipe()
+        return 0

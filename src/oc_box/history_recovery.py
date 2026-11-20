@@ -19,9 +19,10 @@ import threading
 import time
 
 if __package__:
-    from . import history_reader, workspace_control, workspace_service
+    from . import history_reader, lifecycle_output, workspace_control, workspace_service
 else:
     import history_reader
+    import lifecycle_output
     import workspace_control
     import workspace_service
 
@@ -29,6 +30,7 @@ else:
 DEADLINE = contextvars.ContextVar("oc_box_history_recovery_deadline", default=None)
 FENCE = contextvars.ContextVar("oc_box_history_snapshot_commands", default=None)
 ADMITTED = contextvars.ContextVar("oc_box_history_snapshot_admitted", default=None)
+REPORT = contextvars.ContextVar("oc_box_history_report", default=None)
 TRANSITION_BUDGET = 35
 SNAPSHOT_BUDGET = 180
 CLEANUP_BUDGET = 30
@@ -80,9 +82,37 @@ COMPATIBILITY_REFUSALS = frozenset(
 )
 
 
+@dataclass
+class Report:
+    """Reporting only: never used to authorize retries or change an exit status."""
+
+    attempted: bool = False
+    recovery_attempted: bool = False
+    populated: bool | None = None
+    verified: bool = False
+    interrupted: bool = False
+    reason: str | None = None
+
+
+def compatibility_category(reason):
+    if isinstance(reason, str) and reason in COMPATIBILITY_REFUSALS:
+        return "unsupported-version" if reason == "unsupported-version" else "schema"
+    return None
+
+
 def report_compatibility_refusal(reason):
     """Actionable fixed-category guidance, never native errors or store content."""
-    if not isinstance(reason, str) or reason not in COMPATIBILITY_REFUSALS:
+    category = compatibility_category(reason)
+    if category is None:
+        return
+    lifecycle_output.record(
+        "history.recovery",
+        level="debug",
+        stage="history-recovery",
+        reason=category,
+        outcome="refused",
+    )
+    if lifecycle_output.concise():
         return
     print(
         "oc-box: Automatic post-stop history recovery is unavailable: "
@@ -357,6 +387,20 @@ def report_skipped(reasons):
             for reason in reasons
         )
     )
+    reason = (
+        "cleanup-unverified"
+        if {"clients-not-detached", "owner-close-unverified"}.intersection(safe)
+        else next(filter(None, map(compatibility_category, safe)), "source-unavailable")
+    )
+    lifecycle_output.record(
+        "history.recovery",
+        level="debug",
+        stage="history-recovery",
+        reason=reason,
+        outcome="unavailable",
+    )
+    if lifecycle_output.concise():
+        return
     print(
         "oc-box: Automatic persisted-history snapshot not attempted ("
         + ", ".join(safe or ["unavailable"])
@@ -428,6 +472,11 @@ def recover(box, path, data, source):
     category, saved, transitioned = "unavailable", False, False
     compatibility_reason = None
     pinned = {**data, "container": source.container_id}
+    started = time.monotonic()
+    report = REPORT.get()
+    if report is not None:
+        # A previous live pass must not supply the Reader's population result.
+        report.populated = None
     try:
         if workspace_service.live_connection() is not None:
             raise RecoveryError("old-connection")
@@ -446,11 +495,14 @@ def recover(box, path, data, source):
                 or volumes[0].get("Mountpoint") != source.mount_signature[2]
             ):
                 raise RecoveryError("home-ownership")
-            print(
-                "oc-box: Stopping the workspace before one persisted-history snapshot retry.",
-                file=sys.stderr,
-            )
+            if not lifecycle_output.concise():
+                print(
+                    "oc-box: Stopping the workspace before one persisted-history snapshot retry.",
+                    file=sys.stderr,
+                )
             _stop(box, path, data, source)
+            if report is not None:
+                report.interrupted = True
             _unchanged(path, source)
             # A failed/timed-out start has an indeterminate engine outcome. Fence
             # future recovery and successful explicit-stop claims before releasing
@@ -464,7 +516,10 @@ def recover(box, path, data, source):
         with (
             budget(SNAPSHOT_BUDGET),
             commands(path, source),
-            box.loading_stage("Checking persisted history after workspace stop"),
+            box.loading_stage(
+                "Checking persisted history after workspace stop",
+                stage="history-recovery",
+            ),
         ):
             _unchanged(path, source)
             with history_reader.Reader(box, pinned, remaining=remaining) as reader:
@@ -489,7 +544,9 @@ def recover(box, path, data, source):
             and reader_reason in history_reader.CATEGORIES
             else "snapshot-failed"
         )
-        if isinstance(exc, box.HistoryPending):
+        if getattr(exc, "history_source_cleanup_failed", False):
+            category = "cleanup-unverified"
+        elif isinstance(exc, box.HistoryPending):
             category = "snapshot-incomplete"
     finally:
         if transitioned:
@@ -498,6 +555,29 @@ def recover(box, path, data, source):
                     _stop(box, path, data, source)
             except (box.BoxError, OSError, ValueError, subprocess.SubprocessError):
                 saved, category = False, "cleanup-unverified"
+
+    reason = None
+    if not saved:
+        reason = {
+            "cleanup-unverified": "cleanup-unverified",
+            "reader-cleanup-failed": "cleanup-unverified",
+            "reader-history-cleanup": "cleanup-unverified",
+            "snapshot-incomplete": "pending",
+            "stop-requested": "stop-requested",
+            "deadline": "timeout",
+        }.get(category, compatibility_category(compatibility_reason) or "sync-failed")
+    if report is not None:
+        report.reason = reason
+    lifecycle_output.record(
+        "history.recovery",
+        level="debug",
+        stage="history-recovery",
+        reason=reason,
+        outcome="success" if saved else "failure",
+        duration_ms=int(max(0, min(time.monotonic() - started, 9999)) * 1000),
+    )
+    if lifecycle_output.concise():
+        return saved
     if saved:
         print(
             "oc-box: Checked persisted history snapshots were synchronized after stopping the workspace. "

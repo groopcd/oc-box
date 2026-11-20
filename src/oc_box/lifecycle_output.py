@@ -4,10 +4,11 @@ The policy applies only to launcher diagnostics. It does not capture native
 output, take ownership of the terminal, or change lifecycle outcomes.
 """
 
+import re
+from collections import deque
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
-import re
+from dataclasses import dataclass, field
 
 
 @dataclass
@@ -16,6 +17,7 @@ class _Invocation:
     root: object
     verbose: bool
     workspace: str | None = None
+    pending: deque = field(default_factory=lambda: deque(maxlen=64))
 
 
 _CURRENT: ContextVar[_Invocation | None] = ContextVar(
@@ -29,7 +31,10 @@ def invocation(command, root=None, *, verbose=False):
     try:
         yield
     finally:
-        _CURRENT.reset(token)
+        try:
+            flush()
+        finally:
+            _CURRENT.reset(token)
 
 
 def concise():
@@ -40,9 +45,12 @@ def concise():
 def bind_workspace(workspace_id):
     """Associate subsequent events only with a verified registry identity."""
     current = _CURRENT.get()
-    if current is not None and isinstance(workspace_id, str):
-        if re.fullmatch(r"[a-f0-9]{32}", workspace_id):
-            current.workspace = workspace_id
+    if (
+        current is not None
+        and isinstance(workspace_id, str)
+        and re.fullmatch(r"[a-f0-9]{32}", workspace_id)
+    ):
+        current.workspace = workspace_id
 
 
 def bind_command(command):
@@ -50,6 +58,11 @@ def bind_command(command):
     current = _CURRENT.get()
     if current is not None:
         current.command = command
+
+
+def command_name():
+    current = _CURRENT.get()
+    return current.command if current is not None else None
 
 
 def workspace():
@@ -67,27 +80,47 @@ def record(
     duration_ms=None,
     metrics=None,
 ):
-    """Write fixed metadata only; journal failures never affect the caller."""
+    """Queue fixed metadata without disk or lock I/O inside lifecycle budgets."""
     current = _CURRENT.get()
     if current is None:
+        return
+    current.pending.append(
+        (
+            event,
+            {
+                "command": current.command,
+                "workspace": current.workspace,
+                "level": level,
+                "stage": stage,
+                "reason": reason,
+                "outcome": outcome,
+                "duration_ms": duration_ms,
+                "metrics": metrics,
+            },
+        )
+    )
+
+
+def flush():
+    """Write queued metadata only at safe host-side reporting boundaries."""
+    current = _CURRENT.get()
+    if current is None or not current.pending:
         return
     try:
         if __package__:
             from .activity_log import record_event
         else:
             from activity_log import record_event
-        record_event(
-            event,
-            command=current.command,
-            workspace=current.workspace,
-            level=level,
-            stage=stage,
-            reason=reason,
-            outcome=outcome,
-            duration_ms=duration_ms,
-            metrics=metrics,
-            root=current.root,
-        )
-    except Exception:
+        while current.pending:
+            event, fields = current.pending.popleft()
+            if not record_event(event, root=current.root, **fields):
+                # Do not repeatedly wait for the same unavailable journal.
+                break
+    except KeyboardInterrupt:
+        # Reporting runs after lifecycle exits are already determined.
+        return
+    except Exception:  # noqa: BLE001 - optional diagnostics must not abort callers.
         # Do not let optional diagnostics hide or replace a lifecycle result.
-        pass
+        return
+    finally:
+        current.pending.clear()
