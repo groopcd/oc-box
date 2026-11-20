@@ -9,7 +9,7 @@ oc-box - persistent rootless Podman environments for mainline OpenCode.
 ```text
 oc-box [start] [--project PATH | --workspace ID] [START-OPTIONS] [LIFECYCLE-LOG-OPTIONS]
 oc-box stop [--project PATH | --workspace ID] [LIFECYCLE-LOG-OPTIONS]
-oc-box sync [--project PATH | --workspace ID] [LIFECYCLE-LOG-OPTIONS]
+oc-box sync [--project PATH | --workspace ID] [--cpus N] [--memory SIZE] [--pids-limit N] [LIFECYCLE-LOG-OPTIONS]
 oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS] [LIFECYCLE-LOG-OPTIONS]
 oc-box repair [--project PATH | --workspace ID]
 oc-box terminal [--project PATH | --workspace ID] [--maintenance] [LIFECYCLE-LOG-OPTIONS]
@@ -39,6 +39,7 @@ oc-box restore FILE --project NEW_PATH [--identity FILE ...]
 oc-box --about
 oc-box --version
 oc-box -h | --help
+oc-box COMMAND --help
 ```
 
 The command defaults to `start`. For `start`, `reset`, `stop`, `sync` and
@@ -494,6 +495,11 @@ existing workspace and an intact project directory. It starts or recreates the
 container if needed, prepares its runtime/configuration, discovers saved
 sessions, exports them, and imports separate namespaced archive copies into the
 host database. It stops the container afterward, even if it had been running.
+
+When recreating a missing container for a registered workspace, `sync` can save
+and apply `--cpus`, `--memory`, and `--pids-limit` overrides. It refuses explicit
+limit changes if an owned container already exists, even when stopped; use
+`reset` for that case.
 
 Manual `sync` retains ordinary runtime preparation and native service startup,
 including configured integrations and native scheduling behavior. It is not the
@@ -1306,8 +1312,9 @@ On V1 the existing maintenance-shell default is retained.
 
 Open an interactive maintenance shell in an existing workspace container
 instead of starting OpenCode. Select the current project, `--project PATH`, or
-`--workspace ID`. Only these selectors, `--maintenance` and help are accepted. Run from a real
-host terminal with TTY input/output; piped or redirected input/output is refused.
+`--workspace ID`. The [logging options](#launcher-diagnostics) also apply to
+`terminal`. Run from a real host terminal with TTY input/output; piped or
+redirected input/output is refused.
 
 ```sh
 oc-box terminal
@@ -2093,8 +2100,23 @@ inspection; the launcher never deletes a caller-supplied tree on marker alone.
 
 ### -h, --help
 
-Print command choices, options, and short descriptions; exit without Podman.
-For example: `oc-box --help`.
+Use `oc-box --help` for a short index of commands grouped by purpose. Use
+`oc-box COMMAND --help` to see the syntax and options for one command.
+Launcher commands group only the options that apply to that command; commands
+with dedicated help pages keep their existing layouts. `-h` is the short form
+in both cases. Startup still defaults to `start` when no command is given;
+use `oc-box start --help` for startup options.
+
+For example, `oc-box start --help` shows `--journald` and `--no-journald`,
+which control whether that launch mirrors activity events to the system
+journal. `oc-box logs --help` shows the reader's `--journald`, which selects
+existing mirrored entries instead of the private journal. It does not enable
+mirroring.
+
+Help does not require or look up a workspace, take locks, access the vault,
+call Podman, or read or write launcher state, including the activity journal.
+For full option semantics, defaults, and examples, use this command reference
+or the installed `man oc-box` and `info oc-box` manuals.
 
 ### --min-passphrase-length N
 
@@ -4200,4 +4222,5 @@ retain their own licenses. Documentation does not alter their behavior.
 `podman(1)`, `podman-create(1)`, `podman-stats(1)`, `podman-update(1)`,
 `containers.conf(5)`, `containers-storage.conf(5)`, `info(1)`, `man(1)`.
 The project README provides setup context and development verification commands.
-Use `oc-box --help` for the installed launcher's actual command-line surface.
+Use `oc-box --help` to discover the installed launcher's commands and
+`oc-box COMMAND --help` for a command's options.

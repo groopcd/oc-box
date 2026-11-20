@@ -10,7 +10,7 @@ oc\-box \- persistent rootless Podman environments for mainline OpenCode.
 .fam C
 oc\-box [start] [\-\-project PATH | \-\-workspace ID] [START\-OPTIONS] [LIFECYCLE\-LOG\-OPTIONS]
 oc\-box stop [\-\-project PATH | \-\-workspace ID] [LIFECYCLE\-LOG\-OPTIONS]
-oc\-box sync [\-\-project PATH | \-\-workspace ID] [LIFECYCLE\-LOG\-OPTIONS]
+oc\-box sync [\-\-project PATH | \-\-workspace ID] [\-\-cpus N] [\-\-memory SIZE] [\-\-pids\-limit N] [LIFECYCLE\-LOG\-OPTIONS]
 oc\-box reset [\-\-project PATH | \-\-workspace ID] [RESET\-OPTIONS] [LIFECYCLE\-LOG\-OPTIONS]
 oc\-box repair [\-\-project PATH | \-\-workspace ID]
 oc\-box terminal [\-\-project PATH | \-\-workspace ID] [\-\-maintenance] [LIFECYCLE\-LOG\-OPTIONS]
@@ -40,6 +40,7 @@ oc\-box restore FILE \-\-project NEW_PATH [\-\-identity FILE ...]
 oc\-box \-\-about
 oc\-box \-\-version
 oc\-box \-h | \-\-help
+oc\-box COMMAND \-\-help
 .fam T
 .fi
 .PP
@@ -222,6 +223,8 @@ The foreground broker holds an explicit existing\-workspace client lease. Ctrl\-
 .SS sync
 .PP
 Refresh host conversation archives without opening the TUI. Requires an existing workspace and an intact project directory. It starts or recreates the container if needed, prepares its runtime/configuration, discovers saved sessions, exports them, and imports separate namespaced archive copies into the host database. It stops the container afterward, even if it had been running.
+.PP
+When recreating a missing container for a registered workspace, \fBsync\fR can save and apply \fB\-\-cpus\fR, \fB\-\-memory\fR, and \fB\-\-pids\-limit\fR overrides. It refuses explicit limit changes if an owned container already exists, even when stopped; use \fBreset\fR for that case.
 .PP
 Manual \fBsync\fR retains ordinary runtime preparation and native service startup, including configured integrations and native scheduling behavior. It is not the isolated, non\-executing post\-stop reader used by automatic timeout recovery. Both use the same checked \fBsync_sessions\fR archival implementation; automatic recovery does not recursively launch this command or repeat its preparation.
 .PP
@@ -428,7 +431,7 @@ The Logs tab defaults to \fBlog/\:activity.jsonl\fR under the configured state r
 .PP
 On V2, the default connects to the active session's native persistent shell terminal, also shown in OpenCode's TUI/web terminal panel. It can run concurrently with those clients. The currently controlled running PTY is reused (otherwise the last running PTY), or a new session terminal is created when none exists. It uses the session project and the running server's environment. \fBCtrl\-]\fR detaches without ending the shell; reattach to retain shell variables and state. Typing \fBexit\fR ends the shell. Connection takes interactive control and propagates terminal dimensions; TUI/web clients can regain control in their terminal panel. It does not forward new host credentials, refresh config/auth, or take the exclusive lifecycle lock. A ready active V2 owner is required; start \fBoc\-box\fR or \fBoc\-box web\fR first. Exit the attached client to release its lease without stopping other clients. Use \fB\-\-maintenance\fR for the shell described below. On V1 the existing maintenance\-shell default is retained.
 .PP
-Open an interactive maintenance shell in an existing workspace container instead of starting OpenCode. Select the current project, \fB\-\-project PATH\fR, or \fB\-\-workspace ID\fR\&. Only these selectors, \fB\-\-maintenance\fR and help are accepted. Run from a real host terminal with TTY input/output; piped or redirected input/output is refused.
+Open an interactive maintenance shell in an existing workspace container instead of starting OpenCode. Select the current project, \fB\-\-project PATH\fR, or \fB\-\-workspace ID\fR\&. The [logging options](#launcher\-diagnostics) also apply to \fBterminal\fR\&. Run from a real host terminal with TTY input/output; piped or redirected input/output is refused.
 .PP
 .nf
 .fam C
@@ -769,7 +772,11 @@ The global host vault is not included or unlocked. Workspace credential modes/po
 .SH OPTIONS
 .SS \-h, \-\-help
 .PP
-Print command choices, options, and short descriptions; exit without Podman. For example: \fBoc\-box \-\-help\fR\&.
+Use \fBoc\-box \-\-help\fR for a short index of commands grouped by purpose. Use \fBoc\-box COMMAND \-\-help\fR to see the syntax and options for one command. Launcher commands group only the options that apply to that command; commands with dedicated help pages keep their existing layouts. \fB\-h\fR is the short form in both cases. Startup still defaults to \fBstart\fR when no command is given; use \fBoc\-box start \-\-help\fR for startup options.
+.PP
+For example, \fBoc\-box start \-\-help\fR shows \fB\-\-journald\fR and \fB\-\-no\-journald\fR, which control whether that launch mirrors activity events to the system journal. \fBoc\-box logs \-\-help\fR shows the reader's \fB\-\-journald\fR, which selects existing mirrored entries instead of the private journal. It does not enable mirroring.
+.PP
+Help does not require or look up a workspace, take locks, access the vault, call Podman, or read or write launcher state, including the activity journal. For full option semantics, defaults, and examples, use this command reference or the installed \fBman oc\-box\fR and \fBinfo oc\-box\fR manuals.
 .SS \-\-min\-passphrase\-length N
 .PP
 Set the minimum character count for a new vault or backup passphrase for this operation. Accepted only with \fBoc\-box secrets init\fR, \fBoc\-box secrets passwd\fR, and \fBoc\-box backup\fR; it is incompatible with backup \fB\-\-recipient\fR\&. N must be an integer from 8 to 1024. The default is 8 unless the corresponding host config key \fBvault_min_passphrase_length\fR or \fBbackup_min_passphrase_length\fR is set; this flag overrides that key without saving it. Passwords may exceed the minimum, subject to the 1024 UTF\-8\-byte limit. Unlock/restore never enforces a new creation policy against an existing password. The number is public policy, not a way to pass a password in argv. For example:
@@ -1829,4 +1836,4 @@ The full CLI reference is \fBdocs/\:cli.md\fR; the source tree includes generate
 Author: Paulo Dias <paulo.miguel.dias@gmail.com>. AI\-assisted implementation, debugging, tests, and documentation: OpenAI coding assistant via OpenCode. Copyright (C) 2026 Paulo Dias. Original oc\-box source and documentation are licensed GPL\-3.0\-or\-later, without warranty; retain LICENSE and NOTICE. OpenCode, Podman, distribution images, MCPs, and other installed programs retain their own licenses. Documentation does not alter their behavior.
 .SH SEE ALSO
 .PP
-\fBpodman(1)\fR, \fBpodman\-create(1)\fR, \fBpodman\-stats(1)\fR, \fBpodman\-update(1)\fR, \fBcontainers.conf(5)\fR, \fBcontainers\-storage.conf(5)\fR, \fBinfo(1)\fR, \fBman(1)\fR\&. The project README provides setup context and development verification commands. Use \fBoc\-box \-\-help\fR for the installed launcher's actual command\-line surface.
+\fBpodman(1)\fR, \fBpodman\-create(1)\fR, \fBpodman\-stats(1)\fR, \fBpodman\-update(1)\fR, \fBcontainers.conf(5)\fR, \fBcontainers\-storage.conf(5)\fR, \fBinfo(1)\fR, \fBman(1)\fR\&. The project README provides setup context and development verification commands. Use \fBoc\-box \-\-help\fR to discover the installed launcher's commands and \fBoc\-box COMMAND \-\-help\fR for a command's options.

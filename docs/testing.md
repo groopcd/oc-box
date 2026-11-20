@@ -23,7 +23,7 @@ reports. Source/native identities below retain their original wording and scope.
 | --- | --- |
 | Browser clients and selection reports | [Browser attachments](#experimental-browser-attachment-adapter) · [Web sessions](#open-tui-sessions-in-the-web-interface) · [Native TUI selection reports](#cooperative-native-tui-selection-reports) |
 | Host files and dashboard | [Temporary host-file tools](#experimental-temporary-host-file-tools) · [Host-image attachments](#experimental-host-image-attachments) · [Native TUI host drops](#experimental-transparent-native-tui-host-drops) · [Workspace manager](#experimental-workspace-manager) |
-| Launcher output and activity journal | [Quiet lifecycle and severity-based logs](#quiet-lifecycle-and-severity-based-logs) |
+| Launcher help, output and activity journal | [Command help](#command-help) · [Quiet lifecycle and severity-based logs](#quiet-lifecycle-and-severity-based-logs) |
 | History and readiness | [V2 history synchronization](#v2-session-history-synchronization) · [Focused host runner](#focused-historyreadiness-host-runner) |
 | Host-only fixture guidance | [Vault edges](#fresh-provider-free-vault-edges-host-only) · [Manual UI observation](#fresh-manual-ui-observation-host-only) · [Home-component ownership](#shared-home-component-ownership-fresh-host-only-image-free) |
 | CI and announcements | [Ubuntu CI bootstrap](#ubuntu-ci-package-bootstrap) · [Optional social announcements](#optional-social-release-announcements) |
@@ -71,6 +71,22 @@ not a deprecated feature that can be removed from the regression suite.
   encrypted backup/restore. Never run these fixtures inside this container or use
   real workspaces/credentials. Native/offline results do not establish a new live
   host pass; retained evidence and each accepted scope remain separate.
+
+### Command help
+
+Use offline CLI contract checks for the grouped `oc-box --help` index and
+the exact option scope of each launcher command's `--help` page. Cover `-h`
+and confirm dedicated pages such as `logs`, `web` and `secrets` retain their
+scope. In particular, check that `start` help describes the journal writer
+switches, while `logs` help describes the read-side `--journald` and omits
+`--no-journald` and `--lifecycle-diagnostics`. Check option sets and groups
+rather than snapshotting prose or line wrapping.
+
+Check that help exits successfully without a workspace and does not resolve
+selectors, acquire locks, access the vault, run Podman or native tools, or
+read or change workspace or activity-journal state. Keep regression coverage
+for implicit `start` and legacy selector-first invocations; help presentation
+must not change parsing or defaults for ordinary commands.
 
 ### Quiet lifecycle and severity-based logs
 

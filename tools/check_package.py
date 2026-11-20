@@ -121,6 +121,7 @@ def check_archives(directory):
             "bootstrap.py",
             "sync_config.py",
             "terminal_ui.py",
+            "cli_help.py",
             "status_report.py",
             "activity_log.py",
             "journal_output.py",
@@ -221,6 +222,7 @@ def check_archives(directory):
             "tests/test_logs_cli.py",
             "tests/test_journal_output.py",
             "tests/test_log_config.py",
+            "tests/test_cli_help.py",
             "tests/test_lifecycle_output.py",
             "tests/test_host_drop_preferences.py",
             "tests/smoke_host_drop_v2.py",
@@ -326,6 +328,7 @@ def check_archives(directory):
             "src/oc_box/logs_cli.py",
             "src/oc_box/journal_output.py",
             "src/oc_box/log_config.py",
+            "src/oc_box/cli_help.py",
             "src/oc_box/plugin_compat.py",
             "src/oc_box/plugin_bridge.js",
             "src/oc_box/paths.py",
@@ -399,6 +402,9 @@ def check(directory, *, with_vault=False, with_tui=False):
         )
         cli = environment / "bin/oc-box"
         assert run(cli, "--version").strip() == "oc-box " + build["version"]
+        overview = run(cli, "--help")
+        assert "COMMAND --help" in overview
+        assert "--image-preview" not in overview and "--delete-sessions" not in overview
         log_help = run(cli, "logs", "--help")
         for option in (
             "--level",
@@ -411,6 +417,7 @@ def check(directory, *, with_vault=False, with_tui=False):
         ):
             assert option in log_help, option
         begin_help = run(cli, "start", "--help")
+        assert "--image-preview" in begin_help and "--delete-sessions" not in begin_help
         for option in (
             "--journald",
             "--no-journald",
@@ -418,6 +425,11 @@ def check(directory, *, with_vault=False, with_tui=False):
             "--lifecycle-diagnostics",
         ):
             assert option in begin_help, option
+        sync_help = run(cli, "sync", "--help")
+        assert (
+            "--lifecycle-diagnostics" in sync_help
+            and "--image-preview" not in sync_help
+        )
         logdir = work / "one-invocation-log"
         assert run(cli, "logs", "--log-dir", str(logdir), "--path").strip() == str(
             logdir / "activity.jsonl"
@@ -440,9 +452,9 @@ def check(directory, *, with_vault=False, with_tui=False):
             "assert updater.package_managed(oc_box.APP); "
             "print(updater.package_upgrade_message())",
         )
-        assert "--devel" in run(cli, "--help")
-        assert "--stable" in run(cli, "--help")
-        assert "--import-session" in run(cli, "--help")
+        upgrade_help = run(cli, "upgrade", "--help")
+        assert "--devel" in upgrade_help and "--stable" in upgrade_help
+        assert "--import-session" in begin_help
         completion = environment / "share/bash-completion/completions/oc-box"
         assert completion.is_file()
         assert run(cli, "completion", "bash") == completion.read_text()
@@ -476,7 +488,7 @@ def check(directory, *, with_vault=False, with_tui=False):
             "os.write(fd,b'synthetic-package-check'); os.lseek(fd,0,0); "
             "assert os.read(fd,64)==b'synthetic-package-check'; os.close(fd)",
         )
-        assert "secrets" in run(cli, "--help")
+        assert "secrets" in overview
         assert "--recipient" in run(cli, "backup", "--help")
         assert "--no-open" in run(cli, "web", "--help")
         assert "--read-only" in run(cli, "tui", "--help")
@@ -484,7 +496,7 @@ def check(directory, *, with_vault=False, with_tui=False):
         assert "textual" not in run(
             python, "-c", "import sys,oc_box.tui; print(' '.join(sys.modules))"
         )
-        assert "--maintenance" in run(cli, "--help")
+        assert "--maintenance" in run(cli, "terminal", "--help")
         assert "--min-passphrase-length" in run(cli, "backup", "--help")
         assert "--identity" in run(cli, "restore", "--help")
         assert "--identity" in run(cli, "backup-info", "--help")

@@ -27,6 +27,7 @@ import uuid
 
 if __package__:
     from . import (
+        cli_help,
         credentials,
         dependencies,
         history_reader,
@@ -45,6 +46,7 @@ if __package__:
         workspace_service,
     )
 else:
+    import cli_help
     import credentials
     import dependencies
     import history_reader
@@ -4026,7 +4028,7 @@ def purge(path, data, args):
 
 
 def parser():
-    result = argparse.ArgumentParser(
+    result = cli_help.LauncherParser(
         prog="oc-box",
         description="Run full OpenCode in rootless Podman; sync session history to the host on exit.",
     )
@@ -4059,12 +4061,13 @@ def parser():
             "attach",
             "preferences",
         ),
-        default="start",
+        default=cli_help.DEFAULT_COMMAND,
     )
     result.add_argument(
         "--project",
         type=Path,
-        help="project directory (default: current directory; --status defaults to all workspaces)",
+        metavar="PATH",
+        help="select the host project directory",
     )
     info = result.add_mutually_exclusive_group()
     info.add_argument(
@@ -4083,7 +4086,7 @@ def parser():
     result.add_argument(
         "--json",
         action="store_true",
-        help="emit status or doctor as JSON",
+        help="emit the workspace status report as JSON",
     )
     result.add_argument(
         "--check",
@@ -4129,7 +4132,8 @@ def parser():
     )
     result.add_argument(
         "--workspace",
-        help="workspace ID, also works after the project directory was deleted",
+        metavar="ID",
+        help="select a registered workspace by ID",
     )
     result.add_argument(
         "--distro",
@@ -4231,9 +4235,11 @@ def parser():
         action="store_true",
         help="with credentials, clear saved credential-name selections before adding new names",
     )
-    result.add_argument("--cpus", help="CPU limit (default: 4)")
-    result.add_argument("--memory", help="memory limit (default: 8g)")
-    result.add_argument("--pids-limit", type=int, help="process limit (default: 2048)")
+    result.add_argument("--cpus", help="CPU limit (new workspace default: 4)")
+    result.add_argument("--memory", help="memory limit (new workspace default: 8g)")
+    result.add_argument(
+        "--pids-limit", type=int, help="process limit (new workspace default: 2048)"
+    )
     result.add_argument(
         "--device",
         action="append",
@@ -4249,12 +4255,12 @@ def parser():
     result.add_argument(
         "--clear-devices",
         action="store_true",
-        help="clear saved device mappings during reset",
+        help="clear saved device mappings on container creation or reset",
     )
     result.add_argument(
         "--clear-podman-args",
         action="store_true",
-        help="clear saved additional Podman options during reset",
+        help="clear saved additional Podman options on container creation or reset",
     )
     result.add_argument(
         "--delete-sessions",
@@ -5216,11 +5222,26 @@ def _main_command(args, argv):
     return 0
 
 
+def _help_requested(arguments):
+    """Keep help and help-like syntax out of the activity journal."""
+    for argument in arguments:
+        if argument == "--":
+            break
+        flag = argument.partition("=")[0]
+        if flag.startswith("--"):
+            if "--help".startswith(flag):
+                return True
+        elif flag.startswith("-") and "h" in flag[1:]:
+            # Argparse can dispatch help from a short switch cluster (e.g. -yh).
+            # The actual parser still decides whether the syntax is valid.
+            return True
+    return False
+
+
 def entrypoint():
     arguments = sys.argv[1:]
-    informational = any(
-        arg in arguments
-        for arg in ("--help", "-h", "--version", "--about", "--status", "--demo")
+    informational = _help_requested(arguments) or any(
+        arg in arguments for arg in ("--version", "--about", "--status", "--demo")
     )
     command = (
         arguments[0] if arguments and not arguments[0].startswith("-") else "start"

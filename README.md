@@ -141,6 +141,11 @@ same command to return. Processes do not survive a stop.
 
 ## Everyday use
 
+Use `oc-box --help` for a grouped command index and `oc-box COMMAND --help`
+for a command's options. For example, `oc-box start --help` covers startup
+options even when you normally omit `start`, while `oc-box logs --help` covers
+reading activity logs. Help does not need or change a workspace.
+
 | I want to… | Command or guide |
 | --- | --- |
 | Resume the current project | `oc-box` |

@@ -166,6 +166,28 @@ fi
         self.assertEqual(self.complete("completion", "ba"), ["bash"])
         self.assertEqual(self.complete("completion", "bash", "ba"), [])
 
+    def test_explicit_launcher_commands_complete_their_scoped_help_options(self):
+        parser = box.parser()
+        for command in (
+            "start",
+            "reset",
+            "stop",
+            "sync",
+            "repair",
+            "terminal",
+            "status",
+            "list",
+            "distros",
+            "upgrade",
+            "credentials",
+            "purge",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(
+                    set(self.complete(command, "-")),
+                    set(parser.command_option_strings(command)),
+                )
+
     def test_channel_options_are_local_to_upgrade_not_tui_or_workspace_actions(self):
         self.assertEqual(self.complete("upgrade", "--st"), ["--stable"])
         self.assertEqual(self.complete("upgrade", "--de"), ["--devel"])

@@ -39,6 +39,10 @@ Editable source installations must also refuse the GitHub self-updater; keep
 their checkout ownership distinct from unrelated source and flat installations.
 
 - `oc_box.py`: external rootless-Podman launcher and workspace lifecycle.
+  Keep top-level help a short grouped command index and launcher command pages
+  scoped to applicable options. Preserve dedicated command help, implicit
+  `start` and legacy selector-first parsing. Help must not resolve workspaces,
+  acquire locks, consult the vault, call Podman or touch launcher state.
 - `bootstrap.py`: baseline tools installed inside the container.
 - `sync_config.py`: container-only config refresh with dependency-cache reuse.
 - `terminal_ui.py`: native TUI relay and startup loading indicator. Keep native

@@ -60,6 +60,7 @@ RUNTIME_FILES = (
     "bootstrap.py",
     "sync_config.py",
     "terminal_ui.py",
+    "cli_help.py",
     "status_report.py",
     "activity_log.py",
     "journal_output.py",
