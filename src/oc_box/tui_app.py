@@ -2168,9 +2168,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             and previous[0][1:] == key[1:]
             and previous[1:] == render_key[1:]
         )
-        if self._log_paint_blocked(
-            table, render_key == previous, same_view and bool(entries)
-        ):
+        same_selection_scope = (
+            previous is not None
+            and previous[0][1:3] == key[1:3]
+            and previous[1:] == render_key[1:]
+        )
+        if self._log_paint_blocked(table, render_key == previous, same_selection_scope):
             return
         follow_tail = (
             same_view
@@ -2267,13 +2270,11 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             "RAW · Source order. Scroll sideways for long lines. Copy all includes off-screen matches.",
         )
         output = self.query_one("#log-output", RichLog)
-        # A same-view follow may keep a highlighted snapshot in place while
-        # it is being copied. New source/filter choices render immediately.
+        # A same-source highlight stays in place while search feedback updates.
+        # Source changes and invalidated snapshots have a different scope.
         previous_key = self._raw_render_key
-        same_view = (
-            bool(entries) and previous_key is not None and previous_key[1:] == key[1:]
-        )
-        if self._log_paint_blocked(output, key == previous_key, same_view):
+        same_scope = previous_key is not None and previous_key[1:3] == key[1:3]
+        if self._log_paint_blocked(output, key == previous_key, same_scope):
             return
         self._raw_render_key = key
         rendered = entries

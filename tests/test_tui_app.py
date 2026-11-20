@@ -140,6 +140,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
         app = DashboardApp(DemoBackend(), read_only=True, demo=True)
         async with app.run_test(size=(120, 40)) as pilot:
             await self.settle(app, pilot)
+            app._poll_timer.pause()
             app.query_one("#log-search", Input).value = "READY"
             await pilot.pause()
             self.assertEqual(app.query_one("#content", TabbedContent).active, "status")
@@ -154,13 +155,20 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                     LogEntry(
                         "2026-01-01T12:00:02Z", "podman", "info", "More ready output"
                     )
-                ]
+                ],
+                private=False,
             )
             self.assertEqual(app.log_query, "READY")
-            self.assertEqual(len(app.logs.search(app.log_query)), 1)
+            self.assertEqual(
+                [entry.message for entry in app.logs.search(app.log_query)],
+                ["More ready output"],
+            )
             app.query_one("#log-search", Input).value = "dashboard"
             await pilot.pause()
-            self.assertEqual(len(app.logs.search(app.log_query)), 1)
+            self.assertEqual(
+                [entry.message for entry in app.logs.search(app.log_query)],
+                ["Synthetic dashboard started"],
+            )
 
     def test_session_journal_refuses_resolved_state_symlink_without_changing_ui_paths(
         self,
@@ -1128,6 +1136,7 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
         app = DashboardApp(DemoBackend(), read_only=True, demo=True)
         async with app.run_test(size=(120, 40)) as pilot:
             await self.settle(app, pilot)
+            app._poll_timer.pause()
             app.action_tab("logs")
             await pilot.pause()
             await pilot.click("#log-mode")
@@ -1144,12 +1153,13 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
                 selected = app.screen.get_selected_text()
                 app._apply_logs(
                     [
+                        *app.backend.logs(),
                         LogEntry(
                             "2026-01-01T12:00:02Z",
-                            "synthetic-copy-test",
+                            "podman",
                             "info",
                             "New event",
-                        )
+                        ),
                     ]
                 )
                 await pilot.pause()
