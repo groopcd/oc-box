@@ -88,13 +88,15 @@ class TuiCommandTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(box.entrypoint(), 0)
-        with (
-            patch.object(sys, "argv", ["oc-box", "tui", "--demo"]),
-            patch.object(box, "main", return_value=0),
-            patch.object(activity_log, "record_event") as record,
-        ):
-            self.assertEqual(box.entrypoint(), 0)
-            record.assert_not_called()
+        for flag in ("--demo", "--dem"):
+            with (
+                self.subTest(flag=flag),
+                patch.object(sys, "argv", ["oc-box", "tui", flag]),
+                patch.object(box, "main", return_value=0),
+                patch.object(activity_log, "record_event") as record,
+            ):
+                self.assertEqual(box.entrypoint(), 0)
+                record.assert_not_called()
 
 
 if __name__ == "__main__":

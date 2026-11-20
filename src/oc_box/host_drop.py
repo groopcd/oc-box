@@ -479,25 +479,31 @@ class Transfer:
         except (DropError, OSError, ValueError, subprocess.SubprocessError):
             self.cleanup_verified = False
         finally:
-            with contextlib.suppress(OSError):
-                process.stdin.close()
             try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
+                process.stdin.close()
+            except (OSError, ValueError):
                 self.cleanup_verified = False
-                with contextlib.suppress(ProcessLookupError):
-                    os.killpg(process.pid, signal.SIGTERM)
+            for escalation in (signal.SIGTERM, signal.SIGKILL, None):
                 try:
-                    process.wait(timeout=3)
+                    if process.wait(timeout=3) != 0:
+                        self.cleanup_verified = False
+                    break
                 except subprocess.TimeoutExpired:
-                    with contextlib.suppress(ProcessLookupError):
-                        os.killpg(process.pid, signal.SIGKILL)
-                    # State is already uncertain. Do not retry the cleanup,
-                    # and do not let an unreaped helper mask the client exit.
-                    with contextlib.suppress(subprocess.TimeoutExpired):
-                        process.wait(timeout=3)
-            process.stdout.close()
-            if process.returncode != 0:
+                    self.cleanup_verified = False
+                    if escalation is not None:
+                        try:
+                            os.killpg(process.pid, escalation)
+                        except ProcessLookupError:
+                            pass
+                        except (OSError, ValueError):
+                            # Do not let signalling failure mask the client exit.
+                            pass
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    self.cleanup_verified = False
+                    break
+            try:
+                process.stdout.close()
+            except (OSError, ValueError):
                 self.cleanup_verified = False
 
     def __exit__(self, *_):

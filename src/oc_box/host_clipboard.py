@@ -198,7 +198,6 @@ class Reader:
                     raise ClipboardError("Host clipboard data exceeds its size limit.")
             if process.wait(timeout=max(0, deadline - time.monotonic())) != 0:
                 raise ClipboardError("Host clipboard read failed.")
-            return bytes(output)
         except ClipboardError:
             raise
         except subprocess.TimeoutExpired:
@@ -208,3 +207,6 @@ class Reader:
         finally:
             if process is not None:
                 self.cleanup_verified = _reap(process)
+        if not self.cleanup_verified:
+            raise ClipboardError("Host clipboard helper cleanup is unverified.")
+        return bytes(output)

@@ -70,7 +70,7 @@ oc_box.workspace_lock = refuse("workspace lock")
 oc_box.vault.vault_path = refuse("vault")
 activity_log.record_event = refuse("activity journal append")
 activity_log.read_events = refuse("activity journal read")
-oc_box.log_config._read_config = refuse("host log configuration")
+oc_box.log_config._read_config_file = refuse("host log configuration")
 sys.exit(oc_box.entrypoint())
 """
 

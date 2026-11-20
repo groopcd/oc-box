@@ -5265,6 +5265,14 @@ def entrypoint():
             and _has_launcher_logging_flag(arguments[1:])
         ):
             raise BoxError(_LOGGING_SCOPE_ERROR)
+        elif command == "tui" and not informational:
+            if __package__:
+                from .tui import parser as dashboard_parser
+            else:
+                from tui import parser as dashboard_parser
+            # Use argparse's actual mode, including --dem, before opening the
+            # activity journal. The dashboard parser uses only the stdlib.
+            informational = dashboard_parser().parse_args(arguments[1:]).demo
         if launch_options is not None:
             _validate_logging_options(launch_options)
             # Argparse accepts abbreviations such as --statu. The parsed

@@ -243,6 +243,48 @@ class HostDropTests(unittest.TestCase):
         process.stdin.close.assert_called_once()
         process.stdout.close.assert_called_once()
 
+    def test_transfer_teardown_fault_does_not_mask_client_outcome(self):
+        for fault in ("wait", "signal", "stdout"):
+            with self.subTest(fault=fault):
+                relay = host_drop.Relay(
+                    self.facade, self.data, self.connection, profile="konsole"
+                )
+                process = Mock(pid=4343, returncode=0)
+                process.poll.return_value = None
+                process.wait.return_value = 0
+                relay.transfer.process = process
+                errors = io.StringIO()
+                failure = OSError("synthetic private detail")
+                if fault == "wait":
+                    process.wait.side_effect = failure
+                elif fault == "signal":
+                    process.wait.side_effect = [
+                        host_drop.subprocess.TimeoutExpired("synthetic", 3),
+                        0,
+                    ]
+                else:
+                    process.stdout.close.side_effect = failure
+                with (
+                    contextlib.redirect_stderr(errors),
+                    patch.object(host_drop.os, "killpg", side_effect=failure),
+                    patch.object(
+                        relay.transfer,
+                        "exchange",
+                        return_value={"ok": True, "closed": True},
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "^client result$"),
+                ):
+                    try:
+                        raise RuntimeError("client result")
+                    finally:
+                        relay.__exit__()
+                self.assertFalse(relay.transfer.cleanup_verified)
+                process.stdout.close.assert_called_once_with()
+                self.assertIn(
+                    "Temporary import cleanup could not be verified", errors.getvalue()
+                )
+                self.assertNotIn(str(failure), errors.getvalue())
+
     def test_clipboard_framing_refusal_reports_one_fixed_warning_on_client_exit(self):
         clipboard = Mock()
         relay = host_drop.Relay(

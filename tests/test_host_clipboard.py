@@ -805,6 +805,28 @@ class HostClipboardRecoveryTests(unittest.TestCase):
                 )
                 self.assertNotIn("input-incomplete", self.errors.getvalue())
 
+    def test_successful_payload_is_not_staged_if_helper_cleanup_is_unverified(self):
+        process = Mock()
+        process.stdout.fileno.return_value = 41
+        process.wait.return_value = 0
+        reader = host_clipboard.Reader(("/fixture/wl-paste",), {}, helper="wl-paste")
+        with (
+            patch.object(
+                host_clipboard.subprocess, "Popen", return_value=process
+            ) as spawn,
+            patch.object(host_clipboard.os, "set_blocking"),
+            patch.object(host_clipboard.select, "select", return_value=([41], [], [])),
+            patch.object(
+                host_clipboard.os, "read", side_effect=[b"image/png\n", b"", PNG, b""]
+            ),
+            patch.object(host_clipboard, "_reap", side_effect=[True, False]),
+            self.client(reader) as (relay, transfer),
+        ):
+            self.assertEqual(relay.input_bytes(KEY), refusal("clipboard-cleanup"))
+            self.assertEqual(relay.input_bytes(KEY), refusal("clipboard-disabled"))
+            self.assertEqual(spawn.call_count, 2)
+            transfer.put.assert_not_called()
+
     def test_bad_reader_return_is_not_a_retryable_read_exception(self):
         reader = Mock(cleanup_verified=True)
         reader.read_selection.return_value = None
