@@ -35,7 +35,7 @@ _LABEL = "io.oc-box.workspace"
 _WORKSPACE = re.compile(r"[0-9a-f]{32}\Z")
 _CONTAINER = re.compile(r"[0-9a-f]{64}\Z")
 _TIME = re.compile(
-    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2}))\s+"
+    r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2}))[ \t]+"
 )
 _ANSI = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\|$)"
@@ -43,6 +43,7 @@ _ANSI = re.compile(
     r"|\x1b[ -/]*[@-~]"
     r"|\x9b[0-?]*[ -/]*[@-~]"
 )
+_PODMAN_SGR = re.compile(r"(?:(?:\x1b\[|\x9b)[0-9;:]*m)+")
 _AUTH = re.compile(
     r"(?i)\b((?:proxy-)?authorization[\"']?\s*[:=]\s*)"
     r"(?:\"[^\"]*\"|'[^']*'|(?:bearer|basic)\s+[^\s,;]+|[^\s,;]+)"
@@ -85,6 +86,22 @@ class LogEntry:
             return self.raw
         # Local diagnostics and synthetic samples may have no source record.
         return " ".join(field for field in (self.timestamp, self.message) if field)
+
+
+def raw_copy_text(entries, max_bytes):
+    """Assemble complete RAW matches within the byte cap, or no payload at all."""
+    lines = []
+    remaining = max_bytes
+    for entry in entries:
+        line = entry.raw_line()
+        remaining -= bool(lines)  # LF between records, including empty records.
+        if len(line) > remaining:
+            return None
+        remaining -= len(line.encode("utf-8"))
+        if remaining < 0:
+            return None
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _clean(value, limit):
@@ -150,6 +167,16 @@ def sort_entries(entries, column, descending=False):
             unknown.append(entry)
     known.sort(key=lambda item: item[0], reverse=descending)
     return [entry for _, entry in known] + unknown
+
+
+def fifo_tail_drop(previous, current):
+    """Find a bounded head trim followed by an exact retained tail and new rows."""
+    # DataTable reindexes on each remove, so large jumps should rebuild.
+    for drop in range(min(len(previous), 17)):
+        kept = len(previous) - drop
+        if len(current) > kept and previous[drop:] == current[:kept]:
+            return drop
+    return None
 
 
 class LogBuffer:
@@ -334,6 +361,41 @@ def _unavailable():
     return [LogEntry("", "podman", "warning", "Podman logs unavailable.")]
 
 
+def _podman_record(line):
+    """Sanitize a complete producer record without guessing invisible boundaries."""
+    line = line.removesuffix("\r")
+    match = _TIME.match(line)
+    if match is not None and not _timestamp_key(match[1])[0]:
+        match = None
+    prefix = line[: match.end()].replace("\t", " ") if match else ""
+    body = line[match.end() :] if match else line
+
+    def remove_style(match):
+        # Isolated SGR decoration is safe to strip. A style change at a
+        # non-space gap can hide either a split token or a credential separator.
+        if (
+            0 < match.start()
+            and match.end() < len(body)
+            and body[match.start() - 1] != " "
+            and body[match.end()] != " "
+        ):
+            return "\0"
+        return ""
+
+    visible = _PODMAN_SGR.sub(remove_style, body)
+    if any(
+        char != " " and (char.isspace() or unicodedata.category(char).startswith("C"))
+        for char in visible.strip(" \t")
+    ):
+        # Dropping or spacing arbitrary controls can each make recognizable
+        # credentials disappear from a redaction regex while exposing values.
+        # Keep the real record/time but withhold its ambiguous message.
+        visible = "[REDACTED]"
+    message = _clean(visible, _MAX_MESSAGE_CHARS)
+    raw = prefix + _clean(visible, _MAX_RAW_CHARS)
+    return _entry(LogEntry(match[1] if match else "", "podman", "", message, raw))
+
+
 def podman_entries(box, data, tail=500) -> list[LogEntry]:
     """Read a bounded snapshot of owned container logs; never follow in Podman.
 
@@ -371,16 +433,10 @@ def podman_entries(box, data, tail=500) -> list[LogEntry]:
             # Do not publish a byte-limited fragment that could end midway
             # through a control sequence or a recognizable credential.
             output = output[: output.rfind("\n") + 1]
-        entries = []
-        for line in output.splitlines()[-tail:]:
-            raw = _clean(line, _MAX_RAW_CHARS)
-            match = _TIME.match(raw)
-            if match and not _timestamp_key(match[1])[0]:
-                match = None
-            timestamp = match[1] if match else ""
-            message = raw[match.end() :] if match else raw
-            # Podman does not provide authoritative severity in this format.
-            entries.append(_entry(LogEntry(timestamp, "podman", "", message, raw)))
+        # Only the producer's LF delimits records. str.splitlines() would turn
+        # controlled separators inside a record into independent unredacted rows.
+        lines = output.removesuffix("\n").split("\n") if output else []
+        entries = [_podman_record(line) for line in lines[-tail:]]
         if truncated:
             entries.append(
                 LogEntry(

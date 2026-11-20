@@ -127,7 +127,9 @@ class LogFeedbackTests(unittest.IsolatedAsyncioTestCase):
             app._render_logs()
             await pilot.pause(0.2)
             self.assertEqual(self.feedback(app), "1 log match")
-            app.screen.clear_selection()
-            app._render_logs()
+            with patch.object(app.backend, "logs") as read:
+                app.screen.clear_selection()
+                await pilot.pause()
+                read.assert_not_called()
             self.assertEqual(len(app._rendered_logs), 1)
             self.assertEqual(app._rendered_logs[0].message, "Synthetic container ready")

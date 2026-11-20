@@ -36,13 +36,15 @@ from textual.widgets import (
 )
 
 if __package__:
-    from . import status_report
+    from . import status_report, tui_clipboard
     from .tui_backend import plain, TerminalAttachmentError
     from .tui_logs import (
         JOURNAL_LIMIT,
         JOURNAL_SOURCE,
         LOG_COLUMNS,
         LogBuffer,
+        fifo_tail_drop,
+        raw_copy_text,
         sort_entries,
     )
     from .tui_sessions import FavoriteStore, SessionCatalog
@@ -74,12 +76,15 @@ if __package__:
     from .tui_management import ManagementActions, StoragePanel, BackupPanel
 else:
     import status_report
+    import tui_clipboard
     from tui_backend import plain, TerminalAttachmentError
     from tui_logs import (
         JOURNAL_LIMIT,
         JOURNAL_SOURCE,
         LOG_COLUMNS,
         LogBuffer,
+        fifo_tail_drop,
+        raw_copy_text,
         sort_entries,
     )
     from tui_sessions import FavoriteStore, SessionCatalog
@@ -432,6 +437,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         self._raw_render_key = None
         self._log_search_snapshot = None
         self._log_table_render_key = None
+        self._log_deferred_viewport = None
         self._log_mode = "table"
         self._log_sort = ("timestamp", False)
         self._log_columns = frozenset(key for key, _, _ in LOG_COLUMNS)
@@ -699,7 +705,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                     output = SelectableRichLog(
                         id="log-output",
                         max_lines=2000,
-                        wrap=True,
+                        wrap=False,
                         markup=False,
                         highlight=False,
                     )
@@ -732,6 +738,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             "★", "ID", "Title", "Kind", "Native directory"
         )
         self._poll_timer = self.set_interval(0.25, self._tick)
+        self.watch(self.screen, "selections", self._log_selection_changed, init=False)
         self._management_mount()
         self._refresh_favorites()
         self._sync_navigation("status")
@@ -1209,7 +1216,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             self._monitor_snapshots[selector] = deepcopy(state)
 
     def _update_table(
-        self, selector, rows, *, selected=None, source=None, append_only=False
+        self, selector, rows, *, selected=None, source=None, tail_drop=None
     ):
         """Only changed cells touch Textual; structural changes retain the view.
 
@@ -1228,14 +1235,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         same_source = had_view and bool(previous) and previous_source == source
         old_ids = tuple(key for key, _ in previous)
         new_ids = tuple(key for key, _ in rows)
-        appended = (
-            append_only
-            and same_source
-            and rows[: len(previous)] == previous
-            and len(rows) > len(previous)
-        )
-        if appended:
-            for key, cells in rows[len(previous) :]:
+        if tail_drop is not None and same_source:
+            kept = len(previous) - tail_drop
+            scroll, cursor = table.scroll_offset, table.cursor_row
+            for key, _ in previous[:tail_drop]:
+                table.remove_row(key)
+            for key, cells in rows[kept:]:
                 table.add_row(
                     *(
                         self._table_text(selector, i, cell)
@@ -1243,6 +1248,11 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                     ),
                     key=key,
                 )
+            if tail_drop:
+                # Anchor the viewport and cursor to the same retained records.
+                table.move_cursor(row=max(0, cursor - tail_drop), scroll=False)
+                scroll = scroll._replace(y=max(0, scroll.y - tail_drop))
+                table.scroll_to(x=scroll.x, y=scroll.y, animate=False, force=True)
         elif same_source and old_ids == new_ids:
             columns = tuple(table.columns)
             for (key, old), (_, new) in zip(previous, rows):
@@ -1280,7 +1290,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             if same_source:
                 table.scroll_to(x=scroll.x, y=scroll.y, animate=False, force=True)
         self._table_snapshots[selector] = (source, rows)
-        if same_source and old_ids != new_ids and not appended:
+        if same_source and old_ids != new_ids and tail_drop != 0:
             # DataTable's coordinate watcher queues its own cursor-into-view
             # after rebuilding dimensions, even with move_cursor(scroll=False).
             # Restore after that callback, but never over a newer view or user
@@ -1599,11 +1609,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             and self._log_mode == "raw"
             and not self._clipboard_private()
         ):
-            # Use the current input even before the debounced paint.
-            _, entries = self._matching_logs(self.query_one("#log-search", Input).value)
-            self.action_copy_selection(
-                text="\n".join(entry.raw_line() for entry in entries)
-            )
+            self._copy_all_logs()
         elif action in ("terminal-owner", "terminal-selected"):
             self._confirm_terminal(action == "terminal-selected")
         elif action == "terminal-disconnect":
@@ -1789,6 +1795,28 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             self._log_search_snapshot = (key, entries)
         return self._log_search_snapshot
 
+    def _copy_all_logs(self):
+        # Inspect the current matching retained records even before a debounced
+        # paint. The display snapshot may be frozen during selection.
+        key, entries = self._matching_logs(self.query_one("#log-search", Input).value)
+        if key[1] == "all":
+            scopes = {
+                entry.source
+                for entry in entries
+                if entry.source == "podman" or entry.source.startswith("podman:")
+            }
+            if len(scopes) > 1:
+                self._clipboard_notice(
+                    "Matches include multiple Podman workspaces. "
+                    "Choose Selected Podman container or another scoped source before copying."
+                )
+                return
+        payload = raw_copy_text(entries, tui_clipboard.MAX_CLIPBOARD_BYTES)
+        if payload is None:
+            self._clipboard_notice("Clipboard text exceeds the 1 MiB UTF-8 limit.")
+            return
+        self.action_copy_selection(text=payload)
+
     def _render_logs(self):
         key, entries = self._matching_logs(self.log_query)
         count = len(entries)
@@ -1807,6 +1835,31 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             self._render_log_table(key, entries)
         else:
             self._render_log_raw(key, entries)
+
+    def _log_paint_blocked(self, viewport, unchanged):
+        if not unchanged and viewport.text_selection is not None:
+            self._log_deferred_viewport = viewport
+            return True
+        self._log_deferred_viewport = None
+        return unchanged
+
+    def _log_selection_changed(self, previous, current):
+        viewport = self._log_deferred_viewport
+        if (
+            viewport is not None
+            and previous.get(viewport) is not None
+            and current.get(viewport) is None
+        ):
+            self.call_later(self._resume_log_paint, viewport)
+
+    def _resume_log_paint(self, viewport):
+        if (
+            self.is_running
+            and self._log_deferred_viewport is viewport
+            and viewport.is_attached
+            and viewport.text_selection is None
+        ):
+            self._render_logs()
 
     def _switch_log_mode(self):
         raw = self._log_mode != "raw"
@@ -1856,21 +1909,24 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             "Choose a row, then Details.",
         )
         render_key = (key, self._log_sort, self._log_columns)
-        if table.text_selection is not None or render_key == self._log_table_render_key:
+        if self._log_paint_blocked(table, render_key == self._log_table_render_key):
             return
         previous = self._log_table_render_key
-        follow_tail = (
+        same_view = (
             previous is not None
             and previous[0][1:] == key[1:]
             and previous[1:] == render_key[1:]
+        )
+        follow_tail = (
+            same_view
             and self._log_sort == ("timestamp", False)
             and table.is_vertical_scroll_end
             and self.query_one("#log-follow", Switch).value
         )
         columns = tuple(item for item in LOG_COLUMNS if item[0] in self._log_columns)
+        old_rows = self._table_snapshots.get("#log-table", (None, ()))[1]
         selected = None
         if columns != self._mounted_log_columns:
-            old_rows = self._table_snapshots.get("#log-table", (None, ()))[1]
             if previous is not None and previous[0][1] == key[1]:
                 if 0 <= table.cursor_row < len(old_rows):
                     selected = old_rows[table.cursor_row][0]
@@ -1879,14 +1935,31 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                 table.add_column(label, key=name, width=width)
             self._mounted_log_columns = columns
 
-        # Duplicate lines need different row keys. Keep stable prior keys for
-        # identical occurrences so normal sort/follow preserves the cursor.
+        ordered = tuple(sort_entries(entries, column, descending))
+        drop = (
+            fifo_tail_drop(
+                tuple(self._log_table_entries[row_key] for row_key, _ in old_rows),
+                ordered,
+            )
+            if same_view
+            else None
+        )
+        kept = len(old_rows) - drop if drop is not None else 0
+        # A rolling tail retains the exact keys for its overlap, even when
+        # equal rows near the cutoff have different prior occurrence ordinals.
+        # Other changes use occurrence identities to keep a stable cursor.
         keys, items, rows, occurrences = {}, {}, [], {}
-        for entry in sort_entries(entries, column, descending):
+        for index, entry in enumerate(ordered):
             ordinal = occurrences.get(entry, 0)
             occurrences[entry] = ordinal + 1
             identity = (entry, ordinal)
-            row_key = self._log_row_keys.get(identity)
+            row_key = (
+                old_rows[drop + index][0]
+                if drop is not None and index < kept
+                else None
+                if drop is not None
+                else self._log_row_keys.get(identity)
+            )
             if row_key is None:
                 self._log_row_sequence += 1
                 row_key = str(self._log_row_sequence)
@@ -1907,7 +1980,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
             "#log-table",
             tuple(rows),
             source=(key[1], self._log_columns),
-            append_only=True,
+            tail_drop=drop,
             selected=selected,
         )
         self.query_one("#log-details", Button).disabled = not rows
@@ -1936,14 +2009,12 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
     def _render_log_raw(self, key, entries):
         self._update_text(
             "#log-help",
-            "RAW · Source order, independent of table sort. Copy all includes off-screen matches.",
+            "RAW · Source order. Scroll sideways for long lines. Copy all includes off-screen matches.",
         )
         output = self.query_one("#log-output", RichLog)
         # Keep a highlighted log snapshot in place while it is being copied.
         # Search feedback still follows the current query/source while copying.
-        if output.text_selection is not None:
-            return
-        if key == self._raw_render_key:
+        if self._log_paint_blocked(output, key == self._raw_render_key):
             return
         self._raw_render_key = key
         rendered = entries
@@ -1961,6 +2032,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         for entry in entries[len(previous) if appended else 0 :]:
             output.write(
                 Text(entry.raw_line()),
+                shrink=False,
                 scroll_end=at_end,
             )
         if not at_end:

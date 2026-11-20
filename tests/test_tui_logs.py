@@ -39,6 +39,18 @@ class LogBufferTests(unittest.TestCase):
         self.assertEqual(buffer.search("[missing]"), [])
         self.assertEqual(buffer.search(None), [])
 
+    def test_raw_copy_checks_utf8_and_delimiters_before_collecting_the_rest(self):
+        first = logs.LogEntry("", "podman", "", "", "é")
+        second = logs.LogEntry("", "podman", "", "", "λ")
+        self.assertEqual(logs.raw_copy_text([first, second], 5), "é\nλ")
+
+        def overflow():
+            yield first
+            yield second
+            self.fail("Copy inspected more lines after exceeding the byte cap")
+
+        self.assertIsNone(logs.raw_copy_text(overflow(), 4))
+
     def test_following_does_not_change_or_narrow_retained_search_data(self):
         buffer = logs.LogBuffer(max_entries=3)
         buffer.replace(
@@ -378,6 +390,39 @@ class PodmanEntriesTests(unittest.TestCase):
             ],
         )
         self.assertEqual(entries[1].timestamp, "")
+
+    def test_lf_frames_keep_control_separated_credentials_in_the_same_record(self):
+        credentials = [
+            "Authorization:\u2028Bearer synthetic-private",
+            "Autho\u2029rization: Bearer synthetic-private",
+            "password\v=\fsynthetic-private",
+            "toke\x85n=synthetic-private",
+            "Bearer\x1b[31msynthetic-private",
+            "password=\x1b]0;title\x07synthetic-private",
+            "pass\u00a0word=synthetic-private",
+            "password=first\rsynthetic-private",
+            "Bear\ter synthetic-private",
+        ]
+        lines = [
+            f"2026-11-10T12:00:{i:02}Z {text}"
+            for i, text in enumerate(
+                ["first safe line", *credentials, "last safe line"]
+            )
+        ]
+        # CRLF is an actual LF record, unlike an embedded CR or C1/Unicode
+        # line separator. Tail limits count producer records, not fragments.
+        with patch.object(
+            logs, "_podman_output", return_value=("\r\n".join(lines) + "\r\n", False)
+        ):
+            entries = logs.podman_entries(self.box, self.data, tail=len(lines))
+        self.assertEqual(len(entries), len(lines))
+        self.assertEqual(entries[0].raw_line(), lines[0])
+        self.assertEqual(entries[-1].raw_line(), lines[-1])
+        self.assertEqual([entry.level for entry in entries], [""] * len(lines))
+        for i, entry in enumerate(entries[1:-1], 1):
+            self.assertEqual(entry.timestamp, f"2026-11-10T12:00:{i:02}Z")
+            self.assertEqual(entry.message, "[REDACTED]")
+            self.assertEqual(entry.raw_line(), entry.timestamp + " [REDACTED]")
 
     def test_normal_ownership_helper_uses_only_readonly_inspection(self):
         from oc_box import oc_box as box
