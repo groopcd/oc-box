@@ -170,7 +170,7 @@ class HistoryRecoveryTests(unittest.TestCase):
         self.assertNotIn("normal host OpenCode database", self.output.getvalue())
         workspace_control.require_certain(self.path)
 
-    def test_concise_timeout_reports_only_after_recovery_and_final_stop(self):
+    def test_history_wait_reports_only_after_recovery_and_final_stop(self):
         cases = {
             "saved": (0, "Available history synced.", None),
             "nonzero-client": (7, "Available history synced.", None),
@@ -191,11 +191,43 @@ class HistoryRecoveryTests(unittest.TestCase):
                 "History sync cleanup could not be verified.",
                 "cleanup-unverified",
             ),
+            "late-active": (
+                1,
+                "History not synced: the OpenCode compatibility contract was not recognized.",
+                "schema",
+            ),
+            "late-jobs": (
+                1,
+                "History not synced: the OpenCode compatibility contract was not recognized.",
+                "schema",
+            ),
+            "late-decode": (
+                1,
+                "History not synced: the OpenCode compatibility contract was not recognized.",
+                "schema",
+            ),
+            "late-transport": (
+                1,
+                "History not synced: OpenCode activity did not settle.",
+                "timeout",
+            ),
         }
         workspace_service = box.workspace_service
         wait_history = workspace_service.wait_history
-        for case, (code, message, reason) in cases.items():
-            with self.subTest(case=case):
+        matrix = [(case, False) for case in cases] + [
+            (case, True)
+            for case in ("saved", "final-cleanup", "late-active", "late-decode")
+        ]
+        recovery_success = (
+            "oc-box: Checked persisted history snapshots were synchronized after stopping the workspace. "
+            "Execution was interrupted; completion notices or final results may be missing. "
+            "Background work is not declared complete."
+        )
+        fallback_success = "Session history synced to your normal host OpenCode database using the post-stop fallback."
+        for case, verbose in matrix:
+            code, message, reason = cases[case]
+            late = case.startswith("late-")
+            with self.subTest(case=case, diagnostic=verbose):
                 self.running = True
                 self.calls.clear()
                 release = "2.3.2" if case == "foreground" else "2.2.7"
@@ -216,9 +248,9 @@ class HistoryRecoveryTests(unittest.TestCase):
                     connection={"url": "http://127.0.0.1:7777"},
                     wait_clients=Mock(),
                 )
-                clock = [0.0]
+                clock, requests = [0.0], []
                 info = {
-                    "id": "ses_concise_" + case.replace("-", "_"),
+                    "id": f"ses_history_{case.replace('-', '_')}_{int(verbose)}",
                     "location": {"directory": str(self.project)},
                     "time": {"created": 1, "updated": 1},
                 }
@@ -235,8 +267,16 @@ class HistoryRecoveryTests(unittest.TestCase):
                         if case == "stop-requested":
                             workspace_control.request_stop(self.path)
 
-                def api(_box, _data, _connection, method, target, **_kwargs):
+                def api(_box, _data, _connection, method, target, *, timeout):
                     self.assertEqual(method, "GET")
+                    requests.append(target)
+                    if late and len(requests) == (6 if case == "late-jobs" else 5):
+                        clock[0] += timeout
+                        if case == "late-decode":
+                            raise ValueError("private-native-response")
+                        if case == "late-transport":
+                            raise box.BoxError("private-transport-error")
+                        return {"data": "private-native-response"}
                     if target == "/api/session/active":
                         return {
                             "data": {info["id"]: {"type": "running"}}
@@ -282,9 +322,14 @@ class HistoryRecoveryTests(unittest.TestCase):
                         raise box.BoxError("private-recovery-cleanup")
 
                 def stop(data):
-                    self.assertEqual(data["container"], self.ident)
+                    self.assertEqual(
+                        data["container"],
+                        self.data["container"] if late else self.ident,
+                    )
                     self.assertNotIn("history synced", stdout.getvalue())
-                    self.assertEqual(stderr.getvalue(), "")
+                    self.assertNotIn(recovery_success, stderr.getvalue())
+                    if not verbose:
+                        self.assertEqual(stderr.getvalue(), "")
                     self.record("final stop")
                     if case == "final-cleanup":
                         raise box.BoxError("private-final-cleanup")
@@ -298,7 +343,9 @@ class HistoryRecoveryTests(unittest.TestCase):
                 self.inject = inject
                 stdout, stderr = io.StringIO(), io.StringIO()
                 boundaries = (
-                    lifecycle_output.invocation("start", self.root / "state"),
+                    lifecycle_output.invocation(
+                        "start", self.root / "state", verbose=verbose
+                    ),
                     contextlib.redirect_stdout(stdout),
                     contextlib.redirect_stderr(stderr),
                     patch.object(
@@ -372,10 +419,36 @@ class HistoryRecoveryTests(unittest.TestCase):
                 self.assertEqual(wait["metrics"]["shell"], 1)
                 self.assertNotIn("private-", repr(journal.call_args_list))
                 self.assertEqual(
-                    self.calls.count("start"), int(case != "stop-requested")
+                    self.calls.count("start"),
+                    int(case != "stop-requested" and not late),
                 )
+                if late:
+                    self.assertNotIn("reader", self.calls)
+                    self.assertNotIn("host export checked", self.calls)
+                    self.assertFalse(hasattr(owner, "_history_failure"))
+                    self.assertEqual(
+                        "Check for an oc-box update first" in stderr.getvalue(),
+                        reason == "schema",
+                    )
+                    self.assertNotIn("private-", stderr.getvalue())
                 self.assertEqual(self.calls[-2:], ["final stop", "history result"])
-                if reason is None:
+                if verbose:
+                    self.assertEqual(
+                        stderr.getvalue().splitlines().count(recovery_success),
+                        int(reason is None),
+                    )
+                    self.assertEqual(
+                        stdout.getvalue().splitlines().count(fallback_success),
+                        int(reason is None),
+                    )
+                    if late:
+                        self.assertIn("History wait timeout:", stderr.getvalue())
+                        self.assertIn("History wait timing:", stderr.getvalue())
+                        self.assertIn(
+                            "contract was not recognized (invalid-active-response)",
+                            stderr.getvalue(),
+                        )
+                elif reason is None:
                     self.assertEqual(stderr.getvalue(), "")
                     self.assertEqual(
                         stdout.getvalue().splitlines()[-1],
@@ -390,6 +463,120 @@ class HistoryRecoveryTests(unittest.TestCase):
                     self.assertEqual(len(stderr.getvalue().splitlines()), 1)
                     self.assertTrue(stderr.getvalue().startswith(message))
                     self.assertNotIn("private-", stderr.getvalue())
+
+    def test_helper_cleanup_uncertainty_survives_recovery_and_outer_stop(self):
+        def fixed_cleanup():
+            return box.BoxError("private-helper-cleanup")
+
+        cases = (
+            (recovery.RecoveryError("deadline"), fixed_cleanup(), None),
+            (workspace_control.ControlError("unsafe-control"), fixed_cleanup(), None),
+            (box.HistoryPending("private-pending"), fixed_cleanup(), None),
+            (RuntimeError("private-generic"), fixed_cleanup(), None),
+            (box.HistoryPending("private-pending"), KeyboardInterrupt(), None),
+            (box.HistoryPending("private-pending"), SystemExit(0), None),
+            (
+                recovery.RecoveryError("deadline"),
+                fixed_cleanup(),
+                RuntimeError("private-reader-exit"),
+            ),
+        )
+        args = SimpleNamespace(
+            command="start", _opencode_release="2.2.7", import_session=None
+        )
+        workspace_service = box.workspace_service
+        history_reader = recovery.history_reader
+        for primary, cleanup, reader_error in cases:
+            self.running = True
+            self.calls.clear()
+            owner = SimpleNamespace(clients=0, child=SimpleNamespace(returncode=0))
+            lease = SimpleNamespace(
+                data=self.data,
+                connection={"url": "http://127.0.0.1:7777"},
+                assert_idle=lambda: self.record("idle"),
+            )
+            stream = SimpleNamespace(close=Mock(side_effect=cleanup))
+
+            @contextlib.contextmanager
+            def open_reader(*_args, **_kwargs):
+                self.record("reader")
+                token = history_reader.CURRENT.set(lease)
+                try:
+                    yield lease
+                finally:
+                    history_reader.CURRENT.reset(token)
+                    if reader_error is not None:
+                        raise reader_error
+
+            def client(*_args):
+                owner._history_timeout = box.HistoryWaitTimeout(
+                    "fixed-timeout", recovery_eligible=True
+                )
+                owner._client_exit_code = 7
+                return 7
+
+            def stop(data):
+                self.assertEqual(data["container"], self.ident)
+                self.assertFalse(self.running)
+                self.assertEqual(errors.getvalue(), "")
+                self.record("final stop")
+
+            errors, stdout = io.StringIO(), io.StringIO()
+            with (
+                self.subTest(
+                    primary=type(primary),
+                    cleanup=type(cleanup),
+                    reader_error=bool(reader_error),
+                ),
+                lifecycle_output.invocation("start", self.root / "state"),
+                contextlib.redirect_stderr(errors),
+                contextlib.redirect_stdout(stdout),
+                patch.object(box, "check_private_output"),
+                patch.object(box, "start_container", return_value=self.info),
+                patch.object(box, "prepare_runtime"),
+                patch.object(box, "launch_client", side_effect=client),
+                patch.object(
+                    workspace_service,
+                    "Owner",
+                    return_value=contextlib.nullcontext(owner),
+                ),
+                patch.object(history_reader, "Reader", side_effect=open_reader),
+                patch.object(history_reader, "_Exports", return_value=stream),
+                patch.object(box, "refresh_sessions", side_effect=primary),
+                patch.object(box, "run", side_effect=self.run_command),
+                patch.object(box, "stop_container", side_effect=stop),
+                patch.object(lifecycle_output, "record") as journal,
+            ):
+                winner = reader_error or (
+                    cleanup
+                    if isinstance(cleanup, (KeyboardInterrupt, SystemExit))
+                    else primary
+                )
+                if isinstance(winner, (RuntimeError, KeyboardInterrupt, SystemExit)):
+                    with self.assertRaises(type(winner)) as raised:
+                        box.launch_environment(self.path, self.data, args)
+                    self.assertIs(raised.exception, winner)
+                    self.assertTrue(winner.history_outcome_reported)
+                    if isinstance(winner, SystemExit):
+                        self.assertEqual(winner.code, 1)
+                else:
+                    self.assertEqual(
+                        box.launch_environment(self.path, self.data, args), 7
+                    )
+                stream.close.assert_called_once_with()
+                self.assertEqual(self.calls.count("start"), 1)
+                self.assertEqual(self.calls[-2:], ["inspect-stopped", "final stop"])
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(len(errors.getvalue().splitlines()), 1)
+                self.assertIn(
+                    "History sync cleanup could not be verified.", errors.getvalue()
+                )
+                reasons = [
+                    call.kwargs["reason"]
+                    for call in journal.call_args_list
+                    if call.args in (("history.pass",), ("history.result",))
+                ]
+                self.assertEqual(reasons, ["cleanup-unverified"] * 2)
 
     def test_initially_stopped_or_replaced_container_never_restarts(self):
         for condition in (

@@ -3049,6 +3049,15 @@ def verify_host_archive(path, data, archived):
         )
 
 
+def _announce_history_synced(*, recovered=False):
+    with contextlib.suppress(OSError, ValueError):
+        print(
+            "Session history synced to your normal host OpenCode database"
+            + (" using the post-stop fallback." if recovered else "."),
+            flush=True,
+        )
+
+
 def sync_sessions(path, data, *, announce=True):
     started = time.monotonic()
     source_mode = (
@@ -3068,10 +3077,15 @@ def sync_sessions(path, data, *, announce=True):
             populated = _sync_sessions(path, data, started, source_mode, counts)
     except BaseException as exc:
         reason = _history_failure_reason(exc)
+        if report is not None and reason == "cleanup-unverified":
+            # Remember this before outer lease/stop cleanup can raise its own
+            # exception. Reporting must not change which exception wins.
+            report.reason = reason
         raise
     else:
         if report is not None:
             report.populated = populated
+            report.omitted_interrupted_assistants = bool(counts["interrupted"])
     finally:
         if report is not None:
             report.verified |= bool(counts["unchanged"] or counts["updated"])
@@ -3084,10 +3098,8 @@ def sync_sessions(path, data, *, announce=True):
             duration_ms=int(max(0, min(time.monotonic() - started, 9999)) * 1000),
             metrics={key: min(count, 9999) for key, count in counts.items()},
         )
-    if populated and announce and not lifecycle_output.concise():
-        print(
-            "Session history synced to your normal host OpenCode database.", flush=True
-        )
+    if report is None and populated and announce and not lifecycle_output.concise():
+        _announce_history_synced()
 
 
 def _sync_sessions(path, data, started, source_mode, counts):
@@ -3168,6 +3180,17 @@ def _sync_sessions(path, data, started, source_mode, counts):
     return bool(state.get("sessions"))
 
 
+def _history_compatibility_refusal(error):
+    reason = getattr(error, "history_compatibility_category", None)
+    if history_recovery.compatibility_category(reason) is not None:
+        return reason
+    if isinstance(error, HistoryWaitTimeout):
+        reason = error.recovery_reason
+        if history_recovery.compatibility_category(reason) is not None:
+            return reason
+    return None
+
+
 def _history_failure_reason(error):
     reader = getattr(error, "history_reader_category", None)
     if getattr(error, "history_source_cleanup_failed", False) or reader in (
@@ -3178,7 +3201,7 @@ def _history_failure_reason(error):
     if isinstance(error, (KeyboardInterrupt, SystemExit)):
         return "cancelled"
     compatibility = history_recovery.compatibility_category(
-        getattr(error, "history_compatibility_category", None)
+        _history_compatibility_refusal(error)
     ) or history_recovery.compatibility_category(reader)
     if compatibility is not None:
         return compatibility
@@ -3238,6 +3261,8 @@ def _report_history_result(report, *, recovered, error):
         level, outcome = "info", "success"
         reason = None if report.populated else "not-needed"
         message = "History synced." if report.populated else "No history to sync."
+        if report.populated and report.omitted_interrupted_assistants:
+            message += " Native export omitted interrupted assistant messages."
     else:
         return
     lifecycle_output.record(
@@ -3366,6 +3391,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
     code = 1
     recovered = False
     history_started = False
+    manual_populated = False
     manual_closing_source = client_returned = owner_closed = False
     error, owner = None, None
     stop_token, source, cleanup_data = None, None, data
@@ -3422,11 +3448,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                     sync_sessions(path, data, announce=False)
                     manual_closing_source = True
                 manual_closing_source = False
-                if session_state(path).get("sessions") and not concise:
-                    print(
-                        "Session history synced to your normal host OpenCode database.",
-                        flush=True,
-                    )
+                manual_populated = bool(session_state(path).get("sessions"))
             return 0
         with contextlib.ExitStack() as services:
             owner = (
@@ -3551,7 +3573,23 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                 except BaseException as exc:
                     error = exc
                     report.reason = "cleanup-unverified"
-                    if not concise:
+                    if not report.attempted:
+                        lifecycle_output.record(
+                            "lifecycle.notice",
+                            level="error",
+                            stage="shutdown",
+                            reason="cleanup-unverified",
+                            outcome="failure",
+                        )
+                        if concise and isinstance(exc, (BoxError, OSError, ValueError)):
+                            exc.history_outcome_reported = True
+                        with contextlib.suppress(OSError, ValueError):
+                            print(
+                                "oc-box: Workspace shutdown could not be verified. "
+                                "Container data retained; inspect the workspace on the host.",
+                                file=sys.stderr,
+                            )
+                    elif not concise:
                         print(
                             "oc-box: Container data retained. Retry with 'oc-box sync'.",
                             file=sys.stderr,
@@ -3585,12 +3623,18 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
         finally:
             if report.attempted:
                 _report_history_result(report, recovered=recovered, error=error)
+                if (
+                    not concise
+                    and not recovered
+                    and report.reason is None
+                    and (
+                        manual_populated if args.command == "sync" else report.populated
+                    )
+                ):
+                    _announce_history_synced()
     if recovered and not concise:
-        print(
-            "Session history synced to your normal host OpenCode database "
-            "using the post-stop fallback.",
-            flush=True,
-        )
+        history_recovery.announce_saved()
+        _announce_history_synced(recovered=True)
     return code
 
 
@@ -3802,7 +3846,7 @@ def launch_client(path, data, args, version, exported, owner=None):
                     or report.reason
                 )
         history_recovery.report_compatibility_refusal(
-            getattr(exc, "history_compatibility_category", None)
+            _history_compatibility_refusal(exc)
         )
         if not concise:
             print(

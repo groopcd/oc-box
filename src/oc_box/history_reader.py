@@ -997,14 +997,14 @@ def export_pass(box, data):
         EXPORTS.reset(token)
         try:
             stream.close()
-            if original is None and stream.failed:
-                raise stream.fail("history-command")
         except BaseException as cleanup:
             if original is None:
+                cleanup.history_source_cleanup_failed = True
                 raise
             if isinstance(original, SystemExit) and original.code in (None, 0):
                 original.code = 1
             if isinstance(cleanup, (KeyboardInterrupt, SystemExit)):
+                cleanup.history_source_cleanup_failed = True
                 if isinstance(cleanup, SystemExit) and cleanup.code in (None, 0):
                     cleanup.code = 1
                 raise
@@ -1016,11 +1016,15 @@ def export_pass(box, data):
             else:
                 import lifecycle_output
             if not lifecycle_output.concise():
-                print(
-                    "oc-box: History export helper cleanup unverified. "
-                    "Container data retained; retry with 'oc-box sync'.",
-                    file=sys.stderr,
-                )
+                with contextlib.suppress(OSError, ValueError):
+                    print(
+                        "oc-box: History export helper cleanup unverified. "
+                        "Container data retained; retry with 'oc-box sync'.",
+                        file=sys.stderr,
+                    )
+        else:
+            if original is None and stream.failed:
+                raise stream.fail("history-command")
 
 
 class Reader:

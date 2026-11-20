@@ -574,7 +574,18 @@ class HistoryWaitTests(unittest.TestCase):
                         )
 
                     self.api.side_effect = request
-                    error = self.assert_wait_error("activity-timeout", timeout=1)
+                    contract = (
+                        (
+                            "invalid-active-response"
+                            if expired_call % 2
+                            else "invalid-jobs-response"
+                        )
+                        if outcome == "json-error"
+                        else None
+                    )
+                    error = self.assert_wait_error(
+                        "activity-timeout", timeout=1, contract_category=contract
+                    )
                     self.assertEqual(
                         error.recovery_eligible,
                         expired_call >= 5
@@ -749,8 +760,20 @@ class HistoryWaitTests(unittest.TestCase):
                         )
 
                     self.api.side_effect = request
+                    contract = (
+                        (
+                            "invalid-active-response"
+                            if expired_call == 5
+                            else "invalid-jobs-response"
+                        )
+                        if outcome == "failed"
+                        else None
+                    )
                     error = self.assert_wait_error(
-                        "activity-timeout", timeout=1, interval=0.125
+                        "activity-timeout",
+                        timeout=1,
+                        interval=0.125,
+                        contract_category=contract,
                     )
                     self.assertEqual(self.api.call_count, expired_call)
                     self.assertEqual(self.now, 101)
@@ -1020,7 +1043,13 @@ class WorkspaceServiceTests(unittest.TestCase):
         self.addCleanup(tabs.stop)
 
     def test_manual_sync_history_scope_closes_before_success_or_container_stop(self):
-        for outcome in ("success", "legacy-fallback", "sync-error", "cleanup-error"):
+        for outcome in (
+            "success",
+            "legacy-fallback",
+            "sync-error",
+            "cleanup-error",
+            "final-stop-error",
+        ):
             with self.subTest(outcome=outcome):
                 args = box.parser().parse_args(["sync"])
                 args._opencode_release = self.data["opencode_version"]
@@ -1058,6 +1087,11 @@ class WorkspaceServiceTests(unittest.TestCase):
                     if outcome == "sync-error":
                         raise error
 
+                def stop(_data):
+                    events.append("container-stop")
+                    if outcome == "final-stop-error":
+                        raise error
+
                 class Output(io.StringIO):
                     def write(self, text):
                         if text.startswith("Session history synced"):
@@ -1076,11 +1110,7 @@ class WorkspaceServiceTests(unittest.TestCase):
                     ) as source,
                     patch.object(service, "Owner") as owner,
                     patch.object(box, "sync_sessions", side_effect=synchronize),
-                    patch.object(
-                        box,
-                        "stop_container",
-                        side_effect=lambda *_a: events.append("container-stop"),
-                    ),
+                    patch.object(box, "stop_container", side_effect=stop),
                     contextlib.redirect_stdout(output),
                     contextlib.redirect_stderr(errors),
                 ):
@@ -1099,9 +1129,8 @@ class WorkspaceServiceTests(unittest.TestCase):
                 owner.assert_not_called()
                 self.assertEqual(
                     events,
-                    ["source-open", "sync", "source-closed"]
-                    + ([] if outcome.endswith("-error") else ["success"])
-                    + ["container-stop"],
+                    ["source-open", "sync", "source-closed", "container-stop"]
+                    + ([] if outcome.endswith("-error") else ["success"]),
                 )
                 self.assertIsNone(service.live_connection())
                 if outcome.endswith("-error"):

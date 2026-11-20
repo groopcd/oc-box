@@ -779,7 +779,7 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
 
     def fail(category):
         if category == "activity-timeout":
-            raise box.HistoryWaitTimeout(
+            error = box.HistoryWaitTimeout(
                 f"History wait timeout: phase={phase}; "
                 f"last complete job kinds: {kind_observation}; "
                 f"last complete observation: {observation}.",
@@ -787,7 +787,12 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
                 recovery_reason=recovery_reason,
                 timing_diagnostic=timing_diagnostic(),
                 interrupted_foreground=foreground_observed,
-            ) from None
+            )
+            # Keep the deadline and routing diagnostics; a native response
+            # decode failure is still a known compatibility refusal.
+            if compatibility_reason is not None:
+                error.history_compatibility_category = compatibility_reason
+            raise error from None
         error = box.BoxError(f"OpenCode 2.x history wait failed ({category}).")
         error.interrupted_foreground = foreground_observed
         error.history_retryable = (

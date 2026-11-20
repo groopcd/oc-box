@@ -17,7 +17,7 @@ from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 from oc_box import history_reader as reader, history_recovery, oc_box as box
-from oc_box import workspace_service
+from oc_box import lifecycle_output, workspace_control, workspace_service
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -295,24 +295,42 @@ class HistoryExportsTests(unittest.TestCase):
         self.assertIsNone(stream.child)
 
     def test_concise_double_failure_retains_original_and_marks_unverified_cleanup(self):
-        from oc_box import lifecycle_output
-
-        primary = box.HistoryPending("synthetic-original")
-        stream = SimpleNamespace(
-            close=Mock(side_effect=box.BoxError("synthetic-cleanup"))
+        originals = (
+            lambda: history_recovery.RecoveryError("deadline"),
+            lambda: workspace_control.ControlError("unsafe-control"),
+            lambda: box.HistoryPending("synthetic-original"),
+            lambda: RuntimeError("synthetic-original"),
+            lambda: SystemExit(0),
         )
-        with (
-            patch.object(reader, "_Exports", return_value=stream),
-            lifecycle_output.invocation("sync", self.path.parent),
-            contextlib.redirect_stderr(io.StringIO()) as errors,
-            self.assertRaises(box.HistoryPending) as raised,
-        ):
-            with reader.export_pass(box, self.data):
-                raise primary
-        self.assertIs(raised.exception, primary)
-        self.assertTrue(primary.history_source_cleanup_failed)
-        self.assertEqual(errors.getvalue(), "")
-        self.assertIsNone(reader.EXPORTS.get())
+        for original in originals:
+            for error in (
+                box.BoxError("synthetic-cleanup"),
+                KeyboardInterrupt(),
+                SystemExit(0),
+            ):
+                primary = original()
+                winner = (
+                    error
+                    if isinstance(error, (KeyboardInterrupt, SystemExit))
+                    else primary
+                )
+                with (
+                    self.subTest(primary=type(primary), cleanup=type(error)),
+                    patch.object(reader, "_Exports") as stream_type,
+                    lifecycle_output.invocation("sync", self.path.parent),
+                    contextlib.redirect_stderr(io.StringIO()) as errors,
+                    self.assertRaises(type(winner)) as raised,
+                ):
+                    stream_type.return_value.close.side_effect = error
+                    with reader.export_pass(box, self.data):
+                        raise primary
+                self.assertIs(raised.exception, winner)
+                self.assertTrue(winner.history_source_cleanup_failed)
+                if isinstance(winner, SystemExit):
+                    self.assertEqual(winner.code, 1)
+                self.assertEqual(errors.getvalue(), "")
+                stream_type.return_value.close.assert_called_once_with()
+                self.assertIsNone(reader.EXPORTS.get())
 
     def test_non_reader_pass_does_not_create_helper(self):
         token = reader.CURRENT.set(None)

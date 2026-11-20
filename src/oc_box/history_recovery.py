@@ -91,7 +91,18 @@ class Report:
     populated: bool | None = None
     verified: bool = False
     interrupted: bool = False
+    omitted_interrupted_assistants: bool = False
     reason: str | None = None
+
+
+def announce_saved():
+    with contextlib.suppress(OSError, ValueError):
+        print(
+            "oc-box: Checked persisted history snapshots were synchronized after stopping the workspace. "
+            "Execution was interrupted; completion notices or final results may be missing. "
+            "Background work is not declared complete.",
+            file=sys.stderr,
+        )
 
 
 def compatibility_category(reason):
@@ -530,24 +541,27 @@ def recover(box, path, data, source):
                 _unchanged(path, source)
             _unchanged(path, source)
             saved = True
-    except RecoveryError as exc:
-        category = exc.reason
-    except workspace_control.ControlError:
-        category = "control-state"
     except (box.BoxError, OSError, ValueError, subprocess.SubprocessError) as exc:
         reader_reason = getattr(exc, "history_reader_category", None)
         if isinstance(reader_reason, str) and reader_reason in COMPATIBILITY_REFUSALS:
             compatibility_reason = reader_reason
-        category = (
-            "reader-" + reader_reason
-            if isinstance(reader_reason, str)
-            and reader_reason in history_reader.CATEGORIES
-            else "snapshot-failed"
-        )
-        if getattr(exc, "history_source_cleanup_failed", False):
+        if getattr(exc, "history_source_cleanup_failed", False) or (
+            report is not None and report.reason == "cleanup-unverified"
+        ):
             category = "cleanup-unverified"
+        elif isinstance(exc, RecoveryError):
+            category = exc.reason
+        elif isinstance(exc, workspace_control.ControlError):
+            category = "control-state"
         elif isinstance(exc, box.HistoryPending):
             category = "snapshot-incomplete"
+        elif (
+            isinstance(reader_reason, str)
+            and reader_reason in history_reader.CATEGORIES
+        ):
+            category = "reader-" + reader_reason
+        else:
+            category = "snapshot-failed"
     finally:
         if transitioned:
             try:
@@ -579,12 +593,8 @@ def recover(box, path, data, source):
     if lifecycle_output.concise():
         return saved
     if saved:
-        print(
-            "oc-box: Checked persisted history snapshots were synchronized after stopping the workspace. "
-            "Execution was interrupted; completion notices or final results may be missing. "
-            "Background work is not declared complete.",
-            file=sys.stderr,
-        )
+        if report is None:  # A launcher will announce only after its own final stop.
+            announce_saved()
     else:
         if category == "snapshot-incomplete":
             print(
