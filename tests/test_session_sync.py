@@ -306,9 +306,14 @@ class SessionSyncTests(unittest.TestCase):
             output, errors = io.StringIO(), io.StringIO()
             with (
                 self.subTest(stop_error=type(stop_error), diagnostic=diagnostic),
-                patch.object(sys, "argv", ["oc-box", "start"]),
-                patch.dict(
-                    os.environ, {"OC_BOX_LIFECYCLE_DIAGNOSTICS": str(int(diagnostic))}
+                patch.object(
+                    sys,
+                    "argv",
+                    [
+                        "oc-box",
+                        "start",
+                        *(["--lifecycle-diagnostics"] if diagnostic else []),
+                    ],
                 ),
                 patch.object(
                     box,

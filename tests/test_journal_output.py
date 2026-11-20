@@ -66,19 +66,18 @@ def _child(script, *, use_sender_flags=False):
 
 
 class JournalEmitTests(unittest.TestCase):
-    def test_requires_exact_host_opt_in(self):
-        for environment in (
-            {},
-            {"OC_BOX_JOURNALD": "true"},
-            {"OC_BOX_JOURNALD": "1", "OC_BOX_CONTAINER": "1"},
+    def setUp(self):
+        patcher = mock.patch.dict(os.environ, {}, clear=True)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_refuses_to_launch_sender_in_container(self):
+        with (
+            mock.patch.dict(os.environ, {"OC_BOX_CONTAINER": "1"}),
+            mock.patch.object(journal_output.subprocess, "Popen") as opened,
         ):
-            with (
-                self.subTest(environment=environment),
-                mock.patch.dict(os.environ, environment, clear=True),
-                mock.patch.object(journal_output.subprocess, "Popen") as opened,
-            ):
-                self.assertFalse(journal_output.emit(_record()))
-                opened.assert_not_called()
+            self.assertFalse(journal_output.emit(_record()))
+            opened.assert_not_called()
 
     def test_native_packet_contains_only_fixed_fields_and_maps_priority(self):
         for level, priority in (
@@ -92,11 +91,9 @@ class JournalEmitTests(unittest.TestCase):
                 mock.patch.dict(
                     os.environ,
                     {
-                        "OC_BOX_JOURNALD": "1",
                         "AWS_SECRET_ACCESS_KEY": _SECRET,
                         "PYTHONPATH": f"/fake/{_SECRET}",
                     },
-                    clear=True,
                 ),
                 mock.patch.object(sys, "argv", ["oc-box", "--podman-config", _SECRET]),
                 mock.patch.object(journal_output.subprocess, "Popen") as opened,
@@ -160,7 +157,6 @@ class JournalEmitTests(unittest.TestCase):
         ):
             with (
                 self.subTest(record=record),
-                mock.patch.dict(os.environ, {"OC_BOX_JOURNALD": "1"}, clear=True),
                 mock.patch.object(journal_output.subprocess, "Popen") as opened,
             ):
                 self.assertFalse(journal_output.emit(record))
@@ -228,8 +224,7 @@ assert b"OC_BOX_FORMAT=oc-box-activity-v1\\n" in sys.stdin.buffer.read(4097)
         with (
             mock.patch.dict(
                 os.environ,
-                {"OC_BOX_JOURNALD": "1", "AWS_SECRET_ACCESS_KEY": _SECRET},
-                clear=True,
+                {"AWS_SECRET_ACCESS_KEY": _SECRET},
             ),
             _child(script, use_sender_flags=True) as calls,
         ):
@@ -238,23 +233,21 @@ assert b"OC_BOX_FORMAT=oc-box-activity-v1\\n" in sys.stdin.buffer.read(4097)
         self.assertEqual(calls[0][2].returncode, 0)
 
     def test_child_start_or_exit_failure_is_silent_and_never_retried(self):
-        with mock.patch.dict(os.environ, {"OC_BOX_JOURNALD": "1"}, clear=True):
-            with mock.patch.object(
-                journal_output.subprocess,
-                "Popen",
-                side_effect=FileNotFoundError(_SECRET),
-            ) as opened:
-                self.assertFalse(journal_output.emit(_record()))
-                opened.assert_called_once()
-            with _child("raise SystemExit(1)", use_sender_flags=True) as calls:
-                self.assertFalse(journal_output.emit(_record()))
-                self.assertEqual(len(calls), 1)
-                self.assertEqual(calls[0][2].returncode, 1)
+        with mock.patch.object(
+            journal_output.subprocess,
+            "Popen",
+            side_effect=FileNotFoundError(_SECRET),
+        ) as opened:
+            self.assertFalse(journal_output.emit(_record()))
+            opened.assert_called_once()
+        with _child("raise SystemExit(1)", use_sender_flags=True) as calls:
+            self.assertFalse(journal_output.emit(_record()))
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][2].returncode, 1)
 
     def test_slow_child_hits_deadline_and_is_reaped_without_retry(self):
         script = "import sys,time; sys.stdin.buffer.read(); time.sleep(2)"
         with (
-            mock.patch.dict(os.environ, {"OC_BOX_JOURNALD": "1"}, clear=True),
             mock.patch.object(journal_output, "_SEND_TIMEOUT", 0.2),
             _child(script, use_sender_flags=True) as calls,
         ):

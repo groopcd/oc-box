@@ -101,27 +101,42 @@ output, prompts, pairing links, credentials, clipboard contents and other
 free-form text cannot enter the journal.
 
 For the optional system journal backend, use mocked local sink and
-`journalctl` checks. Mirror only with `OC_BOX_JOURNALD=1` in the host launcher
-environment and only after a validated private append succeeds. Check native
-priorities and the fixed identifier and format marker, and verify that the
-mirror cannot carry raw output, auth or secrets. A failed or unavailable sink
-must not roll back a successful private append or change the lifecycle
-outcome. Ordinary installs and default reads must not require systemd.
+`journalctl` checks. Mirroring defaults to off; cover saved `logs.journald`
+booleans and one-invocation `--journald` and `--no-journald` overrides. Mirror
+only after a validated private append succeeds. Check native priorities and
+the fixed identifier and format marker, and verify that the mirror cannot
+carry raw output, auth or secrets. A failed or unavailable sink must not roll
+back a successful private append or change the lifecycle outcome. Ordinary
+installs and default reads must not require systemd.
 
-For `oc-box logs --journald`, check explicit backend selection, current-user
-record filtering, validation of returned activity records, and parity for
-severity thresholds, workspace selectors, initial limit, follow and JSON
-Lines. An unavailable reader must give fixed private-reader guidance without
-automatically falling back or exposing raw errors. Mocked backend checks do
-not establish access, delivery, retention or priority behavior on a real host
-journal.
+For `oc-box logs --journald`, check explicit backend selection independent of
+the writer choice, current-user record filtering, validation of returned
+activity records, and parity for severity thresholds, workspace selectors,
+initial limit, follow and JSON Lines. An unavailable reader must give fixed
+private-reader guidance without automatically falling back or exposing raw
+errors. Mocked backend checks do not establish access, delivery, retention or
+priority behavior on a real host journal.
 
-For version-pinned scripted checks that parse legacy launcher output, use
-`OC_BOX_LIFECYCLE_DIAGNOSTICS=1` explicitly on the launcher under test.
-Check the opt-in separately from the quiet default. Keep historical reports,
-exact revision/native identities, original exits and failed/refused checks
-intact. Local unit, process and native fixtures do not establish a new
-external-host acceptance; do not replay retained fixtures for this change.
+Cover `--log-dir PATH` precedence over a valid saved `logs.directory` for
+append and private reads, including `logs --path` and filtered reads. It must
+not move old logs, change workspace selectors or retention, or create a
+directory during policy loading or reads. Reject `logs --log-dir` with
+`--journald`. Verify invalid saved log policy fails closed even when flags
+override individual fields. Confirm no writes to saved config, no changes
+to the process environment or to XDG and `OC_BOX_STATE_HOME` selection, and
+that the former environment switches do not alter launcher or reader behavior.
+
+Check lifecycle flag scope for `start` (including the implicit command),
+`reset`, `stop`, `sync`, `terminal`, and `web`. Check `--lifecycle-diagnostics`
+separately from the quiet default; it must not persist to later invocations.
+For version-pinned scripted checks that parse legacy launcher output, pass
+the flag only to the invocation under test. In the sharing host fixture that
+is the owner expecting an explicit stop, solely for its legacy pending-history
+line check; do not broaden diagnostics to other fixture invocations. Keep
+historical reports, exact revision/native identities, original exits and
+failed/refused checks intact. Local unit, process and native fixtures do not
+establish a new external-host acceptance; do not replay retained fixtures for
+this change.
 
 ### Experimental host clipboard attachment shortcut
 

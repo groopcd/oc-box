@@ -653,10 +653,7 @@ def record_event(
                 os.close(fd)
             if discard_outgoing:
                 _discard_archive(directory, files, 1)
-        if (
-            os.environ.get("OC_BOX_JOURNALD") == "1"
-            and os.environ.get("OC_BOX_CONTAINER") != "1"
-        ):
+        if policy.journald and os.environ.get("OC_BOX_CONTAINER") != "1":
             try:
                 if __package__:
                     from . import journal_output

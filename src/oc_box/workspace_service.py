@@ -1670,6 +1670,11 @@ def preflight_port(port):
 
 
 def web_parser():
+    if __package__:
+        from .log_config import add_launch_arguments
+    else:
+        from log_config import add_launch_arguments
+
     result = argparse.ArgumentParser(
         prog="oc-box web",
         description="Open the native web UI on the private V2 workspace service; attach to a running session or own a new foreground lease.",
@@ -1706,4 +1711,5 @@ def web_parser():
         action="store_true",
         help="owning V2 launch only: skip vault use once; refused when attaching",
     )
+    add_launch_arguments(result)
     return result

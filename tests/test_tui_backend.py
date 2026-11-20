@@ -71,7 +71,11 @@ class DashboardBackendTests(unittest.TestCase):
             linked.symlink_to(state, target_is_directory=True)
             self.box.state_root = Mock(return_value=state)
             with patch.dict(
-                os.environ, {"OC_BOX_STATE_HOME": str(state), "OC_BOX_JOURNALD": "0"}
+                os.environ,
+                {
+                    "OC_BOX_STATE_HOME": str(state),
+                    "XDG_CONFIG_HOME": str(root / "config"),
+                },
             ):
                 self.assertTrue(activity_log.record_event("tui.started"))
                 [entry] = self.backend.logs()

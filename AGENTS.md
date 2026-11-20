@@ -47,9 +47,11 @@ their checkout ownership distinct from unrelated source and flat installations.
   Preserve actionable warnings/prompts and one final history result per attempt,
   with interruption/unconfirmed-completion cautions on recovery. Report partial
   or uncertain cleanup honestly; do not change lifecycle, eligibility or exits.
-  `OC_BOX_LIFECYCLE_DIAGNOSTICS=1` explicitly opts in to expanded launcher
-  messages for troubleshooting and legacy scripted checks. Keep historical
-  reports intact; offline output checks are not new host acceptance.
+  `--lifecycle-diagnostics` explicitly opts in to expanded launcher messages for
+  one invocation; no saved default beyond quiet. The sharing host fixture uses
+  it only for the owner expecting an explicit stop and checking the legacy
+  pending-history line. Keep historical reports intact; offline output checks
+  are not new host acceptance.
 - `status_report.py`: read-only host resource and storage reporting.
 - `tui.py` / `tui_app.py` / `tui_backend.py`: optional, host-side Textual manager.
   Keep ordinary CLI imports stdlib-only, demo strictly synthetic, browsing free
@@ -104,22 +106,29 @@ their checkout ownership distinct from unrelated source and flat installations.
   pairing links, authentication, clipboard data or other free-form text.
   Dashboard external-log redaction remains best-effort, not a guarantee of
   arbitrary-secret removal.
-  `log_config.py` loads bounded host `logs` policy and `OC_BOX_LOG_DIR`
-  without writes or following config symlinks. `logs --path` is read-only.
-  Journal location is independent of workspace registration. Rotation and
-  age/space retention apply only on appends, only to the owner's validated
-  managed files, and never modify the system journal or move old logs.
-  `OC_BOX_JOURNALD=1` opts the host launcher into best-effort mirroring of only
-  successfully appended, validated activity events to existing local
-  systemd-journald with native priorities. The private file remains primary;
-  sink errors cannot affect lifecycle results. Do not start/configure daemons
-  or add ordinary systemd dependencies. System journal visibility and
-  retention follow host policy. `oc-box logs --journald` expressly selects the
-  current user's mirror via local `journalctl`, with the same severity and
-  workspace filters, limit, follow and JSON Lines support. On unavailability
-  give fixed safe guidance to use the private default, never fall back
-  automatically or expose raw errors. Mock backends are not host journal
-  acceptance.
+  `log_config.py` loads bounded host `logs` policy without writes or following
+  config symlinks. Logger flags are invocation-local, never environment
+  switches or config edits; invalid saved policy fails closed even with
+  explicit overrides. Only default/start, reset, stop, sync, terminal and web
+  accept launcher `--log-dir PATH`, `--journald` / `--no-journald`, and
+  `--lifecycle-diagnostics`. `--log-dir PATH` overrides valid `logs.directory`
+  and also works for private `logs` reads, including `logs --path`; only an
+  append can create the directory. Journal location is independent of workspace
+  registration. Rotation and age/space retention apply only on appends, only
+  to the owner's validated managed files, and never modify the system journal
+  or move old logs.
+  `logs.journald` is a host boolean, default false. The launcher flags override
+  it for one invocation. Mirror only successfully appended, validated activity
+  events to existing local systemd-journald with native priorities. The private
+  file remains primary; sink errors cannot affect lifecycle results. Do not
+  start/configure daemons or add ordinary systemd dependencies. System journal
+  visibility and retention follow host policy. `oc-box logs --journald` is
+  read-only, independent of the writer setting, and incompatible with
+  `--log-dir`. It expressly selects the current user's mirror via local
+  `journalctl`, with the same severity and workspace filters, limit, follow and
+  JSON Lines support. On unavailability give fixed safe guidance to use the
+  private default, never fall back automatically or expose raw errors. Mock
+  backends are not host journal acceptance.
 - `tui_storage.py` / `tui_operations.py` / `tui_management.py`: three distinct
   host/selected/all-workspace scopes, canonical bounded registry reads and explicit
   operation reviews, typed only for destructive actions. Host operations target

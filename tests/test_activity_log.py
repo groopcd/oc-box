@@ -13,7 +13,8 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from oc_box import activity_log as journal
-from oc_box.log_config import LogConfigError
+from oc_box import journal_output
+from oc_box.log_config import LogConfigError, overrides
 
 
 def _writer(root, start, count, ready, result):
@@ -44,7 +45,11 @@ class ActivityJournalFixture(unittest.TestCase):
         self.enterContext(
             patch.dict(os.environ, {"XDG_CONFIG_HOME": str(self.config.parents[1])})
         )
-        os.environ.pop("OC_BOX_LOG_DIR", None)
+
+    def configure(self, **logs):
+        self.config.parent.mkdir(parents=True, exist_ok=True)
+        self.config.write_text(json.dumps({"logs": logs}))
+        self.config.chmod(0o600)
 
     def record(self, **kwargs):
         return journal.record_event(
@@ -272,6 +277,57 @@ class ActivityLogTests(ActivityJournalFixture):
             journal.read_events(self.root, level="warn", workspace="a" * 32), []
         )
         self.assertFalse(self.root.exists())
+
+    def test_journal_mirror_is_host_only_using_saved_policy_or_cli_override(self):
+        with (
+            patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
+            patch.object(journal_output, "emit") as emit,
+        ):
+            self.assertTrue(self.record(duration_ms=1))
+            self.configure(journald=False)
+            self.assertTrue(self.record(duration_ms=2))
+            emit.assert_not_called()
+            with overrides(journald=True):
+                self.assertTrue(self.record(duration_ms=3))
+                emit.assert_called_once_with(journal.read_events(self.root)[-1])
+                self.assertEqual(journal.log_path(self.root), self.active)
+                self.assertFalse(self.record(duration_ms="invalid"))
+                with patch.dict(os.environ, {"OC_BOX_CONTAINER": "1"}):
+                    self.assertTrue(self.record(duration_ms=4))
+                emit.assert_called_once()
+            self.configure(journald=True)
+            with overrides(journald=False):
+                self.assertTrue(self.record(duration_ms=5))
+            emit.assert_called_once()
+            self.assertTrue(self.record(duration_ms=6))
+            self.assertEqual(self.durations(), [1, 2, 3, 4, 5, 6])
+            self.assertEqual(
+                [call.args[0]["duration_ms"] for call in emit.call_args_list], [3, 6]
+            )
+
+    def test_mirror_failure_does_not_change_successful_private_append(self):
+        self.configure(journald=True)
+        seen = []
+
+        for duration, failure in ((1, False), (2, RuntimeError("synthetic error"))):
+
+            def failing_sink(_event, failure=failure):
+                seen.append(json.loads(self.active.read_bytes().splitlines()[-1]))
+                if isinstance(failure, Exception):
+                    raise failure
+                return failure
+
+            with (
+                self.subTest(failure=failure),
+                patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
+                patch.object(journal, "_policy", wraps=journal._policy) as policy,
+                patch.object(journal_output, "emit", side_effect=failing_sink) as emit,
+            ):
+                self.assertTrue(self.record(duration_ms=duration))
+                policy.assert_called_once()
+                emit.assert_called_once_with(seen[-1])
+        self.assertEqual([row["duration_ms"] for row in seen], [1, 2])
+        self.assertEqual(journal.read_events(self.root), seen)
 
     def test_rotation_retention_byte_limits_and_latest_oldest_first(self):
         with (
@@ -624,11 +680,6 @@ class ActivityLogTests(ActivityJournalFixture):
 
 
 class ActivityRotationTests(ActivityJournalFixture):
-    def configure(self, **logs):
-        self.config.parent.mkdir(parents=True, exist_ok=True)
-        self.config.write_text(json.dumps({"logs": logs}))
-        self.config.chmod(0o600)
-
     def files(self):
         return {
             path.name: path.read_bytes() for path in self.log.glob("activity.jsonl*")
@@ -655,7 +706,7 @@ class ActivityRotationTests(ActivityJournalFixture):
         self.assertFalse(self.root.exists())
         for name, mode in ((custom, 0o700), (custom / self.active.name, 0o600)):
             self.assertEqual(stat.S_IMODE(name.stat().st_mode), mode)
-        with patch.dict(os.environ, {"OC_BOX_LOG_DIR": str(alternate)}):
+        with overrides(directory=alternate):
             self.assertEqual(journal.log_path(self.root), alternate / self.active.name)
             self.assertEqual(self.durations(strict_snapshot=True), [])
             self.assertFalse(alternate.exists())
@@ -684,12 +735,19 @@ class ActivityRotationTests(ActivityJournalFixture):
         self.seed()
         before = self.files()
         self.configure(SystemMaxFiles="synthetic-private-value")
-        with self.assertRaisesRegex(
-            LogConfigError, "^Activity log configuration is invalid or unsafe\\.$"
+        alternate = self.base / "alternate"
+        with (
+            overrides(directory=alternate, journald=True),
+            patch.object(journal_output, "emit") as emit,
         ):
-            journal.log_path(self.root)
-        self.assertFalse(self.record())
-        self.assertEqual(self.durations(), [])
+            with self.assertRaisesRegex(
+                LogConfigError, "^Activity log configuration is invalid or unsafe\\.$"
+            ):
+                journal.log_path(self.root)
+            self.assertFalse(self.record())
+            self.assertEqual(self.durations(), [])
+            emit.assert_not_called()
+        self.assertFalse(alternate.exists())
         self.assertEqual(self.files(), before)
 
     def test_size_and_count_rotation_read_latest_in_order(self):
@@ -847,18 +905,18 @@ class ActivityRotationTests(ActivityJournalFixture):
     def test_keep_free_refusal_and_unsynced_appends_do_not_mirror(self):
         self.rotated_journal()
         before = self.active.read_bytes()
-        self.configure(SystemKeepFree="1K")
+        self.configure(SystemKeepFree="1K", journald=True)
         emit = Mock()
         with (
-            patch("oc_box.journal_output", SimpleNamespace(emit=emit), create=True),
-            patch.dict(os.environ, {"OC_BOX_JOURNALD": "1", "OC_BOX_CONTAINER": "0"}),
+            patch.object(journal_output, "emit", emit),
+            patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
         ):
             with patch.object(journal.os, "fstatvfs", return_value=self.filesystem(1)):
                 self.assertFalse(self.record(duration_ms=4))
             self.assertEqual(self.files(), {self.active.name: before})
             emit.assert_not_called()
 
-            self.configure()
+            self.configure(journald=True)
             with patch.object(journal.os, "fsync", side_effect=OSError):
                 self.assertFalse(self.record(duration_ms=5))
             emit.assert_not_called()
@@ -904,10 +962,9 @@ class ActivityRotationTests(ActivityJournalFixture):
                     "unlink",
                     side_effect=NotImplementedError("synthetic-private-error"),
                 ) as remove,
-                patch("oc_box.journal_output", SimpleNamespace(emit=emit), create=True),
-                patch.dict(
-                    os.environ, {"OC_BOX_JOURNALD": "1", "OC_BOX_CONTAINER": "0"}
-                ),
+                patch.object(journal_output, "emit", emit),
+                patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
+                overrides(journald=True),
                 contextlib.redirect_stdout(output),
                 contextlib.redirect_stderr(output),
             ):

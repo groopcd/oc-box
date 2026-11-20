@@ -1,14 +1,25 @@
+import argparse
+import io
 import json
 import os
 import stat
 import tempfile
 import unittest
+from contextlib import redirect_stderr
+from contextvars import Context
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 from unittest.mock import patch
 
 from oc_box import log_config
-from oc_box.log_config import LogConfigError, LogPolicy, load
+from oc_box.log_config import (
+    LogConfigError,
+    LogPolicy,
+    add_launch_arguments,
+    directory_argument,
+    load,
+    overrides,
+)
 
 
 class LogConfigTests(unittest.TestCase):
@@ -41,6 +52,7 @@ class LogConfigTests(unittest.TestCase):
     def test_missing_config_uses_immutable_defaults_without_creating_anything(self):
         policy = load()
         self.assertEqual(policy, LogPolicy(None, 256 * 1024, 4, 1024**2, 0, 0, 0))
+        self.assertIs(policy.journald, False)
         with self.assertRaises(FrozenInstanceError):
             policy.max_files = 5
         self.assertEqual(list(self.home.iterdir()), [])
@@ -73,7 +85,7 @@ class LogConfigTests(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(after.st_mode), 0o644)
         self.assertEqual(list(config.parent.iterdir()), [config])
 
-    def test_override_and_shell_free_lexical_directory(self):
+    def test_override_and_lexical_directory(self):
         self.write({"logs": {"directory": "~/logs//./Café space/", "MaxFileSec": "1h"}})
         policy = load()
         self.assertEqual(policy.directory, self.home / "logs/Café space")
@@ -81,7 +93,7 @@ class LogConfigTests(unittest.TestCase):
 
         alias = self.base / "link"
         alias.symlink_to(self.base / "missing", target_is_directory=True)
-        with patch.dict(os.environ, {"OC_BOX_LOG_DIR": str(alias)}):
+        with overrides(directory=directory_argument(str(alias))):
             overridden = load()
         self.assertEqual(overridden.directory, alias)
         self.assertEqual(overridden.max_file_sec, policy.max_file_sec)
@@ -89,11 +101,105 @@ class LogConfigTests(unittest.TestCase):
         self.assertFalse((self.base / "missing").exists())
 
         self.config.unlink()
-        with patch.dict(os.environ, {"OC_BOX_LOG_DIR": "~/env only"}):
+        with overrides(directory=directory_argument("~/CLI only")):
             policy = load()
         self.assertTrue(policy.configured)
-        self.assertEqual(policy.directory, self.home / "env only")
+        self.assertEqual(policy.directory, self.home / "CLI only")
         self.assertFalse(policy.directory.exists())
+
+    def test_launch_arguments_have_tri_state_mirror_and_fixed_errors(self):
+        parser = argparse.ArgumentParser(prog="oc-box start", allow_abbrev=False)
+        add_launch_arguments(parser)
+        self.assertEqual(
+            vars(parser.parse_args([])),
+            {"log_dir": None, "journald": None, "lifecycle_diagnostics": False},
+        )
+        self.assertEqual(
+            vars(
+                parser.parse_args(
+                    [
+                        "--log-dir",
+                        "~/log space",
+                        "--journald",
+                        "--lifecycle-diagnostics",
+                    ]
+                )
+            ),
+            {
+                "log_dir": self.home / "log space",
+                "journald": True,
+                "lifecycle_diagnostics": True,
+            },
+        )
+        self.assertIs(parser.parse_args(["--no-journald"]).journald, False)
+        for arguments in (
+            ["--journald", "--no-journald"],
+            ["--log-dir", "relative-synthetic-private-value"],
+        ):
+            stderr = io.StringIO()
+            with redirect_stderr(stderr), self.assertRaises(SystemExit) as caught:
+                parser.parse_args(arguments)
+            self.assertEqual(caught.exception.code, 2)
+            self.assertNotIn("synthetic-private-value", stderr.getvalue())
+
+    def test_saved_mirror_requires_exact_boolean_even_with_cli_override(self):
+        for value in (True, False):
+            with self.subTest(value=value):
+                self.write({"logs": {"journald": value}})
+                self.assertIs(load().journald, value)
+                self.assertTrue(load().configured)
+                with overrides(journald=not value):
+                    self.assertIs(load().journald, not value)
+                self.assertIs(load().journald, value)
+        for value in (None, 0, 1, 1.0, "true", "false", {}, []):
+            with self.subTest(value=value):
+                self.write({"logs": {"journald": value}})
+                with overrides(directory=self.base, journald=True):
+                    self.assert_invalid()
+
+    def test_overrides_inherit_independently_and_reset_on_exit_and_error(self):
+        saved = self.base / "saved"
+        selected = self.base / "selected"
+        self.write({"logs": {"directory": str(saved), "journald": True}})
+        baseline = load()
+        environment = dict(os.environ)
+        with overrides(directory=selected, journald=False):
+            outer = load()
+            self.assertEqual(outer.directory, selected)
+            self.assertIs(outer.journald, False)
+            self.assertEqual(Context().run(load), baseline)
+            with overrides(directory=self.base):
+                self.assertEqual(load().directory, self.base)
+                self.assertIs(load().journald, False)
+            with overrides():
+                self.assertEqual(load(), outer)
+            with (
+                self.assertRaisesRegex(RuntimeError, "^synthetic exception$"),
+                overrides(journald=True),
+            ):
+                self.assertIs(load().journald, True)
+                self.assertEqual(load().directory, selected)
+                raise RuntimeError("synthetic exception")
+            self.assertEqual(load(), outer)
+            with (
+                self.assertRaises(LogConfigError),
+                overrides(directory=Path("relative"), journald=True),
+            ):
+                self.fail("invalid directory was accepted")
+            with self.assertRaises(LogConfigError), overrides(journald=1):
+                self.fail("invalid mirror setting was accepted")
+            self.assertEqual(load(), outer)
+            self.assertEqual(dict(os.environ), environment)
+        self.assertEqual(load(), baseline)
+        self.assertFalse(selected.exists())
+        self.assertFalse(saved.exists())
+
+    def test_unreleased_environment_switches_are_ignored(self):
+        defaults = load()
+        with patch.dict(
+            os.environ, {"OC_BOX_LOG_DIR": "/invalid\nignored", "OC_BOX_JOURNALD": "1"}
+        ):
+            self.assertEqual(load(), defaults)
 
     def test_quantity_units_limits_and_effective_size_left_to_writer(self):
         self.write(
@@ -160,16 +266,19 @@ class LogConfigTests(unittest.TestCase):
             with self.subTest(value=value):
                 self.write({"logs": {"directory": value}})
                 self.assert_invalid()
+            if isinstance(value, str):
+                with (
+                    self.subTest(argument=value),
+                    self.assertRaises(argparse.ArgumentTypeError) as caught,
+                ):
+                    directory_argument(value)
+                self.assertEqual(
+                    str(caught.exception),
+                    "must be an absolute non-root directory without '..' or non-printing characters",
+                )
         self.write({"logs": {"directory": "/invalid\nsaved"}})
-        with patch.dict(os.environ, {"OC_BOX_LOG_DIR": str(self.base)}):
+        with overrides(directory=self.base):
             self.assert_invalid()
-        self.write({"logs": {"directory": str(self.base)}})
-        for value in ("", "relative", "/unsafe\x1bpath"):
-            with (
-                self.subTest(override=value),
-                patch.dict(os.environ, {"OC_BOX_LOG_DIR": value}),
-            ):
-                self.assert_invalid()
         self.write({"logs": {"directory": "~/valid"}})
         with patch.dict(
             os.environ,

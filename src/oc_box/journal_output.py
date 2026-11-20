@@ -120,12 +120,9 @@ def _send_packet(payload):
 
 
 def emit(record) -> bool:
-    """Mirror an opted-in event via a bounded helper; never retry or log errors."""
+    """Send an explicitly selected host event via a bounded helper; never retry."""
     try:
-        if (
-            os.environ.get("OC_BOX_JOURNALD") != "1"
-            or os.environ.get("OC_BOX_CONTAINER") == "1"
-        ):
+        if os.environ.get("OC_BOX_CONTAINER") == "1":
             return False
         record = activity_log._sanitize(record)
         if record is None:

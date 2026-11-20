@@ -28,65 +28,102 @@ def _event(duration=1, **fields):
     }
 
 
+def _write_events(path, *records):
+    path.write_text("".join(json.dumps(record) + "\n" for record in records))
+    path.chmod(0o600)
+
+
 class LogsCliTests(unittest.TestCase):
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(prefix="oc-box-logs-cli-")
         self.addCleanup(temporary.cleanup)
         self.base = Path(temporary.name).resolve()
         self.root = self.base / "oc-box"
+        self.config = self.base / "config" / "oc-box" / "config.json"
         self.box = SimpleNamespace(BoxError=_BoxError, MARKER=".fixture-id")
         env = patch.dict(
             os.environ,
             {
+                "HOME": str(self.base),
                 "OC_BOX_CONTAINER": "0",
-                "OC_BOX_JOURNALD": "0",
                 "OC_BOX_STATE_HOME": str(self.root),
                 "XDG_CONFIG_HOME": str(self.base / "config"),
             },
+            clear=True,
         )
         env.start()
         self.addCleanup(env.stop)
-        os.environ.pop("OC_BOX_LOG_DIR", None)
 
     def run_cli(self, *args):
         with contextlib.redirect_stdout(io.StringIO()) as stdout:
             code = logs_cli.cli(self.box, args)
         return code, stdout.getvalue()
 
+    def configure_logs(self, **settings):
+        self.config.parent.mkdir(parents=True)
+        self.config.write_text(json.dumps({"logs": settings}))
+
     def test_path_reports_default_configured_and_invocation_override_without_writes(
         self,
     ):
-        config = self.base / "config" / "oc-box" / "config.json"
         configured = self.base / "custom logs"
-        override = self.base / "override"
-        self.assertEqual(
-            self.run_cli("--path"), (0, str(self.root / "log/activity.jsonl") + "\n")
-        )
-        config.parent.mkdir(parents=True)
-        config.write_text(json.dumps({"logs": {"directory": str(configured)}}))
-        before = config.read_bytes()
-        self.assertEqual(
-            self.run_cli("--path"), (0, str(configured / "activity.jsonl") + "\n")
-        )
-        with patch.dict(os.environ, {"OC_BOX_LOG_DIR": str(override)}):
+        override = self.base / "override logs"
+        with (
+            patch.object(logs_cli.activity_log, "_log_directory") as open_log,
+            patch.object(logs_cli.activity_log, "read_events") as read,
+            patch.object(logs_cli.activity_log, "record_event") as record,
+        ):
             self.assertEqual(
-                self.run_cli("--path"), (0, str(override / "activity.jsonl") + "\n")
+                self.run_cli("--path"),
+                (0, str(self.root / "log/activity.jsonl") + "\n"),
             )
+            self.configure_logs(directory=str(configured))
+            before = self.config.read_bytes()
+            configured_path = (0, str(configured / "activity.jsonl") + "\n")
+            self.assertEqual(self.run_cli("--path"), configured_path)
+            self.assertEqual(
+                self.run_cli("--path", "--log-dir", "~/override logs"),
+                (0, str(override / "activity.jsonl") + "\n"),
+            )
+            self.assertEqual(self.run_cli("--path"), configured_path)
+        open_log.assert_not_called()
+        read.assert_not_called()
+        record.assert_not_called()
         self.assertFalse(
             any(path.exists() for path in (self.root, configured, override))
         )
-        self.assertEqual(config.read_bytes(), before)
+        self.assertEqual(self.config.read_bytes(), before)
+
+    def test_path_with_override_still_rejects_selectors_follow_and_json(self):
+        with patch.object(logs_cli, "_configured_path") as path:
+            for args in (
+                ("--project", "."),
+                ("--workspace", _ID),
+                ("--follow",),
+                ("--json",),
+            ):
+                with (
+                    self.subTest(args=args),
+                    self.assertRaisesRegex(_BoxError, "does not take event filters"),
+                ):
+                    self.run_cli("--path", "--log-dir", str(self.base / "log"), *args)
+        path.assert_not_called()
 
     def test_path_and_read_refuse_invalid_config_with_fixed_help(self):
-        config = self.base / "config" / "oc-box" / "config.json"
-        config.parent.mkdir(parents=True)
-        config.write_text('{"logs":{"SystemMaxUse":"PRIVATE_SENTINEL"}}')
-        for flag in ("--path", "--json"):
-            with self.subTest(flag=flag), self.assertRaises(_BoxError) as raised:
-                self.run_cli(flag)
+        self.configure_logs(SystemMaxUse="PRIVATE_SENTINEL")
+        override = self.base / "override"
+        for args in (
+            ("--path",),
+            ("--json",),
+            ("--path", "--log-dir", str(override)),
+            ("--json", "--log-dir", str(override)),
+        ):
+            with self.subTest(args=args), self.assertRaises(_BoxError) as raised:
+                self.run_cli(*args)
             self.assertIn("configuration is invalid", str(raised.exception))
             self.assertNotIn("PRIVATE_SENTINEL", str(raised.exception))
         self.assertFalse(self.root.exists())
+        self.assertFalse(override.exists())
 
     def registration(self):
         project = self.base / "project"
@@ -124,13 +161,18 @@ class LogsCliTests(unittest.TestCase):
                 logs_cli.cli(self.box, ["--help"])
             self.assertEqual(result.exception.code, 0)
             self.assertIn("--follow", stdout.getvalue())
+            self.assertIn("--log-dir", stdout.getvalue())
         root.assert_not_called()
         read.assert_not_called()
 
     def test_bad_arguments_refuse_before_io(self):
+        from oc_box import journal_output
+
         with (
             patch.object(logs_cli.activity_log, "_root") as root,
+            patch.object(logs_cli, "_configured_path") as path,
             patch.object(logs_cli.activity_log, "read_events") as read,
+            patch.object(journal_output, "read_events") as system,
         ):
             for args in (
                 ("--project", ".", "--workspace", _ID),
@@ -138,16 +180,32 @@ class LogsCliTests(unittest.TestCase):
                 ("--limit", "10001"),
                 ("--limit", "1.5"),
                 ("--level", "warning"),
+                ("--log-dir",),
+                ("--log-dir", ""),
+                ("--log-dir", "/"),
+                ("--log-dir", "relative/PRIVATE_SENTINEL"),
+                ("--log-dir", str(self.base / "../PRIVATE_SENTINEL")),
+                ("--log-dir", str(self.base / "\nPRIVATE_SENTINEL")),
+                ("--journald", "--log-dir", str(self.base / "override")),
+                ("--journald", "--path"),
             ):
                 with (
                     self.subTest(args=args),
-                    contextlib.redirect_stderr(io.StringIO()),
+                    contextlib.redirect_stderr(io.StringIO()) as stderr,
                     self.assertRaises(SystemExit) as result,
                 ):
                     self.run_cli(*args)
                 self.assertEqual(result.exception.code, 2)
+                self.assertNotIn("PRIVATE_SENTINEL", stderr.getvalue())
+                if "--journald" in args and "--log-dir" in args:
+                    self.assertIn(
+                        "--log-dir cannot be combined with --journald",
+                        stderr.getvalue(),
+                    )
         root.assert_not_called()
+        path.assert_not_called()
         read.assert_not_called()
+        system.assert_not_called()
 
     def test_human_default_and_unscoped_json_show_fixed_records(self):
         legacy = _event()
@@ -178,8 +236,11 @@ class LogsCliTests(unittest.TestCase):
         )
 
     def test_missing_journal_is_empty_and_never_initialized(self):
+        override = self.base / "missing logs"
         self.assertEqual(self.run_cli("--json"), (0, ""))
+        self.assertEqual(self.run_cli("--log-dir", str(override), "--json"), (0, ""))
         self.assertFalse(self.root.exists())
+        self.assertFalse(override.exists())
 
     def test_linked_state_ancestor_is_empty_unscoped_and_refused_for_selectors(self):
         project, registration = self.registration()
@@ -202,7 +263,15 @@ class LogsCliTests(unittest.TestCase):
         ):
             with (
                 self.subTest(state_variable=state_variable),
-                patch.dict(os.environ, {state_variable: str(path)}, clear=True),
+                patch.dict(
+                    os.environ,
+                    {
+                        "HOME": str(self.base),
+                        "XDG_CONFIG_HOME": str(self.base / "config"),
+                        state_variable: str(path),
+                    },
+                    clear=True,
+                ),
             ):
                 self.assertEqual(self.run_cli("--json"), (0, ""))
                 with patch.object(logs_cli.activity_log, "read_events") as read:
@@ -215,6 +284,52 @@ class LogsCliTests(unittest.TestCase):
 
         self.assertTrue(alias.is_symlink())
         self.assertEqual((registration.read_bytes(), active.read_bytes()), before)
+
+    def test_log_dir_override_reads_only_selected_private_records(self):
+        project, _ = self.registration()
+        configured = self.base / "configured"
+        override = self.base / "override"
+        configured_record = _event(1, level="warn", workspace=_ID)
+        selected = _event(3, level="warn", workspace=_ID)
+        self.configure_logs(directory=str(configured))
+        for directory, records in (
+            (configured, [configured_record]),
+            (
+                override,
+                [
+                    _event(2, level="error", workspace=_ID),
+                    selected,
+                    _event(4, level="debug", workspace=_ID),
+                    _event(5, level="error", workspace="b" * 32),
+                ],
+            ),
+        ):
+            directory.mkdir(mode=0o700)
+            (directory / "activity.lock").touch(mode=0o600)
+            _write_events(directory / "activity.jsonl", *records)
+
+        for selector in (("--project", str(project)), ("--workspace", _ID)):
+            with self.subTest(selector=selector):
+                code, output = self.run_cli(
+                    "--log-dir",
+                    str(override),
+                    "--json",
+                    "--level",
+                    "warn",
+                    "--limit",
+                    "1",
+                    *selector,
+                )
+                self.assertEqual(code, 0)
+                self.assertEqual(json.loads(output), selected)
+
+        alias = self.base / "linked"
+        alias.symlink_to(override, target_is_directory=True)
+        self.assertEqual(self.run_cli("--log-dir", str(alias), "--json"), (0, ""))
+        code, output = self.run_cli("--json")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output), configured_record)
+        self.assertFalse((self.root / "log").exists())
 
     def test_project_and_id_resolve_same_exact_filter_even_after_project_removal(self):
         project, path = self.registration()
@@ -357,16 +472,34 @@ class LogsCliTests(unittest.TestCase):
             [d, e],
             [d, e],
         ]
+        override = self.base / "follow logs"
+        environment = dict(os.environ)
+        retained = iter(snapshots)
+
+        def read_snapshot(root, **_):
+            self.assertEqual(
+                logs_cli.activity_log.log_path(root), override / "activity.jsonl"
+            )
+            self.assertEqual(dict(os.environ), environment)
+            return next(retained)
+
         with (
             patch.object(
-                logs_cli.activity_log, "read_events", side_effect=snapshots
+                logs_cli.activity_log, "read_events", side_effect=read_snapshot
             ) as read,
             patch.object(
                 logs_cli.time, "sleep", side_effect=[None] * 7 + [KeyboardInterrupt]
             ) as sleep,
         ):
             code, output = self.run_cli(
-                "--json", "--follow", "--level", "warn", "--limit", "1"
+                "--json",
+                "--follow",
+                "--level",
+                "warn",
+                "--limit",
+                "1",
+                "--log-dir",
+                str(override),
             )
         self.assertEqual(code, 130)
         self.assertEqual(
@@ -387,6 +520,9 @@ class LogsCliTests(unittest.TestCase):
         )
         self.assertEqual(sleep.call_count, len(snapshots))
         self.assertTrue(all(0 < delay.args[0] <= 1 for delay in sleep.call_args_list))
+        self.assertEqual(
+            self.run_cli("--path"), (0, str(self.root / "log/activity.jsonl") + "\n")
+        )
 
     def test_private_follow_ignores_gap_and_resumes_without_replay(self):
         log = self.root / "log"
@@ -398,10 +534,7 @@ class LogsCliTests(unittest.TestCase):
         held = self.base / "held-rotation"
 
         def write(path, *durations):
-            path.write_text(
-                "".join(json.dumps(_event(duration)) + "\n" for duration in durations)
-            )
-            path.chmod(0o600)
+            _write_events(path, *(_event(duration) for duration in durations))
 
         write(log / "activity.jsonl.2", 1)
         write(middle, 2)
@@ -436,9 +569,11 @@ class LogsCliTests(unittest.TestCase):
     def test_journald_follow_does_not_forward_private_snapshot_option(self):
         from oc_box import journal_output
 
+        self.configure_logs(journald=False)
         first, second = _event(), _event(2)
         with (
             patch.object(logs_cli.activity_log, "read_events") as private,
+            patch.object(journal_output, "emit") as mirror,
             patch.object(
                 journal_output, "read_events", side_effect=[[first], [first, second]]
             ) as system,
@@ -453,6 +588,7 @@ class LogsCliTests(unittest.TestCase):
             system.call_args_list, [call(limit=10000, level="info", workspace=None)] * 2
         )
         private.assert_not_called()
+        mirror.assert_not_called()
 
     def test_broken_pipe_from_buffer_flush_ends_without_shutdown_error(self):
         read_fd, write_fd = os.pipe()

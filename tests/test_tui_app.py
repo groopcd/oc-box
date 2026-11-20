@@ -171,15 +171,18 @@ class DashboardInteractionTests(unittest.IsolatedAsyncioTestCase):
             linked = state.with_name("linked-state")
             linked.symlink_to(state, target_is_directory=True)
             catalog = SimpleNamespace(origin="workspace", store="a" * 32)
+            private_config = str(Path(temporary) / "config")
             with patch.dict(
-                os.environ, {"OC_BOX_STATE_HOME": str(linked), "OC_BOX_JOURNALD": "0"}
+                os.environ,
+                {"OC_BOX_STATE_HOME": str(linked), "XDG_CONFIG_HOME": private_config},
             ):
                 app = DashboardApp(DashboardBackend(box))
                 self.assertEqual(app.favorites.root, state / "ui")
                 app._journal("session.archived", catalog)
                 self.assertFalse((state / "log").exists())
             with patch.dict(
-                os.environ, {"OC_BOX_STATE_HOME": str(state), "OC_BOX_JOURNALD": "0"}
+                os.environ,
+                {"OC_BOX_STATE_HOME": str(state), "XDG_CONFIG_HOME": private_config},
             ):
                 app._journal("session.archived", catalog)
                 [record] = activity_log.read_events()

@@ -44,12 +44,12 @@ oc-box - persistent rootless Podman environments for mainline OpenCode.
 @chapter Synopsis
 
 @example
-oc-box [start] [--project PATH | --workspace ID] [START-OPTIONS]
-oc-box stop [--project PATH | --workspace ID]
-oc-box sync [--project PATH | --workspace ID]
-oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS]
+oc-box [start] [--project PATH | --workspace ID] [START-OPTIONS] [LIFECYCLE-LOG-OPTIONS]
+oc-box stop [--project PATH | --workspace ID] [LIFECYCLE-LOG-OPTIONS]
+oc-box sync [--project PATH | --workspace ID] [LIFECYCLE-LOG-OPTIONS]
+oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS] [LIFECYCLE-LOG-OPTIONS]
 oc-box repair [--project PATH | --workspace ID]
-oc-box terminal [--project PATH | --workspace ID] [--maintenance]
+oc-box terminal [--project PATH | --workspace ID] [--maintenance] [LIFECYCLE-LOG-OPTIONS]
 oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
 oc-box attach PATH --session ID [--project PATH | --workspace ID] [--text TEXT] [--send] [--acknowledge-risk]
 oc-box attach --broker --session ID [--project PATH | --workspace ID]
@@ -59,11 +59,11 @@ oc-box list
 oc-box distros
 oc-box doctor [--json] [--feature FEATURE ...]
 oc-box completion bash
-oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments]
+oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [LIFECYCLE-LOG-OPTIONS]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
-oc-box logs [--journald] [--project PATH | --workspace ID] [--level debug|info|warn|error] [--limit N] [--follow] [--json]
-oc-box logs --path
+oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level debug|info|warn|error] [--limit N] [--follow] [--json]
+oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
 oc-box upgrade --auto-update on|off
@@ -78,7 +78,9 @@ oc-box --version
 oc-box -h | --help
 @end example
 
-The command defaults to @code{start}. Place options before or after the command. Run the launcher on the host as your regular user, without sudo. It manages rootless Podman; container root is mapped to the unprivileged host user.
+The command defaults to @code{start}. For @code{start}, @code{reset}, @code{stop}, @code{sync} and @code{terminal}, options may appear before or after the command. For @code{logs} and @code{web}, put the command first. Run the launcher on the host as your regular user, without sudo. It manages rootless Podman; container root is mapped to the unprivileged host user.
+
+@code{LIFECYCLE-LOG-OPTIONS} are @code{[--journald | --no-journald] [--log-dir PATH] [--lifecycle-diagnostics]}. They apply only to the current invocation; see the [activity journal settings](#dashboard-state-and-activity-journal).
 
 @node Description
 @chapter Description
@@ -97,7 +99,7 @@ Startup and shutdown are quiet by default. On an interactive terminal, oc-box sh
 
 After a history sync or recovery attempt, oc-box reports one final history result: saved normally, recovered after stop, partial, failed, empty, or cleanup unverified. The recovery result itself carries the interruption and unconfirmed-background-completion caution; archived history does not prove work finished. Incomplete results retain guidance for retrying @code{oc-box sync} when appropriate. The presentation does not change lifecycle steps, recovery eligibility, history verification or exit codes.
 
-Use @code{oc-box logs --level debug} to inspect retained stage details. For additional launcher messages on a particular invocation, see [@code{OC_BOX_LIFECYCLE_DIAGNOSTICS=1}](#launcher-diagnostics).
+Use @code{oc-box logs --level debug} to inspect retained stage details. For additional launcher messages on a particular invocation, see [@code{--lifecycle-diagnostics}](#launcher-diagnostics).
 
 @section OpenCode versions
 
@@ -317,7 +319,7 @@ Spectacle/browser/Wayland/X11/portal combinations can expose a temporary file as
 
 Native browser draft storage, including **IndexedDB**, still stores attachment data. Sending can retain it in container history and disclose it to the selected provider; ordinary history synchronization still applies. Removal/detach is not guaranteed erasure or recall. Pairing/session cookies remain governed by native authentication; the adapter does not put the controller password into a URL, HTML, JavaScript, files or browser storage. Standard browser file authorization or desktop portal UI may still be required by the browser/desktop itself. Synthetic DOM/API checks are not an interactive Spectacle/browser or live rootless-Podman acceptance claim.
 
-After the last client exits, V2 final sync waits up to 30 seconds for the same private server's foreground sessions and unconsumed background jobs to settle. An idle persistent shell terminal does not block this wait. Timeout or an invalid activity response refuses live history export. Unless the guarded post-stop path below completes in full, history remains pending and the command returns nonzero. Normal cleanup still stops the container, so running work is not promised to continue. This is bounded checking, not an atomic freeze of every possible history producer. With [@code{OC_BOX_LIFECYCLE_DIAGNOSTICS=1}](#launcher-diagnostics), the @code{History wait timeout:} diagnostic reports the wait phase (@code{foreground-query}, @code{background-query} or @code{poll-delay}) and counts from the last complete, validated activity/job observation. Job counts distinguish running, completed, error and cancelled entries, with separate allowlisted shell/subagent/image kind counts; counts above 9999 appear as @code{9999+}. If no complete pair was validated, the observation is @code{unavailable}, not zero. These are previous observations, not proof of the current state or that a native request succeeded: a request failure at the deadline also retains the @code{activity-timeout} category. In this diagnostic mode the existing line keeps its format. A separate @code{History wait timing:} line is emitted only for @code{activity-timeout}, not on normal success:
+After the last client exits, V2 final sync waits up to 30 seconds for the same private server's foreground sessions and unconsumed background jobs to settle. An idle persistent shell terminal does not block this wait. Timeout or an invalid activity response refuses live history export. Unless the guarded post-stop path below completes in full, history remains pending and the command returns nonzero. Normal cleanup still stops the container, so running work is not promised to continue. This is bounded checking, not an atomic freeze of every possible history producer. With [@code{--lifecycle-diagnostics}](#launcher-diagnostics), the @code{History wait timeout:} diagnostic reports the wait phase (@code{foreground-query}, @code{background-query} or @code{poll-delay}) and counts from the last complete, validated activity/job observation. Job counts distinguish running, completed, error and cancelled entries, with separate allowlisted shell/subagent/image kind counts; counts above 9999 appear as @code{9999+}. If no complete pair was validated, the observation is @code{unavailable}, not zero. These are previous observations, not proof of the current state or that a native request succeeded: a request failure at the deadline also retains the @code{activity-timeout} category. In this diagnostic mode the existing line keeps its format. A separate @code{History wait timing:} line is emitted only for @code{activity-timeout}, not on normal success:
 
 @itemize @bullet
 @item
@@ -568,11 +570,14 @@ Read the [oc-box activity journal](#dashboard-state-and-activity-journal) on the
 
 By default, show the latest 100 retained entries at @code{info} or above. @code{--level debug} includes lower-severity stage detail; @code{--level warn} or @code{--level error} narrows the output. @code{--project PATH} and @code{--workspace ID} are mutually exclusive filters and require a valid workspace registration. With neither, show entries across workspaces, including entries with no workspace. Severity and workspace filters apply before the limit. Use @code{--follow} to keep watching after the initial output, and Ctrl-C to stop. Use @code{--json} for one validated event per line (JSON Lines), including when following. With no matches, JSON Lines output is empty, not @code{[]} or a placeholder. The default reader treats missing or unsafe private journal data as empty. Lifecycle detail can appear after the invocation finishes: history and shutdown diagnostics are queued so journal writes do not run inside verification deadlines or while a client lease is held.
 
-Use @code{--journald} to explicitly read this user's mirrored oc-box activity events through local @code{journalctl} with @code{--output-fields} support (systemd 236+). The same workspace selectors, severity thresholds, limit, follow and JSON Lines settings still apply; the system journal reader uses native journal priorities for severity. An unavailable reader reports fixed guidance to run @code{oc-box logs} without @code{--journald}; it never falls back automatically. The writer opt-in and system retention limits are described under [Dashboard state and activity journal](#dashboard-state-and-activity-journal).
+Use @code{--log-dir PATH} to read a different private journal for this invocation. It works with the private event filters or with @code{--path} to print the resulting pathname without opening the journal. It does not create the directory or change the saved policy.
+
+Use @code{--journald} to explicitly read this user's mirrored oc-box activity events through local @code{journalctl} with @code{--output-fields} support (systemd 236+). The same workspace selectors, severity thresholds, limit, follow and JSON Lines settings still apply; the system journal reader uses native journal priorities for severity. An unavailable reader reports fixed guidance to run @code{oc-box logs} without @code{--journald}; it never falls back automatically. Do not combine @code{--journald} with @code{--log-dir} or @code{--path}. The writer opt-in and system retention limits are described under [Dashboard state and activity journal](#dashboard-state-and-activity-journal).
 
 @example
 oc-box logs
 oc-box logs --path
+oc-box logs --log-dir ~/.local/state/oc-box-diagnostics --path
 oc-box logs --project ~/devel/demo --level debug --limit 50
 oc-box logs --workspace WORKSPACE_ID --level warn --follow --json
 oc-box logs --journald --level warn --follow --json
@@ -870,11 +875,25 @@ For @code{logs}, keep displaying newly retained matching entries after the initi
 
 @section --journald
 
+For @code{start} (including when the command is omitted), @code{reset}, @code{stop}, @code{sync}, @code{terminal} and @code{web}, enable best-effort system journal mirroring for this invocation, overriding the saved @code{logs.journald} choice. The private journal remains primary. Do not combine with @code{--no-journald}.
+
 For @code{logs}, read this user's mirrored activity events from the local system journal instead of the private file. Requires a usable local @code{journalctl} and access to those records. It does not enable mirroring, change journal settings or fall back to the private file.
+
+@section --no-journald
+
+For the same launcher commands as @code{--journald}, disable mirroring for this invocation even if saved @code{logs.journald} is @code{true}. This does not disable private journaling or change the saved choice. It does not apply to @code{logs}.
+
+@section --log-dir PATH
+
+Override the saved @code{logs.directory} for this invocation of @code{start} (including when the command is omitted), @code{reset}, @code{stop}, @code{sync}, @code{terminal}, @code{web} or private @code{logs}. @code{PATH} is a directory, not a logfile. It must be absolute after @code{~} expansion and cannot be @code{/} or include a @code{..} path component. An append may create the directory privately; a read, including @code{logs --path}, never does. Old logs are not moved or deleted. Do not combine with @code{logs --journald}.
+
+@section --lifecycle-diagnostics
+
+Show expanded launcher stage messages and fixed-category diagnostics for this invocation of @code{start} (including when the command is omitted), @code{reset}, @code{stop}, @code{sync}, @code{terminal} or @code{web}. Quiet output is the default and there is no saved diagnostic setting. This option does not change native OpenCode output, journaling or lifecycle results. See [Launcher diagnostics](#launcher-diagnostics).
 
 @section --path
 
-For @code{logs}, display the configured private @code{activity.jsonl} pathname without reading or creating the journal. Use @code{oc-box logs --path} by itself, not with @code{--journald}, workspace filters, @code{--follow}, or @code{--json}.
+For @code{logs}, display the effective private @code{activity.jsonl} pathname without reading or creating the journal. Use @code{oc-box logs --path} alone or with @code{--log-dir PATH}, not with @code{--journald}, workspace filters, @code{--follow}, or @code{--json}.
 
 @section --about
 
@@ -1351,10 +1370,6 @@ HTTP endpoint keys in global config using localhost, 127.0.0.1, or ::1 are rewri
 
 @code{OC_BOX_STATE_HOME} overrides the host workspace registry root. Otherwise it is @code{$XDG_STATE_HOME/oc-box}, defaulting to @code{~/.local/state/oc-box}. Use the same registry when looking up existing workspace IDs; changing it does not migrate old resources automatically.
 
-@code{OC_BOX_LIFECYCLE_DIAGNOSTICS=1} opts the host launcher into expanded lifecycle messages for troubleshooting or compatible scripted checks. It is an output setting, not a lifecycle, history or credential option. See [Launcher diagnostics](#launcher-diagnostics).
-
-@code{OC_BOX_JOURNALD=1} opts the host launcher into best-effort mirroring of successfully appended activity events to existing local systemd-journald. It does not replace the private file or change the default @code{oc-box logs} reader.
-
 @code{XDG_CONFIG_HOME} selects the source global OpenCode/oc-box configuration; default @code{~/.config}. @code{XDG_DATA_HOME} selects the normal host OpenCode data root; default @code{~/.local/share}. The installer itself uses fixed @code{~/.local} paths. Container XDG paths use the private home, not host XDG directories.
 
 Without an explicit workspace policy, normal V2 owning launches use all current host vault entries. A present vault replaces ambient automatic @code{_API_KEY}/ @code{_TOKEN} and @code{pass_env} forwarding, including legacy @code{OPENCODE_AUTH_CONTENT} overrides; no vault present retains env-file fallback with setup guidance. Ordinary native OpenCode saved/OAuth credential refresh/copy remains independent in every mode. V1 and explicit @code{env} policy retain the legacy rules below; @code{selected} policy instead uses only selected credential names. @code{--no-vault} is a one-owning-invocation V2 compatibility opt-out, not a saved default or a way to refresh an attached service.
@@ -1458,6 +1473,7 @@ Generated entries use fixed categories and allowlisted metadata, such as a works
 @{
   "logs": @{
     "directory": "~/.local/state/oc-box-logs",
+    "journald": false,
     "SystemMaxFileSize": "512K",
     "SystemMaxFiles": 4,
     "SystemMaxUse": "2M",
@@ -1468,18 +1484,18 @@ Generated entries use fixed categories and allowlisted metadata, such as a works
 @}
 @end example
 
-Set @code{OC_BOX_LOG_DIR} to override only @code{logs.directory} for an invocation. A custom directory must be absolute after @code{~} expansion. oc-box can create it privately when it appends; it won't fix unsafe permissions or follow symlinks. Changing it does not move or delete the previous journal.
+Use @code{--log-dir PATH} to override only @code{logs.directory} for one lifecycle invocation or private @code{oc-box logs} read. A custom directory must be absolute after @code{~} expansion. oc-box can create it privately on append; it won't fix unsafe permissions or follow symlinks. Changing the directory does not move or delete the previous journal, alter rotation settings, or change which workspace registry is used.
 
 | Private setting | Meaning | Default | | --- | --- | --- | | @code{SystemMaxFileSize} | Size that triggers rotation, 1 KiB–4 MiB | @code{256K} | | @code{SystemMaxFiles} | Active file plus rotations, 1–16 | @code{4} | | @code{SystemMaxUse} | Total retained journal bytes, up to 16 MiB | File size × count, capped at 16 MiB | | @code{SystemKeepFree} | Filesystem free-space reserve, in bytes; zero disables it | @code{0} | | @code{MaxFileSec} | Age limit for the active file; zero disables it | @code{0} | | @code{MaxRetentionSec} | Age limit for retained journal files; zero disables it | @code{0} |
 
-Size settings accept bytes or a single binary @code{K}, @code{M}, or @code{G} suffix. Age settings accept seconds or a single @code{s}, @code{m}, @code{h}, @code{d}, or @code{w} suffix, up to one year. Rotation and expiry are checked on append; there is no timer, and a reader never prunes files. Age cleanup applies to whole files, not individual entries. Only the private journal's own validated files are eligible. If the requested free-space reserve cannot be met, an append may be skipped. Invalid settings do not silently select a different journal or change lifecycle results. These settings borrow journald's names; **they do not edit @code{journald.conf} or change the system journal**.
+Size settings accept bytes or a single binary @code{K}, @code{M}, or @code{G} suffix. Age settings accept seconds or a single @code{s}, @code{m}, @code{h}, @code{d}, or @code{w} suffix, up to one year. Rotation and expiry are checked on append; there is no timer, and a reader never prunes files. Age cleanup applies to whole files, not individual entries. Only the private journal's own validated files are eligible. If the requested free-space reserve cannot be met, an append may be skipped. Explicit flags override only valid saved policy, without changing host configuration or the environment. Invalid saved @code{logs} policy fails closed even when a flag is present: private logging does not silently select a different journal, and a failed append does not change lifecycle results. These settings borrow journald's names; **they do not edit @code{journald.conf} or change the system journal**.
 
-**Optional system journal mirror.** Set @code{OC_BOX_JOURNALD=1} in the host launcher's environment. oc-box mirrors only validated activity events after they have been successfully appended to the private file. The file remains the primary journal. Mirroring uses native journal priorities and never includes raw output, authentication data or secrets. A missing sink or delivery error cannot change lifecycle results. No daemon is started, installed or reconfigured; an ordinary installation does not require systemd.
+**Optional system journal mirror.** The host @code{logs.journald} setting is a JSON boolean and defaults to @code{false}. Set it to @code{true} to enable mirroring by default, or use @code{--journald} or @code{--no-journald} on a lifecycle command to choose for one invocation. oc-box mirrors only validated activity events after they have been successfully appended to the private file. The file remains the primary journal. Mirroring uses native journal priorities and never includes raw output, authentication data or secrets. A missing sink or delivery error cannot change lifecycle results. No daemon is started, installed or reconfigured; an ordinary installation does not require systemd.
 
-The system journal can be visible to administrators and other authorized journal viewers. It follows system retention and priority policy, which may discard @code{debug} entries, so it need not contain the same history as the file. On the host, read the mirror explicitly with @code{oc-box logs --journald}, or query the matching records directly:
+The system journal can be visible to administrators and other authorized journal viewers. It follows system retention and priority policy, which may discard @code{debug} entries, so it need not contain the same history as the file. @code{oc-box logs} still defaults to the private file regardless of the writer setting. On the host, read the mirror explicitly with @code{oc-box logs --journald}, or query the matching records directly:
 
 @example
-OC_BOX_JOURNALD=1 oc-box start --project ~/devel/demo
+oc-box start --project ~/devel/demo --journald
 oc-box logs --journald
 journalctl SYSLOG_IDENTIFIER=oc-box "_UID=$(id -u)" OC_BOX_FORMAT=oc-box-activity-v1
 @end example
@@ -1569,10 +1585,10 @@ The last command deletes its remaining managed resources and recorded host archi
 Use @code{oc-box logs --level debug} to inspect retained activity details without restarting a workspace. To see the launcher's expanded stage messages and fixed-category diagnostics during an invocation, opt in explicitly:
 
 @example
-OC_BOX_LIFECYCLE_DIAGNOSTICS=1 oc-box start --project ~/devel/demo
+oc-box start --project ~/devel/demo --lifecycle-diagnostics
 @end example
 
-Scripts that consume older verbose lifecycle messages should opt in explicitly instead of expecting routine start/done text in a pipe. The setting does not enable native debug logging, add raw child output to the journal or change lifecycle behavior. Continue to treat native output and interactive prompts as separate from the activity journal.
+Scripts that consume older verbose lifecycle messages should pass the flag to the launcher invocation under test instead of expecting routine start/done text in a pipe. The flag does not enable native debug logging, add raw child output to the journal or change lifecycle behavior. Continue to treat native output and interactive prompts as separate from the activity journal.
 
 @section Private output capture and uv Python
 
@@ -1705,7 +1721,7 @@ The framework's OS package is normally @code{bash-completion} on all seven suppo
 
 GitHub/source installs place it in @code{~/.local/share/bash-completion/completions/oc-box} and refresh it on upgrades. They also retain a release-local copy at @code{completions/oc-box}. Wheels contain the same package resource and install another copy under their Python environment's @code{share/bash-completion/completions/oc-box}; uv/pipx private environments may not be on Bash's autoload search path, so use either activation method above. From a source checkout, @code{source completions/oc-box} works directly in Bash.
 
-Completion suggests commands, context-appropriate options, vault actions, distros/aliases, doctor features, auto-update and credential-mode choices. Credential modes include @code{env}, @code{selected}, and @code{vault}; @code{--no-vault} is offered for start/reset/web only (including the default start context). Completion does not inspect the OpenCode major version or whether a service is already active; the command itself rejects V1 or attached-client use of @code{--no-vault}. @code{--host-drop} and @code{--no-host-drop} startup flags are offered only for default/start/reset TUI clients, not web, terminal or the separate dashboard. The clipboard enable/disable and symlink startup flags use the same command scope. The separate @code{preferences --host-drop}, @code{--host-clipboard} and @code{--host-clipboard-symlinks} settings complete @code{on}/@code{off}. Direct-TTY, native-version and host-input requirements are checked by the command, not during completion. @code{--project} completes directories; backup archive inputs, @code{--output}, and @code{--identity} complete paths, including spaces. Both @code{--option VALUE} and @code{--option=VALUE} are supported. Press Tab after @code{oc-box } or @code{oc-box backup --} to see candidates. Completion uses only Bash builtins and local pathname expansion: it does not run oc-box on each Tab, query Podman, contact providers, read vault contents, or guess passwords, credential names, session/workspace IDs, or model identifiers.
+Completion suggests commands, context-appropriate options, vault actions, distros/aliases, doctor features, auto-update and credential-mode choices. Credential modes include @code{env}, @code{selected}, and @code{vault}; @code{--no-vault} is offered for start/reset/web only (including the default start context). Completion does not inspect the OpenCode major version or whether a service is already active; the command itself rejects V1 or attached-client use of @code{--no-vault}. @code{--host-drop} and @code{--no-host-drop} startup flags are offered only for default/start/reset TUI clients, not web, terminal or the separate dashboard. The clipboard enable/disable and symlink startup flags use the same command scope. The separate @code{preferences --host-drop}, @code{--host-clipboard} and @code{--host-clipboard-symlinks} settings complete @code{on}/@code{off}. Direct-TTY, native-version and host-input requirements are checked by the command, not during completion. @code{--project} and @code{--log-dir} complete directories; backup archive inputs, @code{--output}, and @code{--identity} complete paths, including spaces. Both @code{--option VALUE} and @code{--option=VALUE} are supported. Press Tab after @code{oc-box } or @code{oc-box backup --} to see candidates. Completion uses only Bash builtins and local pathname expansion: it does not run oc-box on each Tab, query Podman, contact providers, read vault contents, or guess passwords, credential names, session/workspace IDs, or model identifiers.
 
 @section Python package installations
 

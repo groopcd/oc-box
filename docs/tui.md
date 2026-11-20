@@ -583,10 +583,14 @@ The default oc-box activity source is the private rotating JSON-lines journal
 the file is `~/.local/state/oc-box/log/activity.jsonl`. Default rotations are
 `activity.jsonl.1` through `activity.jsonl.3`: four files capped at 256 KiB each.
 Files use mode 0600 and private directories 0700; readers never create journal
-files. The dashboard follows the same
+files. The dashboard uses the saved host
 [log-directory and rotation settings](cli.md#dashboard-state-and-activity-journal)
-as `oc-box logs`. Use
-`oc-box logs --path` to see the configured private pathname.
+that bare `oc-box logs` uses. Run `oc-box logs --path` to see that private
+pathname. A lifecycle command's one-off `--log-dir PATH` does not change the
+dashboard source; use `oc-box logs --log-dir PATH` to inspect that private
+journal. Optional system journal mirroring does not change the dashboard
+source either. To read the mirror, use the separate `oc-box logs --journald`
+command.
 
 The dashboard's oc-box source shares validated severity and message formatting
 with the read-only host command [`oc-box logs`](cli.md#logs). The dashboard

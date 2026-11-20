@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from oc_box import activity_log, journal_output, lifecycle_output
+from oc_box import activity_log, journal_output, lifecycle_output, log_config
 from oc_box import oc_box as box
 
 WORKSPACE = "a" * 32
@@ -33,6 +33,12 @@ class LifecycleOutputTests(unittest.TestCase):
         environment.start()
         self.addCleanup(environment.stop)
 
+    def saved_logs(self, **settings):
+        config = Path(os.environ["XDG_CONFIG_HOME"]) / "oc-box/config.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"logs": settings}))
+        return config
+
     def test_scoped_report_context_resets_after_error_and_nested_invocation(self):
         self.assertFalse(lifecycle_output.concise())
         with lifecycle_output.invocation("start", self.root):
@@ -51,18 +57,18 @@ class LifecycleOutputTests(unittest.TestCase):
         self.assertFalse(self.root.exists())
 
     def test_entrypoint_enables_concise_output_and_logs_only_allowlisted_metadata(self):
-        for verbose in ("0", "1"):
+        for verbose in (False, True):
             with self.subTest(verbose=verbose):
 
                 def run_start(verbose=verbose):
-                    self.assertIs(lifecycle_output.concise(), verbose == "0")
+                    self.assertIs(lifecycle_output.concise(), not verbose)
                     lifecycle_output.bind_workspace(WORKSPACE)
                     display = io.StringIO()
                     with box.loading_stage(
                         "PRIVATE_STAGE_LABEL", stage="configuration", stream=display
                     ):
                         pass
-                    self.assertIs(bool(display.getvalue()), verbose == "1")
+                    self.assertIs(bool(display.getvalue()), verbose)
                     # The diagnostic input is not a free-form message sink.
                     lifecycle_output.record(
                         "history.result", level="warn", reason="DO_NOT_PERSIST"
@@ -70,8 +76,15 @@ class LifecycleOutputTests(unittest.TestCase):
                     return 0
 
                 with (
-                    patch.dict(os.environ, {"OC_BOX_LIFECYCLE_DIAGNOSTICS": verbose}),
-                    patch.object(sys, "argv", ["oc-box", "start"]),
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "oc-box",
+                            "start",
+                            *(["--lifecycle-diagnostics"] if verbose else []),
+                        ],
+                    ),
                     patch.object(box, "main", side_effect=run_start),
                 ):
                     self.assertEqual(box.entrypoint(), 0)
@@ -143,7 +156,7 @@ class LifecycleOutputTests(unittest.TestCase):
                 activity_log.record_event("command.started", command="sync")
             )
             emit.assert_not_called()
-            with patch.dict(os.environ, {"OC_BOX_JOURNALD": "1"}):
+            with log_config.overrides(journald=True):
                 self.assertFalse(
                     activity_log.record_event("history.result", reason="DO_NOT_PERSIST")
                 )
@@ -190,8 +203,8 @@ class LifecycleOutputTests(unittest.TestCase):
         self.assertFalse(self.root.exists())
 
     def test_misordered_read_only_logs_invocation_does_not_append_or_mirror(self):
+        self.saved_logs(journald=True)
         with (
-            patch.dict(os.environ, {"OC_BOX_JOURNALD": "1"}),
             patch.object(sys, "argv", ["oc-box", "--project", ".", "logs"]),
             patch.object(journal_output, "emit") as mirror,
             contextlib.redirect_stderr(io.StringIO()) as errors,
@@ -200,6 +213,139 @@ class LifecycleOutputTests(unittest.TestCase):
             self.assertIn("Use 'oc-box logs' first", errors.getvalue())
         mirror.assert_not_called()
         self.assertFalse(self.root.exists())
+
+    def test_logging_flags_scope_every_launcher_event_without_mutating_config_or_env(
+        self,
+    ):
+        saved = self.root.parent / "saved"
+        config = self.saved_logs(directory=str(saved), journald=False)
+        before, environment = config.read_bytes(), dict(os.environ)
+        cases = (
+            ([], "start"),
+            (["start"], "start"),
+            (["reset"], "reset"),
+            (["--project", ".", "sync"], "sync"),
+            (["stop"], "stop"),
+            (["terminal"], "terminal"),
+            (["web"], "web"),
+        )
+        for index, (prefix, command) in enumerate(cases):
+            with self.subTest(command=command, prefix=prefix):
+                selected = self.root.parent / f"override-{index}"
+
+                def launch(selected=selected, command=command):
+                    self.assertEqual(dict(os.environ), environment)
+                    policy = log_config.load()
+                    self.assertEqual(policy.directory, selected)
+                    self.assertTrue(policy.journald)
+                    self.assertEqual(lifecycle_output.command_name(), command)
+                    self.assertFalse(lifecycle_output.concise())
+                    lifecycle_output.record(
+                        "lifecycle.stage", stage="configuration", level="debug"
+                    )
+                    return 0
+
+                with (
+                    patch.object(
+                        sys,
+                        "argv",
+                        [
+                            "oc-box",
+                            *prefix,
+                            "--log-dir",
+                            str(selected),
+                            "--journald",
+                            "--lifecycle-diagnostics",
+                        ],
+                    ),
+                    patch.object(box, "main", side_effect=launch),
+                    patch.object(journal_output, "emit") as mirror,
+                ):
+                    self.assertEqual(box.entrypoint(), 0)
+                    self.assertEqual(
+                        [event.args[0]["event"] for event in mirror.call_args_list],
+                        ["command.started", "lifecycle.stage", "command.finished"],
+                    )
+                    self.assertTrue(
+                        all(
+                            event.args[0]["command"] == command
+                            for event in mirror.call_args_list
+                        )
+                    )
+                self.assertTrue((selected / "activity.jsonl").is_file())
+                self.assertEqual(log_config.load().directory, saved)
+                self.assertFalse(log_config.load().journald)
+                self.assertIsNone(lifecycle_output.command_name())
+                self.assertEqual(config.read_bytes(), before)
+        self.assertFalse(saved.exists())
+        self.assertFalse(self.root.exists())
+
+    def test_no_journald_overrides_saved_enable_for_one_launcher(self):
+        config = self.saved_logs(journald=True)
+        before = config.read_bytes()
+        with (
+            patch.object(sys, "argv", ["oc-box", "sync", "--no-journald"]),
+            patch.object(box, "main", return_value=0),
+            patch.object(journal_output, "emit") as mirror,
+        ):
+            self.assertEqual(box.entrypoint(), 0)
+            mirror.assert_not_called()
+        self.assertEqual(len(activity_log.read_events(self.root)), 2)
+        self.assertTrue(log_config.load().journald)
+        self.assertEqual(config.read_bytes(), before)
+
+    def test_incompatible_flags_refuse_before_lifecycle_or_journal(self):
+        self.saved_logs(journald=True)
+        directory = self.root.parent / "must-not-be-created"
+        for arguments in (
+            ["--status", "--journald"],
+            ["--log-dir", str(directory), "--journald", "web"],
+            ["upgrade", "--check", "--journald"],
+            ["upgrade", "--check", "--journa"],
+            ["tui", "--read-only", "--log-dir", str(directory)],
+        ):
+            with (
+                self.subTest(arguments=arguments),
+                patch.object(sys, "argv", ["oc-box", *arguments]),
+                patch.object(box, "main") as main,
+                patch.object(journal_output, "emit") as mirror,
+                contextlib.redirect_stderr(io.StringIO()),
+            ):
+                self.assertEqual(box.entrypoint(), 1)
+                main.assert_not_called()
+                mirror.assert_not_called()
+            self.assertFalse(directory.exists())
+            self.assertFalse(self.root.exists())
+
+    def test_abbreviated_status_is_read_only_even_when_saved_mirroring_is_enabled(self):
+        self.saved_logs(journald=True)
+        with (
+            patch.object(sys, "argv", ["oc-box", "start", "--statu"]),
+            patch.object(box, "report_status", return_value=0) as report,
+            patch.object(journal_output, "emit") as mirror,
+        ):
+            self.assertEqual(box.entrypoint(), 0)
+            report.assert_called_once()
+            mirror.assert_not_called()
+        self.assertFalse(self.root.exists())
+
+    def test_direct_main_can_select_options_without_harness_environment_switches(self):
+        directory = self.root.parent / "direct"
+
+        def launch(args, _argv):
+            self.assertEqual(args.command, "stop")
+            self.assertEqual(log_config.load().directory, directory)
+            self.assertTrue(log_config.load().journald)
+            self.assertTrue(lifecycle_output.concise())
+            return 0
+
+        with patch.object(box, "_main_command", side_effect=launch):
+            self.assertEqual(
+                box.main(["stop", "--log-dir", str(directory), "--journald"]), 0
+            )
+        self.assertIsNone(log_config.load().directory)
+        self.assertFalse(log_config.load().journald)
+        self.assertFalse(directory.exists())
 
     def test_already_reported_history_failure_does_not_print_a_second_error(self):
         for error in (

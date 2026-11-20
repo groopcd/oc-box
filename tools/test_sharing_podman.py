@@ -1364,23 +1364,21 @@ def child(args, loaded, *, control=None):
                 ):
                     operation = "reset" if args.reset else "start"
                     owner_stage(control, "owner-launch")
+                    arguments = [
+                        operation,
+                        "--project",
+                        str(root / args.project_name),
+                        "--distro",
+                        args.distro,
+                        "--no-vault",
+                    ]
                     # The explicit-stop oracle checks one legacy pending line.
-                    with (
-                        patch.dict(os.environ, {"OC_BOX_LIFECYCLE_DIAGNOSTICS": "1"})
-                        if args.expect_stop
-                        else contextlib.nullcontext()
-                    ):
-                        code = entrypoint(
-                            box,
-                            [
-                                operation,
-                                "--project",
-                                str(root / args.project_name),
-                                "--distro",
-                                args.distro,
-                                "--no-vault",
-                            ],
-                        )
+                    # Older source parsers cannot opt in via this flag.
+                    if args.expect_stop:
+                        flag = "--lifecycle-diagnostics"
+                        if flag in box.parser()._option_string_actions:
+                            arguments.append(flag)
+                    code = entrypoint(box, arguments)
                     if code != 0:
                         sys.stderr.flush()
                         descriptor = sys.stderr.fileno()

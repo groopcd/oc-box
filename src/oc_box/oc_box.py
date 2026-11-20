@@ -32,6 +32,7 @@ if __package__:
         history_reader,
         history_recovery,
         lifecycle_output,
+        log_config,
         native_tabs,
         opencode_compat,
         opencode_v2_io,
@@ -49,6 +50,7 @@ else:
     import history_reader
     import history_recovery
     import lifecycle_output
+    import log_config
     import native_tabs
     import opencode_compat
     import opencode_v2_io
@@ -4267,6 +4269,7 @@ def parser():
     result.add_argument(
         "-y", "--yes", action="store_true", help="skip purge confirmation"
     )
+    log_config.add_launch_arguments(result)
     return result
 
 
@@ -4400,6 +4403,48 @@ def completion_parser():
     return result
 
 
+_LOGGING_COMMANDS = frozenset({"start", "reset", "stop", "sync", "terminal", "web"})
+_LOGGING_FLAGS = ("--log-dir", "--journald", "--no-journald", "--lifecycle-diagnostics")
+_LOGGING_SCOPE_ERROR = "Launcher logging options apply only to start, reset, stop, sync, terminal, and web."
+_WEB_ORDER_ERROR = (
+    "Use 'oc-box web' first, followed by --project/--workspace/--port/--no-open."
+)
+
+
+def _logging_options_requested(args):
+    return (
+        args.journald is not None
+        or args.log_dir is not None
+        or args.lifecycle_diagnostics
+    )
+
+
+def _informational_request(args):
+    return any(
+        getattr(args, name, False) for name in ("status", "version", "about", "json")
+    )
+
+
+def _validate_logging_options(args):
+    if _logging_options_requested(args) and (
+        args.command not in _LOGGING_COMMANDS or _informational_request(args)
+    ):
+        raise BoxError(_LOGGING_SCOPE_ERROR)
+
+
+def _has_launcher_logging_flag(arguments):
+    """Identify otherwise unsupported flags before journaling another command."""
+    for argument in arguments:
+        if argument == "--":
+            break
+        flag = argument.partition("=")[0]
+        if flag.startswith("--") and any(
+            option.startswith(flag) for option in _LOGGING_FLAGS
+        ):
+            return True
+    return False
+
+
 def main(argv=None):
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == "logs":
@@ -4469,6 +4514,9 @@ def main(argv=None):
         args.web_session = web.session
         args.no_vault = web.no_vault
         args.attachments = web.attachments
+        args.log_dir = web.log_dir
+        args.journald = web.journald
+        args.lifecycle_diagnostics = web.lifecycle_diagnostics
         args._opencode_release = detect_opencode_release()
         if opencode_compat.major(args._opencode_release) != 2:
             raise BoxError(
@@ -4486,6 +4534,21 @@ def main(argv=None):
         workspace_service.preflight_port(web.port)
     else:
         args = parser().parse_args(argv)
+    _validate_logging_options(args)
+    if _logging_options_requested(args) and lifecycle_output.command_name() is None:
+        # Direct callers may explicitly select CLI behavior. Without options,
+        # source-bound harnesses retain the legacy console renderer.
+        with (
+            log_config.overrides(directory=args.log_dir, journald=args.journald),
+            lifecycle_output.invocation(
+                args.command, verbose=args.lifecycle_diagnostics
+            ),
+        ):
+            return _main_command(args, argv)
+    return _main_command(args, argv)
+
+
+def _main_command(args, argv):
     lifecycle_output.bind_command(args.command)
     if args.command == "logs":
         raise BoxError("Use 'oc-box logs' first, followed by its filters; see --help.")
@@ -4508,9 +4571,7 @@ def main(argv=None):
             "Use 'oc-box preferences' first, followed by its workspace selector."
         )
     if args.command == "web" and not hasattr(args, "port"):
-        raise BoxError(
-            "Use 'oc-box web' first, followed by --project/--workspace/--port/--no-open."
-        )
+        raise BoxError(_WEB_ORDER_ERROR)
     if args.maintenance and args.command != "terminal":
         raise BoxError("--maintenance applies only to terminal.")
     if args.image_preview and (
@@ -5164,10 +5225,32 @@ def entrypoint():
     command = (
         arguments[0] if arguments and not arguments[0].startswith("-") else "start"
     )
-    if arguments and arguments[0].startswith("-") and not informational:
-        # A selector-first command may be read-only. Determine its actual
-        # command before any journal append or mirroring, even if main refuses it.
-        command = parser().parse_args(arguments).command
+    launch_options = None
+    try:
+        if command == "web":
+            launch_options = workspace_service.web_parser().parse_args(arguments[1:])
+            launch_options.command = command
+        elif command in _LOGGING_COMMANDS:
+            # A selector-first command may be read-only. Use the actual parser
+            # before any journal append; only valid options can select a sink.
+            launch_options = parser().parse_args(arguments)
+            command = launch_options.command
+            if command == "web":
+                raise BoxError(_WEB_ORDER_ERROR)
+        elif (
+            command != "logs"
+            and not informational
+            and _has_launcher_logging_flag(arguments[1:])
+        ):
+            raise BoxError(_LOGGING_SCOPE_ERROR)
+        if launch_options is not None:
+            _validate_logging_options(launch_options)
+            # Argparse accepts abbreviations such as --statu. The parsed
+            # request, not the spelling in argv, determines read-only behavior.
+            informational = informational or _informational_request(launch_options)
+    except BoxError as exc:
+        print(f"oc-box: {exc}", file=sys.stderr)
+        return 1
     journaled = (
         command
         in {
@@ -5217,13 +5300,19 @@ def entrypoint():
 
     reporting = (
         lifecycle_output.invocation(
-            command, verbose=os.environ.get("OC_BOX_LIFECYCLE_DIAGNOSTICS") == "1"
+            command, verbose=launch_options.lifecycle_diagnostics
         )
-        if journaled
-        and command in {"start", "reset", "web", "terminal", "sync", "stop"}
+        if journaled and command in _LOGGING_COMMANDS
         else contextlib.nullcontext()
     )
-    with reporting:
+    policy = (
+        log_config.overrides(
+            directory=launch_options.log_dir, journald=launch_options.journald
+        )
+        if launch_options is not None and command in _LOGGING_COMMANDS
+        else contextlib.nullcontext()
+    )
+    with policy, reporting:
         try:
             journal("command.started")
             result = main()

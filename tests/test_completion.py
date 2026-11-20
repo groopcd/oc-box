@@ -113,6 +113,20 @@ fi
         self.assertEqual(self.complete("logs", "--level=w"), ["warn"])
         self.assertEqual(self.complete("logs", "--limit", ""), [])
         self.assertEqual(self.complete("sync", "--fo"), [])
+        controls = {
+            "--journald",
+            "--no-journald",
+            "--log-dir",
+            "--lifecycle-diagnostics",
+        }
+        for command in ("start", "reset", "stop", "sync", "terminal", "web"):
+            self.assertTrue(controls.issubset(self.complete(command, "--")))
+        for command in ("status", "repair", "upgrade", "tui"):
+            self.assertTrue(controls.isdisjoint(self.complete(command, "--")))
+        self.assertEqual(
+            controls.intersection(self.complete("logs", "--")),
+            {"--journald", "--log-dir"},
+        )
         credential_modes = next(
             action.choices
             for action in box.parser()._actions

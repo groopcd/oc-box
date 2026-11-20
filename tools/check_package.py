@@ -407,8 +407,22 @@ def check(directory, *, with_vault=False, with_tui=False):
             "--json",
             "--journald",
             "--path",
+            "--log-dir",
         ):
             assert option in log_help, option
+        begin_help = run(cli, "start", "--help")
+        for option in (
+            "--journald",
+            "--no-journald",
+            "--log-dir",
+            "--lifecycle-diagnostics",
+        ):
+            assert option in begin_help, option
+        logdir = work / "one-invocation-log"
+        assert run(cli, "logs", "--log-dir", str(logdir), "--path").strip() == str(
+            logdir / "activity.jsonl"
+        )
+        assert not logdir.exists()
         assert (
             run(python, "-m", "oc_box", "--version").strip()
             == "oc-box " + build["version"]

@@ -11,9 +11,10 @@ from contextlib import ExitStack
 from pathlib import Path
 
 if __package__:
-    from . import activity_log
+    from . import activity_log, log_config
 else:
     import activity_log
+    import log_config
 
 
 _DEFAULT_LIMIT = 100
@@ -72,7 +73,13 @@ def parser():
     source.add_argument(
         "--path",
         action="store_true",
-        help="show the configured private journal path without reading it",
+        help="show the selected private journal path without reading it",
+    )
+    result.add_argument(
+        "--log-dir",
+        type=log_config.directory_argument,
+        metavar="PATH",
+        help="override the private journal directory for this read (not with --journald)",
     )
     return result
 
@@ -292,49 +299,53 @@ def _configured_path(box, root=None):
 def cli(box, arguments):
     try:
         try:
-            args = parser().parse_args(arguments)
+            options = parser()
+            args = options.parse_args(arguments)
+            if args.journald and args.log_dir is not None:
+                options.error("--log-dir cannot be combined with --journald")
         except SystemExit as error:
             if error.code == 0:
                 sys.stdout.flush()
             raise
         if os.environ.get("OC_BOX_CONTAINER") == "1":
             raise box.BoxError("Run 'oc-box logs' on the host, not inside a container.")
-        if args.path:
-            if (
-                args.project is not None
-                or args.workspace is not None
-                or args.follow
-                or args.json
-            ):
-                raise box.BoxError(
-                    "'oc-box logs --path' does not take event filters or output modes."
-                )
-            path = str(_configured_path(box))
-            print(path if path.isprintable() else json.dumps(path), flush=True)
+        with log_config.overrides(directory=args.log_dir):
+            if args.path:
+                if (
+                    args.project is not None
+                    or args.workspace is not None
+                    or args.follow
+                    or args.json
+                ):
+                    raise box.BoxError(
+                        "'oc-box logs --path' does not take event filters or output modes."
+                    )
+                path = str(_configured_path(box))
+                print(path if path.isprintable() else json.dumps(path), flush=True)
+                return 0
+            root, workspace = _journal_scope(box, args)
+            if not args.journald:
+                _configured_path(box, root)
+            selectors = {
+                "level": args.level,
+                "workspace": workspace,
+                "journald": args.journald,
+                "follow": args.follow,
+            }
+            limit = _MAX_LIMIT if args.follow else args.limit
+            previous = _read_events(box, root, limit=limit, **selectors)
+            _emit(previous[-args.limit :], json_lines=args.json)
+            while args.follow:
+                time.sleep(_POLL_SECONDS)
+                current = _read_events(box, root, limit=limit, **selectors)
+                if not current:
+                    # A busy or incomplete snapshot is not a new follow baseline.
+                    continue
+                new = _new_records(previous, current)
+                if new:
+                    _emit(new, json_lines=args.json)
+                    previous = current
             return 0
-        root, workspace = _journal_scope(box, args)
-        if not args.journald:
-            _configured_path(box, root)
-        selectors = {
-            "level": args.level,
-            "workspace": workspace,
-            "journald": args.journald,
-            "follow": args.follow,
-        }
-        limit = _MAX_LIMIT if args.follow else args.limit
-        previous = _read_events(box, root, limit=limit, **selectors)
-        _emit(previous[-args.limit :], json_lines=args.json)
-        while args.follow:
-            time.sleep(_POLL_SECONDS)
-            current = _read_events(box, root, limit=limit, **selectors)
-            if not current:
-                # A busy or incomplete snapshot is not a new follow baseline.
-                continue
-            new = _new_records(previous, current)
-            if new:
-                _emit(new, json_lines=args.json)
-                previous = current
-        return 0
     except KeyboardInterrupt:
         return 130
     except BrokenPipeError:

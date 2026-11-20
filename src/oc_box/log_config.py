@@ -1,9 +1,12 @@
-"""Read-only host policy for the private activity journal, not journald."""
+"""Read-only host activity journal policy and invocation-local overrides."""
 
+import argparse
 import json
 import os
 import re
 import stat
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +23,7 @@ _SUFFIX = re.compile(r"([0-9]{1,19})([A-Za-z])")
 _KEYS = frozenset(
     {
         "directory",
+        "journald",
         "SystemMaxFileSize",
         "SystemMaxFiles",
         "SystemMaxUse",
@@ -27,6 +31,10 @@ _KEYS = frozenset(
         "MaxFileSec",
         "MaxRetentionSec",
     }
+)
+_INVALID_CONFIG = "Activity log configuration is invalid or unsafe."
+_OVERRIDES: ContextVar[tuple[Path | None, bool | None]] = ContextVar(
+    "oc_box_log_overrides", default=(None, None)
 )
 
 
@@ -44,6 +52,7 @@ class LogPolicy:
     max_file_sec: int
     max_retention_sec: int
     configured: bool = False
+    journald: bool = False
 
 
 def _read_config():
@@ -130,6 +139,72 @@ def _directory(value):
     return path
 
 
+def directory_argument(value: str) -> Path:
+    """Parse a lexical directory without opening or resolving it."""
+    try:
+        return _directory(value)
+    except (OSError, ValueError, RuntimeError):
+        pass
+    raise argparse.ArgumentTypeError(
+        "must be an absolute non-root directory without '..' or non-printing characters"
+    )
+
+
+@contextmanager
+def overrides(*, directory: Path | str | None = None, journald: bool | None = None):
+    """Override the host policy in this context; None retains an enclosing value."""
+    try:
+        if directory is not None:
+            directory = _directory(
+                str(directory) if isinstance(directory, Path) else directory
+            )
+        if journald is not None and type(journald) is not bool:
+            raise ValueError
+    except (OSError, ValueError, RuntimeError):
+        raise LogConfigError(_INVALID_CONFIG) from None
+
+    outer_directory, outer_journald = _OVERRIDES.get()
+    token = _OVERRIDES.set(
+        (
+            outer_directory if directory is None else directory,
+            outer_journald if journald is None else journald,
+        )
+    )
+    try:
+        yield
+    finally:
+        _OVERRIDES.reset(token)
+
+
+def add_launch_arguments(parser: argparse.ArgumentParser) -> None:
+    """Register launcher log policy and expanded diagnostic flags."""
+    parser.add_argument(
+        "--log-dir",
+        type=directory_argument,
+        metavar="DIRECTORY",
+        help="use this private activity log directory for this invocation",
+    )
+    mirror = parser.add_mutually_exclusive_group()
+    mirror.add_argument(
+        "--journald",
+        dest="journald",
+        action="store_true",
+        help="also mirror activity events to the local system journal on the host",
+    )
+    mirror.add_argument(
+        "--no-journald",
+        dest="journald",
+        action="store_false",
+        help="disable host system journal mirroring for this invocation",
+    )
+    parser.set_defaults(journald=None)
+    parser.add_argument(
+        "--lifecycle-diagnostics",
+        action="store_true",
+        help="show expanded launcher lifecycle diagnostics",
+    )
+
+
 def _quantity(value, minimum, maximum, units=None):
     if units is not None and isinstance(value, str):
         match = _SUFFIX.fullmatch(value)
@@ -164,9 +239,10 @@ def _load(default_file_size, default_max_files):
         return _quantity(logs[key], minimum, maximum, units)
 
     directory = _directory(logs["directory"]) if "directory" in logs else None
-    override = os.environ.get("OC_BOX_LOG_DIR")
-    if override is not None:
-        directory = _directory(override)
+    journald = logs.get("journald", False)
+    if type(journald) is not bool:
+        raise ValueError
+    override_directory, override_journald = _OVERRIDES.get()
     max_file_size = number(
         "SystemMaxFileSize",
         default_file_size,
@@ -176,7 +252,7 @@ def _load(default_file_size, default_max_files):
     )
     max_files = number("SystemMaxFiles", default_max_files, 1, _MAX_FILES)
     return LogPolicy(
-        directory=directory,
+        directory=directory if override_directory is None else override_directory,
         max_file_size=max_file_size,
         max_files=max_files,
         max_use=number(
@@ -189,7 +265,10 @@ def _load(default_file_size, default_max_files):
         keep_free=number("SystemKeepFree", 0, 0, _MAX_KEEP_FREE, _SIZE_UNITS),
         max_file_sec=number("MaxFileSec", 0, 0, _MAX_AGE, _TIME_UNITS),
         max_retention_sec=number("MaxRetentionSec", 0, 0, _MAX_AGE, _TIME_UNITS),
-        configured=bool(logs) or override is not None,
+        configured=bool(logs)
+        or override_directory is not None
+        or override_journald is not None,
+        journald=journald if override_journald is None else override_journald,
     )
 
 
@@ -200,4 +279,4 @@ def load(default_file_size=256 * 1024, default_max_files=4) -> LogPolicy:
     except (OSError, ValueError, TypeError, RuntimeError):
         pass
     # Don't attach a JSON decoder error or OSError that may retain private data.
-    raise LogConfigError("Activity log configuration is invalid or unsafe.") from None
+    raise LogConfigError(_INVALID_CONFIG) from None

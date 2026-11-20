@@ -30,6 +30,7 @@ _oc_box()
     local command='' action='' word skip=0 positional=0 ended=0 broker=0 i
     local commands='start stop sync reset repair terminal web tui share attach preferences upgrade secrets credentials backup backup-info restore purge list distros status logs doctor completion'
     local selectors='--project --workspace'
+    local launch_logs='--journald --no-journald --log-dir --lifecycle-diagnostics'
     local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks'
     local help='-h --help' options
     COMPREPLY=()
@@ -51,7 +52,7 @@ _oc_box()
         if (( ! ended )); then
             case $word in
                 --*=*) continue ;;
-                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--min-passphrase-length|--feature|--port|--session|--text|--level|--limit)
+                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--min-passphrase-length|--feature|--port|--session|--text|--level|--limit|--log-dir)
                     skip=1; continue ;;
                 --broker) broker=1; continue ;;
                 --host-drop|--host-clipboard|--host-clipboard-symlinks)
@@ -88,7 +89,7 @@ _oc_box()
             option=$prev
         fi
         case $option in
-            --project) _oc_box_paths -d; return 0 ;;
+            --project|--log-dir) _oc_box_paths -d; return 0 ;;
             --output|--identity) _oc_box_paths -f; return 0 ;;
             --distro)
                 _oc_box_words 'tumbleweed leap ubuntu debian fedora arch alpine opensuse opensuse-tumbleweed opensuse-leap archlinux'; return 0 ;;
@@ -110,19 +111,19 @@ _oc_box()
     fi
 
     case $command in
-        start) options="$help $selectors $launch" ;;
-        reset) options="$help $selectors --distro --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks" ;;
-        sync) options="$help $selectors" ;;
-        stop|repair) options="$help $selectors" ;;
-        terminal) options="$help $selectors --maintenance" ;;
-        web) options="$help $selectors --session --port --no-open --no-vault --attachments" ;;
+        start) options="$help $selectors $launch $launch_logs" ;;
+        reset) options="$help $selectors $launch_logs --distro --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks" ;;
+        sync|stop) options="$help $selectors $launch_logs" ;;
+        repair) options="$help $selectors" ;;
+        terminal) options="$help $selectors $launch_logs --maintenance" ;;
+        web) options="$help $selectors $launch_logs --session --port --no-open --no-vault --attachments" ;;
         tui) options="$help $selectors --read-only --demo" ;;
         share) options="$help $selectors --acknowledge-risk" ;;
         attach)
             options="$help $selectors --session --broker"
             (( broker )) || options+=' --text --send --acknowledge-risk' ;;
         status) options="$help $selectors --json" ;;
-        logs) options="$help $selectors --level --limit --follow --json --journald --path" ;;
+        logs) options="$help $selectors --level --limit --follow --json --journald --log-dir --path" ;;
         purge) options="$help $selectors --delete-sessions --all -y --yes" ;;
         credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;
         preferences) options="$help $selectors --host-drop --host-clipboard --host-clipboard-symlinks --json" ;;
@@ -142,7 +143,7 @@ _oc_box()
             options=$help
             (( positional == 0 )) && options+=' bash' ;;
         list|distros) options=$help ;;
-        *) options="$commands $help $selectors $launch --status --about --version --json --check --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --maintenance" ;;
+        *) options="$commands $help $selectors $launch $launch_logs --status --about --version --json --check --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --maintenance" ;;
     esac
     if (( ! ended )); then
         _oc_box_words "$options"

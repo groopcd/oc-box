@@ -5,6 +5,7 @@ container, and refresh boundaries use local stubs; the sole real child is a tiny
 Python EOF peer. No test calls a host guard, OpenCode, Podman, or FUSE.
 """
 
+import argparse
 import contextlib
 import copy
 import hashlib
@@ -394,13 +395,44 @@ class HarnessCase(LocalCase):
 
 class ChildDiagnosticsTests(LocalCase):
     def test_only_explicit_stop_owner_entrypoint_opts_in(self):
-        flag = "OC_BOX_LIFECYCLE_DIAGNOSTICS"
-        for child, expect_stop in (("owner", True), ("owner", False), ("share", False)):
-            with self.subTest(child=child, expect_stop=expect_stop):
+        flag = "--lifecycle-diagnostics"
+        cases = (
+            ("owner", True, False, True),
+            ("owner", True, False, False),
+            ("owner", False, False, True),
+            ("owner", False, True, True),
+            ("share", False, False, True),
+        )
+        for child, expect_stop, reset, supports_flag in cases:
+            with self.subTest(
+                child=child,
+                expect_stop=expect_stop,
+                reset=reset,
+                supports_flag=supports_flag,
+            ):
                 observed = []
+                child_argv = ["sharing-fixture-child"]
+                parent_env = {"OC_BOX_LIFECYCLE_DIAGNOSTICS": "parent-only"}
+                child_env = {"SYNTHETIC_FIXTURE": "child-only"}
 
                 def observe(stage):
-                    observed.append((stage, os.environ.get(flag)))
+                    observed.append((stage, list(sys.argv), dict(os.environ)))
+
+                source_parser = argparse.ArgumentParser()
+                source_parser.add_argument(
+                    "command", choices=("start", "reset", "share")
+                )
+                source_parser.add_argument("source", nargs="?")
+                for option in ("--project", "--distro", "--workspace"):
+                    source_parser.add_argument(option)
+                source_parser.add_argument("--no-vault", action="store_true")
+                if supports_flag:
+                    source_parser.add_argument(flag, action="store_true")
+
+                def entrypoint():
+                    source_parser.parse_args(sys.argv[1:])
+                    observe("entrypoint")
+                    return 0
 
                 records = {"source-a": (self.parent, {"id": "a" * 32})}
                 fixture = SimpleNamespace(
@@ -416,7 +448,9 @@ class ChildDiagnosticsTests(LocalCase):
                     record_ids=Mock(),
                 )
                 box = SimpleNamespace(
-                    run_tui=Mock(), entrypoint=lambda: observe("entrypoint") or 0
+                    run_tui=Mock(),
+                    parser=lambda: observe("parser") or source_parser,
+                    entrypoint=entrypoint,
                 )
                 service = SimpleNamespace(
                     Owner=SimpleNamespace(wait_clients=Mock()),
@@ -437,13 +471,14 @@ class ChildDiagnosticsTests(LocalCase):
                     single_file=False,
                     protected=False,
                     acknowledge_risk=False,
-                    reset=False,
+                    reset=reset,
                     distro="synthetic",
                     expect_stop=expect_stop,
                 )
                 with (
-                    patch.dict(os.environ, {flag: "parent-only"}, clear=True),
-                    patch.object(runner, "fixture_environment", return_value={}),
+                    patch.dict(os.environ, parent_env, clear=True),
+                    patch.object(sys, "argv", child_argv.copy()),
+                    patch.object(runner, "fixture_environment", return_value=child_env),
                     patch.object(
                         runner, "validate_root", return_value=(self.parent, records)
                     ),
@@ -452,13 +487,36 @@ class ChildDiagnosticsTests(LocalCase):
                 ):
                     control = io.StringIO() if child == "owner" else None
                     self.assertEqual(runner.child(args, loaded, control=control), 0)
-                    self.assertEqual(os.environ.get(flag), "parent-only")
-                entry = ("entrypoint", "1" if expect_stop else None)
-                resources = ("resources", None)
-                expected = (
-                    [entry, resources] if child == "owner" else [resources, entry]
-                )
-                self.assertEqual(observed, [("store", None), *expected])
+                    self.assertEqual(dict(os.environ), parent_env)
+                    self.assertEqual(sys.argv, child_argv)
+
+                expected = [("store", child_argv, child_env)]
+                resources = ("resources", child_argv, child_env)
+                if child == "share":
+                    expected.append(resources)
+                    arguments = [
+                        "share",
+                        str(self.parent / "share-input-a"),
+                        "--workspace",
+                        "a" * 32,
+                    ]
+                else:
+                    arguments = [
+                        "reset" if reset else "start",
+                        "--project",
+                        str(self.parent / "source-a"),
+                        "--distro",
+                        "synthetic",
+                        "--no-vault",
+                    ]
+                    if expect_stop:
+                        expected.append(("parser", child_argv, child_env))
+                        if supports_flag:
+                            arguments.append(flag)
+                expected.append(("entrypoint", ["oc-box", *arguments], child_env))
+                if child == "owner":
+                    expected.append(resources)
+                self.assertEqual(observed, expected)
 
 
 class InputAndRegrantOracleTests(HarnessCase):

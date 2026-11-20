@@ -7,12 +7,12 @@ oc-box - persistent rootless Podman environments for mainline OpenCode.
 ## Synopsis
 
 ```text
-oc-box [start] [--project PATH | --workspace ID] [START-OPTIONS]
-oc-box stop [--project PATH | --workspace ID]
-oc-box sync [--project PATH | --workspace ID]
-oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS]
+oc-box [start] [--project PATH | --workspace ID] [START-OPTIONS] [LIFECYCLE-LOG-OPTIONS]
+oc-box stop [--project PATH | --workspace ID] [LIFECYCLE-LOG-OPTIONS]
+oc-box sync [--project PATH | --workspace ID] [LIFECYCLE-LOG-OPTIONS]
+oc-box reset [--project PATH | --workspace ID] [RESET-OPTIONS] [LIFECYCLE-LOG-OPTIONS]
 oc-box repair [--project PATH | --workspace ID]
-oc-box terminal [--project PATH | --workspace ID] [--maintenance]
+oc-box terminal [--project PATH | --workspace ID] [--maintenance] [LIFECYCLE-LOG-OPTIONS]
 oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
 oc-box attach PATH --session ID [--project PATH | --workspace ID] [--text TEXT] [--send] [--acknowledge-risk]
 oc-box attach --broker --session ID [--project PATH | --workspace ID]
@@ -22,11 +22,11 @@ oc-box list
 oc-box distros
 oc-box doctor [--json] [--feature FEATURE ...]
 oc-box completion bash
-oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments]
+oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [LIFECYCLE-LOG-OPTIONS]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
-oc-box logs [--journald] [--project PATH | --workspace ID] [--level debug|info|warn|error] [--limit N] [--follow] [--json]
-oc-box logs --path
+oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level debug|info|warn|error] [--limit N] [--follow] [--json]
+oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
 oc-box upgrade --auto-update on|off
@@ -41,9 +41,15 @@ oc-box --version
 oc-box -h | --help
 ```
 
-The command defaults to `start`. Place options before or after the command.
-Run the launcher on the host as your regular user, without sudo. It manages
-rootless Podman; container root is mapped to the unprivileged host user.
+The command defaults to `start`. For `start`, `reset`, `stop`, `sync` and
+`terminal`, options may appear before or after the command. For `logs` and
+`web`, put the command first. Run the launcher on the host as your regular user,
+without sudo. It manages rootless Podman; container root is mapped to the
+unprivileged host user.
+
+`LIFECYCLE-LOG-OPTIONS` are `[--journald | --no-journald] [--log-dir PATH]
+[--lifecycle-diagnostics]`. They apply only to the current invocation; see
+the [activity journal settings](#dashboard-state-and-activity-journal).
 
 ## Description
 
@@ -97,7 +103,7 @@ recovery eligibility, history verification or exit codes.
 
 Use `oc-box logs --level debug` to inspect retained stage details. For additional
 launcher messages on a particular invocation, see
-[`OC_BOX_LIFECYCLE_DIAGNOSTICS=1`](#launcher-diagnostics).
+[`--lifecycle-diagnostics`](#launcher-diagnostics).
 
 ### OpenCode versions
 
@@ -764,7 +770,7 @@ below completes in full, history remains pending and the command returns nonzero
 Normal cleanup still stops the container, so running work is not promised to
 continue. This is bounded checking, not an atomic freeze of every possible
 history producer.
-With [`OC_BOX_LIFECYCLE_DIAGNOSTICS=1`](#launcher-diagnostics), the
+With [`--lifecycle-diagnostics`](#launcher-diagnostics), the
 `History wait timeout:` diagnostic reports the wait phase (`foreground-query`,
 `background-query` or `poll-delay`) and counts from the last complete, validated
 activity/job observation. Job counts distinguish
@@ -1532,18 +1538,25 @@ Lifecycle detail can appear after the invocation finishes: history and shutdown
 diagnostics are queued so journal writes do not run inside verification deadlines
 or while a client lease is held.
 
+Use `--log-dir PATH` to read a different private journal for this invocation.
+It works with the private event filters or with `--path` to print the resulting
+pathname without opening the journal. It does not create the directory or
+change the saved policy.
+
 Use `--journald` to explicitly read this user's mirrored oc-box activity events
 through local `journalctl` with `--output-fields` support (systemd 236+).
 The same workspace selectors, severity thresholds,
 limit, follow and JSON Lines settings still apply; the system journal reader
 uses native journal priorities for severity. An unavailable reader reports
 fixed guidance to run `oc-box logs` without `--journald`; it never falls back
-automatically. The writer opt-in and system retention limits are described
+automatically. Do not combine `--journald` with `--log-dir` or `--path`. The
+writer opt-in and system retention limits are described
 under [Dashboard state and activity journal](#dashboard-state-and-activity-journal).
 
 ```sh
 oc-box logs
 oc-box logs --path
+oc-box logs --log-dir ~/.local/state/oc-box-diagnostics --path
 oc-box logs --project ~/devel/demo --level debug --limit 50
 oc-box logs --workspace WORKSPACE_ID --level warn --follow --json
 oc-box logs --journald --level warn --follow --json
@@ -2252,16 +2265,46 @@ be recovered. Stop following with Ctrl-C.
 
 ### --journald
 
+For `start` (including when the command is omitted), `reset`, `stop`, `sync`,
+`terminal` and `web`, enable best-effort system journal mirroring for this
+invocation, overriding the saved `logs.journald` choice. The private journal
+remains primary. Do not combine with `--no-journald`.
+
 For `logs`, read this user's mirrored activity events from the local system
 journal instead of the private file. Requires a usable local `journalctl` and
 access to those records. It does not enable mirroring, change journal settings
 or fall back to the private file.
 
+### --no-journald
+
+For the same launcher commands as `--journald`, disable mirroring for this
+invocation even if saved `logs.journald` is `true`. This does not disable
+private journaling or change the saved choice. It does not apply to `logs`.
+
+### --log-dir PATH
+
+Override the saved `logs.directory` for this invocation of `start` (including
+when the command is omitted), `reset`, `stop`, `sync`, `terminal`, `web`
+or private `logs`. `PATH` is a directory, not a logfile. It must be absolute
+after `~` expansion and cannot be `/` or include a `..` path component. An
+append may create the directory privately; a read, including `logs --path`,
+never does. Old logs are not moved or deleted. Do not combine with
+`logs --journald`.
+
+### --lifecycle-diagnostics
+
+Show expanded launcher stage messages and fixed-category diagnostics for this
+invocation of `start` (including when the command is omitted), `reset`,
+`stop`, `sync`, `terminal` or `web`. Quiet output is the default and there is
+no saved diagnostic setting. This option does not change native OpenCode output,
+journaling or lifecycle results. See [Launcher diagnostics](#launcher-diagnostics).
+
 ### --path
 
-For `logs`, display the configured private `activity.jsonl` pathname without
-reading or creating the journal. Use `oc-box logs --path` by itself, not with
-`--journald`, workspace filters, `--follow`, or `--json`.
+For `logs`, display the effective private `activity.jsonl` pathname without
+reading or creating the journal. Use `oc-box logs --path` alone or with
+`--log-dir PATH`, not with `--journald`, workspace filters, `--follow`, or
+`--json`.
 
 ### --about
 
@@ -3315,15 +3358,6 @@ are not rewritten. Container localhost remains local to the container.
 registry when looking up existing workspace IDs; changing it does not migrate
 old resources automatically.
 
-`OC_BOX_LIFECYCLE_DIAGNOSTICS=1` opts the host launcher into expanded lifecycle
-messages for troubleshooting or compatible scripted checks. It is an output
-setting, not a lifecycle, history or credential option. See
-[Launcher diagnostics](#launcher-diagnostics).
-
-`OC_BOX_JOURNALD=1` opts the host launcher into best-effort mirroring of
-successfully appended activity events to existing local systemd-journald.
-It does not replace the private file or change the default `oc-box logs` reader.
-
 `XDG_CONFIG_HOME` selects the source global OpenCode/oc-box configuration;
 default `~/.config`. `XDG_DATA_HOME` selects the normal host OpenCode data root;
 default `~/.local/share`. The installer itself uses fixed `~/.local` paths.
@@ -3555,6 +3589,7 @@ Keep the other keys. For example:
 {
   "logs": {
     "directory": "~/.local/state/oc-box-logs",
+    "journald": false,
     "SystemMaxFileSize": "512K",
     "SystemMaxFiles": 4,
     "SystemMaxUse": "2M",
@@ -3565,10 +3600,12 @@ Keep the other keys. For example:
 }
 ```
 
-Set `OC_BOX_LOG_DIR` to override only `logs.directory` for an invocation. A
-custom directory must be absolute after `~` expansion. oc-box can create it
-privately when it appends; it won't fix unsafe permissions or follow symlinks.
-Changing it does not move or delete the previous journal.
+Use `--log-dir PATH` to override only `logs.directory` for one lifecycle
+invocation or private `oc-box logs` read. A custom directory must be absolute
+after `~` expansion. oc-box can create it privately on append; it won't fix
+unsafe permissions or follow symlinks. Changing the directory does not move
+or delete the previous journal, alter rotation settings, or change which
+workspace registry is used.
 
 | Private setting | Meaning | Default |
 | --- | --- | --- |
@@ -3584,27 +3621,33 @@ settings accept seconds or a single `s`, `m`, `h`, `d`, or `w` suffix, up to one
 year. Rotation and expiry are checked on append; there is no timer, and a
 reader never prunes files. Age cleanup applies to whole files, not individual
 entries. Only the private journal's own validated files are eligible. If the
-requested free-space reserve cannot be met, an append may be skipped. Invalid
-settings do not silently select a different journal or change lifecycle results.
+requested free-space reserve cannot be met, an append may be skipped. Explicit
+flags override only valid saved policy, without changing host configuration or
+the environment. Invalid saved `logs` policy fails closed even when a flag is
+present: private logging does not silently select a different journal, and a
+failed append does not change lifecycle results.
 These settings borrow journald's names; **they do not edit `journald.conf` or
 change the system journal**.
 
-**Optional system journal mirror.** Set `OC_BOX_JOURNALD=1` in the host
-launcher's environment. oc-box mirrors only validated activity events after
-they have been successfully appended to the private file. The file remains
-the primary journal. Mirroring uses native journal priorities and never
-includes raw output, authentication data or secrets. A missing sink or
-delivery error cannot change lifecycle results. No daemon is started,
-installed or reconfigured; an ordinary installation does not require systemd.
+**Optional system journal mirror.** The host `logs.journald` setting is a
+JSON boolean and defaults to `false`. Set it to `true` to enable mirroring by
+default, or use `--journald` or `--no-journald` on a lifecycle command to choose
+for one invocation. oc-box mirrors only validated activity events after they
+have been successfully appended to the private file. The file remains the
+primary journal. Mirroring uses native journal priorities and never includes
+raw output, authentication data or secrets. A missing sink or delivery error
+cannot change lifecycle results. No daemon is started, installed or
+reconfigured; an ordinary installation does not require systemd.
 
 The system journal can be visible to administrators and other authorized
 journal viewers. It follows system retention and priority policy, which may
 discard `debug` entries, so it need not contain the same history as the file.
-On the host, read the mirror explicitly with `oc-box logs --journald`, or query
-the matching records directly:
+`oc-box logs` still defaults to the private file regardless of the writer
+setting. On the host, read the mirror explicitly with `oc-box logs --journald`,
+or query the matching records directly:
 
 ```sh
-OC_BOX_JOURNALD=1 oc-box start --project ~/devel/demo
+oc-box start --project ~/devel/demo --journald
 oc-box logs --journald
 journalctl SYSLOG_IDENTIFIER=oc-box "_UID=$(id -u)" OC_BOX_FORMAT=oc-box-activity-v1
 ```
@@ -3716,14 +3759,14 @@ restarting a workspace. To see the launcher's expanded stage messages and
 fixed-category diagnostics during an invocation, opt in explicitly:
 
 ```sh
-OC_BOX_LIFECYCLE_DIAGNOSTICS=1 oc-box start --project ~/devel/demo
+oc-box start --project ~/devel/demo --lifecycle-diagnostics
 ```
 
-Scripts that consume older verbose lifecycle messages should opt in explicitly
-instead of expecting routine start/done text in a pipe. The setting does not
-enable native debug logging, add raw child output to the journal or change
-lifecycle behavior. Continue to treat native output and interactive prompts
-as separate from the activity journal.
+Scripts that consume older verbose lifecycle messages should pass the flag
+to the launcher invocation under test instead of expecting routine start/done
+text in a pipe. The flag does not enable native debug logging, add raw child
+output to the journal or change lifecycle behavior. Continue to treat native
+output and interactive prompts as separate from the activity journal.
 
 ### Private output capture and uv Python
 
@@ -3987,13 +4030,13 @@ scope. The separate `preferences --host-drop`, `--host-clipboard` and
 `--host-clipboard-symlinks` settings complete `on`/`off`.
 Direct-TTY, native-version and
 host-input requirements are checked by the command, not during completion.
-`--project` completes directories; backup archive inputs, `--output`, and
-`--identity` complete paths, including spaces. Both `--option VALUE` and
-`--option=VALUE` are supported. Press Tab after `oc-box ` or `oc-box backup --`
-to see candidates. Completion uses only Bash builtins and local pathname
-expansion: it does not run oc-box on each Tab, query Podman, contact providers,
-read vault contents, or guess passwords, credential names, session/workspace
-IDs, or model identifiers.
+`--project` and `--log-dir` complete directories; backup archive inputs,
+`--output`, and `--identity` complete paths, including spaces. Both
+`--option VALUE` and `--option=VALUE` are supported. Press Tab after `oc-box `
+or `oc-box backup --` to see candidates. Completion uses only Bash builtins and
+local pathname expansion: it does not run oc-box on each Tab, query Podman,
+contact providers, read vault contents, or guess passwords, credential names,
+session/workspace IDs, or model identifiers.
 
 ### Python package installations
 
