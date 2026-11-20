@@ -148,6 +148,7 @@ MAX_METRIC_VALUE = 2**31 - 1
 
 _FILE = "activity.jsonl"
 _LOCK = "activity.lock"
+_PRUNE = ".activity.prune"
 _MAX_FILE_BYTES = 256 * 1024
 _BACKUP_COUNT = 3
 # Safety bounds are independent of the current write/retention policy.
@@ -295,12 +296,27 @@ def _open_file(directory, name, *, create=False, writable=False, exclusive=False
 
 @contextmanager
 def _locked(directory, *, write, custom=False):
-    if custom:
-        _custom_lock_exists(directory)
-    fd = _open_file(directory, _LOCK, create=write, writable=write)
+    if not custom:
+        fd = _open_file(directory, _LOCK, create=write, writable=write)
+        admitted = None
+    else:
+        admitted = _custom_lock_snapshot(directory)
+        if admitted is None and write:
+            # Do not mint a lock alongside an unrecognized empty active file.
+            _reject_empty_active(directory)
+            try:
+                fd = _open_file(
+                    directory, _LOCK, create=True, writable=True, exclusive=True
+                )
+            except FileExistsError:
+                # Another cooperating writer initialized the journal.
+                admitted = _custom_lock_snapshot(directory)
+                if admitted is None:
+                    raise ValueError("Changed activity lock") from None
+                fd = _open_file(directory, _LOCK, writable=True)
+        else:
+            fd = _open_file(directory, _LOCK, writable=write)
     try:
-        if custom and os.fstat(fd).st_size:
-            raise ValueError("Unexpected activity lock")
         deadline = time.monotonic() + _LOCK_TIMEOUT
         operation = fcntl.LOCK_EX if write else fcntl.LOCK_SH
         while True:
@@ -311,6 +327,13 @@ def _locked(directory, *, write, custom=False):
                 if time.monotonic() >= deadline:
                     raise TimeoutError("Activity journal busy") from None
                 time.sleep(0.005)
+        if custom:
+            current = os.fstat(fd)
+            if current.st_size:
+                raise ValueError("Unexpected activity lock")
+            if admitted is not None:
+                _check_snapshot(current, admitted)
+            _check_snapshot(_activity_stat(directory, _LOCK), current)
         yield
     finally:
         os.close(fd)
@@ -465,18 +488,34 @@ def _activity_stat(directory, name):
     return os.stat(name, dir_fd=directory, follow_symlinks=False)
 
 
-def _custom_lock_exists(directory):
+def _custom_lock_snapshot(directory):
     try:
         info = _activity_stat(directory, _LOCK)
     except FileNotFoundError:
-        return False
+        return None
     _check_file(info)
     if info.st_size:
         raise ValueError("Unexpected activity lock")
-    return True
+    return info
+
+
+def _reject_empty_active(directory):
+    try:
+        info = _activity_stat(directory, _FILE)
+    except FileNotFoundError:
+        return
+    if not info.st_size:
+        raise ValueError("Unrecognized empty activity journal")
 
 
 def _custom_inventory(directory):
+    try:
+        _activity_stat(directory, _PRUNE)
+    except FileNotFoundError:
+        pass
+    else:
+        # An interrupted or unverified prune is not disposable on retry.
+        raise ValueError("Unresolved activity prune")
     files = {}
     remaining = _HARD_TOTAL_BYTES
     for index in range(_HARD_FILE_COUNT):
@@ -492,24 +531,35 @@ def _custom_inventory(directory):
     return files
 
 
+def _custom_records(directory, index, info):
+    # An empty lock has no binding to an empty active inode. In particular,
+    # a failed bootstrap must never turn a late empty file into managed data.
+    # Only the empty active fd exclusively created by this append is writable.
+    if not info.st_size:
+        raise ValueError("Unrecognized empty activity file")
+    fd = _open_file(directory, _filename(index))
+    try:
+        _check_snapshot(os.fstat(fd), info)
+        line = b""
+        first = None
+        for line in _read_file(fd, info):
+            record = _parse_record(line, strict=True)
+            if record is None:
+                raise ValueError("Unrecognized activity record")
+            if first is None:
+                first = record
+        if first is None:
+            raise ValueError("Unrecognized activity record")
+    finally:
+        os.close(fd)
+    _check_snapshot(_activity_stat(directory, _filename(index)), info)
+    return first, b"" if line.endswith(b"\n") else b"\n"
+
+
 def _verify_custom_candidates(directory, files, candidates):
     """Prove every candidate has managed content before any ring changes."""
     for index in candidates:
-        info = files[index]
-        if not info.st_size:
-            # A crash can leave an empty newly opened active file. Rotation
-            # never creates an empty archive.
-            if index:
-                raise ValueError("Unrecognized activity archive")
-            continue
-        fd = _open_file(directory, _filename(index))
-        try:
-            _check_snapshot(os.fstat(fd), info)
-            for line in _read_file(fd, info):
-                if _parse_record(line, strict=True) is None:
-                    raise ValueError("Unrecognized activity record")
-        finally:
-            os.close(fd)
+        _custom_records(directory, index, files[index])
     for index in candidates:
         _check_snapshot(_activity_stat(directory, _filename(index)), files[index])
 
@@ -522,7 +572,7 @@ def validate_custom_directory(path):
         _private_directory(directory)
         lock = (
             _locked(directory, write=False, custom=True)
-            if _custom_lock_exists(directory)
+            if _custom_lock_snapshot(directory) is not None
             else nullcontext()
         )
         with lock:
@@ -533,44 +583,10 @@ def validate_custom_directory(path):
 def _inspect_custom_files(directory, policy, now):
     files = _custom_inventory(directory)
     active = files.get(0)
-    if active is None or not active.st_size:
+    if active is None:
         return files, b"", False
 
-    fd = _open_file(directory, _FILE)
-    try:
-        _check_snapshot(os.fstat(fd), active)
-        size = active.st_size
-        window = _MAX_RECORD_BYTES + 2  # Maximum record plus CRLF.
-        first = os.pread(fd, min(size, window), 0)
-        if len(first) != min(size, window):
-            raise ValueError("Incomplete activity journal")
-        head, newline, _ = first.partition(b"\n")
-        record = (
-            _parse_record(head, strict=True) if newline or size == len(first) else None
-        )
-        if record is None:
-            raise ValueError("Unrecognized activity record")
-
-        prefix = b""
-        last = first[-1:] if len(first) == size else os.pread(fd, 1, size - 1)
-        if last != b"\n":
-            # A complete final record without LF can be separated on append.
-            # For custom paths, never turn unrecognizable partial bytes into
-            # another log line or move/discard them as managed content.
-            start = max(0, size - window)
-            tail = first if not start else os.pread(fd, size - start, start)
-            _, separator, final = tail.rpartition(b"\n")
-            if (
-                len(tail) != size - start
-                or (start and not separator)
-                or _parse_record(final if separator else tail, strict=True) is None
-            ):
-                raise ValueError("Unrecognized activity record")
-            prefix = b"\n"
-        _check_snapshot(os.fstat(fd), active)
-    finally:
-        os.close(fd)
-    _check_snapshot(_activity_stat(directory, _FILE), active)
+    record, prefix = _custom_records(directory, 0, active)
 
     aged = False
     if policy.max_file_sec:
@@ -638,15 +654,68 @@ def _check_name(directory, index, info):
         raise ValueError("Changed activity journal")
 
 
-def _discard_archive(directory, files, index):
+def _rename_noreplace(directory, source, target):
+    """Kernel-enforced no-replace; unsupported platforms/filesystems refuse."""
+    import ctypes
+
+    rename = ctypes.CDLL(None, use_errno=True).renameat2
+    rename.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    rename.restype = ctypes.c_int
+    no_replace = 1  # Linux RENAME_NOREPLACE
+    if rename(
+        directory, os.fsencode(source), directory, os.fsencode(target), no_replace
+    ):
+        raise OSError(ctypes.get_errno(), "Activity rename refused")
+
+
+def _rename_custom(directory, source, target, info):
+    # flock serializes journal writers. A same-UID process ignoring the lock
+    # can still change a source between this check and the namespace operation.
+    _check_snapshot(_activity_stat(directory, source), info)
+    _rename_noreplace(directory, source, target)
+    moved = _activity_stat(directory, target)
+    _check_file(moved)
+    # Linux rename advances ctime. Check the other snapshot fields before
+    # admitting the new ctime for a later move or prune in this same pass.
+    if (
+        not _same_file(moved, info)
+        or moved.st_size != info.st_size
+        or moved.st_mtime_ns != info.st_mtime_ns
+    ):
+        raise ValueError("Unverified activity rename")
+    return moved
+
+
+def _discard_archive(directory, files, index, *, custom):
     if not 1 <= index < _HARD_FILE_COUNT:
         raise ValueError("Invalid activity archive")
-    _check_name(directory, index, files[index])
-    os.unlink(_filename(index), dir_fd=directory)
+    name = _filename(index)
+    if custom:
+        # Move out of the ring before unlink. If the source was replaced in
+        # the check/rename window, leave it quarantined rather than delete it.
+        # The final check/unlink is still not atomic against a same-UID editor.
+        moved = _rename_custom(directory, name, _PRUNE, files[index])
+        _check_snapshot(_activity_stat(directory, _PRUNE), moved)
+        os.unlink(_PRUNE, dir_fd=directory)
+    else:
+        _check_name(directory, index, files[index])
+        os.unlink(name, dir_fd=directory)
     del files[index]
 
 
-def _move_file(directory, files, source, target):
+def _move_file(directory, files, source, target, *, custom):
+    if custom:
+        files[target] = _rename_custom(
+            directory, _filename(source), _filename(target), files[source]
+        )
+        del files[source]
+        return
     _check_name(directory, source, files[source])
     try:
         os.stat(_filename(target), dir_fd=directory, follow_symlinks=False)
@@ -689,9 +758,10 @@ def _prepare_append(directory, files, policy, now, rotate, final_size, append_si
     available = _available_bytes(directory, required) if policy.keep_free else None
     kept_archives = [index for index in keep if index]
     discarded = set(archives) - set(kept_archives)
-    if policy.directory is not None:
+    custom = policy.directory is not None
+    if custom:
         if rotate:
-            affected = files.keys()
+            affected = archives
         elif available is not None and (available < required or discarded):
             # Available blocks are measured again after pruning and may stay
             # low. Prove every archive that the fallback could then discard.
@@ -706,13 +776,15 @@ def _prepare_append(directory, files, policy, now, rotate, final_size, append_si
                 }
             )
         _verify_custom_candidates(directory, files, affected)
+        if 0 in files:
+            _check_snapshot(_activity_stat(directory, _FILE), files[0])
     for index in reversed(archives):
         if index in discarded:
-            _discard_archive(directory, files, index)
+            _discard_archive(directory, files, index, custom=custom)
     # Close any pre-existing gaps without changing the order.
     for target, source in enumerate(sorted(index for index in files if index), 1):
         if source != target:
-            _move_file(directory, files, source, target)
+            _move_file(directory, files, source, target, custom=custom)
 
     if available is not None:
         if len(archives) != len(files) - int(0 in files):
@@ -723,12 +795,12 @@ def _prepare_append(directory, files, policy, now, rotate, final_size, append_si
             oldest = max(files, default=0)
             if not oldest:
                 raise ValueError("Insufficient activity journal space")
-            _discard_archive(directory, files, oldest)
+            _discard_archive(directory, files, oldest, custom=custom)
             available = _available_bytes(directory, required)
 
     if rotate:
         for index in sorted(files, reverse=True):
-            _move_file(directory, files, index, index + 1)
+            _move_file(directory, files, index, index + 1, custom=custom)
     # Do not discard the outgoing active file until its replacement has
     # synced. By that point it has a checked archive name, never the active name.
     # If it must be discarded, all older archives were already pruned above.
@@ -755,7 +827,9 @@ def record_event(
 
     Files are 0600, the log directory is 0700, and symlinks, hardlinks,
     foreign ownership and unsafe existing permissions are refused, not repaired.
-    A shared lock serializes append/rotation; default retention is four 256-KiB files.
+    Cooperating writers serialize append/rotation with flock; default retention is
+    four 256-KiB files. Custom snapshot checks are not a boundary against same-UID
+    processes that can change files without holding that lock.
     No exception text or arbitrary caller field is ever written.
     """
     try:
@@ -785,16 +859,15 @@ def record_event(
             json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
         ).encode("ascii")
         policy = _policy()
+        custom = policy.directory is not None
         if len(payload) > min(_MAX_RECORD_BYTES, policy.max_file_size, policy.max_use):
             return False
         with (
             _log_directory(root, create=True, policy=policy) as directory,
-            _locked(directory, write=True, custom=policy.directory is not None),
+            _locked(directory, write=True, custom=custom),
         ):
             now = time.time()
-            inspect = (
-                _inspect_files if policy.directory is None else _inspect_custom_files
-            )
+            inspect = _inspect_custom_files if custom else _inspect_files
             files, prefix, aged = inspect(directory, policy, now)
             size = files[0].st_size if 0 in files else 0
             final_size = size + len(prefix) + len(payload)
@@ -818,23 +891,34 @@ def record_event(
                 writable=True,
             )
             try:
-                if active is not None:
-                    if policy.directory is not None:
-                        _check_snapshot(os.fstat(fd), active)
-                    elif not _same_file(os.fstat(fd), active):
-                        raise ValueError("Changed activity journal")
+                if (
+                    not custom
+                    and active is not None
+                    and not _same_file(os.fstat(fd), active)
+                ):
+                    raise ValueError("Changed activity journal")
+                if custom and active is None:
+                    active = os.fstat(fd)
                 if os.lseek(fd, 0, os.SEEK_END) != final_size - len(pending):
                     raise ValueError("Changed activity journal")
+                if custom:
+                    _check_snapshot(_activity_stat(directory, _FILE), active)
+                    _check_snapshot(os.fstat(fd), active)
                 while pending:
                     written = os.write(fd, pending)
                     if written <= 0:
                         raise OSError("Activity write failed")
                     pending = pending[written:]
                 os.fsync(fd)
+                if custom:
+                    written = os.fstat(fd)
+                    if written.st_size != final_size:
+                        raise ValueError("Changed activity journal")
+                    _check_snapshot(_activity_stat(directory, _FILE), written)
             finally:
                 os.close(fd)
             if discard_outgoing:
-                _discard_archive(directory, files, 1)
+                _discard_archive(directory, files, 1, custom=custom)
         if policy.journald and os.environ.get("OC_BOX_CONTAINER") != "1":
             try:
                 if __package__:

@@ -758,15 +758,20 @@ class ActivityRotationTests(ActivityJournalFixture):
             + terminator
         )
 
-    def test_custom_active_refuses_unrecognized_first_record_without_appending(self):
+    def test_custom_active_refuses_unrecognized_records_without_appending(self):
         custom = self.custom_journal(journald=True)
         valid = self.legacy_row()
+        duplicate = valid.replace(
+            b'"duration_ms": 1', b'"duration_ms": "foreign", "duration_ms": 1'
+        )
         for raw in (
             b"unrelated private data\n" + valid,
             b"{}\n" + valid,
-            valid.replace(
-                b'"duration_ms": 1', b'"duration_ms": "foreign", "duration_ms": 1'
-            ),
+            duplicate,
+            valid + b"unrelated private data\n" + valid,
+            valid + b"\n" + valid,
+            valid + duplicate + valid,
+            valid + b'{"event":\n',
         ):
             with self.subTest(raw=raw):
                 active = self.custom_file(custom, 0, raw)
@@ -776,23 +781,46 @@ class ActivityRotationTests(ActivityJournalFixture):
                 self.assertEqual(active.read_bytes(), raw)
                 self.assertFalse((custom / "activity.jsonl.1").exists())
 
-    def test_quiet_custom_append_uses_bounded_active_guard_and_no_full_scan(self):
-        # A sizeable valid ring and active age policy must not turn every
-        # ordinary append into a full-content read.
+    def test_unrecognized_empty_custom_active_is_not_adopted_on_retry(self):
+        custom = self.custom_journal()
+        active = self.custom_file(custom, 0, b"")
+        original = active.stat()
+        lock = custom / "activity.lock"
+        for _ in range(2):
+            self.assertFalse(self.record())
+            self.assertFalse(lock.exists())
+        with self.assertRaises(ValueError):
+            journal.validate_custom_directory(custom)
+        self.assertEqual(active.stat().st_ino, original.st_ino)
+        self.assertEqual(active.read_bytes(), b"")
+
+    def test_late_empty_custom_active_cannot_gain_provenance_from_new_lock(self):
+        custom = self.custom_journal()
+        open_file = journal._open_file
+
+        def late_empty(directory, name, **kwargs):
+            if name == "activity.lock" and kwargs.get("exclusive"):
+                self.custom_file(custom, 0, b"")
+            return open_file(directory, name, **kwargs)
+
+        with patch.object(journal, "_open_file", side_effect=late_empty):
+            self.assertFalse(self.record())
+        self.assertTrue((custom / "activity.lock").is_file())
+        self.assertFalse(self.record())
+        self.assertEqual((custom / self.active.name).read_bytes(), b"")
+
+    def test_quiet_custom_append_checks_active_once_without_reading_archives(self):
         custom = self.custom_journal(SystemMaxFileSize="4M", MaxFileSec="1d")
         self.assertTrue(self.record(duration_ms=1))
         active = custom / self.active.name
         raw = active.read_bytes()
         active.write_bytes(raw * 4096)
         archive = self.custom_file(custom, 1, self.legacy_row() * 4096)
-        with (
-            patch.object(
-                journal, "_read_file", side_effect=AssertionError("full scan")
-            ),
-            patch.object(journal.os, "pread", wraps=os.pread) as pread,
-        ):
+        with patch.object(journal, "_read_file", wraps=journal._read_file) as read:
             self.assertTrue(self.record(duration_ms=2))
-        self.assertLessEqual(sum(call.args[1] for call in pread.call_args_list), 1027)
+        read.assert_called_once()
+        self.assertEqual(read.call_args.args[1].st_ino, active.stat().st_ino)
+        self.assertEqual(read.call_args.args[1].st_size, len(raw) * 4096)
         self.assertEqual(active.stat().st_size, len(raw) * 4097)
         self.assertEqual(archive.read_bytes(), self.legacy_row() * 4096)
 
@@ -808,7 +836,9 @@ class ActivityRotationTests(ActivityJournalFixture):
             if operation in ("rotation", "keep-free"):
                 files[self.custom_file(custom, 2, valid)] = valid
             with (
-                patch.object(journal.os, "rename", wraps=os.rename) as rename,
+                patch.object(
+                    journal, "_rename_noreplace", wraps=journal._rename_noreplace
+                ) as rename,
                 patch.object(journal.os, "unlink", wraps=os.unlink) as unlink,
                 patch.object(journal, "_available_bytes", return_value=0),
             ):
@@ -831,6 +861,167 @@ class ActivityRotationTests(ActivityJournalFixture):
         ):
             with self.subTest(operation=operation):
                 verify(operation, settings, foreign_index)
+
+    def test_custom_rotation_atomically_refuses_late_destination(self):
+        custom = self.custom_journal(MaxFileSec="1h", journald=True)
+        raw = self.legacy_row()
+        active = self.custom_file(custom, 0, raw)
+        foreign = b"unrelated late destination\n"
+        rename_noreplace = journal._rename_noreplace
+
+        def late_destination(directory, source, target):
+            self.assertEqual((source, target), (active.name, active.name + ".1"))
+            self.custom_file(custom, 1, foreign)
+            rename_noreplace(directory, source, target)
+
+        with (
+            patch.object(
+                journal, "_rename_noreplace", side_effect=late_destination
+            ) as rename,
+            patch.object(journal_output, "emit") as mirror,
+        ):
+            self.assertFalse(self.record(duration_ms=2))
+            rename.assert_called_once()
+            mirror.assert_not_called()
+        self.assertEqual(active.read_bytes(), raw)
+        self.assertEqual((custom / (active.name + ".1")).read_bytes(), foreign)
+
+    def test_custom_rotation_does_not_fall_back_without_kernel_support(self):
+        custom = self.custom_journal(MaxFileSec="1h")
+        raw = self.legacy_row()
+        active = self.custom_file(custom, 0, raw)
+        with (
+            patch("ctypes.CDLL", return_value=object()),
+            patch.object(journal.os, "rename", wraps=os.rename) as rename,
+            patch.object(journal.os, "link", wraps=os.link) as link,
+        ):
+            self.assertFalse(self.record(duration_ms=2))
+            rename.assert_not_called()
+            link.assert_not_called()
+        self.assertEqual(active.read_bytes(), raw)
+        self.assertFalse((custom / (active.name + ".1")).exists())
+
+    def test_custom_rename_and_prune_reject_changed_admitted_archive(self):
+        for policy in ({"MaxFileSec": "1h"}, {"SystemMaxFiles": 1}):
+            with self.subTest(policy=policy):
+                custom = self.custom_journal(**policy)
+                raw = self.legacy_row()
+                active = self.custom_file(custom, 0, raw)
+                archive = self.custom_file(custom, 1, raw)
+                verify_candidates = journal._verify_custom_candidates
+                changed = b"x" * len(raw)
+
+                def change_verified(
+                    directory,
+                    files,
+                    candidates,
+                    verify_candidates=verify_candidates,
+                    archive=archive,
+                    changed=changed,
+                ):
+                    verify_candidates(directory, files, candidates)
+                    original = archive.stat()
+                    archive.write_bytes(changed)
+                    os.utime(
+                        archive,
+                        ns=(original.st_atime_ns, original.st_mtime_ns - 10**9),
+                    )
+
+                with (
+                    patch.object(
+                        journal,
+                        "_verify_custom_candidates",
+                        side_effect=change_verified,
+                    ) as verify,
+                    patch.object(
+                        journal, "_rename_noreplace", wraps=journal._rename_noreplace
+                    ) as rename,
+                ):
+                    self.assertFalse(self.record(duration_ms=2))
+                    verify.assert_called_once()
+                    rename.assert_not_called()
+                self.assertEqual(active.read_bytes(), raw)
+                self.assertEqual(archive.read_bytes(), changed)
+                self.assertFalse((custom / (active.name + ".2")).exists())
+
+    def test_custom_prune_keeps_unexpected_source_quarantined_without_deleting_it(self):
+        custom = self.custom_journal(SystemMaxFiles=1)
+        raw = self.legacy_row()
+        active = self.custom_file(custom, 0, raw)
+        archive = self.custom_file(custom, 1, raw)
+        aside = self.base / "admitted-archive"
+        foreign = b"unrelated replacement source\n"
+        rename_noreplace = journal._rename_noreplace
+
+        def replace_before_rename(directory, source, target):
+            self.assertEqual(source, archive.name)
+            archive.rename(aside)
+            self.custom_file(custom, 1, foreign)
+            rename_noreplace(directory, source, target)
+
+        with (
+            patch.object(
+                journal, "_rename_noreplace", side_effect=replace_before_rename
+            ) as rename,
+            patch.object(journal.os, "unlink", wraps=os.unlink) as unlink,
+        ):
+            self.assertFalse(self.record(duration_ms=2))
+            rename.assert_called_once()
+            unlink.assert_not_called()
+        self.assertEqual(aside.read_bytes(), raw)
+        self.assertFalse(archive.exists())
+        self.assertFalse(self.record(duration_ms=3))
+        self.assertEqual(active.read_bytes(), raw)
+        self.assertEqual((custom / journal._PRUNE).read_bytes(), foreign)
+
+    def test_custom_prune_rechecks_quarantined_snapshot_before_unlink(self):
+        custom = self.custom_journal(SystemMaxFiles=1)
+        raw = self.legacy_row()
+        active = self.custom_file(custom, 0, raw)
+        archive = self.custom_file(custom, 1, raw)
+        quarantined = custom / journal._PRUNE
+        rename_custom = journal._rename_custom
+        changed = b"x" * len(raw)
+
+        def change_quarantined(directory, source, target, info):
+            moved = rename_custom(directory, source, target, info)
+            quarantined.write_bytes(changed)
+            os.utime(quarantined, ns=(moved.st_atime_ns, moved.st_mtime_ns - 10**9))
+            return moved
+
+        with (
+            patch.object(journal, "_rename_custom", side_effect=change_quarantined),
+            patch.object(journal.os, "unlink", wraps=os.unlink) as unlink,
+        ):
+            self.assertFalse(self.record(duration_ms=2))
+            unlink.assert_not_called()
+        self.assertFalse(archive.exists())
+        self.assertEqual(active.read_bytes(), raw)
+        self.assertEqual(quarantined.read_bytes(), changed)
+
+    def test_custom_append_rechecks_snapshot_after_seeking(self):
+        custom = self.custom_journal(journald=True)
+        raw = self.legacy_row()
+        active = self.custom_file(custom, 0, raw)
+        original = active.stat()
+        changed = b"x" * len(raw)
+        lseek = os.lseek
+
+        def change_during_seek(fd, offset, whence):
+            end = lseek(fd, offset, whence)
+            active.write_bytes(changed)
+            os.utime(active, ns=(original.st_atime_ns, original.st_mtime_ns - 10**9))
+            return end
+
+        with (
+            patch.object(journal.os, "lseek", side_effect=change_during_seek) as seek,
+            patch.object(journal_output, "emit") as mirror,
+        ):
+            self.assertFalse(self.record(duration_ms=2))
+            seek.assert_called_once()
+            mirror.assert_not_called()
+        self.assertEqual(active.stat().st_ino, original.st_ino)
+        self.assertEqual(active.read_bytes(), changed)
 
     def test_custom_accepts_legacy_and_complete_no_lf_but_preserves_partial_record(
         self,
@@ -856,6 +1047,30 @@ class ActivityRotationTests(ActivityJournalFixture):
         self.assertEqual(active.read_bytes(), damaged)
         self.assertEqual(archive.read_bytes(), previous)
         self.assertEqual(self.durations(), [1, 2, 3, 4])
+
+    def test_custom_single_file_rotation_prunes_outgoing_only_after_fsync(self):
+        custom = self.custom_journal(MaxFileSec="1h", SystemMaxFiles=1, journald=True)
+        raw = self.legacy_row()
+        active = self.custom_file(custom, 0, raw)
+        archive = custom / (active.name + ".1")
+        fsync = os.fsync
+        states = []
+
+        def sync_with_old_archive(fd):
+            states.append(archive.read_bytes())
+            fsync(fd)
+
+        with (
+            patch.object(journal.os, "fsync", side_effect=sync_with_old_archive),
+            patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
+            patch.object(journal_output, "emit") as mirror,
+        ):
+            self.assertTrue(self.record(duration_ms=2))
+            mirror.assert_called_once()
+        self.assertEqual(states, [raw])
+        self.assertFalse(archive.exists())
+        self.assertFalse((custom / journal._PRUNE).exists())
+        self.assertEqual(self.durations(strict_snapshot=True), [2])
 
     def test_invalid_policy_refuses_all_private_access_with_fixed_path_error(self):
         self.seed()
