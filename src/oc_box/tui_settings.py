@@ -1,4 +1,4 @@
-"""Session-only dashboard preferences, grouped without resource mutations."""
+"""Dashboard preferences and separately committed host logging settings."""
 
 from types import MappingProxyType
 
@@ -9,9 +9,13 @@ from textual.validation import Integer
 from textual.widgets import Button, Input, Label, Select, Static, Switch
 
 if __package__:
+    from . import log_config
+    from .activity_log import _root as _activity_state_root
     from .tui_clipboard import ClipboardInput
     from .tui_logs import JOURNAL_SOURCE
 else:
+    import log_config
+    from activity_log import _root as _activity_state_root
     from tui_clipboard import ClipboardInput
     from tui_logs import JOURNAL_SOURCE
 
@@ -61,7 +65,7 @@ class RoundedSwitch(Switch):
 
 
 class SettingsPanel(Vertical):
-    """One inline draft; only Apply changes the dashboard's active preferences."""
+    """Independent session and host drafts; only the host Save writes to disk."""
 
     BINDINGS = [("escape", "revert", "Revert edits")]
     DEFAULT_CSS = """
@@ -78,8 +82,10 @@ class SettingsPanel(Vertical):
     SettingsPanel .settings-row SelectCurrent > #label {
       height: 1; text-wrap: nowrap; text-overflow: ellipsis; }
     SettingsPanel #pref-interval-error { height: auto; color: $error; }
-    SettingsPanel #preferences-actions { height: 3; }
-    SettingsPanel #preferences-actions Button { width: auto; min-width: 8; margin-right: 1; }
+    SettingsPanel #preferences-actions, SettingsPanel #host-logging-actions { height: 3; }
+    SettingsPanel #preferences-actions Button, SettingsPanel #host-logging-actions Button {
+      width: auto; min-width: 8; margin-right: 1;
+    }
     """
 
     class ApplyRequested(Message):
@@ -93,10 +99,111 @@ class SettingsPanel(Vertical):
             super().__init__()
             self.panel = panel
 
-    def __init__(self, values, themes, *, read_only=False, resources="", **kwargs):
+    class SaveHostLoggingRequested(Message):
+        def __init__(self, panel):
+            super().__init__()
+            self.panel = panel
+
+    def __init__(
+        self, values, themes, *, read_only=False, demo=False, resources="", **kwargs
+    ):
         super().__init__(**kwargs)
         self.values, self.themes = dict(values), tuple(themes)
-        self.read_only, self.resources = read_only, resources
+        self.read_only, self.demo, self.resources = read_only, demo, resources
+        self._host_logging = None
+
+    def _host_logging_view(self):
+        if self.demo:
+            return "/home/demo/.local/state/oc-box/log", "Off (default)"
+        settings = self._host_logging
+        if settings is None:
+            return "Unavailable", "Unavailable"
+        directory = settings.effective_directory
+        if directory is None:
+            try:
+                directory = _activity_state_root(None) / "log"
+            except (OSError, RuntimeError, ValueError):
+                pass
+        shown = str(directory) if directory is not None else ""
+        if not shown.isprintable():
+            shown = "Unavailable"
+        mirror = (
+            ("On" if settings.journald else "Off") + " (saved)"
+            if settings.journald_configured
+            else "Off (default)"
+        )
+        return shown, mirror
+
+    @property
+    def _can_edit_host_logging(self):
+        return not (self.demo or self.read_only) and self._host_logging is not None
+
+    def _compose_host_logging(self):
+        if not self.demo:
+            try:
+                self._host_logging = log_config.load_host_settings()
+            except log_config.LogConfigError:
+                pass
+        directory, mirror = self._host_logging_view()
+        welcome = (
+            "Demo: synthetic settings only."
+            if self.demo
+            else "Read-only mode: host logging settings cannot be saved."
+            if self.read_only
+            else ""
+        )
+        if not self.demo and self._host_logging is None:
+            welcome = "Host logging configuration is invalid or unsafe."
+        disabled = not self._can_edit_host_logging
+        saved = self._host_logging
+        with Vertical(classes="settings-topic", id="host-logging-settings"):
+            yield Label("Host logging", classes="settings-topic-title")
+            yield Static(
+                f"Effective private log directory: {directory}",
+                id="host-logging-directory-status",
+                markup=False,
+            )
+            yield Static(
+                f"System journal mirror: {mirror}",
+                id="host-logging-mirror-status",
+                markup=False,
+            )
+            with Horizontal(classes="settings-row"):
+                yield Label("Private log directory")
+                yield ClipboardInput(
+                    (saved.directory or "") if saved else "",
+                    placeholder="Default (accepts absolute paths or ~/…)",
+                    id="host-logging-directory",
+                    disabled=disabled,
+                )
+            yield Label("Mirror oc-box activity to system journal")
+            with Horizontal(classes="settings-row settings-toggle-row"):
+                yield Switch(
+                    saved.journald if saved else False,
+                    id="host-logging-mirror",
+                    disabled=disabled,
+                )
+            yield Static(
+                "The private file remains primary. Authorized host journal viewers can read mirrored activity; "
+                "visibility and retention follow host policy.",
+                markup=False,
+            )
+            yield Static(
+                "Use default clears the directory override after Save. Saving affects future activity and "
+                "does not create a log directory or move existing logs. Rotation and retention are config-only.",
+                markup=False,
+            )
+            with Horizontal(id="host-logging-actions"):
+                yield Button(
+                    "Use default", id="host-logging-default", disabled=disabled
+                )
+                yield Button(
+                    "Save Host Logging",
+                    id="host-logging-save",
+                    variant="primary",
+                    disabled=disabled,
+                )
+            yield Static(welcome, id="host-logging-result", markup=False)
 
     def compose(self):
         with Vertical():
@@ -198,6 +305,7 @@ class SettingsPanel(Vertical):
                         "Search text is not saved to disk.",
                         markup=False,
                     )
+                yield from self._compose_host_logging()
                 with Vertical(classes="settings-topic"):
                     yield Label(
                         "Resources · information only", classes="settings-topic-title"
@@ -277,6 +385,36 @@ class SettingsPanel(Vertical):
     def action_revert(self):
         self.post_message(self.RevertRequested(self))
 
+    def save_host_logging(self):
+        if not self._can_edit_host_logging:
+            return
+        directory = self.query_one("#host-logging-directory", Input)
+        mirror = self.query_one("#host-logging-mirror", Switch)
+        result = self.query_one("#host-logging-result", Static)
+        try:
+            settings, changed = log_config.save_host_settings(
+                self._host_logging,
+                directory=directory.value or None,
+                journald=mirror.value,
+            )
+        except log_config.LogConfigError as exc:
+            result.update(str(exc))
+        else:
+            self._host_logging = settings
+            effective, configured = self._host_logging_view()
+            self.query_one("#host-logging-directory-status", Static).update(
+                f"Effective private log directory: {effective}"
+            )
+            self.query_one("#host-logging-mirror-status", Static).update(
+                f"System journal mirror: {configured}"
+            )
+            result.update(
+                "Host logging settings saved."
+                if changed
+                else "No host logging changes."
+            )
+        result.scroll_visible(animate=False)
+
     def reset_defaults(self):
         # Stage changes just like ordinary edits: Revert still discards them.
         # Read-only mode, resources, connections, favorites and log buffers are
@@ -307,7 +445,19 @@ class SettingsPanel(Vertical):
         self.query_one("#pref-log-query", Input).value = DEFAULT_SETTINGS["log_query"]
 
     def on_button_pressed(self, event):
-        if event.button.id == "preferences-cancel":
+        if event.button.id in ("host-logging-save", "host-logging-default"):
+            event.stop()
+            if (
+                not self._can_edit_host_logging
+                or event.button.disabled
+                or event.button is not self.query_one("#" + event.button.id, Button)
+            ):
+                return
+            if event.button.id == "host-logging-default":
+                self.query_one("#host-logging-directory", Input).value = ""
+            else:
+                self.post_message(self.SaveHostLoggingRequested(self))
+        elif event.button.id == "preferences-cancel":
             event.stop()
             self.action_revert()
         elif event.button.id == "preferences-reset":

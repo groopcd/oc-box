@@ -1,10 +1,14 @@
-"""Inline, session-only settings on the real dashboard with synthetic data."""
+"""Inline dashboard settings with synthetic data and private config fixtures."""
 
 import copy
 import importlib.util
+import json
+import os
+import tempfile
 import threading
 import unittest
 from contextlib import ExitStack
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from oc_box.tui import DemoBackend
@@ -78,6 +82,7 @@ class InlineSettingsTests(unittest.IsolatedAsyncioTestCase):
                             "Display",
                             "Sessions",
                             "Logs",
+                            "Host logging",
                             "Resources · information only",
                             "Safety and terminals",
                         ],
@@ -95,6 +100,10 @@ class InlineSettingsTests(unittest.IsolatedAsyncioTestCase):
                         "pref-log-follow",
                         "pref-log-source",
                         "pref-log-query",
+                        "host-logging-directory",
+                        "host-logging-mirror",
+                        "host-logging-default",
+                        "host-logging-save",
                         "settings-info",
                     ):
                         with self.subTest(field=ident):
@@ -490,6 +499,7 @@ class InlineSettingsTests(unittest.IsolatedAsyncioTestCase):
                             baseline,
                             sorted(app.available_themes),
                             read_only=True,
+                            demo=True,
                             id="settings-panel",
                         )
                         await foreign_screen.mount(panel)
@@ -505,6 +515,218 @@ class InlineSettingsTests(unittest.IsolatedAsyncioTestCase):
                         self.assert_settings_requests_ignored(
                             app, requests, no_queries=state == "unmounted source"
                         )
+
+    def private_host_config(self, value):
+        private = tempfile.TemporaryDirectory(prefix="oc-box-tui-host-config-")
+        self.addCleanup(private.cleanup)
+        root = Path(private.name)
+        env = patch.dict(
+            os.environ,
+            {
+                "XDG_CONFIG_HOME": str(root / "config"),
+                "OC_BOX_STATE_HOME": str(root / "state"),
+            },
+        )
+        env.start()
+        self.addCleanup(env.stop)
+        config = root / "config/oc-box/config.json"
+        config.parent.mkdir(parents=True)
+        config.write_bytes(value)
+        config.chmod(0o600)
+        return root, config
+
+    async def click_host_logging(self, pilot, panel, selector):
+        button = panel.query_one(selector, Button)
+        button.active_effect_duration = 0
+        button.scroll_visible(animate=False, force=True)
+        await pilot.pause()
+        self.assert_visible(panel.app, button)
+        await pilot.click(button)
+        await pilot.pause()
+
+    async def test_host_logging_commit_is_separate_from_session_controls_and_navigation(
+        self,
+    ):
+        raw = b'{ "logs": {"directory": "/synthetic/old", "SystemMaxFiles": 2}, "auto_update": false }\n'
+        root, config = self.private_host_config(raw)
+        app = DashboardApp(SettingsDemo())
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.ready(app, pilot)
+            app.action_settings()
+            await pilot.pause()
+            panel = app.query_one(SettingsPanel)
+            directory = panel.query_one("#host-logging-directory", Input)
+            mirror = panel.query_one("#host-logging-mirror", Switch)
+            status = panel.query_one("#host-logging-directory-status", Static)
+            mirror_status = panel.query_one("#host-logging-mirror-status", Static)
+            result = panel.query_one("#host-logging-result", Static)
+            self.assertFalse(directory.disabled)
+            self.assertEqual(directory.value, "/synthetic/old")
+            self.assertIn("/synthetic/old", str(status.render()))
+            self.assertIn("Off (default)", str(mirror_status.render()))
+            chosen = str(root / "custom logs")
+            directory.value = chosen
+            mirror.value = True
+            panel.query_one("#pref-interval", Input).value = "17"
+            for action in (
+                "preferences-apply",
+                "preferences-reset",
+                "preferences-cancel",
+            ):
+                await pilot.click("#" + action)
+                await pilot.pause()
+                self.assertEqual(config.read_bytes(), raw)
+                self.assertEqual(directory.value, chosen)
+                self.assertTrue(mirror.value)
+            self.assertEqual(app._settings_snapshot()["interval"], 17)
+            app.action_tab("status")
+            app.on_settings_panel_save_host_logging_requested(
+                SettingsPanel.SaveHostLoggingRequested(panel)
+            )
+            app.action_settings()
+            await pilot.pause()
+            with patch.object(app, "_clipboard_private", return_value=True):
+                app.on_settings_panel_save_host_logging_requested(
+                    SettingsPanel.SaveHostLoggingRequested(panel)
+                )
+            self.assertEqual(config.read_bytes(), raw)
+            self.assertIn("/synthetic/old", str(status.render()))
+            self.assertIn("Off (default)", str(mirror_status.render()))
+            panel.query_one("#pref-interval", Input).value = "23"
+            await self.click_host_logging(pilot, panel, "#host-logging-save")
+            self.assertEqual(
+                json.loads(config.read_bytes()),
+                {
+                    "logs": {
+                        "directory": chosen,
+                        "SystemMaxFiles": 2,
+                        "journald": True,
+                    },
+                    "auto_update": False,
+                },
+            )
+            self.assertFalse(Path(chosen).exists())
+            self.assertIn(chosen, str(status.render()))
+            self.assertIn("On (saved)", str(mirror_status.render()))
+            self.assertIn("settings saved", str(result.render()))
+            self.assertEqual(app._settings_snapshot()["interval"], 17)
+            self.assertEqual(panel.query_one("#pref-interval", Input).value, "23")
+            before_reset = config.read_bytes()
+            await self.click_host_logging(pilot, panel, "#host-logging-default")
+            self.assertEqual(directory.value, "")
+            self.assertEqual(config.read_bytes(), before_reset)
+            await self.click_host_logging(pilot, panel, "#host-logging-save")
+            self.assertNotIn("directory", json.loads(config.read_bytes())["logs"])
+            self.assertIn(str(root / "state/log"), str(status.render()))
+            self.assertTrue(mirror.value)
+            self.assertFalse((root / "state").exists())
+
+    async def test_demo_host_logging_is_synthetic_without_config_or_state_access(self):
+        with (
+            patch("oc_box.tui_settings.log_config.load_host_settings") as load,
+            patch("oc_box.tui_settings.log_config.save_host_settings") as save,
+            patch("oc_box.tui_settings._activity_state_root") as root,
+        ):
+            app = DashboardApp(SettingsDemo(), demo=True)
+            async with app.run_test(size=(80, 24)) as pilot:
+                await self.ready(app, pilot)
+                app.action_settings()
+                await pilot.pause()
+                panel = app.query_one(SettingsPanel)
+                app.on_settings_panel_save_host_logging_requested(
+                    SettingsPanel.SaveHostLoggingRequested(panel)
+                )
+                self.assert_host_logging_disabled(panel)
+                self.assertIn(
+                    "/home/demo/",
+                    str(
+                        panel.query_one(
+                            "#host-logging-directory-status", Static
+                        ).render()
+                    ),
+                )
+                self.assertIn(
+                    "Off (default)",
+                    str(
+                        panel.query_one("#host-logging-mirror-status", Static).render()
+                    ),
+                )
+            load.assert_not_called()
+            save.assert_not_called()
+            root.assert_not_called()
+
+    def assert_host_logging_disabled(self, panel):
+        for selector in ("directory", "mirror", "default", "save"):
+            self.assertTrue(panel.query_one("#host-logging-" + selector).disabled)
+
+    async def test_host_logging_refuses_invalid_config_and_read_only_but_displays_valid_status(
+        self,
+    ):
+        for raw, read_only in (
+            (b'{"logs":{"directory":"/synthetic/configured","journald":true}}', True),
+            (
+                b'{"logs":{"directory":"/synthetic/private-value","journald":"bad"}}',
+                False,
+            ),
+        ):
+            with self.subTest(read_only=read_only):
+                _root, config = self.private_host_config(raw)
+                with patch("oc_box.tui_settings.log_config.save_host_settings") as save:
+                    app = DashboardApp(SettingsDemo(), read_only=read_only)
+                    async with app.run_test(size=(80, 24)) as pilot:
+                        await self.ready(app, pilot)
+                        app.action_settings()
+                        await pilot.pause()
+                        panel = app.query_one(SettingsPanel)
+                        app.on_settings_panel_save_host_logging_requested(
+                            SettingsPanel.SaveHostLoggingRequested(panel)
+                        )
+                        self.assert_host_logging_disabled(panel)
+                        path_status = str(
+                            panel.query_one(
+                                "#host-logging-directory-status", Static
+                            ).render()
+                        )
+                        mirror_status = str(
+                            panel.query_one(
+                                "#host-logging-mirror-status", Static
+                            ).render()
+                        )
+                        if read_only:
+                            self.assertIn("/synthetic/configured", path_status)
+                            self.assertIn("On (saved)", mirror_status)
+                        else:
+                            self.assertIn("Unavailable", path_status)
+                            self.assertIn("Unavailable", mirror_status)
+                            self.assertNotIn("private-value", path_status)
+                    save.assert_not_called()
+                self.assertEqual(config.read_bytes(), raw)
+
+    async def test_host_logging_conflict_leaves_draft_visible_but_does_not_echo_config(
+        self,
+    ):
+        _root, config = self.private_host_config(b"{}\n")
+        app = DashboardApp(SettingsDemo())
+        async with app.run_test(size=(100, 30)) as pilot:
+            await self.ready(app, pilot)
+            app.action_settings()
+            await pilot.pause()
+            panel = app.query_one(SettingsPanel)
+            path = panel.query_one("#host-logging-directory", Input)
+            result = panel.query_one("#host-logging-result", Static)
+            path.value = "private-invalid-relative"
+            await self.click_host_logging(pilot, panel, "#host-logging-save")
+            self.assertIn("Enter a valid", str(result.render()))
+            self.assertNotIn(path.value, str(result.render()))
+            self.assertEqual(config.read_bytes(), b"{}\n")
+            path.value = "/synthetic/pending"
+            outside = b'{"outside-edit":"private-value"}'
+            config.write_bytes(outside)
+            await self.click_host_logging(pilot, panel, "#host-logging-save")
+            self.assertIn("Host config changed", str(result.render()))
+            self.assertNotIn("private-value", str(result.render()))
+            self.assertEqual(config.read_bytes(), outside)
+            self.assertEqual(path.value, "/synthetic/pending")
 
 
 if __name__ == "__main__":

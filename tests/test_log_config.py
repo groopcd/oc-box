@@ -1,4 +1,5 @@
 import argparse
+import fcntl
 import io
 import json
 import os
@@ -18,7 +19,9 @@ from oc_box.log_config import (
     add_launch_arguments,
     directory_argument,
     load,
+    load_host_settings,
     overrides,
+    save_host_settings,
 )
 
 
@@ -409,6 +412,256 @@ class LogConfigTests(unittest.TestCase):
         with patch.object(log_config.os, "read", side_effect=grow_on_read) as read:
             self.assert_invalid()
         read.assert_called_once()
+
+    def assert_save_refused(self, settings, match, **changes):
+        with self.assertRaisesRegex(LogConfigError, match) as caught:
+            save_host_settings(
+                settings, **{"directory": None, "journald": True, **changes}
+            )
+        self.assertIsNone(caught.exception.__cause__)
+        self.assertIsNone(caught.exception.__context__)
+        self.assertNotIn(str(self.base), str(caught.exception))
+        self.assertFalse(list(self.config.parent.glob(".host-logging.*.tmp")))
+
+    def test_explicit_save_provisions_only_private_config_and_noop_is_write_free(self):
+        settings = load_host_settings()
+        self.assertIsNone(settings.directory)
+        self.assertFalse(settings.journald)
+        self.assertFalse(settings.journald_configured)
+        self.assertEqual(
+            save_host_settings(settings, directory=None, journald=False),
+            (settings, False),
+        )
+        self.assertEqual(list(self.home.iterdir()), [])
+        target = self.base / "untouched logs"
+        saved, changed = save_host_settings(
+            settings, directory=str(target), journald=False
+        )
+        self.assertTrue(changed)
+        self.assertEqual(saved.effective_directory, target)
+        self.assertFalse(saved.journald_configured)
+        self.assertEqual(load().directory, target)
+        self.assertFalse(target.exists())
+        self.assertEqual(stat.S_IMODE(self.config.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.config.parent.stat().st_mode), 0o700)
+        self.assertEqual(self.config.stat().st_nlink, 1)
+        self.assertEqual(
+            json.loads(self.config.read_bytes()), {"logs": {"directory": str(target)}}
+        )
+
+    def test_reset_removes_only_directory_and_preserves_full_unrelated_values(self):
+        unrelated = {
+            "auto_update": False,
+            "backup_min_passphrase_length": 14,
+            "update_channel": "stable",
+            "package_update_channels": {"pipx": "devel"},
+            "pass_env": ["EXAMPLE_TOKEN"],
+        }
+        rotation = {
+            "SystemMaxFileSize": "1M",
+            "SystemMaxFiles": 5,
+            "SystemMaxUse": "8M",
+            "SystemKeepFree": "2G",
+            "MaxFileSec": "1h",
+            "MaxRetentionSec": "7d",
+        }
+        special = b'[1.234567890123456789, 1e50000, 1e-50000, "\\ud800"]'
+        raw = (
+            json.dumps(
+                {
+                    **unrelated,
+                    "logs": {**rotation, "directory": "~/historical", "journald": True},
+                }
+            ).encode()[:-1]
+            + b', "synthetic": '
+            + special
+            + b"}"
+        )
+        path = self.write(raw)
+        before = load_host_settings()
+        old_dir = self.home / "historical"
+        old_dir.mkdir()
+        marker = old_dir / "retained"
+        marker.write_bytes(b"synthetic old log")
+        with overrides(directory=self.base, journald=False):
+            self.assertEqual(load().directory, self.base)
+            self.assertEqual(load_host_settings(), before)
+            saved, changed = save_host_settings(before, directory=None, journald=False)
+        self.assertTrue(changed)
+        self.assertIsNone(saved.effective_directory)
+        self.assertTrue(saved.journald_configured)
+        self.assertFalse(saved.journald)
+        after = json.loads(path.read_bytes())
+        self.assertEqual(after.pop("logs"), {**rotation, "journald": False})
+        after.pop("synthetic")
+        self.assertEqual(after, unrelated)
+        self.assertIn(special.replace(b", ", b","), path.read_bytes())
+        self.assertIsNone(load().directory)
+        self.assertEqual(marker.read_bytes(), b"synthetic old log")
+        self.assertFalse((self.home / ".local").exists())
+
+    def test_unmodified_saved_policy_does_not_replace_or_normalize_legacy_config(self):
+        raw = b'{ "logs": {"directory":"~/two//./levels", "journald":false}, "other": 1.0 }\n'
+        path = self.write(raw)
+        baseline = path.stat()
+        settings = load_host_settings()
+        self.assertEqual(settings.directory, "~/two//./levels")
+        self.assertEqual(settings.effective_directory, self.home / "two/levels")
+        self.assertEqual(
+            save_host_settings(settings, directory=settings.directory, journald=False),
+            (settings, False),
+        )
+        self.assertEqual(path.read_bytes(), raw)
+        self.assertEqual(path.stat().st_ino, baseline.st_ino)
+        self.assertEqual(path.stat().st_mode, baseline.st_mode)
+        self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_invalid_or_oversized_candidate_does_not_create_config_dirs_or_lock(self):
+        settings = load_host_settings()
+        for value in ("relative path", "/directory\0extra", "/" + "a" * 65536):
+            self.assert_save_refused(settings, "valid absolute", directory=value)
+        self.assert_save_refused(settings, "must be on or off", journald=1)
+        self.assertEqual(list(self.home.iterdir()), [])
+        path = self.write(b'{"synthetic":"' + b"x" * 65504 + b'"}')
+        before = path.read_bytes()
+        self.assert_save_refused(
+            load_host_settings(),
+            "Could not safely save",
+            directory="/synthetic/overflow",
+        )
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_stale_snapshot_and_config_reselection_refuse_without_overwrite(self):
+        baseline = self.write({"logs": {"journald": False}})
+        stale = load_host_settings()
+        new = b'{"auto_update":true,"logs":{"journald":false}}'
+        baseline.write_bytes(new)
+        self.assert_save_refused(stale, "Host config changed")
+        self.assertEqual(baseline.read_bytes(), new)
+        self.assertEqual(list(baseline.parent.iterdir()), [baseline])
+        selected = self.base / "other-config"
+        with patch.dict(os.environ, {"XDG_CONFIG_HOME": str(selected)}):
+            self.assert_save_refused(
+                load_host_settings(), "valid absolute", directory="/"
+            )
+            self.assert_save_refused(stale, "Host config changed")
+        self.assertFalse(selected.exists())
+
+    def test_writer_refuses_unsafe_ancestry_and_file_without_touching_target(self):
+        path = self.write({})
+        settings = load_host_settings()
+        for directory in (path.parent, path.parent.parent, self.home):
+            mode = stat.S_IMODE(directory.stat().st_mode)
+            with self.subTest(directory=directory):
+                directory.chmod(mode | 0o002)
+                try:
+                    self.assert_save_refused(settings, "Could not safely save")
+                    self.assertEqual(list(path.parent.iterdir()), [path])
+                finally:
+                    directory.chmod(mode)
+        path.chmod(0o400)
+        self.assert_save_refused(load_host_settings(), "Could not safely save")
+        self.assertEqual(path.read_bytes(), b"{}")
+        target = self.base / "unrelated"
+        target.write_bytes(b"sentinel")
+        path.unlink()
+        for kind in ("symlink", "hardlink", "fifo"):
+            with self.subTest(kind=kind):
+                if kind == "symlink":
+                    path.symlink_to(target)
+                elif kind == "hardlink":
+                    os.link(target, path)
+                else:
+                    os.mkfifo(path)
+                with self.assertRaisesRegex(LogConfigError, "invalid or unsafe"):
+                    load_host_settings()
+                self.assert_save_refused(settings, "Could not safely save")
+                self.assertEqual(target.read_bytes(), b"sentinel")
+                path.unlink()
+
+    def test_unsafe_or_busy_shared_lock_refuses_save(self):
+        path = self.write({})
+        settings = load_host_settings()
+        lock = path.parent / ".update-settings.lock"
+        target = self.base / "not-the-lock"
+        target.write_bytes(b"test sentinel")
+        lock.symlink_to(target)
+        self.assert_save_refused(settings, "Could not safely save")
+        self.assertEqual(target.read_bytes(), b"test sentinel")
+        lock.unlink()
+        os.mkfifo(lock, 0o600)
+        self.assert_save_refused(settings, "Could not safely save")
+        lock.unlink()
+        lock.touch(mode=0o600)
+        with lock.open("r+") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assert_save_refused(settings, "Could not safely save")
+        self.assertEqual(path.read_bytes(), b"{}")
+        self.assertTrue(save_host_settings(settings, directory=None, journald=True)[1])
+
+    def test_rechecks_existing_file_and_parent_after_staging(self):
+        def verify(change):
+            path = self.write({})
+            settings = load_host_settings()
+            unsaved = b'{"outside-edit":true}'
+            real_fsync = os.fsync
+            old_parent = self.base / "old-config-dir"
+
+            def edit_while_staging(fd):
+                real_fsync(fd)
+                if change == "parent":
+                    path.parent.rename(old_parent)
+                    path.parent.mkdir()
+                path.write_bytes(unsaved)
+
+            with patch.object(log_config.os, "fsync", side_effect=edit_while_staging):
+                self.assert_save_refused(settings, "Host config changed")
+            self.assertEqual(path.read_bytes(), unsaved)
+            if change == "parent":
+                self.assertEqual((old_parent / path.name).read_bytes(), b"{}")
+                self.assertFalse(list(old_parent.glob(".host-logging.*.tmp")))
+
+        for change in ("file", "parent"):
+            with self.subTest(change=change):
+                verify(change)
+
+    def test_atomic_first_save_does_not_replace_a_last_instant_entry(self):
+        self.config.parent.mkdir(parents=True)
+        settings = load_host_settings()
+        other = self.base / "unrelated"
+        other.write_bytes(b"unchanged")
+        publish = log_config._publish_config
+
+        def inject(parent, name, *, missing):
+            self.assertTrue(missing)
+            self.config.symlink_to(other)
+            return publish(parent, name, missing=missing)
+
+        with patch.object(log_config, "_publish_config", side_effect=inject):
+            self.assert_save_refused(settings, "Host config changed")
+        self.assertTrue(self.config.is_symlink())
+        self.assertEqual(other.read_bytes(), b"unchanged")
+
+    def test_publication_and_durability_failures_report_fixed_distinct_errors(self):
+        path = self.write({})
+        settings = load_host_settings()
+        private_error = OSError(str(path))
+        with patch.object(log_config.os, "replace", side_effect=private_error):
+            self.assert_save_refused(settings, "Could not safely save")
+        self.assertEqual(path.read_bytes(), b"{}")
+        real_fsync = os.fsync
+
+        def fail_final_directory_sync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise private_error
+            return real_fsync(fd)
+
+        with patch.object(
+            log_config.os, "fsync", side_effect=fail_final_directory_sync
+        ):
+            self.assert_save_refused(settings, "save could not be verified")
+        self.assertTrue(load().journald)
 
 
 if __name__ == "__main__":

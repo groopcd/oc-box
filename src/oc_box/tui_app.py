@@ -567,6 +567,7 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
                         DEFAULT_SETTINGS,
                         sorted(self.available_themes),
                         read_only=self.read_only,
+                        demo=self.demo,
                         id="settings-panel",
                     )
                 with TabPane("Sessions", id="sessions"):
@@ -959,6 +960,19 @@ class DashboardApp(ManagementActions, ClipboardActions, App):
         if not self._admit_settings_request(event) or self._clipboard_private():
             return
         event.panel.load_values(self._settings_snapshot())
+
+    def on_settings_panel_save_host_logging_requested(self, event):
+        event.stop()
+        if (
+            self.demo
+            or self.read_only
+            or not self._admit_settings_request(event)
+            or self._clipboard_private()
+            or isinstance(self.screen, ModalScreen)
+            or self.query_one("#content", TabbedContent).active != "settings"
+        ):
+            return
+        event.panel.save_host_logging()
 
     def _admit_settings_request(self, event):
         panel = event.panel
