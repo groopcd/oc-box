@@ -118,7 +118,11 @@ their checkout ownership distinct from unrelated source and flat installations.
   config symlinks. Only a separate, explicit Host logging save may persist
   the private directory and mirror choice, preserving all other configuration.
   Demo and read-only views cannot save; there is no log migration or setup
-  during config edits. Logger flags are invocation-local, never environment
+  during config edits. Existing custom destinations are checked without
+  creation; custom writes verify reserved names and the records of every file
+  affected by rotation or retention before changing the ring. Never adopt
+  unrelated files or guess at corrupt custom records. Keep default-journal
+  crash recovery unchanged. Logger flags are invocation-local, never environment
   switches or config edits; invalid saved policy fails closed even with
   explicit overrides. Only default/start, reset, stop, sync, terminal and web
   accept launcher `--log-dir PATH`, `--journald` / `--no-journald`, and

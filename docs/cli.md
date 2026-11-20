@@ -3641,9 +3641,12 @@ Keep the other keys. For example:
 Use `--log-dir PATH` to override only `logs.directory` for one lifecycle
 invocation or private `oc-box logs` read. A custom directory must be absolute
 after `~` expansion. oc-box can create it privately on append; it won't fix
-unsafe permissions or follow symlinks. Changing the directory does not move
-or delete the previous journal, alter rotation settings, or change which
-workspace registry is used.
+unsafe permissions or follow symlinks. Use a dedicated directory: oc-box
+refuses to rotate or prune an unrecognized file with a reserved activity
+filename. A dashboard save checks an existing custom directory without
+creating it; writes recheck the selected directory. Changing the directory
+does not move or delete the previous journal, alter rotation settings, or
+change which workspace registry is used.
 
 | Private setting | Meaning | Default |
 | --- | --- | --- |

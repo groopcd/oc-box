@@ -420,7 +420,9 @@ migrations. A settings Apply is not a resource Apply or native service reload.
 The **Host logging** card has a separate save action. Its directory field points
 to a private directory, not a file; use the default to fall back to the effective
 oc-box state root. Changing that setting does not move or delete old journals,
-and saving creates no log directory. The journald switch is off by default.
+and saving creates no log directory. Use a dedicated directory. An existing
+unsafe directory or an unrecognized file with a reserved activity name is
+refused rather than being adopted as a log. The journald switch is off by default.
 When enabled, successfully written, validated private activity events may also
 be mirrored to the local system journal. The private file remains primary, and
 authorized system-journal viewers may see the mirrored metadata. Saving never
@@ -589,10 +591,12 @@ The table sorts by time, source, severity or message. Click a heading to sort
 and click again to reverse; optional metadata columns can be hidden without
 changing the source. Open a row to read its full message. **RAW** shows the
 matching retained entries without table formatting, independent of the table's
-sort and visible columns. **Copy all** copies that snapshot subject to the same
-1 MiB UTF-8 limit and shows a clipboard notification. RAW never bypasses
-validation or redaction: it does not recover discarded bytes, arbitrary system
-journal fields, or pre-redaction Podman output.
+sort and visible columns. Each record occupies one line; scroll horizontally
+for long lines. **Copy all** copies matching retained records subject to the same
+1 MiB UTF-8 limit and shows a clipboard notification. If matches contain output
+from multiple Podman workspaces, select a scoped source before bulk copying.
+RAW never bypasses validation or redaction: it does not recover discarded bytes,
+arbitrary system journal fields, or pre-redaction Podman output.
 
 The header shows **N log entries** when search is empty and **N log matches**
 when filtering, with singular forms for one result. These are retained log

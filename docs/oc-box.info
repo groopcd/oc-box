@@ -4071,9 +4071,12 @@ example:
 Use ‘--log-dir PATH’ to override only ‘logs.directory’ for one lifecycle
 invocation or private ‘oc-box logs’ read.  A custom directory must be
 absolute after ‘~’ expansion.  oc-box can create it privately on append;
-it won't fix unsafe permissions or follow symlinks.  Changing the
-directory does not move or delete the previous journal, alter rotation
-settings, or change which workspace registry is used.
+it won't fix unsafe permissions or follow symlinks.  Use a dedicated
+directory: oc-box refuses to rotate or prune an unrecognized file with a
+reserved activity filename.  A dashboard save checks an existing custom
+directory without creating it; writes recheck the selected directory.
+Changing the directory does not move or delete the previous journal,
+alter rotation settings, or change which workspace registry is used.
 
 | Private setting | Meaning | Default | | -- | -- | -- | |
 ‘SystemMaxFileSize’ | Size that triggers rotation, 1 KiB–4 MiB | ‘256K’
@@ -4721,12 +4724,12 @@ Node: Devices and host permissions194683
 Node: Resource reports197029
 Node: Configuration and environment199140
 Node: Files210521
-Node: Exit status220877
-Node: Examples222285
-Node: Troubleshooting224424
-Node: Installation and manuals236563
-Node: Authors and license246753
-Node: See also247360
+Node: Exit status221108
+Node: Examples222516
+Node: Troubleshooting224655
+Node: Installation and manuals236794
+Node: Authors and license246984
+Node: See also247591
 
 End Tag Table
 
