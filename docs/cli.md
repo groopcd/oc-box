@@ -2725,6 +2725,24 @@ produces a refusal placeholder with a fixed stage/category, without clipboard
 data, source paths, raw exceptions or helper stderr. Source-guard failures remain
 uniform for missing, inaccessible or protected sources and links refused by
 strict mode.
+
+An ordinary paste above the 16 KiB pathname-capture limit passes through
+unchanged. While it is still framed as paste, it cannot trigger clipboard
+reads or pathname imports. The relay resumes interception only after an exact,
+valid paste end. Ambiguous or malformed input instead keeps interception
+disabled; an unfinished terminal reply or paste also cannot grant a read.
+The relay reports a fixed reason on client exit. Open a fresh native TUI client
+if that happens; the relay does not restart OpenCode or the workspace.
+
+After an unexpected clipboard-read error, one later qualifying Ctrl+Y key
+event may try again if no desktop helper is still outstanding. There is no
+automatic retry, and a success does not refill the per-client allowance.
+Encodings without an event type cannot distinguish repeat from a new press.
+A second unexpected read failure or unverified helper cleanup or staging
+disables clipboard imports for that client. Unverified staging also stops
+pathname and Kitty file imports in the same client. Refusals use fixed
+categories; input and clipboard contents are not logged.
+
 No packages are installed automatically.
 Missing helpers name the selected utility and its host package explicitly:
 `wl-paste` is provided by `wl-clipboard`, and X11 uses `xclip`. These package

@@ -1,5 +1,6 @@
 """Focused clipboard/file checks; never read the real desktop clipboard."""
 
+import base64
 import contextlib
 import io
 import os
@@ -219,7 +220,9 @@ class HostClipboardTests(unittest.TestCase):
                 state_root=lambda: root / "state",
                 vault=SimpleNamespace(vault_path=lambda: root / "vault/vault.age"),
             )
-            transfer = MagicMock(files=0, total=0, cleanup_verified=True)
+            transfer = MagicMock(
+                files=0, total=0, failed=False, closed=False, cleanup_verified=True
+            )
             transfer.put.return_value = (
                 b"/tmp/oc-box-drop-test/drop_one.pdf /tmp/oc-box-drop-test/drop_two.png"
             )
@@ -326,7 +329,9 @@ class HostClipboardTests(unittest.TestCase):
                 state_root=lambda: root / "state",
                 vault=SimpleNamespace(vault_path=lambda: root / "vault/vault.age"),
             )
-            transfer = MagicMock(files=0, total=0, cleanup_verified=True)
+            transfer = MagicMock(
+                files=0, total=0, failed=False, closed=False, cleanup_verified=True
+            )
             transfer.put.return_value = b"/tmp/oc-box-drop-test/drop_one.pdf"
             reader = Mock()
             with (
@@ -520,7 +525,9 @@ class HostClipboardTests(unittest.TestCase):
             state_root=lambda: Path("/fixture/state"),
             vault=SimpleNamespace(vault_path=lambda: Path("/fixture/vault/vault.age")),
         )
-        transfer = MagicMock(files=0, total=0, cleanup_verified=True)
+        transfer = MagicMock(
+            files=0, total=0, failed=False, closed=False, cleanup_verified=True
+        )
         transfer.put.return_value = b"/tmp/oc-box-drop-test/drop_image.png"
         reader = Mock()
         reader.read_selection.return_value = ("image/png", PNG)
@@ -668,6 +675,225 @@ class HostClipboardTests(unittest.TestCase):
             reader.read_selection.assert_not_called()
         self.assertIn("host_clipboard.py", installation.PROGRAM_FILES)
         self.assertIn("host-clipboard-testing.md", installation.MANUAL_FILES)
+
+
+class HostClipboardRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.facade = SimpleNamespace(
+            APP=Path("/fixture/application"),
+            state_root=lambda: Path("/fixture/state"),
+            vault=SimpleNamespace(vault_path=lambda: Path("/fixture/vault/vault.age")),
+        )
+        self.errors = io.StringIO()
+        self.secret = "synthetic-secret-not-for-terminal"
+
+    @contextlib.contextmanager
+    def client(self, reader, *, profile="konsole"):
+        transfer = MagicMock(
+            files=0, total=0, failed=False, closed=False, cleanup_verified=True
+        )
+        transfer.put.return_value = b"/tmp/oc-box-drop-test/drop_image.png"
+        with (
+            patch.object(host_drop, "Transfer", return_value=transfer) as start,
+            contextlib.redirect_stderr(self.errors),
+            host_drop.Relay(
+                self.facade, {}, {}, profile=profile, clipboard=reader
+            ) as relay,
+        ):
+            yield relay, transfer
+        start.assert_called_once_with(self.facade, {}, {})
+        transfer.__exit__.assert_called_once_with()
+        self.assertNotIn(self.secret, self.errors.getvalue())
+
+    def test_unexpected_read_recovery_requires_a_later_press_and_keeps_its_budget(self):
+        press = b"\x1b[121;5:1u"
+        repeat = b"\x1b[121;5:2u"
+        release = b"\x1b[121;5:3u"
+        for first, later in ((KEY, press), (press, KEY)):
+            with self.subTest(first=first, later=later):
+                reader = Mock(cleanup_verified=True)
+                reader.read_selection.side_effect = [
+                    RuntimeError(self.secret),
+                    ("image/png", PNG),
+                    RuntimeError(self.secret),
+                ]
+                with self.client(reader) as (relay, transfer):
+                    reader.read_selection.assert_not_called()
+                    self.assertEqual(
+                        relay.input_bytes(first), refusal("clipboard-unexpected-read")
+                    )
+                    reader.read_selection.assert_called_once_with()
+                    transfer.put.assert_not_called()
+                    self.assertEqual(relay.input_bytes(repeat), b"")
+                    self.assertEqual(relay.input_bytes(release), b"")
+                    reader.read_selection.assert_called_once_with()
+
+                    self.assertEqual(
+                        relay.input_bytes(later),
+                        PASTE + transfer.put.return_value + END,
+                    )
+                    self.assertEqual(reader.read_selection.call_count, 2)
+                    transfer.put.assert_called_once_with([("image/png", PNG)])
+                    self.assertEqual(
+                        relay.input_bytes(first), refusal("clipboard-internal")
+                    )
+                    self.assertEqual(reader.read_selection.call_count, 3)
+                    self.assertEqual(relay.input_bytes(repeat + release), b"")
+                    for key in (KEY, press):
+                        self.assertEqual(
+                            relay.input_bytes(key), refusal("clipboard-disabled")
+                        )
+                    self.assertEqual(reader.read_selection.call_count, 3)
+                    self.assertEqual(relay.clipboard_refused, 4)
+                    transfer.put.assert_called_once_with([("image/png", PNG)])
+
+    def test_unverified_helper_cleanup_blocks_recovery_and_further_spawns(self):
+        process = Mock()
+        process.stdout.fileno.return_value = 41
+        process.poll.return_value = None
+        process.wait.side_effect = host_clipboard.subprocess.TimeoutExpired(
+            "fixture-helper", host_clipboard.REAP_TIMEOUT
+        )
+        for error_type in (OSError, RuntimeError):
+            with self.subTest(error_type=error_type):
+                reader = host_clipboard.Reader(
+                    ("/fixture/wl-paste",), {}, helper="wl-paste"
+                )
+                process.reset_mock()
+                with (
+                    patch.object(
+                        host_clipboard.subprocess, "Popen", return_value=process
+                    ) as spawn,
+                    patch.object(
+                        host_clipboard.os,
+                        "set_blocking",
+                        side_effect=error_type(self.secret),
+                    ) as setup_pipe,
+                    self.client(reader) as (relay, transfer),
+                ):
+                    spawn.assert_not_called()
+                    self.assertIs(reader.cleanup_verified, True)
+                    self.assertEqual(
+                        relay.input_bytes(KEY), refusal("clipboard-cleanup")
+                    )
+                    self.assertIs(reader.cleanup_verified, False)
+                    process.kill.assert_called_once_with()
+                    process.wait.assert_called_once_with(
+                        timeout=host_clipboard.REAP_TIMEOUT
+                    )
+                    process.stdout.close.assert_called_once_with()
+                    self.assertEqual(
+                        relay.input_bytes(KEY), refusal("clipboard-disabled")
+                    )
+                    # A later truncated reply must not hide the earlier failure.
+                    self.assertEqual(
+                        relay.input_bytes(b"\x1bPtruncated"), b"\x1bPtruncated"
+                    )
+
+                    # The reader also refuses before spawning, apart from the latch.
+                    with self.assertRaises(host_clipboard.ClipboardError) as error:
+                        reader.read_selection()
+                    self.assertEqual(
+                        str(error.exception),
+                        "Host clipboard helper cleanup is unverified.",
+                    )
+                    spawn.assert_called_once()
+                    setup_pipe.assert_called_once_with(41, False)
+                    transfer.put.assert_not_called()
+                self.assertIn(
+                    "for this client (clipboard-cleanup).", self.errors.getvalue()
+                )
+                self.assertNotIn("input-incomplete", self.errors.getvalue())
+
+    def test_bad_reader_return_is_not_a_retryable_read_exception(self):
+        reader = Mock(cleanup_verified=True)
+        reader.read_selection.return_value = None
+        with self.client(reader) as (relay, transfer):
+            self.assertEqual(relay.input_bytes(KEY), refusal("clipboard-internal"))
+            self.assertEqual(relay.input_bytes(KEY), refusal("clipboard-disabled"))
+            reader.read_selection.assert_called_once_with()
+            transfer.put.assert_not_called()
+
+    def test_unacknowledged_transfer_refuses_further_clipboard_reads(self):
+        reader = Mock(cleanup_verified=True)
+        reader.read_selection.return_value = ("image/png", PNG)
+        with self.client(reader) as (relay, transfer):
+
+            def no_ack(_images):
+                transfer.failed = transfer.closed = True
+                raise host_drop.DropError(self.secret)
+
+            transfer.put.side_effect = no_ack
+            self.assertEqual(relay.input_bytes(KEY), refusal("transfer"))
+            self.assertEqual(relay.input_bytes(KEY), refusal("clipboard-disabled"))
+            with patch.object(host_drop, "capture") as capture:
+                self.assertEqual(
+                    relay.input_bytes(PASTE + b"/tmp/host-image.png" + END),
+                    PASTE + host_drop.REFUSED + END,
+                )
+                capture.assert_not_called()
+            reader.read_selection.assert_called_once_with()
+            transfer.put.assert_called_once_with([("image/png", PNG)])
+
+    def test_unexpected_clipboard_transfer_failure_blocks_all_import_routes(self):
+        reader = Mock(cleanup_verified=True)
+        images = [("image/png", PNG)]
+        reader.read_selection.return_value = ("image/png", PNG)
+        with (
+            self.client(reader, profile="kitty") as (relay, transfer),
+            patch.object(host_drop, "capture", return_value=images) as capture,
+        ):
+            relay.start()
+
+            def packet(kind, fields=b"", payload=b""):
+                return (
+                    b"\x1b]72;t="
+                    + kind
+                    + b":i="
+                    + relay.ident.encode()
+                    + fields
+                    + b";"
+                    + payload
+                    + b"\x1b\\"
+                )
+
+            # Have a structured drop already in flight but not yet staged.
+            self.assertEqual(relay.input_bytes(packet(b"q")), b"")
+            self.assertEqual(
+                relay.input_bytes(packet(b"M", payload=b"text/uri-list")), b""
+            )
+            self.assertEqual(
+                relay.input_bytes(
+                    packet(
+                        b"r", b":x=1", base64.b64encode(b"file:///tmp/host-image.png")
+                    )
+                ),
+                b"",
+            )
+            transfer.put.assert_not_called()
+
+            transfer.put.side_effect = RuntimeError(self.secret)
+            self.assertEqual(relay.input_bytes(KEY), refusal("clipboard-internal"))
+            self.assertIs(relay.broken, True)
+            self.assertIs(transfer.failed, True)
+            self.assertEqual(relay.input_bytes(KEY), refusal("clipboard-disabled"))
+            denied = PASTE + host_drop.REFUSED + END
+            self.assertEqual(
+                relay.input_bytes(PASTE + b"/tmp/host-image.png" + END), denied
+            )
+            self.assertEqual(relay.input_bytes(packet(b"r", b":x=1")), b"")
+            self.assertEqual(relay.input_bytes(packet(b"M", payload=b"image/png")), b"")
+            self.assertEqual(
+                relay.pending_output(),
+                b"\x1b]72;t=r:o=0:i="
+                + relay.ident.encode()
+                + b";\x1b\\"
+                + packet(b"A"),
+            )
+            self.assertEqual(relay.pending_output(), b"")
+            reader.read_selection.assert_called_once_with()
+            capture.assert_not_called()
+            transfer.put.assert_called_once_with(images)
 
 
 if __name__ == "__main__":

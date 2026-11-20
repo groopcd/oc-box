@@ -147,6 +147,7 @@ class _Framing:
         self._held = bytearray()
         self._closed = False
         self._disabled = False
+        self._disable_reason = None
         self._string_kind = None
         self._string_escape = False
         self._osc_probe = None
@@ -160,6 +161,7 @@ class _Framing:
         self._csi_number = None
         self._paste_length = 0
         self._paste_end = 0
+        self._paste_passthrough = False
 
     def feed(self, content):
         if self._closed:
@@ -199,6 +201,8 @@ class _Framing:
         result = b"" if discard else bytes(self._held) + pending
         self._held.clear()
         if self._transform is not None:
+            if self._state in ("paste", "string"):
+                self._disable_callbacks("input-incomplete")
             self._disabled = True
         return result
 
@@ -212,8 +216,10 @@ class _Framing:
         self._disable_callbacks()
         self._state = "text"
 
-    def _disable_callbacks(self):
+    def _disable_callbacks(self, reason="input-framing"):
         self._disabled = True
+        if self._disable_reason is None:
+            self._disable_reason = reason
         if self._reserve_osc72 and self._state == "string" and self._osc_target:
             self._osc_discard = True
             self._held.clear()
@@ -237,6 +243,7 @@ class _Framing:
             self._flush(output)
         self._state = "text"
         self._paste_end = 0
+        self._paste_passthrough = False
         for value in suffix:
             self._consume(value, bytes((value,)), output)
 
@@ -345,13 +352,13 @@ class _Framing:
         try:
             replacement = self._on_clipboard()
         except Exception:
-            self._disable_callbacks()
+            self._disable_callbacks("clipboard-callback")
             output.extend(original)
             return
         if isinstance(replacement, bytes):
             output.extend(_PASTE_START + replacement + _PASTE_END)
         elif replacement is not None:
-            self._disable_callbacks()
+            self._disable_callbacks("clipboard-callback")
             output.extend(original)
 
     def _escape_unit(self, code, raw, output):
@@ -449,6 +456,7 @@ class _Framing:
                 self._state = "paste"
                 self._paste_length = 0
                 self._paste_end = 0
+                self._paste_passthrough = False
             return
         self._flush(output)
         self._state = "text"
@@ -461,14 +469,18 @@ class _Framing:
             self._held.extend(raw)
             self._paste_end += 1
             if self._paste_end == len(_PASTE_END):
+                self._state = "text"
+                if self._paste_passthrough:
+                    self._flush(output)
+                    self._paste_passthrough = False
+                    return
                 original = bytes(self._held)
                 payload = original[len(_PASTE_START) : -len(_PASTE_END)]
                 self._held.clear()
-                self._state = "text"
                 try:
                     replacement = self._transform(payload)
                 except Exception:
-                    self._disable_callbacks()
+                    self._disable_callbacks("paste-callback")
                     output.extend(original)
                     return
                 if replacement is None:
@@ -478,18 +490,23 @@ class _Framing:
                     output.extend(replacement)
                     output.extend(_PASTE_END)
                 else:
-                    self._disable_callbacks()
+                    self._disable_callbacks("paste-callback")
                     output.extend(original)
             return
-        if (
-            (code < 0x20 and code not in (0x09, 0x0A, 0x0D))
-            or 0x7F <= code <= 0x9F
-            or self._paste_length + len(raw) > self._max_paste
-        ):
+        if (code < 0x20 and code not in (0x09, 0x0A, 0x0D)) or 0x7F <= code <= 0x9F:
             self._refuse_unit(code, raw, output)
             return
-        self._held.extend(raw)
-        self._paste_length += len(raw)
+        if self._paste_passthrough:
+            output.extend(raw)
+        elif self._paste_length + len(raw) > self._max_paste:
+            # The path-capture limit is not a framing error. Stream the
+            # remaining ordinary paste without a callback, but stay opaque
+            # until its canonical end. Only a partial terminator is held.
+            self._flush(output, raw)
+            self._paste_passthrough = True
+        else:
+            self._held.extend(raw)
+            self._paste_length += len(raw)
 
     def _selector_unit(self, code, raw, output):
         extra = raw
@@ -565,7 +582,7 @@ class _Framing:
                 else:
                     if not self._reserve_osc72:
                         output.extend(original)
-                    self._disable_callbacks()
+                    self._disable_callbacks("osc72-callback")
                 return
             if self._osc_discard or reserved_selector:
                 self._held.clear()
@@ -609,9 +626,10 @@ class PasteInput(_Framing):
     Policy callbacks must validate their own paths, metadata and replacement.
     Exceptions/invalid return types disable interception.
 
-    Ambiguous/malformed encoding or paste/control framing and oversized captured
-    frames permanently set ``disabled``. Normally the original and subsequent
-    bytes pass unchanged; there is no interior rescan or timing-based re-arm.
+    Ambiguous/malformed encoding or paste/control framing permanently sets
+    ``disabled``. Normally the original and subsequent bytes pass unchanged;
+    there is no interior rescan or timing-based re-arm. Over-limit ordinary
+    pastes stream unchanged until their exact canonical end without callbacks.
     With ``reserve_osc72=True``, refused/malformed/oversized private packets and
     partial private packets at EOF are discarded, never forwarded to the child.
     After failure only framing/reservation continues, with all authorization
@@ -665,6 +683,11 @@ class PasteInput(_Framing):
     def disabled(self):
         """Whether interception is permanently refused for this input stream."""
         return self._disabled
+
+    @property
+    def disable_reason(self):
+        """First fixed reason for failing closed, not normal stream closure."""
+        return self._disable_reason
 
 
 MAX_OUTPUT_CONTROL = 262144 - 256

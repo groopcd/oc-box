@@ -218,6 +218,77 @@ class HostDropTests(unittest.TestCase):
             self.assertEqual(first.read_bytes(), PNG)
         self.assertFalse(first.exists())
 
+    def test_unreaped_transfer_cleanup_is_bounded_and_not_retried(self):
+        transfer = host_drop.Transfer(self.facade, self.data, self.connection)
+        process = Mock(pid=4343, returncode=None)
+        process.wait.side_effect = host_drop.subprocess.TimeoutExpired("synthetic", 3)
+        transfer.process = process
+        transfer.failed = True
+        with patch.object(host_drop.os, "killpg") as kill:
+            transfer.close()
+            transfer.close()
+        self.assertTrue(transfer.closed)
+        self.assertFalse(transfer.cleanup_verified)
+        self.assertEqual(process.wait.call_count, 3)
+        self.assertTrue(
+            all(call.kwargs == {"timeout": 3} for call in process.wait.call_args_list)
+        )
+        self.assertEqual(
+            [call.args for call in kill.call_args_list],
+            [
+                (process.pid, host_drop.signal.SIGTERM),
+                (process.pid, host_drop.signal.SIGKILL),
+            ],
+        )
+        process.stdin.close.assert_called_once()
+        process.stdout.close.assert_called_once()
+
+    def test_clipboard_framing_refusal_reports_one_fixed_warning_on_client_exit(self):
+        clipboard = Mock()
+        relay = host_drop.Relay(
+            self.facade,
+            self.data,
+            self.connection,
+            profile="konsole",
+            clipboard=clipboard,
+        )
+        errors = io.StringIO()
+        self.assertEqual(relay.input_bytes(b"\x1b"), b"")
+        # A Meta-prefixed Ctrl+Y is ambiguous, not a clipboard gesture.
+        self.assertEqual(relay.input_bytes(b"\x19"), b"\x1b\x19")
+        self.assertEqual(relay.input_bytes(b"\x19"), b"\x19")
+        with contextlib.redirect_stderr(errors):
+            relay.__exit__()
+        clipboard.read_selection.assert_not_called()
+        self.assertEqual(
+            errors.getvalue(),
+            "oc-box: Host clipboard importing disabled for this client (input-framing). "
+            "Open a fresh client to try again; nothing was restarted.\n",
+        )
+
+    def test_incomplete_opaque_reply_does_not_read_clipboard_or_disclose_diagnostics(
+        self,
+    ):
+        clipboard = Mock()
+        relay = host_drop.Relay(
+            self.facade,
+            self.data,
+            self.connection,
+            profile="kitty",
+            clipboard=clipboard,
+        )
+        reply = b"\x1bPsynthetic-private-data\x19"
+        self.assertEqual(relay.input_bytes(reply), reply)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            relay.__exit__()
+        clipboard.read_selection.assert_not_called()
+        self.assertEqual(
+            errors.getvalue(),
+            "oc-box: Host clipboard importing disabled for this client (input-incomplete). "
+            "Open a fresh client to try again; nothing was restarted.\n",
+        )
+
     def test_paste_only_selection_does_not_read_prose_or_server_path_requests(self):
         with host_drop.Relay(
             self.facade, self.data, self.connection, profile="konsole"

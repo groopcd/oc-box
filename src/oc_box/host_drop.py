@@ -87,6 +87,10 @@ _CLIPBOARD_REFUSALS = {
         "file-list",
         "source",
         "transfer",
+        "clipboard-cleanup",
+        "clipboard-unexpected-read",
+        "clipboard-internal",
+        "clipboard-disabled",
     )
 }
 CLIPBOARD_WARNING = (
@@ -488,7 +492,10 @@ class Transfer:
                 except subprocess.TimeoutExpired:
                     with contextlib.suppress(ProcessLookupError):
                         os.killpg(process.pid, signal.SIGKILL)
-                    process.wait(timeout=3)
+                    # State is already uncertain. Do not retry the cleanup,
+                    # and do not let an unreaped helper mask the client exit.
+                    with contextlib.suppress(subprocess.TimeoutExpired):
+                        process.wait(timeout=3)
             process.stdout.close()
             if process.returncode != 0:
                 self.cleanup_verified = False
@@ -524,6 +531,8 @@ class Relay:
         self.transfer = Transfer(box, data, connection)
         self.refused = 0
         self.clipboard_refused = 0
+        self.clipboard_had_unexpected_read = False
+        self.clipboard_disable_reason = None
         self.protocol = None
         self.ident = None
         self.pending = bytearray()
@@ -545,8 +554,24 @@ class Relay:
         self.transfer.__enter__()
         return self
 
+    def _transfer_unavailable(self):
+        return self.broken or self.transfer.failed or self.transfer.closed
+
     def stage(self, images):
-        return self.transfer.put(images)
+        if self._transfer_unavailable():
+            raise DropError("temporary-import-failed")
+        try:
+            return self.transfer.put(images)
+        except Exception as error:
+            if self.transfer.failed or not isinstance(error, DropError):
+                # A request may have partially arrived. Block further imports
+                # and cancel queued or in-flight Kitty requests, not just puts.
+                self.broken = self.transfer.failed = True
+                self.pending.clear()
+                protocol, self.protocol = self.protocol, None
+                if protocol is not None:
+                    protocol.close()
+            raise
 
     def paste(self, payload):
         if not self.paths_enabled:
@@ -554,7 +579,7 @@ class Relay:
         paths = pasted_paths(payload)
         if paths is None:
             return None
-        if self.broken:
+        if self._transfer_unavailable():
             return REFUSED
         try:
             return self.stage(capture(paths, self.protected))
@@ -562,10 +587,20 @@ class Relay:
             self.refused += 1
             return REFUSED
 
+    def _refuse_clipboard(self, label, *, disable=False):
+        self.clipboard_refused += 1
+        if disable:
+            self.clipboard_disable_reason = label
+        return _CLIPBOARD_REFUSALS.get(label, CLIPBOARD_REFUSED)
+
     def paste_clipboard(self):
         """Only PasteInput's reserved host keyboard action calls this."""
+        if self.clipboard_disable_reason is not None:
+            return self._refuse_clipboard("clipboard-disabled")
         phase = "client-state"
         try:
+            if self.transfer.failed or self.transfer.closed:
+                return self._refuse_clipboard("transfer", disable=True)
             if self.broken or self.clipboard is None:
                 raise DropError("clipboard-unavailable")
             phase = "client-limit"
@@ -575,7 +610,22 @@ class Relay:
             ):
                 raise DropError("staging-limit")
             phase = "clipboard-read"
-            mime, data = self.clipboard.read_selection()
+            try:
+                selection = self.clipboard.read_selection()
+            except (ValueError, OSError):
+                if getattr(self.clipboard, "cleanup_verified", None) is False:
+                    return self._refuse_clipboard("clipboard-cleanup", disable=True)
+                raise
+            except Exception:
+                if getattr(self.clipboard, "cleanup_verified", None) is not True:
+                    return self._refuse_clipboard("clipboard-cleanup", disable=True)
+                if self.clipboard_had_unexpected_read:
+                    return self._refuse_clipboard("clipboard-internal", disable=True)
+                # Only a later qualifying key event may try again. A successful
+                # read does not replenish this connection's recovery allowance.
+                self.clipboard_had_unexpected_read = True
+                return self._refuse_clipboard("clipboard-unexpected-read")
+            mime, data = selection
             if not isinstance(data, bytes) or not data:
                 raise DropError("clipboard-size")
             if mime == "image/png":
@@ -606,9 +656,12 @@ class Relay:
             phase = "transfer"
             return self.stage(images)
         except (ValueError, OSError) as error:
-            self.clipboard_refused += 1
+            if phase == "transfer" and self.transfer.failed:
+                return self._refuse_clipboard("transfer", disable=True)
             label = _CLIPBOARD_ERROR_CODES.get(str(error), phase)
-            return _CLIPBOARD_REFUSALS.get(label, CLIPBOARD_REFUSED)
+            return self._refuse_clipboard(label)
+        except Exception:
+            return self._refuse_clipboard("clipboard-internal", disable=True)
 
     def start(self):
         if self.profile != "kitty" or not self.paths_enabled:
@@ -692,7 +745,17 @@ class Relay:
         return prefix + b"\x1b]72;t=A:i=" + self.ident.encode() + b";\x1b\\"
 
     def __exit__(self, *_):
+        # The native PTY no longer accepts input. Seal the parser without
+        # forwarding any held bytes, including incomplete private replies.
+        self.finish_input()
         self.transfer.__exit__()
+        reason = self.clipboard_disable_reason or self.input.disable_reason
+        if self.clipboard is not None and reason is not None:
+            print(
+                f"oc-box: Host clipboard importing disabled for this client ({reason}). "
+                "Open a fresh client to try again; nothing was restarted.",
+                file=sys.stderr,
+            )
         if self.clipboard_refused:
             print(
                 f"oc-box: {self.clipboard_refused} host clipboard paste(s) refused; "

@@ -324,14 +324,99 @@ class PasteInputTests(FramingCase):
         content = paste(payload) + paste(b"x")
         self.assert_input(
             content,
-            content,
-            disabled=True,
+            paste(payload) + paste(REPLACEMENT),
+            payloads=(b"x",),
             max_paste=len(payload) - 1,
         )
 
-    def test_over_limit_frame_never_rescans_its_interior_or_later_frames(self):
+    def test_malformed_over_limit_frame_never_rescans_interior_or_later_frames(self):
         content = START + b"x" * 17 + paste(b"nested") + END + paste(b"later")
         self.assert_input(content, content, disabled=True, max_paste=16)
+
+    def test_over_limit_stream_holds_only_a_closing_prefix_and_rearms_after_exact_end(
+        self,
+    ):
+        shortcut = b"\x1b[121;5u"
+        for reserve in (False, True):
+            with self.subTest(reserve_osc72=reserve):
+                reads = []
+                paths = []
+                parser = PasteInput(
+                    lambda data: paths.append(data) or REPLACEMENT,
+                    on_clipboard=lambda: reads.append(True) or REPLACEMENT,
+                    max_paste=8,
+                    reserve_osc72=reserve,
+                )
+                self.assertEqual(parser.feed(START + b"x" * 8), b"")
+                self.assertEqual(parser.feed(b"y"), START + b"x" * 8 + b"y")
+                for _ in range(8):
+                    body = b"z" * 4096
+                    self.assertEqual(parser.feed(body), body)
+                    self.assertEqual(len(parser._held), 0)
+                self.assertEqual(parser.feed(END[:-1]), b"")
+                self.assertEqual(parser._held, END[:-1])
+                self.assertEqual(0, len(reads))
+                self.assertEqual(
+                    parser.feed(END[-1:] + shortcut), END + paste(REPLACEMENT)
+                )
+                self.assertEqual(reads, [True])
+                self.assertEqual(paths, [])
+                self.assertFalse(parser.disabled)
+                self.assertIsNone(parser.disable_reason)
+
+    def test_malformed_over_limit_paste_keeps_clipboard_off_and_kitty_replies_reserved(
+        self,
+    ):
+        prefix = START + b"x" * 17
+        shortcut = b"\x19"
+        for retain_reservation in (False, True):
+            for invalid in (shortcut, b"\xc2\x9b201~", b"\xff"):
+                with self.subTest(reserve=retain_reservation, invalid=invalid):
+                    reads = []
+                    parser = PasteInput(
+                        lambda _: REPLACEMENT,
+                        on_clipboard=lambda: reads.append(True) or REPLACEMENT,
+                        max_paste=16,
+                        reserve_osc72=retain_reservation,
+                    )
+                    self.assertEqual(parser.feed(prefix), prefix)
+                    self.assertEqual(
+                        parser.feed(invalid + END + shortcut), invalid + END + shortcut
+                    )
+                    self.assertEqual(reads, [])
+                    self.assertTrue(parser.disabled)
+                    self.assertEqual(parser.disable_reason, "input-framing")
+
+        # A mismatched ESC prefix in an oversized paste can instead introduce
+        # a private reply. Keep the reservation even after failing closed.
+        packets, reads = [], []
+        parser = PasteInput(
+            lambda _: REPLACEMENT,
+            on_osc72=packets.append,
+            on_clipboard=lambda: reads.append(True) or REPLACEMENT,
+            max_paste=16,
+            reserve_osc72=True,
+        )
+        self.assertEqual(parser.feed(prefix + b"\x1b"), prefix)
+        wire = parser.feed(b"]72;private-data\x1b\\" + END + shortcut)
+        self.assertEqual(wire, END + shortcut)
+        self.assertEqual(packets, [])
+        self.assertEqual(reads, [])
+        self.assertTrue(parser.disabled)
+
+    def test_unterminated_oversized_paste_only_flushes_its_partial_end_at_eof(self):
+        seen = []
+        parser = PasteInput(
+            lambda _: REPLACEMENT,
+            on_clipboard=lambda: seen.append(True) or REPLACEMENT,
+            max_paste=1,
+        )
+        content = START + b"long" * 1024
+        self.assertEqual(parser.feed(content + END[:-1]), content)
+        self.assertEqual(parser._held, END[:-1])
+        self.assertEqual(parser.finish(), END[:-1])
+        self.assertEqual(seen, [])
+        self.assertEqual(parser.disable_reason, "input-incomplete")
 
     def test_all_incomplete_frame_prefixes_flush_without_grant(self):
         complete = paste("/host/Ü.png".encode())

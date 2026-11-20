@@ -178,6 +178,16 @@ If it does nothing, don't remap ordinary Ctrl+V or enable broad filesystem/socke
 mounts. Report the terminal and native versions so the binding can be adjusted
 in development.
 
+To check relay recovery, paste more than 16 KiB of ordinary synthetic text
+without sending it. After its valid paste end, clear the draft and try Ctrl+Y
+with a known supported clip. The ordinary paste should be unchanged and the
+shortcut should still work. A fixed `input-framing` warning at client exit
+means interception was disabled because the relay could no longer trust its
+input boundary. A fresh client can attach if the owner is still running.
+An unexpected read error may permit one later qualifying Ctrl+Y event if the
+helper was reaped. There is no automatic retry or restart. If staging or
+cleanup cannot be verified, do not repeat it in that client.
+
 ## What to report
 
 - Branch commit and `oc-box --version`.
@@ -203,6 +213,8 @@ not the underlying exception or pathname:
 | --- | --- |
 | `clipboard-types` | No supported or valid offered clipboard type |
 | `clipboard-helper`, `clipboard-timeout`, `clipboard-size`, `clipboard-read` | Clipboard retrieval/validation failed |
+| `clipboard-unexpected-read` | Unexpected read error; one later qualifying Ctrl+Y event can try again |
+| `clipboard-cleanup`, `clipboard-internal`, `clipboard-disabled` | Importing stopped for this client; there is no further helper read or replay |
 | `file-uri`, `file-list`, `file-list-limit` | Nonlocal/invalid/unsupported file references or list limits |
 | `source-guard` | Missing, inaccessible or protected source, or a link refused in strict mode; deliberately uniform |
 | `source` | Other guarded source-capture refusal |

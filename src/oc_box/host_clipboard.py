@@ -73,14 +73,15 @@ def preflight() -> "Reader":
 
 
 def _reap(process):
-    """Bounded cleanup of this helper only, never a process group."""
+    """Bounded cleanup of this helper only; return verified reaping."""
     try:
         if process.poll() is None:
             process.kill()
     except OSError:
         pass
+    verified = False
     try:
-        process.wait(timeout=REAP_TIMEOUT)
+        verified = type(process.wait(timeout=REAP_TIMEOUT)) is int
     except (OSError, subprocess.SubprocessError):
         pass
     if process.stdout is not None:
@@ -88,12 +89,13 @@ def _reap(process):
             process.stdout.close()
         except OSError:
             pass
+    return verified
 
 
 class Reader:
     """A discovered command and sanitized environment, not a clipboard cache."""
 
-    __slots__ = ("command", "env", "helper")
+    __slots__ = ("command", "env", "helper", "cleanup_verified")
 
     def __init__(self, command, environment, *, helper):
         if helper not in ("wl-paste", "xclip"):
@@ -101,6 +103,7 @@ class Reader:
         self.command = tuple(command)
         self.env = dict(environment)
         self.helper = helper
+        self.cleanup_verified = True
 
     def _command(self, mime=None):
         if self.helper == "wl-paste":
@@ -159,8 +162,11 @@ class Reader:
     def _read(self, command, limit, deadline):
         process = None
         try:
+            if not self.cleanup_verified:
+                raise ClipboardError("Host clipboard helper cleanup is unverified.")
             if time.monotonic() >= deadline:
                 raise ClipboardError("Host clipboard read timed out.")
+            self.cleanup_verified = False
             process = subprocess.Popen(
                 command,
                 stdin=subprocess.DEVNULL,
@@ -201,4 +207,4 @@ class Reader:
             raise ClipboardError("Host clipboard read failed.") from None
         finally:
             if process is not None:
-                _reap(process)
+                self.cleanup_verified = _reap(process)
