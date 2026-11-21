@@ -423,11 +423,10 @@ release CI. Keep published 1.6.60 and earlier tags/artifacts unchanged.
    Finish documentation and regenerate the manuals before freezing the commit.
    Check for untracked files as well as `build-info.json`'s dirty flag. Keep the
    candidate unchanged throughout validation; record its full commit identity.
-2. Require the source/package/native integration workflow to pass, and the
-   seven-image distro workflow for package-map changes. Run `publish.yml` with
-   `publish=false` on the candidate as a build-only gate. Neither this workflow
-   nor the release-triggered publisher automatically checks other workflows or
-   host reports; the release owner must review those gates explicitly.
+2. Run `publish.yml` with `publish=false` on the candidate. It requires the
+   source/package/native matrix, all seven distro checks, and the
+   [security gates](docs/release-security.md) without uploading to PyPI.
+   The release owner still reviews external-host evidence separately.
 3. For history/lifecycle changes, obtain new external-host reports for the
    focused history/readiness runner, global-vault fixture and applicable
    lifecycle profile on the same clean candidate. The current native 2.3.0

@@ -745,6 +745,54 @@ class ReleaseArtifactTests(unittest.TestCase):
         self.assertIn("id-token: write", workflow)
         self.assertIn("name: pypi", workflow)
 
+    def test_live_tag_recheck_refuses_missing_moved_or_ambiguous_tags(self):
+        workflow = (APP / ".github/workflows/publish.yml").read_text()
+        section = workflow.split("name: Recheck the live public tag", 1)[1]
+        script = textwrap.dedent(
+            section.split("run: |\n", 1)[1].split("      - name:", 1)[0]
+        )
+        fake_bin = self.work / "fake-bin"
+        fake_bin.mkdir()
+        git = fake_bin / "git"
+        git.write_text('#!/bin/sh\nprintf "%s" "$OBSERVED_TAG"\nexit "$REMOTE_EXIT"\n')
+        git.chmod(0o700)
+        good, bad = "1" * 40, "2" * 40
+        ref = "refs/tags/v1.7.123.dev0"
+        direct = f"{good}\t{ref}"
+        annotated = f"{bad}\t{ref}\n{good}\t{ref}^{{}}"
+        for label, observed, status, tag, ok in (
+            ("direct", direct, "0", ref.split("/")[-1], True),
+            ("annotated", annotated, "0", ref.split("/")[-1], True),
+            ("wrong-commit", f"{bad}\t{ref}", "0", ref.split("/")[-1], False),
+            (
+                "moved-annotated",
+                f"{good}\t{ref}\n{bad}\t{ref}^{{}}",
+                "0",
+                ref.split("/")[-1],
+                False,
+            ),
+            ("missing-direct", f"{good}\t{ref}^{{}}", "0", ref.split("/")[-1], False),
+            ("duplicate", f"{direct}\n{direct}", "0", ref.split("/")[-1], False),
+            ("network", direct, "2", ref.split("/")[-1], False),
+            ("bad-tag", direct, "0", "-invalid", False),
+        ):
+            with self.subTest(label=label):
+                result = subprocess.run(
+                    ["bash", "-e", "-o", "pipefail", "-c", script],
+                    env={
+                        **self.env,
+                        "PATH": str(fake_bin) + os.pathsep + self.env["PATH"],
+                        "RELEASE_TAG": tag,
+                        "VERIFIED_CANDIDATE": good,
+                        "REMOTE_EXIT": status,
+                        "OBSERVED_TAG": observed,
+                    },
+                    capture_output=True,
+                    timeout=10,
+                    check=False,
+                )
+                self.assertEqual(result.returncode == 0, ok, result.stderr)
+
 
 class AnonymousAssetDownloadTests(unittest.TestCase):
     def response(self, data, *, url=None, length=None, status=200):

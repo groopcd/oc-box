@@ -34,9 +34,6 @@ jobs:
 
   codeql:
     needs: source
-    permissions:
-      contents: read
-      security-events: write
     strategy:
       fail-fast: false
       matrix:
@@ -45,6 +42,36 @@ jobs:
     with:
       commit: ${{ needs.source.outputs[matrix.branch] }}
       branch: ${{ matrix.branch }}
+
+  upload-codeql:
+    needs: [source, codeql]
+    if: ${{ !cancelled() && needs.source.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [master, devel]
+        language: [actions, javascript, python]
+    steps:
+      # Matching checkout is for the pinned SARIF action's source fingerprints.
+      # No checked-out scripts or candidate-controlled actions run in this job.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.source.outputs[matrix.branch] }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: codeql-${{ matrix.branch }}-${{ needs.source.outputs[matrix.branch] }}-${{ matrix.language }}
+          path: ${{ runner.temp }}/oc-box-sarif-upload
+      - uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
+        with:
+          sarif_file: ${{ runner.temp }}/oc-box-sarif-upload/${{ matrix.language }}.sarif
+          ref: refs/heads/${{ matrix.branch }}
+          sha: ${{ needs.source.outputs[matrix.branch] }}
 
   python:
     needs: source
