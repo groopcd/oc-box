@@ -106,7 +106,7 @@ class PreviewAdmissionTests(unittest.TestCase):
             patch.object(
                 file_preview, "host_export_mounts", return_value=("/initial",)
             ),
-            patch.object(file_preview_host, "ready", return_value=True),
+            patch.object(file_preview_host, "readiness_reason", return_value=None),
             patch("oc_box.host_drop.preflight", return_value="konsole"),
             patch.object(box.sys.stdin, "isatty", return_value=True),
             patch.object(box.sys.stdout, "isatty", return_value=True),
@@ -203,22 +203,31 @@ class PreviewAdmissionTests(unittest.TestCase):
             patch.object(
                 file_preview, "host_export_mounts", return_value=("/run/user",)
             ),
-            patch.object(file_preview_host, "ready", side_effect=[True, False]),
+            patch.object(
+                file_preview_host,
+                "readiness_reason",
+                side_effect=[None, "runtime-staging-overlaps-mount"],
+            ),
             patch("oc_box.host_drop.preflight", return_value="konsole"),
             patch.object(box.sys.stdin, "isatty", return_value=True),
             patch.object(box.sys.stdout, "isatty", return_value=True),
+            patch("builtins.print") as notice,
         ):
             command = self.command()
         values = json.loads(command[command.index("-c") + 2])
         self.assertNotIn(file_preview.ROOTS, values)
         self.assertFalse(hasattr(command, "preview_host_open"))
+        notice.assert_called_once_with(
+            "oc-box: Experimental host opening is off (runtime-staging-overlaps-mount).",
+            flush=True,
+        )
 
     def test_kitty_does_not_get_host_open_even_with_a_desktop(self):
         verified = (self.container_id, {"roots": [self.project, self.data["home"]]})
         with (
             patch.object(file_preview, "client_binding", return_value=verified),
             patch.object(file_preview, "host_export_mounts") as inventory,
-            patch.object(file_preview_host, "ready", return_value=True),
+            patch.object(file_preview_host, "readiness_reason", return_value=None),
             patch("oc_box.host_drop.preflight", return_value="kitty"),
             patch.object(box.sys.stdin, "isatty", return_value=True),
             patch.object(box.sys.stdout, "isatty", return_value=True),
@@ -227,6 +236,38 @@ class PreviewAdmissionTests(unittest.TestCase):
         self.assertNotIn(file_preview.ROOTS, " ".join(command))
         self.assertFalse(hasattr(command, "preview_host_open"))
         inventory.assert_not_called()
+
+    def test_reports_desktop_and_engine_refusals_without_swallowing_native_tui(self):
+        verified = (self.container_id, {"roots": [self.project, self.data["home"]]})
+
+        def missing_inventory(*_args, refusals):
+            refusals.append("container-mount-layout-unsupported")
+
+        for desktop_reason, expected in (
+            ("xdg-mime-unavailable-or-untrusted", "xdg-mime-unavailable-or-untrusted"),
+            (None, "container-mount-layout-unsupported"),
+        ):
+            with (
+                self.subTest(reason=expected),
+                patch.object(file_preview, "client_binding", return_value=verified),
+                patch.object(
+                    file_preview, "host_export_mounts", side_effect=missing_inventory
+                ) as inventory,
+                patch.object(
+                    file_preview_host, "readiness_reason", return_value=desktop_reason
+                ),
+                patch("oc_box.host_drop.preflight", return_value="konsole"),
+                patch.object(box.sys.stdin, "isatty", return_value=True),
+                patch.object(box.sys.stdout, "isatty", return_value=True),
+                patch("builtins.print") as notice,
+            ):
+                command = self.command()
+            notice.assert_called_once_with(
+                f"oc-box: Experimental host opening is off ({expected}).", flush=True
+            )
+            self.assertIn(self.data["container"], command)
+            self.assertNotIn(file_preview.ROOTS, " ".join(command))
+            self.assertEqual(inventory.call_count, int(desktop_reason is None))
 
     def test_host_opener_rechecks_private_inventory_after_click(self):
         verified = (self.container_id, {"roots": [self.project, self.data["home"]]})
@@ -237,7 +278,7 @@ class PreviewAdmissionTests(unittest.TestCase):
                 "host_export_mounts",
                 side_effect=[("/initial",), None, ("/latest",)],
             ) as mounts,
-            patch.object(file_preview_host, "ready", return_value=True),
+            patch.object(file_preview_host, "readiness_reason", return_value=None),
             patch("oc_box.host_drop.preflight", return_value="konsole"),
             patch.object(file_preview_host, "open_artifact") as open_artifact,
             patch.object(box.sys.stdin, "isatty", return_value=True),
@@ -264,10 +305,20 @@ class PreviewAdmissionTests(unittest.TestCase):
             "Mounts": [{"Type": "bind", "Source": "/other/workspace"}],
         }
         ids = self.container_id + "\n" + other + "\n"
-        for replaced, stable, expected in (
-            ({}, True, ("/other/workspace", "/synthetic/project", "/synthetic/volume")),
-            ({}, False, None),
-            ({"Options": {"type": "none", "o": "bind"}}, True, None),
+        for replaced, stable, expected, reason in (
+            (
+                {},
+                True,
+                ("/other/workspace", "/synthetic/project", "/synthetic/volume"),
+                [],
+            ),
+            ({}, False, None, ["container-list-changed"]),
+            (
+                {"Options": {"type": "none", "o": "bind"}},
+                True,
+                None,
+                ["volume-backing-unverified"],
+            ),
         ):
             replies = (
                 ids,
@@ -286,10 +337,14 @@ class PreviewAdmissionTests(unittest.TestCase):
                     ],
                 ) as engine,
             ):
+                refusals = []
                 self.assertEqual(
-                    file_preview.host_export_mounts(box, self.data, self.container_id),
+                    file_preview.host_export_mounts(
+                        box, self.data, self.container_id, refusals=refusals
+                    ),
                     expected,
                 )
+                self.assertEqual(refusals, reason)
                 self.assertEqual(
                     engine.call_args_list[0].args,
                     ("--remote=false", "ps", "--all", "--quiet", "--no-trunc"),

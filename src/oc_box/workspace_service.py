@@ -555,6 +555,7 @@ def client_command(
             if verified is not None:
                 # Use the inspected immutable container ID, not a mutable name.
                 container, mounts = verified
+                reason = "not-interactive"
                 if sys.stdin.isatty() and sys.stdout.isatty():
                     if __package__:
                         from . import file_preview_host, host_drop
@@ -564,16 +565,26 @@ def client_command(
                     try:
                         profile = host_drop.preflight(data["opencode_version"])
                     except host_drop.DropError:
-                        terminal_supported = False
+                        reason = "terminal-profile-unverified"
                     else:
                         # Kitty's optional TTY remote control lets child
                         # output inject bytes resembling a real mouse report.
-                        terminal_supported = profile == "konsole"
-                    if terminal_supported and file_preview_host.ready():
-                        sources = preview.host_export_mounts(box, data, container)
-                        if sources is not None and file_preview_host.ready(
-                            host_mounts=sources
-                        ):
+                        reason = (
+                            file_preview_host.readiness_reason()
+                            if profile == "konsole"
+                            else "terminal-profile-unsupported"
+                        )
+                    if reason is None:
+                        refusals = []
+                        sources = preview.host_export_mounts(
+                            box, data, container, refusals=refusals
+                        )
+                        reason = (
+                            (refusals[0] if refusals else "mount-inventory-unverified")
+                            if sources is None
+                            else file_preview_host.readiness_reason(host_mounts=sources)
+                        )
+                        if reason is None:
                             command[-1] = container
                             names[preview.ROOTS] = json.dumps(mounts)
 
@@ -589,8 +600,7 @@ def client_command(
 
                 if preview_host_open is None:
                     print(
-                        "oc-box: Experimental host opening is off: desktop, "
-                        "terminal or private staging checks could not be verified.",
+                        f"oc-box: Experimental host opening is off ({reason}).",
                         flush=True,
                     )
 

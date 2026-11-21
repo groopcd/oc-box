@@ -396,26 +396,38 @@ def _spool_not_mounted(parent, root, name, uid, host_mounts):
     return True
 
 
-def ready(*, host_mounts=()) -> bool:
+def readiness_reason(*, host_mounts=None) -> str | None:
     """Read-only gate: verify a private runtime directory and desktop opener.
 
     Supply inspected host mount sources before admitting workspace proposals.
     Compare canonical paths and ancestor identities to detect bind aliases.
     """
-    if _desktop_env() is None or not _opener_available():
-        return False
+    if _desktop_env() is None:
+        return "desktop-session-unavailable"
+    if not _trusted_exec(_OPENER):
+        return "xdg-open-unavailable-or-untrusted"
+    if not _trusted_exec(_MIME):
+        return "xdg-mime-unavailable-or-untrusted"
     try:
         uid = os.geteuid()
         root = _storage_root()
         parent = os.open(root, _DIRECTORY_FLAGS)
         try:
-            return _spool_not_mounted(
+            if not _spool_not_mounted(parent, root, _storage_name(uid), uid, ()):
+                return "runtime-staging-untrusted"
+            if host_mounts is not None and not _spool_not_mounted(
                 parent, root, _storage_name(uid), uid, host_mounts
-            )
+            ):
+                return "runtime-staging-overlaps-mount"
         finally:
             os.close(parent)
     except (OSError, TypeError, ValueError):
-        return False
+        return "runtime-staging-unverified"
+    return None
+
+
+def ready(*, host_mounts=()) -> bool:
+    return readiness_reason(host_mounts=host_mounts) is None
 
 
 def _private_file(info, uid):

@@ -367,6 +367,7 @@ class HostOpenerTests(unittest.TestCase):
         self.available = self.enterContext(
             patch.object(host, "_opener_available", return_value=True)
         )
+        self.enterContext(patch.object(host, "_trusted_exec", return_value=True))
         self.environment = {
             "HOME": "/home/test",
             "PATH": "/untrusted/bin",
@@ -541,6 +542,10 @@ class HostOpenerTests(unittest.TestCase):
         project.mkdir()
         self.assertTrue(host.ready(host_mounts=(project,)))
         self.assertFalse(host.ready(host_mounts=(self.base,)))
+        self.assertEqual(
+            host.readiness_reason(host_mounts=(self.base,)),
+            "runtime-staging-overlaps-mount",
+        )
         self.assertFalse(host.ready(host_mounts=(self.spool,)))
         self.assertFalse(host.ready(host_mounts=(self.spool / "subdir",)))
         self.assertFalse(host.ready(host_mounts=("relative",)))
@@ -562,6 +567,7 @@ class HostOpenerTests(unittest.TestCase):
                     host.open_artifact("png", self.canonical)
         self.base.chmod(0o755)
         self.assertFalse(host.ready())
+        self.assertEqual(host.readiness_reason(), "runtime-staging-untrusted")
         with self.assertRaisesRegex(host.PreviewError, "not trusted"):
             host.open_artifact("png", self.canonical)
         self.assertFalse(self.spool.exists())
@@ -570,6 +576,7 @@ class HostOpenerTests(unittest.TestCase):
     def test_no_desktop_or_trusted_opener_never_stages(self):
         with patch.dict(os.environ, {}, clear=True):
             self.assertFalse(host.ready())
+            self.assertEqual(host.readiness_reason(), "desktop-session-unavailable")
             with self.assertRaisesRegex(
                 host.PreviewError, "requires a desktop session"
             ):
@@ -583,6 +590,10 @@ class HostOpenerTests(unittest.TestCase):
                 ),
             ):
                 self.assertFalse(host.ready())
+                self.assertEqual(
+                    host.readiness_reason(),
+                    f"{Path(missing).name}-unavailable-or-untrusted",
+                )
                 with self.assertRaisesRegex(host.PreviewError, "unavailable"):
                     host.open_artifact("png", self.canonical)
         self.assertFalse(self.spool.exists())

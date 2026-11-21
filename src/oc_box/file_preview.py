@@ -171,10 +171,16 @@ def client_binding(box, data, connection):
     return binding
 
 
-def host_export_mounts(box, data, container):
+def host_export_mounts(box, data, container, *, refusals=None):
     """Inspect the active local engine for host mounts that could see the spool."""
-    if not _root(data.get("project")):
+
+    def refuse(reason):
+        if refusals is not None:
+            refusals.append(reason)
         return None
+
+    if not _root(data.get("project")):
+        return refuse("workspace-project-unverified")
     # `ps` and inspect share one sanitized environment. Never silently use a
     # remote server's paths as if they were local paths.
     env = box.maintenance_host_env()
@@ -191,6 +197,7 @@ def host_export_mounts(box, data, container):
                 env=env,
             )
 
+        phase = "container-list-unverified"
         listing = query("ps", "--all", "--quiet", "--no-trunc")
         ids = listing.stdout.splitlines()
         if (
@@ -200,59 +207,66 @@ def host_export_mounts(box, data, container):
             or len(set(ids)) != len(ids)
             or not all(re.fullmatch(r"[0-9a-f]{64}", ident) for ident in ids)
         ):
-            return None
+            return refuse(phase)
+        phase = "container-inspect-unverified"
         result = query("container", "inspect", *ids)
         if result.returncode or len(result.stdout) > 8 * 1024 * 1024:
-            return None
+            return refuse(phase)
         entries = json.loads(result.stdout)
         if not isinstance(entries, list) or len(entries) != len(ids):
-            return None
+            return refuse(phase)
         remaining = set(ids)
         sources = {data["project"]}
         volumes = {}
-        for path in box.workspace_paths():
+        phase = "workspace-registry-unverified"
+        registry = box.workspace_paths()
+        if len(registry) > 512:
+            return refuse(phase)
+        for path in registry:
             if len(sources) > 512:
-                return None
+                return refuse(phase)
             project = box.read_json(path).get("project")
             if not _root(project):
-                return None
+                return refuse(phase)
             if os.path.lexists(project):
                 sources.add(project)
+        phase = "container-mounts-unverified"
         for item in entries:
             ident = item.get("Id")
             if ident not in remaining:
-                return None
+                return refuse(phase)
             remaining.remove(ident)
             if ident == container and verify_roots(box, data, item) is None:
-                return None
+                return refuse("workspace-mounts-changed")
             mounts = item.get("Mounts")
             if not isinstance(mounts, list):
-                return None
+                return refuse(phase)
             for mount in mounts:
                 source = mount.get("Source")
                 kind = mount.get("Type")
                 if kind == "tmpfs" and not source:
                     continue
                 if kind not in ("bind", "volume") or not _root(source):
-                    return None
+                    return refuse("container-mount-layout-unsupported")
                 if kind == "volume":
                     name = mount.get("Name")
                     if not isinstance(name, str) or not re.fullmatch(
                         r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name
                     ):
-                        return None
+                        return refuse(phase)
                     if volumes.setdefault(name, source) != source:
-                        return None
+                        return refuse(phase)
                 sources.add(source)
         if remaining or len(sources) > 512 or len(volumes) > 128:
-            return None
+            return refuse(phase)
         if volumes:
+            phase = "volume-inspect-unverified"
             result = query("volume", "inspect", *sorted(volumes))
             if result.returncode or len(result.stdout) > 2 * 1024 * 1024:
-                return None
+                return refuse(phase)
             entries = json.loads(result.stdout)
             if not isinstance(entries, list) or len(entries) != len(volumes):
-                return None
+                return refuse(phase)
             for volume in entries:
                 source = volumes.pop(volume.get("Name"))
                 if (
@@ -261,12 +275,13 @@ def host_export_mounts(box, data, container):
                     or volume.get("Mountpoint") != source
                     or volume.get("Options") not in (None, {})
                 ):
-                    return None
+                    return refuse("volume-backing-unverified")
+        phase = "container-list-changed"
         listed_again = query("ps", "--all", "--quiet", "--no-trunc")
         if listed_again.returncode or sorted(ids) != sorted(
             listed_again.stdout.splitlines()
         ):
-            return None
+            return refuse(phase)
         return tuple(sorted(sources))
     except (
         OSError,
@@ -277,4 +292,4 @@ def host_export_mounts(box, data, container):
         subprocess.SubprocessError,
         box.BoxError,
     ):
-        return None
+        return refuse(phase)
