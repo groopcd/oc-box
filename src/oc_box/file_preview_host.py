@@ -65,6 +65,43 @@ _DESKTOP_ENV = frozenset(
 class PreviewError(ValueError):
     """Fixed categories only, never paths, payloads or executable diagnostics."""
 
+    def __init__(self, message, *, reason=None):
+        super().__init__(message)
+        self.reason = reason
+
+
+_OPEN_FAILURES = frozenset(
+    (
+        "mount-recheck-unverified",
+        "artifact-rejected",
+        "desktop-session-unavailable",
+        "desktop-tools-unavailable",
+        "runtime-staging-unverified",
+        "runtime-staging-untrusted",
+        "runtime-staging-overlaps-mount",
+        "runtime-staging-busy",
+        "runtime-staging-limit",
+        "runtime-staging-write-failed",
+        "mime-query-failed",
+        "mime-query-timeout",
+        "mime-type-rejected",
+        "opener-timeout",
+        "opener-failed",
+        "xdg-open-unavailable-or-untrusted",
+        "xdg-mime-unavailable-or-untrusted",
+    )
+)
+
+
+def safe_open_failure(error):
+    if (
+        isinstance(error, PreviewError)
+        and isinstance(error.reason, str)
+        and error.reason in _OPEN_FAILURES
+    ):
+        return error.reason
+    return "host-open-failed"
+
 
 @dataclass(frozen=True)
 class InactiveMountSource:
@@ -497,10 +534,16 @@ def _cleanup(fd, uid):
     with os.scandir(fd) as entries:
         for entry in entries:
             if len(names) >= _MAX_FILES or not _BASENAME.fullmatch(entry.name):
-                raise PreviewError("Host PNG preview storage is not trusted.")
+                raise PreviewError(
+                    "Host PNG preview storage is not trusted.",
+                    reason="runtime-staging-untrusted",
+                )
             info = entry.stat(follow_symlinks=False)
             if not _private_file(info, uid) or info.st_size > MAX_BYTES:
-                raise PreviewError("Host PNG preview storage is not trusted.")
+                raise PreviewError(
+                    "Host PNG preview storage is not trusted.",
+                    reason="runtime-staging-untrusted",
+                )
             names.append((entry.name, info.st_mtime))
     remaining = 0
     for name, modified in names:
@@ -509,7 +552,10 @@ def _cleanup(fd, uid):
         else:
             remaining += 1
     if remaining >= _MAX_FILES:
-        raise PreviewError("Host PNG preview limit reached; try again later.")
+        raise PreviewError(
+            "Host PNG preview limit reached; try again later.",
+            reason="runtime-staging-limit",
+        )
 
 
 @contextmanager
@@ -529,7 +575,12 @@ def _storage(host_mounts):
         try:
             if not _private_directory(os.fstat(fd), uid):
                 raise PreviewError("Host PNG preview storage is not trusted.")
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise PreviewError(
+                    "Host artifact staging is busy.", reason="runtime-staging-busy"
+                ) from None
             _cleanup(fd, uid)
             yield fd, os.path.join(root, name), uid
         finally:
@@ -575,27 +626,39 @@ def open_artifact(kind: str, data: bytes, *, host_mounts=()) -> None:
         or kind not in ("png", "txt", "md", "html")
         or not 0 < len(data) <= MAX_BYTES
     ):
-        raise PreviewError("Host artifact refused.")
+        raise PreviewError("Host artifact refused.", reason="artifact-rejected")
     try:
         data, types = _prepare(kind, data)
     except ValueError:
-        raise PreviewError("Host artifact refused.") from None
+        raise PreviewError(
+            "Host artifact refused.", reason="artifact-rejected"
+        ) from None
 
     env = _desktop_env()
     if env is None:
-        raise PreviewError("Host PNG preview requires a desktop session.")
+        raise PreviewError(
+            "Host PNG preview requires a desktop session.",
+            reason="desktop-session-unavailable",
+        )
     if not _opener_available():
-        raise PreviewError("Host PNG preview opener is unavailable.")
+        raise PreviewError(
+            "Host PNG preview opener is unavailable.",
+            reason="desktop-tools-unavailable",
+        )
     try:
         host_mounts = tuple(host_mounts)
     except TypeError:
         raise PreviewError("Host PNG preview storage is not trusted.") from None
-    if not ready(host_mounts=host_mounts):
-        raise PreviewError("Host PNG preview storage is not trusted.")
+    reason = readiness_reason(host_mounts=host_mounts)
+    if reason is not None:
+        raise PreviewError("Host PNG preview storage is not trusted.", reason=reason)
     try:
         path = _stage(kind, data, host_mounts)
     except OSError:
-        raise PreviewError("Host PNG preview storage is unavailable.") from None
+        raise PreviewError(
+            "Host PNG preview storage is unavailable.",
+            reason="runtime-staging-write-failed",
+        ) from None
     try:
         # Do not dispatch a filename that the local desktop classifies as a
         # script, desktop launcher, executable or any other unexpected type.
@@ -611,12 +674,24 @@ def open_artifact(kind: str, data: bytes, *, host_mounts=()) -> None:
             timeout=_OPEN_TIMEOUT,
             check=False,
         )
-        if (
-            mime.returncode
-            or len(mime.stdout) > 256
-            or mime.stdout.decode("ascii").strip() not in types
-        ):
-            raise PreviewError("Host artifact has an unexpected desktop file type.")
+    except subprocess.TimeoutExpired:
+        raise PreviewError(
+            "Host MIME check did not report completion.", reason="mime-query-timeout"
+        ) from None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise PreviewError(
+            "Host MIME check failed.", reason="mime-query-failed"
+        ) from None
+    if mime.returncode:
+        raise PreviewError("Host MIME check failed.", reason="mime-query-failed")
+    if len(mime.stdout) > 256 or mime.stdout.strip() not in {
+        value.encode("ascii") for value in types
+    }:
+        raise PreviewError(
+            "Host artifact has an unexpected desktop file type.",
+            reason="mime-type-rejected",
+        )
+    try:
         result = subprocess.run(
             (_OPENER, path),
             env=env,
@@ -632,11 +707,14 @@ def open_artifact(kind: str, data: bytes, *, host_mounts=()) -> None:
         )
     except subprocess.TimeoutExpired:
         raise PreviewError(
-            "Host PNG preview opener did not report completion."
+            "Host PNG preview opener did not report completion.",
+            reason="opener-timeout",
         ) from None
     except PreviewError:
         raise
     except (OSError, ValueError, subprocess.SubprocessError):
-        raise PreviewError("Host PNG preview opener is unavailable.") from None
+        raise PreviewError(
+            "Host PNG preview opener is unavailable.", reason="opener-failed"
+        ) from None
     if result.returncode != 0:
-        raise PreviewError("Host PNG preview opener failed.")
+        raise PreviewError("Host PNG preview opener failed.", reason="opener-failed")

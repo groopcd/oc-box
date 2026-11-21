@@ -593,7 +593,10 @@ def client_command(
                                     box, data, container
                                 )
                                 if sources is None:
-                                    raise ValueError("host-mounts-unverified")
+                                    raise file_preview_host.PreviewError(
+                                        "host-mounts-unverified",
+                                        reason="mount-recheck-unverified",
+                                    )
                                 file_preview_host.open_artifact(
                                     kind, candidate, host_mounts=sources
                                 )

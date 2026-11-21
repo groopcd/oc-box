@@ -508,6 +508,10 @@ class HostOpenerTests(unittest.TestCase):
                 self.mime_result.returncode = returncode
                 with self.assertRaises(host.PreviewError) as error:
                     host.open_artifact(kind, source)
+                self.assertEqual(
+                    host.safe_open_failure(error.exception),
+                    "mime-query-failed" if returncode else "mime-type-rejected",
+                )
                 self.assertNotIn("synthetic-private", str(error.exception))
                 self.assertNotIn(str(self.spool), str(error.exception))
                 self.run_desktop.assert_called_once()
@@ -719,6 +723,7 @@ class HostOpenerTests(unittest.TestCase):
         ) as error:
             host.open_artifact("png", self.canonical)
         self.assertNotIn("private", str(error.exception))
+        self.assertEqual(host.safe_open_failure(error.exception), "opener-timeout")
         self.command_pair()
         (path,) = self.spool.iterdir()
         self.assertEqual(path.read_bytes(), self.canonical)
@@ -728,9 +733,17 @@ class HostOpenerTests(unittest.TestCase):
         with self.assertRaises(host.PreviewError) as error:
             host.open_artifact("png", self.canonical)
         self.assertNotIn("private", str(error.exception))
+        self.assertEqual(host.safe_open_failure(error.exception), "mime-query-timeout")
         self.run_desktop.assert_called_once()
         (command,) = self.run_desktop.call_args.args
         self.assertEqual(command[:3], (MIME, "query", "filetype"))
+
+    def test_only_explicit_fixed_failure_labels_leave_the_worker(self):
+        for error in (
+            ValueError("synthetic private message"),
+            host.PreviewError("private", reason="synthetic private reason"),
+        ):
+            self.assertEqual(host.safe_open_failure(error), "host-open-failed")
 
     def test_failed_partial_write_is_not_left_for_the_opener(self):
         write = os.write
