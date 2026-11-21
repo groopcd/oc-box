@@ -189,10 +189,12 @@ On a revision that includes relay recovery, paste more than 16 KiB of ordinary
 synthetic text as a single bracketed paste, without sending it. After its valid
 paste end, clear the draft and try Ctrl+Y with a known supported clip. The
 ordinary paste should be unchanged, and the shortcut should still work. Do not
-deliberately feed malformed terminal traffic to a real workspace. An
-`input-framing` or `input-incomplete` warning at client exit means interception
-was disabled because the relay could not trust the input boundary. A fresh
-client can attach if the owner is still running.
+deliberately feed malformed terminal traffic to a real workspace. The
+`input-framing-recovered` notice at exit means the relay passed a frame through
+without using it for import and resumed at an unambiguous boundary; it did not
+retry any clipboard read. An `input-framing` or `input-incomplete` warning means
+the relay could not trust a boundary and did not resume interception from that
+problem. A fresh client can attach if the owner is still running.
 
 If `clipboard-unexpected-read` occurs, recovery can use only a later qualifying
 Ctrl+Y event after verified helper reaping. A successful read does not restore

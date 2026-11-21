@@ -766,6 +766,12 @@ class Relay:
                 "Open a fresh client to try again; nothing was restarted.",
                 file=sys.stderr,
             )
+        elif self.clipboard is not None and self.input.recovered_framing:
+            print(
+                "oc-box: Host clipboard input framing recovered (input-framing-recovered). "
+                "No clipboard read was retried and nothing was restarted.",
+                file=sys.stderr,
+            )
         if self.clipboard_refused:
             print(
                 f"oc-box: {self.clipboard_refused} host clipboard paste(s) refused; "

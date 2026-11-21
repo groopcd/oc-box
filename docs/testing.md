@@ -223,6 +223,13 @@ transfer stops all import routes in that client. Check fixed refusal categories
 and bounded cleanup without restart, replay or automatic prompt admission.
 The earlier human observations do not test this recovery behavior.
 
+The follow-up input-framing regressions exercise pasted C0/DEL and CSI control
+bytes across read splits. Check that these frames pass unchanged and cannot
+grant while open, a later top-level shortcut can grant after a trusted end, and
+remaining ambiguous frames still fail closed. The fixed exit notice
+`input-framing-recovered` contains no frame data. These are offline checks, not
+a reproduction or validation of the reported Yakuake failure.
+
 The owner's earlier "it worked" report covers the PNG workflow on native 2.3.2.
 On diagnostic revision `af73035d848daa93ca832351564ba9635082568c`, the owner
 reported `source-guard` for the original copied PDF, then a `[PDF 1]` attachment

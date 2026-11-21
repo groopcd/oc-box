@@ -2755,11 +2755,17 @@ strict mode.
 An ordinary paste above the 16 KiB pathname-capture limit passes through
 unchanged. While it is still framed as paste, it cannot trigger clipboard
 reads or pathname imports. Only an exact, valid paste end lets interception
-resume for later input. Ambiguous or malformed input instead disables
-interception for the client; an unfinished terminal reply or paste also cannot
-grant a read.
-The relay reports a fixed reason on client exit. Open a fresh native TUI client
-if that happens; the relay does not restart OpenCode or the workspace.
+resume for later input. A recognized paste or ASCII CSI sequence with certain
+embedded control bytes also passes unchanged without granting an import. The
+relay resumes only after an unambiguous closing delimiter or final byte, and
+a later Ctrl+Y press is required for a clipboard read. An unfinished terminal
+reply or paste never grants a read. Ambiguous
+encoding, possible nested frames and other untrusted boundaries still stop
+interception for that client.
+On exit, `input-framing-recovered` reports that interception resumed;
+`input-framing` or `input-incomplete` means it did not recover from a framing
+problem. If needed, open a fresh native TUI client; the relay does not restart
+OpenCode or the workspace.
 
 After an unexpected clipboard-read error, one later qualifying Ctrl+Y key
 event may try again only if desktop helper reaping was verified. There is no

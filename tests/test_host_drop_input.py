@@ -70,6 +70,8 @@ class FramingCase(unittest.TestCase):
         payloads=(),
         packets=(),
         disabled=False,
+        recovered=False,
+        clipboard_reads=None,
         replacement=REPLACEMENT,
         packet_result=False,
         max_paste=16384,
@@ -80,6 +82,7 @@ class FramingCase(unittest.TestCase):
             with self.subTest(fragmentation=fragmentation):
                 seen_pastes = []
                 seen_packets = []
+                seen_reads = []
 
                 def transform(payload):
                     seen_pastes.append(payload)
@@ -89,18 +92,25 @@ class FramingCase(unittest.TestCase):
                     seen_packets.append(payload)
                     return packet_result
 
+                def on_clipboard(reads=seen_reads):
+                    reads.append(True)
+                    return REPLACEMENT
+
                 parser = PasteInput(
                     transform,
                     on_osc72=on_packet if packet_handler else None,
+                    on_clipboard=on_clipboard if clipboard_reads is not None else None,
                     max_paste=max_paste,
                     reserve_osc72=reserve_osc72,
                 )
                 result = b"".join(parser.feed(chunk) for chunk in chunks)
                 self.assertEqual(parser.disabled, disabled)
+                self.assertEqual(parser.recovered_framing, recovered)
                 result += parser.finish()
                 self.assertEqual(result, expected)
                 self.assertEqual(seen_pastes, list(payloads))
                 self.assertEqual(seen_packets, list(packets))
+                self.assertEqual(len(seen_reads), clipboard_reads or 0)
                 self.assertEqual(parser.finish(), b"")
 
     def assert_output(self, content, expected):
@@ -285,16 +295,17 @@ class PasteInputTests(FramingCase):
                         + paste(b"/host/no.png")
                         + b"\x1b\\"
                         + paste(b"later")
+                        + b"\x19"
                     )
-                    self.assert_input(content, content, disabled=True)
+                    self.assert_input(
+                        content, content, disabled=True, clipboard_reads=0
+                    )
 
     def test_malformed_or_ambiguous_paste_control_matrix_is_never_rearmed(self):
         ambiguous = {
             "orphan_end": END,
             "nested_start": START + b"outer" + START + b"nested" + END + END,
             "escape_in_payload": START + b"path\x1b[A" + END,
-            "nul_in_payload": paste(b"path\x00.png"),
-            "del_in_payload": paste(b"path\x7f.png"),
             "raw_c1_in_payload": paste(b"path\x85.png"),
             "encoded_c1_in_payload": paste(b"path\xc2\x85.png"),
             "raw_c1_start": b"\x9b200~path" + END,
@@ -310,8 +321,58 @@ class PasteInputTests(FramingCase):
         }
         for name, prefix in ambiguous.items():
             with self.subTest(case=name):
-                content = prefix + paste(b"/host/never-rearm.png")
-                self.assert_input(content, content, disabled=True)
+                content = prefix + paste(b"/host/never-rearm.png") + b"\x19"
+                self.assert_input(content, content, disabled=True, clipboard_reads=0)
+
+    def test_only_a_later_top_level_shortcut_grants_after_known_opaque_frames(self):
+        for frame, shortcut in (
+            (b"\x1b[12\x19;4R", b"\x19"),
+            (b"\x1b[121;\x7f5u", b"\x1b[121;5u"),
+            (paste(b"/host/no\x00.png\x7f\x19"), b"\x19"),
+        ):
+            for reserve in (False, True):
+                with self.subTest(frame=frame, reserve=reserve):
+                    ordinary = b"\x16" + paste(b"normal native text")
+                    self.assert_input(
+                        frame + ordinary + shortcut,
+                        frame + ordinary + paste(REPLACEMENT),
+                        payloads=(b"normal native text",),
+                        replacement=None,
+                        recovered=True,
+                        clipboard_reads=1,
+                        reserve_osc72=reserve,
+                    )
+
+    def test_opaque_frame_never_recovers_from_possible_nested_or_unfinished_payload(
+        self,
+    ):
+        for frame, permanently_disabled in (
+            (b"\x1b[20\x19", False),
+            (b"\x1b[20\x190~\x19" + END, True),
+            (b"\x1b[\x19M\x19\x19\x19", True),
+            (b"\x1b[\x19[A", True),
+            (b"\x1b[12\x18;4R", True),
+            (START + b"\x19", False),
+            (START + b"\x19" + paste(b"nested") + END, True),
+            (START + b"\x19\x9b201~", True),
+            (START + b"\x19" + END[:-1] + b"\x19", True),
+        ):
+            with self.subTest(frame=frame):
+                content = frame + b"\x19"
+                self.assert_input(
+                    content, content, disabled=permanently_disabled, clipboard_reads=0
+                )
+
+    def test_opaque_control_strings_do_not_reframe_shortcuts_or_paste_ends(self):
+        for prefix, suffix in ((b"\x1b]52;c;", b"\x07"), (b"\x1bPdata\x07", b"\x1b\\")):
+            with self.subTest(prefix=prefix):
+                frame = prefix + b"\x19" + END + b"\x1b[121;5u"
+                self.assert_input(frame, frame, clipboard_reads=0)
+                self.assert_input(
+                    frame + suffix + b"\x19",
+                    frame + suffix + paste(REPLACEMENT),
+                    clipboard_reads=1,
+                )
 
     def test_limit_counts_payload_bytes_not_code_points_or_marker_bytes(self):
         payload = "ÜÛ".encode()
@@ -370,7 +431,7 @@ class PasteInputTests(FramingCase):
         prefix = START + b"x" * 17
         shortcut = b"\x19"
         for retain_reservation in (False, True):
-            for invalid in (shortcut, b"\xc2\x9b201~", b"\xff"):
+            for invalid in (b"\xc2\x9b201~", b"\xff"):
                 with self.subTest(reserve=retain_reservation, invalid=invalid):
                     reads = []
                     parser = PasteInput(
@@ -404,6 +465,25 @@ class PasteInputTests(FramingCase):
         self.assertEqual(reads, [])
         self.assertTrue(parser.disabled)
 
+    def test_oversized_paste_with_control_only_recovers_at_exact_end(self):
+        reads = []
+        parser = PasteInput(
+            lambda _: self.fail("oversized paste cannot grant"),
+            on_clipboard=lambda: reads.append(True) or REPLACEMENT,
+            max_paste=1,
+        )
+        prefix = START + b"long" * 1024 + b"\x19"
+        self.assertEqual(parser.feed(prefix + END[:-1]), prefix)
+        self.assertEqual(parser._held, END[:-1])
+        self.assertFalse(parser.recovered_framing)
+        self.assertEqual(reads, [])
+        self.assertEqual(parser.feed(END[-1:]), END)
+        self.assertTrue(parser.recovered_framing)
+        self.assertEqual(reads, [])
+        self.assertEqual(parser.feed(b"\x19"), paste(REPLACEMENT))
+        self.assertEqual(reads, [True])
+        self.assertIsNone(parser.disable_reason)
+
     def test_unterminated_oversized_paste_only_flushes_its_partial_end_at_eof(self):
         seen = []
         parser = PasteInput(
@@ -431,6 +511,17 @@ class PasteInputTests(FramingCase):
                 with self.subTest(tail=tail, prefix=prefix):
                     content = prefix + tail
                     self.assert_input(content, content)
+
+    def test_eof_does_not_recover_opaque_csi_or_partial_encoding(self):
+        for unfinished in (b"\x1b", b"\x1b[121;\x19", b"\xc2"):
+            with self.subTest(unfinished=unfinished):
+                parser = PasteInput(
+                    lambda _: self.fail("unexpected path import"),
+                    on_clipboard=lambda: self.fail("unexpected clipboard read"),
+                )
+                self.assertEqual(parser.feed(unfinished) + parser.finish(), unfinished)
+                self.assertEqual(parser.disable_reason, "input-incomplete")
+                self.assertFalse(parser.recovered_framing)
 
     def test_transform_exception_or_invalid_return_preserves_input_and_disables(self):
         content = paste(b"first") + paste(b"later")

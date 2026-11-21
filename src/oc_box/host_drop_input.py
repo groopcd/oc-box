@@ -9,6 +9,9 @@ Callbacks are trusted policy code, not a way to establish input provenance.
 
 _ESC = 0x1B
 _BEL = 0x07
+_CAN = 0x18
+_SUB = 0x1A
+_DEL = 0x7F
 _CSI = 0x9B
 _ST = 0x9C
 _OSC = 0x9D
@@ -148,6 +151,8 @@ class _Framing:
         self._closed = False
         self._disabled = False
         self._disable_reason = None
+        self._opaque_frame = False
+        self._recovered_framing = False
         self._string_kind = None
         self._string_escape = False
         self._osc_probe = None
@@ -201,7 +206,7 @@ class _Framing:
         result = b"" if discard else bytes(self._held) + pending
         self._held.clear()
         if self._transform is not None:
-            if self._state in ("paste", "string"):
+            if self._state != "text" or pending:
                 self._disable_callbacks("input-incomplete")
             self._disabled = True
         return result
@@ -210,6 +215,13 @@ class _Framing:
         output.extend(self._held)
         self._held.clear()
         output.extend(raw)
+
+    def _end_frame(self):
+        self._state = "text"
+        if self._opaque_frame:
+            self._opaque_frame = False
+            if not self._disabled:
+                self._recovered_framing = True
 
     def _disable(self, output, raw=b""):
         self._flush(output, raw)
@@ -394,7 +406,18 @@ class _Framing:
         intermediate = 0x20 <= code <= 0x2F
         final = 0x40 <= code <= 0x7E
         if not (parameter or intermediate or final):
-            if not self._framing_only():
+            if (
+                not self._framing_only()
+                and self._csi_ascii
+                and (code < 0x20 or code == _DEL)
+                and code not in (_ESC, _CAN, _SUB)
+            ):
+                # A non-cancelling C0 or DEL cannot be a CSI final. It is
+                # native input, not a shortcut; this CSI can no longer grant.
+                self._opaque_frame = True
+                self._csi_candidate = None
+                self._flush(output, raw)
+            elif not self._framing_only():
                 self._refuse_unit(code, raw, output)
             elif code < 0x20 and code != _ESC:
                 self._flush(output, raw)
@@ -428,6 +451,14 @@ class _Framing:
         else:
             self._held.extend(raw)
         if not final:
+            return
+        if self._opaque_frame and not self._framing_only():
+            if code in b"~M[":
+                # Do not recover on possible paste, mouse or legacy function
+                # key prefixes. Those may have a body beyond the CSI final.
+                self._disable(output)
+            else:
+                self._end_frame()
             return
         if (
             not self._framing_only()
@@ -469,7 +500,7 @@ class _Framing:
             self._held.extend(raw)
             self._paste_end += 1
             if self._paste_end == len(_PASTE_END):
-                self._state = "text"
+                self._end_frame()
                 if self._paste_passthrough:
                     self._flush(output)
                     self._paste_passthrough = False
@@ -493,8 +524,14 @@ class _Framing:
                     self._disable_callbacks("paste-callback")
                     output.extend(original)
             return
-        if (code < 0x20 and code not in (0x09, 0x0A, 0x0D)) or 0x7F <= code <= 0x9F:
+        if 0x80 <= code <= 0x9F:
             self._refuse_unit(code, raw, output)
+            return
+        if (code < 0x20 and code not in (0x09, 0x0A, 0x0D)) or code == _DEL:
+            # These bytes cannot open or close a paste. Stream this paste
+            # without using it for import; only the exact end rearms input.
+            self._opaque_frame = self._paste_passthrough = True
+            self._flush(output, raw)
             return
         if self._paste_passthrough:
             output.extend(raw)
@@ -626,10 +663,12 @@ class PasteInput(_Framing):
     Policy callbacks must validate their own paths, metadata and replacement.
     Exceptions/invalid return types disable interception.
 
-    Ambiguous/malformed encoding or paste/control framing permanently sets
-    ``disabled``. Normally the original and subsequent bytes pass unchanged;
-    there is no interior rescan or timing-based re-arm. Over-limit ordinary
-    pastes stream unchanged until their exact canonical end without callbacks.
+    Ambiguous encoding or paste/control framing permanently sets ``disabled``.
+    Normally the original and subsequent bytes pass unchanged. Embedded C0/DEL
+    in a recognized paste or non-cancelling C0/DEL in ASCII CSI are forwarded
+    opaquely; only an unambiguous frame end permits interception of later input.
+    There is no interior rescan or timing-based re-arm. Over-limit ordinary
+    pastes also stream unchanged until their exact canonical end.
     With ``reserve_osc72=True``, refused/malformed/oversized private packets and
     partial private packets at EOF are discarded, never forwarded to the child.
     After failure only framing/reservation continues, with all authorization
@@ -688,6 +727,11 @@ class PasteInput(_Framing):
     def disable_reason(self):
         """First fixed reason for failing closed, not normal stream closure."""
         return self._disable_reason
+
+    @property
+    def recovered_framing(self):
+        """Whether any opaque control/paste recovered at a known frame end."""
+        return self._recovered_framing
 
 
 MAX_OUTPUT_CONTROL = 262144 - 256

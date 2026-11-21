@@ -308,6 +308,41 @@ class HostDropTests(unittest.TestCase):
             "Open a fresh client to try again; nothing was restarted.\n",
         )
 
+    def test_clipboard_framing_recovery_waits_for_fresh_shortcut_in_same_client(self):
+        clipboard = Mock()
+        clipboard.read_selection.return_value = ("image/png", PNG)
+        relay = host_drop.Relay(
+            self.facade,
+            self.data,
+            self.connection,
+            profile="konsole",
+            clipboard=clipboard,
+        )
+        errors = io.StringIO()
+        with (
+            patch.object(
+                relay.transfer, "put", return_value=b"/tmp/oc-box-drop-fixture/drop.png"
+            ) as put,
+            contextlib.redirect_stderr(errors),
+        ):
+            for frame in (b"\x1b[1\x19;2R", b"\x1b[200~synthetic\x19\x1b[201~"):
+                self.assertEqual(relay.input_bytes(frame), frame)
+            clipboard.read_selection.assert_not_called()
+            put.assert_not_called()
+            self.assertEqual(errors.getvalue(), "")
+            self.assertEqual(
+                relay.input_bytes(b"\x16\x19"),
+                b"\x16\x1b[200~/tmp/oc-box-drop-fixture/drop.png\x1b[201~",
+            )
+            clipboard.read_selection.assert_called_once_with()
+            put.assert_called_once_with([("image/png", PNG)])
+            relay.__exit__()
+        self.assertEqual(
+            errors.getvalue(),
+            "oc-box: Host clipboard input framing recovered (input-framing-recovered). "
+            "No clipboard read was retried and nothing was restarted.\n",
+        )
+
     def test_incomplete_opaque_reply_does_not_read_clipboard_or_disclose_diagnostics(
         self,
     ):
