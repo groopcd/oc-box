@@ -518,8 +518,8 @@ class HostOpenerTests(unittest.TestCase):
                 (command,) = self.run_desktop.call_args.args
                 self.assertEqual(command[:3], (MIME, "query", "filetype"))
                 self.assertEqual(Path(command[-1]).parent, self.spool)
-                # Keep subcases independent of the spool's retention budget.
-                Path(command[-1]).unlink(missing_ok=True)
+                self.assertFalse(Path(command[-1]).exists())
+                self.assertEqual(list(self.spool.iterdir()), [])
 
     def test_invalid_artifacts_never_staged_or_queried(self):
         for kind, candidate in (
@@ -737,6 +737,38 @@ class HostOpenerTests(unittest.TestCase):
         self.run_desktop.assert_called_once()
         (command,) = self.run_desktop.call_args.args
         self.assertEqual(command[:3], (MIME, "query", "filetype"))
+        self.assertEqual(list(self.spool.iterdir()), [])
+
+    def test_rejected_copy_does_not_consume_last_slot_or_remove_existing_copy(self):
+        with patch.object(host, "_MAX_FILES", 2):
+            host.open_artifact("png", self.canonical)
+            (retained,) = self.spool.iterdir()
+            self.mime_result.stdout = b"application/x-desktop\n"
+            for _ in range(8):
+                with self.assertRaises(host.PreviewError) as error:
+                    host.open_artifact("md", b"# attempted draft\n")
+                self.assertEqual(
+                    host.safe_open_failure(error.exception), "mime-type-rejected"
+                )
+                self.assertEqual(list(self.spool.iterdir()), [retained])
+            self.mime_result.stdout = b"text/plain\n"
+            host.open_artifact("md", b"# opened draft\n")
+            self.assertTrue(retained.exists())
+            self.assertEqual(len(list(self.spool.iterdir())), 2)
+
+    def test_previous_spool_is_not_reused_or_cleaned(self):
+        legacy = self.base / f"oc-box-open-{os.geteuid()}"
+        legacy.mkdir(mode=0o700)
+        for index in range(host._MAX_FILES):
+            path = legacy / f"artifact-{index:032x}.png"
+            path.write_bytes(b"older copy")
+            path.chmod(0o600)
+        host.open_artifact("png", self.canonical)
+        self.assertEqual(len(list(legacy.iterdir())), host._MAX_FILES)
+        self.assertTrue(
+            all(path.read_bytes() == b"older copy" for path in legacy.iterdir())
+        )
+        self.assertEqual(len(list(self.spool.iterdir())), 1)
 
     def test_only_explicit_fixed_failure_labels_leave_the_worker(self):
         for error in (

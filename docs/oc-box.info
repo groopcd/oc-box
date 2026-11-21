@@ -2910,7 +2910,9 @@ share is created, no file is written back, and no clipboard or model
 access is granted.  The host copy survives the asynchronous viewer
 handoff.  The launcher keeps up to eight copies, clears copies older
 than 24 hours on a later open, and leaves earlier removal to the desktop
-runtime-directory policy.
+runtime-directory policy.  Copies rejected before calling the opener are
+removed immediately.  Older experimental staging directories are not
+adopted or cleaned by the new launcher.
 
 The switch is not saved and does not change host OpenCode or terminal
 settings.  If the existing owner was started before upgrading oc-box,
@@ -4837,19 +4839,19 @@ Node: Synopsis930
 Node: Description3846
 Node: Commands9273
 Node: Options132652
-Node: Lifecycle and persistence187620
-Node: Distribution images189920
-Node: Sessions and recovery194884
-Node: Devices and host permissions201469
-Node: Resource reports203815
-Node: Configuration and environment205926
-Node: Files217307
-Node: Exit status228217
-Node: Examples229625
-Node: Troubleshooting231764
-Node: Installation and manuals243810
-Node: Authors and license254000
-Node: See also254607
+Node: Lifecycle and persistence187776
+Node: Distribution images190076
+Node: Sessions and recovery195040
+Node: Devices and host permissions201625
+Node: Resource reports203971
+Node: Configuration and environment206082
+Node: Files217463
+Node: Exit status228373
+Node: Examples229781
+Node: Troubleshooting231920
+Node: Installation and manuals243966
+Node: Authors and license254156
+Node: See also254763
 
 End Tag Table
 

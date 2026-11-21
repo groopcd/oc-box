@@ -365,7 +365,9 @@ def _storage_root():
 
 
 def _storage_name(uid):
-    return f"oc-box-open-{uid}"
+    # Do not adopt or discard v1 copies. That spool did not distinguish
+    # pre-dispatch refusals from files a viewer may still be consuming.
+    return f"oc-box-open-v2-{uid}"
 
 
 def _desktop_env():
@@ -589,11 +591,17 @@ def _storage(host_mounts):
         os.close(parent)
 
 
+@contextmanager
 def _stage(kind, data, host_mounts):
     with _storage(host_mounts) as (directory, path, uid):
         name = f"artifact-{secrets.token_hex(16)}.{kind}"
         fd = os.open(name, _FILE_FLAGS, mode=0o600, dir_fd=directory)
-        complete = False
+        handed_off = False
+
+        def retain_for_viewer():
+            nonlocal handed_off
+            handed_off = True
+
         try:
             try:
                 if not _private_file(os.fstat(fd), uid):
@@ -606,11 +614,45 @@ def _stage(kind, data, host_mounts):
                     pending = pending[written:]
             finally:
                 os.close(fd)
-            complete = True
+            yield os.path.join(path, name), retain_for_viewer
         finally:
-            if not complete:
+            if not handed_off:
                 os.unlink(name, dir_fd=directory)
-        return os.path.join(path, name)
+
+
+def _verify_mime(path, types, env):
+    try:
+        # Do not dispatch a file that the desktop classifies as a script,
+        # desktop launcher, executable or another unexpected type.
+        mime = subprocess.run(
+            (_MIME, "query", "filetype", path),
+            env=env,
+            cwd="/",
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+            timeout=_OPEN_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise PreviewError(
+            "Host MIME check did not report completion.", reason="mime-query-timeout"
+        ) from None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        raise PreviewError(
+            "Host MIME check failed.", reason="mime-query-failed"
+        ) from None
+    if mime.returncode:
+        raise PreviewError("Host MIME check failed.", reason="mime-query-failed")
+    if len(mime.stdout) > 256 or mime.stdout.strip() not in {
+        value.encode("ascii") for value in types
+    }:
+        raise PreviewError(
+            "Host artifact has an unexpected desktop file type.",
+            reason="mime-type-rejected",
+        )
 
 
 def open_artifact(kind: str, data: bytes, *, host_mounts=()) -> None:
@@ -653,44 +695,16 @@ def open_artifact(kind: str, data: bytes, *, host_mounts=()) -> None:
     if reason is not None:
         raise PreviewError("Host PNG preview storage is not trusted.", reason=reason)
     try:
-        path = _stage(kind, data, host_mounts)
+        with _stage(kind, data, host_mounts) as (path, retain_for_viewer):
+            _verify_mime(path, types, env)
+            # From this point an interrupted or nonzero opener can still
+            # have started a viewer. Keep the copy for the normal lifetime.
+            retain_for_viewer()
     except OSError:
         raise PreviewError(
             "Host PNG preview storage is unavailable.",
             reason="runtime-staging-write-failed",
         ) from None
-    try:
-        # Do not dispatch a filename that the local desktop classifies as a
-        # script, desktop launcher, executable or any other unexpected type.
-        mime = subprocess.run(
-            (_MIME, "query", "filetype", path),
-            env=env,
-            cwd="/",
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            close_fds=True,
-            start_new_session=True,
-            timeout=_OPEN_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        raise PreviewError(
-            "Host MIME check did not report completion.", reason="mime-query-timeout"
-        ) from None
-    except (OSError, ValueError, subprocess.SubprocessError):
-        raise PreviewError(
-            "Host MIME check failed.", reason="mime-query-failed"
-        ) from None
-    if mime.returncode:
-        raise PreviewError("Host MIME check failed.", reason="mime-query-failed")
-    if len(mime.stdout) > 256 or mime.stdout.strip() not in {
-        value.encode("ascii") for value in types
-    }:
-        raise PreviewError(
-            "Host artifact has an unexpected desktop file type.",
-            reason="mime-type-rejected",
-        )
     try:
         result = subprocess.run(
             (_OPENER, path),

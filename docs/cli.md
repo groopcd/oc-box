@@ -2598,7 +2598,9 @@ not mint a grant. No new listener or share is created, no file is written
 back, and no clipboard or model access is granted. The host copy survives the
 asynchronous viewer handoff. The launcher keeps up to eight copies, clears
 copies older than 24 hours on a later open, and leaves earlier removal to the
-desktop runtime-directory policy.
+desktop runtime-directory policy. Copies rejected before calling the opener
+are removed immediately. Older experimental staging directories are not
+adopted or cleaned by the new launcher.
 
 The switch is not saved and does not change host OpenCode or terminal settings.
 If the existing owner was started before upgrading oc-box, exit it normally and
