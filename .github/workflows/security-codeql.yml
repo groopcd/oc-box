@@ -34,29 +34,30 @@ jobs:
         with:
           ref: ${{ inputs.commit || github.sha }}
           persist-credentials: false
-          path: scan-source
       - name: Verify the exact scan source
         env:
           CANDIDATE: ${{ inputs.commit || github.sha }}
           BRANCH: ${{ inputs.branch }}
+          LANGUAGE: ${{ matrix.language }}
         run: |
           [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
-          test "$(git -C scan-source rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
           case "$BRANCH" in ''|master|devel) ;; *) exit 1 ;; esac
           if [[ -z "$BRANCH" ]]; then test "$CANDIDATE" = "$GITHUB_SHA"; fi
+          # The Actions extractor discovers workflow files at the workspace
+          # root. Never run source scripts here; the evaluator is a fresh job.
+          if [[ "$LANGUAGE" == actions ]]; then test -d .github/workflows; fi
           printf 'Candidate: `%s`\n' "$CANDIDATE" >> "$GITHUB_STEP_SUMMARY"
       - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: none
-          source-root: scan-source
       - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
         with:
           output: ${{ runner.temp }}/oc-box-codeql
           upload: never
           upload-database: false
           category: /language:${{ matrix.language }}
-          checkout_path: ${{ github.workspace }}/scan-source
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: codeql-${{ inputs.branch || 'release' }}-${{ inputs.commit || github.sha }}-${{ matrix.language }}-attempt-${{ github.run_attempt }}
