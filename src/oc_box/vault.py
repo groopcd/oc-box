@@ -363,7 +363,7 @@ def validate_secrets(values):
         validate_value(value)
 
 
-def unlock(envelope, passphrase):
+def _read_entries(envelope, passphrase):
     aes, _, invalid_tag = crypto()
     try:
         payload = aes(derive(passphrase, decode(envelope["kdf"]["salt"], 16))).decrypt(
@@ -372,19 +372,26 @@ def unlock(envelope, passphrase):
             header(envelope),
         )
         data = json.loads(payload)
-        if not isinstance(data, dict) or set(data) != {"secrets"}:
+        if not isinstance(data, dict) or len(data) != 1:
             raise ValueError
-        validate_secrets(data["secrets"])
-        return data["secrets"]
+        ((field, entries),) = data.items()
+        if field != "secrets":
+            raise ValueError
+        validate_secrets(entries)
+        return entries
     except (invalid_tag, ValueError, UnicodeError, KeyError, TypeError) as exc:
         raise VaultError(
             "Unable to unlock vault: incorrect passphrase or modified/damaged vault. No data was changed."
         ) from exc
 
 
+def unlock(envelope, passphrase):
+    return _read_entries(envelope, passphrase)
+
+
 def unlocked_names(envelope, passphrase):
     """Project only validated credential names from the authenticated payload."""
-    return sorted(unlock(envelope, passphrase).keys())
+    return sorted(_read_entries(envelope, passphrase).keys())
 
 
 def write_encrypted(path, values, passphrase):
