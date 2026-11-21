@@ -652,6 +652,7 @@ class ReleaseArtifactTests(unittest.TestCase):
             "none",
             "corrupt-wheel",
             "corrupt-identity",
+            "different-candidate",
             "duplicate-checksum",
             "checksum-traversal",
             "extra-file",
@@ -683,7 +684,14 @@ class ReleaseArtifactTests(unittest.TestCase):
                 result = subprocess.run(
                     [sys.executable, "-B", "-c", script],
                     cwd=destination,
-                    env=self.env,
+                    env={
+                        **self.env,
+                        "VERIFIED_CANDIDATE": (
+                            "0" * 40
+                            if mutation == "different-candidate"
+                            else self.identity["commit"]
+                        ),
+                    },
                     capture_output=True,
                     text=True,
                     timeout=10,
@@ -707,6 +715,14 @@ class ReleaseArtifactTests(unittest.TestCase):
         gate = workflow.index("python tools/check_release_artifacts.py")
         for step in ("unittest discover", 'python" -m build', "tools/check_package.py"):
             self.assertLess(workflow.index(step), gate)
+        self.assertLess(workflow.index("tools/audit_release_python.sh"), gate)
+        for name in ("ci.yml", "distros.yml", "security-codeql.yml"):
+            self.assertIn(f"uses: ./.github/workflows/{name}", workflow)
+        self.assertIn("needs: [candidate, source, distros, codeql, build]", workflow)
+        publish_job = workflow.split("\n  publish:\n", 1)[1]
+        self.assertIn("success() &&", publish_job)
+        self.assertIn("(github.event_name == 'release' || inputs.publish)", publish_job)
+        self.assertIn('test "$commit" = "$EVENT_SHA"', workflow)
         self.assertLess(gate, workflow.index("echo 'publish_validated=true'"))
         self.assertLess(gate, workflow.index("actions/upload-artifact@"))
         self.assertIn("steps.artifacts.outputs.publish_validated", workflow)

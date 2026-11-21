@@ -1,0 +1,76 @@
+name: Scheduled security reports
+
+on:
+  schedule:
+    - cron: '31 5 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  source:
+    if: github.repository == 'groopcd/oc-box' && github.ref == 'refs/heads/master'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      master: ${{ steps.branches.outputs.master }}
+      devel: ${{ steps.branches.outputs.devel }}
+    steps:
+      - id: branches
+        name: Resolve the two public branch tips once
+        run: |
+          for branch in master devel; do
+            result=$(git ls-remote --exit-code --refs \
+              https://github.com/groopcd/oc-box.git "refs/heads/$branch")
+            IFS=$'\t' read -r sha ref <<< "$result"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ && "$ref" == "refs/heads/$branch" ]]
+            printf '%s=%s\n' "$branch" "$sha" >> "$GITHUB_OUTPUT"
+          done
+
+  codeql:
+    needs: source
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [master, devel]
+    uses: ./.github/workflows/security-codeql.yml
+    with:
+      commit: ${{ needs.source.outputs[matrix.branch] }}
+      branch: ${{ matrix.branch }}
+
+  python:
+    needs: source
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: [master, devel]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ needs.source.outputs[matrix.branch] }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - name: Audit the resolved Python release dependencies (advisory)
+        env:
+          CANDIDATE: ${{ needs.source.outputs[matrix.branch] }}
+        run: |
+          [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          python -m venv "$RUNNER_TEMP/oc-box-build"
+          python tools/release_python_deps.py > "$RUNNER_TEMP/release-requirements.txt"
+          "$RUNNER_TEMP/oc-box-build/bin/python" -m pip install --only-binary=:all: \
+            --upgrade -r "$RUNNER_TEMP/release-requirements.txt"
+          bash tools/audit_release_python.sh "$RUNNER_TEMP/oc-box-build" "$CANDIDATE" \
+            | tee -a "$GITHUB_STEP_SUMMARY"

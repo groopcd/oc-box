@@ -65,7 +65,7 @@ jobs:
         if: inputs.action == 'preview'
         run: |
           python -m venv "$RUNNER_TEMP/linkedin-tools"
-          "$RUNNER_TEMP/linkedin-tools/bin/python" -m pip install 'Pillow>=11,<13'
+          "$RUNNER_TEMP/linkedin-tools/bin/python" -m pip install 'Pillow>=13,<14'
       - name: Discover profiles without posting
         if: inputs.action == 'channels'
         env:
@@ -120,7 +120,7 @@ jobs:
       - name: Install isolated card renderer
         run: |
           python -m venv "$RUNNER_TEMP/linkedin-tools"
-          "$RUNNER_TEMP/linkedin-tools/bin/python" -m pip install 'Pillow>=11,<13'
+          "$RUNNER_TEMP/linkedin-tools/bin/python" -m pip install 'Pillow>=13,<14'
       - name: Announce or reconcile the existing post
         env:
           ACTION: ${{ inputs.action || 'announce' }}
