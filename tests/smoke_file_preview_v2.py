@@ -161,7 +161,9 @@ sys.stdout.buffer.write(path.read_bytes())
     second.write_text("PREVIEW_OTHER_SNAPSHOT\n")
     if private_mounts:
         (project / "sample.png").write_bytes(png_for_test())
-        env["OC_BOX_FILE_PREVIEW_HOST_OPEN"] = "1"
+        (project / "article.html").write_text(
+            "<article><h1>Draft</h1><script>ignored()</script></article>"
+        )
         (project / "binary.txt").write_bytes(b"REFUSED-MUST-NOT-SHOW\x1b")
         (project / "overflow.txt").write_bytes(
             b"OVERFLOW-MUST-NOT-SHOW" + b"A" * (256 * 1024)
@@ -221,7 +223,12 @@ sys.stdout.buffer.write(path.read_bytes())
                     {"type": "text", "text": text},
                     {"type": "text", "text": "[PART_LINK](other.md)" + mount_links},
                     *(
-                        [{"type": "text", "text": "[PNG_LINK](sample.png)"}]
+                        [
+                            {
+                                "type": "text",
+                                "text": "[PNG_LINK](sample.png)\n\n[HTML_LINK](article.html)",
+                            }
+                        ]
                         if private_mounts
                         else []
                     ),
@@ -246,7 +253,9 @@ sys.stdout.buffer.write(path.read_bytes())
     scope = (
         "real reader and disposable mounts" if private_mounts else "synthetic reader"
     )
-    print(f"PASS: OpenCode {version} native file-preview click/panel ({scope}).")
+    print(
+        f"PASS: OpenCode {version} native Ctrl-click artifact handoff ({scope}; no desktop launcher)."
+    )
 
 
 def run_client(
@@ -289,11 +298,16 @@ def run_client(
     reads = root / "reads"
     opened = root / "opened"
     wire = bytearray()
-    preview_wire = None
-    if private_mounts:
-        from oc_box import file_preview_host
+    from oc_box import file_preview_host, file_preview_png
+    from oc_box.host_drop_input import PasteInput
 
-        preview_wire = file_preview_host.Relay()
+    preview_wire = file_preview_host.Relay()
+    input_wire = PasteInput(
+        lambda _: None,
+        on_host_mouse=preview_wire.mouse,
+        on_mouse_boundary=preview_wire.break_press,
+    )
+    candidates = []
 
     def log():
         return reads.read_text().splitlines() if reads.exists() else []
@@ -308,8 +322,10 @@ def run_client(
                     return
                 wire.extend(data)
                 assert len(wire) < 4 * 1024 * 1024
-                if preview_wire is not None:
-                    data = preview_wire.output_bytes(data)
+                data = preview_wire.output_bytes(data)
+                candidate = preview_wire.take()
+                if candidate is not None:
+                    candidates.append(candidate)
                 stream.feed(decoder.decode(data))
 
     def locate(label):
@@ -330,31 +346,38 @@ def run_client(
             [line.strip() for line in screen.display if line.strip()],
         )
 
-    def event(point, button, suffix):
+    def event(point, button, suffix, *, authorized=True):
         x, y = point
-        os.write(master, f"\x1b[<{button};{x};{y}{suffix}".encode())
+        packet = f"\x1b[<{button};{x};{y}{suffix}".encode()
+        os.write(master, input_wire.feed(packet) if authorized else packet)
         pump(0.12)
 
-    def click(label, button=16, *, offset=0):
+    def click(label, button=16, *, offset=0, authorized=True):
         x, y = locate(label)
         point = (x + offset, y)
-        event(point, 35, "M")
-        event(point, button, "M")
-        event(point, button, "m")
+        event(point, 35, "M", authorized=authorized)
+        event(point, button, "M", authorized=authorized)
+        event(point, button, "m", authorized=authorized)
 
-    def dismiss():
-        click("[Close preview]", 0)
-        wait("END_PROBE")
-        assert not locate("File preview (read-only)"), [
-            line.strip() for line in screen.display if line.strip()
-        ]
+    def expect_transfer(label, kind, content):
+        before = len(candidates)
+        click(label)
+        end = time.monotonic() + 5
+        while len(candidates) <= before and time.monotonic() < end:
+            pump(0.15)
+        assert candidates[before:] == [(kind, content)], (
+            label,
+            len(candidates),
+            log(),
+            [line.strip() for line in screen.display if line.strip()],
+        )
 
     try:
         wait("END_PROBE", 16)
         pump(0.7)
-        assert (
-            not log() and not opened.exists() and not locate("File preview (read-only)")
-        )
+        assert not log() and not opened.exists() and not candidates
+        click("ABS_LINK", authorized=False)
+        assert not log() and not candidates
         for label in ("TRAVERSAL_LINK", "REMOTE_FILE", "WEB_LINK"):
             click(label)
         click("BARE_FILE", offset=12)
@@ -362,41 +385,33 @@ def run_client(
         event(locate("ABS_LINK"), 16, "M")
         event(locate("URI_LINK"), 16, "m")  # mismatch
         event(locate("ABS_LINK"), 16, "m")  # stale release at original coordinates
-        os.write(master, b"\x1b[I")  # focus, then blur between press and release
+        os.write(master, input_wire.feed(b"\x1b[I"))  # focus, then blur before release
         pump(0.12)
         event(locate("ABS_LINK"), 16, "M")
-        os.write(master, b"\x1b[O")
+        os.write(master, input_wire.feed(b"\x1b[O"))
         pump(0.12)
         event(locate("ABS_LINK"), 16, "m")
-        os.write(master, b"\x1b[I")
+        os.write(master, input_wire.feed(b"\x1b[I"))
         pump(0.12)
         assert not log() and not opened.exists()
-        click("ABS_LINK")
-        wait("PREVIEW_FIRST_SNAPSHOT")
-        wait("# This stays literal")
+        expect_transfer("ABS_LINK", "md", file.read_bytes())
         if not private_mounts:
             assert log() == ["proof.md"]
         file.write_text("PREVIEW_SECOND_SNAPSHOT\n")
         pump(0.4)
-        assert locate("PREVIEW_FIRST_SNAPSHOT") and not locate(
-            "PREVIEW_SECOND_SNAPSHOT"
-        )
-        dismiss()
-        click("URI_LINK")
-        wait("PREVIEW_SECOND_SNAPSHOT")
+        assert len(candidates) == 1
+        expect_transfer("URI_LINK", "md", file.read_bytes())
         if not private_mounts:
             assert log() == ["proof.md", "proof.md"]
-        dismiss()
         for label in ("REL_LINK", "DOT_LINK", "PART_LINK"):
-            click(label)
-            wait("PREVIEW_OTHER_SNAPSHOT")
-            dismiss()
+            expect_transfer(label, "md", b"PREVIEW_OTHER_SNAPSHOT\n")
         for label, text in (
             ("REFUSED_LINK", "REFUSED-MUST-NOT-SHOW"),
             ("OVERFLOW_LINK", "OVERFLOW-MUST-NOT-SHOW"),
             ("SLOW_LINK", "TIMED-OUT-MUST-NOT-SHOW"),
         ):
             count = len(log())
+            transfers = len(candidates)
             click(label)
             end = time.monotonic() + 6
             if not private_mounts:
@@ -405,37 +420,26 @@ def run_client(
                 pump(4.6 if label == "SLOW_LINK" else 0.4)
                 assert len(log()) == count + 1
             else:
-                wait("File preview unavailable")
-            assert not locate("File preview (read-only)") and not locate(text)
+                wait("Host file open refused")
+            assert len(candidates) == transfers and not locate(text)
         if private_mounts:
-            click("PNG_LINK")
-            wait("[Open in host app]")
-            wait("▀")
-            assert b"oc-box-png:v1:" not in wire
-            # Replace the source after showing it: the button must propose
-            # the already-viewed snapshot, never a second path read.
-            (project / "sample.png").write_bytes(b"changed since preview")
-            click("[Open in host app]", 0)
-            from oc_box import file_preview_png
-
-            candidate = preview_wire.take()
-            assert (
-                candidate is not None
-                and candidate == file_preview_png.normalize(png_for_test())[0]
+            expect_transfer(
+                "PNG_LINK", "png", file_preview_png.normalize(png_for_test())[0]
             )
-            assert preview_wire.take() is None and not opened.exists()
-            wait("[Close preview]")
-            dismiss()
+            expect_transfer(
+                "HTML_LINK", "html", (project / "article.html").read_bytes()
+            )
             for label, value in (
                 ("HOME_LINK", "PREVIEW_HOME_SNAPSHOT"),
                 ("OVERLAY_LINK", "PREVIEW_ORDINARY_ROOT_SNAPSHOT"),
             ):
-                click(label)
-                wait(value)
-                dismiss()
+                expect_transfer(label, "txt", (value + "\n").encode())
+            transfers = len(candidates)
             click("OUTSIDE_LINK")
-            wait("File preview unavailable")
-            assert not locate("UNEXPECTED-MOUNT-MUST-NOT-SHOW")
+            wait("Host file open refused")
+            assert len(candidates) == transfers and not locate(
+                "UNEXPECTED-MOUNT-MUST-NOT-SHOW"
+            )
         assert not opened.exists()
         click("WEB_LINK", 0)
         assert opened.read_text().strip() == "https://example.invalid/preview-test"

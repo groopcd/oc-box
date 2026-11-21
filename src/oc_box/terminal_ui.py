@@ -2,6 +2,7 @@
 
 import codecs
 import errno
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import os
 import pty
@@ -104,6 +105,7 @@ def run_tui(
     process = None
     old_terminal = None
     preview_failed = False
+    worker = pending_open = None
     handlers = {}
     try:
         if interactive:
@@ -142,7 +144,6 @@ def run_tui(
             return process.wait()
 
         detector = VisibleOutput()
-        preview_boundary = VisibleOutput() if preview_relay is not None else None
         if file_drops is not None:
             file_drops.start()
         loading = show_loading
@@ -171,7 +172,6 @@ def run_tui(
             )
             banner_drawn = not clear
 
-        chosen = None
         if preview_relay is not None:
             preview_input = (
                 file_drops.input
@@ -179,41 +179,10 @@ def run_tui(
                 else PasteInput(lambda _: None)
             )
 
-            def request_preview(press):
-                nonlocal chosen
-                if chosen is not None:
-                    return True
-                if press and preview_boundary.safe_to_draw():
-                    chosen = preview_relay.take()
-                return chosen is not None
-
-            preview_input.set_host_preview(request_preview)
-
-        def offer_preview():
-            nonlocal preview_failed, chosen
-            candidate, chosen = chosen, None
-            if (
-                candidate is None
-                or process.poll() is not None
-                or not preview_input.safe_for_host_prompt()
-            ):
-                return
-            if __package__:
-                from .file_preview_consent import confirm
-                from .file_preview_png import canonical_raster
-            else:
-                from file_preview_consent import confirm
-                from file_preview_png import canonical_raster
-            try:
-                raster = canonical_raster(candidate)
-                if (
-                    confirm(input_fd, output_fd, raster=raster)
-                    and process.poll() is None
-                ):
-                    preview_open(candidate)
-            except (OSError, ValueError, subprocess.SubprocessError):
-                # No candidate path or viewer stderr in the native UI.
-                preview_failed = True
+            preview_input.set_host_mouse(preview_relay.mouse, preview_relay.break_press)
+            worker = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="oc-box-host-open"
+            )
 
         while True:
             now = time.monotonic()
@@ -249,8 +218,6 @@ def run_tui(
                     output = preview_relay.output_bytes(output)
                 if file_drops is not None:
                     output = file_drops.output_bytes(output)
-                if preview_boundary is not None:
-                    preview_boundary.feed(output)
                 if loading and detector.feed(output):
                     if banner_drawn:
                         banner(clear=True)
@@ -272,7 +239,22 @@ def run_tui(
                     elif preview_relay is not None:
                         write_all(master, preview_input.finish())
                     stdin_open = False
-                offer_preview()
+            if preview_relay is not None:
+                # A concurrently ready fresh click can supersede an old
+                # arrival before handing it off to the opener worker.
+                candidate = preview_relay.take()
+                if pending_open is not None and pending_open.done():
+                    preview_failed = (
+                        preview_failed or pending_open.exception() is not None
+                    )
+                    pending_open = None
+                if (
+                    candidate is not None
+                    and pending_open is None
+                    and stdin_open
+                    and process.poll() is None
+                ):
+                    pending_open = worker.submit(preview_open, *candidate)
             if process.poll() is not None and not ready:
                 break
         if banner_drawn and detector.safe_to_draw():
@@ -280,11 +262,15 @@ def run_tui(
         return process.wait()
     except relay_errors:
         print(
-            "oc-box: Host PNG export framing failed; no pending image was opened.",
+            "oc-box: Host file transfer framing failed; no pending artifact was opened.",
             file=sys.stderr,
         )
         return 1
     finally:
+        if worker is not None:
+            worker.shutdown(wait=True, cancel_futures=True)
+            if pending_open is not None and not pending_open.cancelled():
+                preview_failed = preview_failed or pending_open.exception() is not None
         if old_terminal is not None:
             termios.tcsetattr(input_fd, termios.TCSADRAIN, old_terminal)
         for sig, previous in handlers.items():
@@ -305,4 +291,7 @@ def run_tui(
             except OSError:
                 pass
         if preview_failed:
-            print("oc-box: The host PNG opener could not be started.", file=sys.stderr)
+            print(
+                "oc-box: A host file open was refused or did not complete.",
+                file=sys.stderr,
+            )

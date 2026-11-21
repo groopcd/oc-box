@@ -46,17 +46,20 @@ def parser():
     selectors = result.add_mutually_exclusive_group()
     selectors.add_argument("--project", help="registered project directory")
     selectors.add_argument("--workspace", help="registered workspace ID")
-    result.add_argument(
+    level = result.add_mutually_exclusive_group()
+    level.add_argument(
         "--level",
         choices=activity_log.LEVELS,
         default="info",
         help="minimum severity (default: %(default)s)",
     )
+    log_config.add_verbosity(
+        level, help_text="show validated activity at this level or higher"
+    )
     result.add_argument(
         "--limit",
         type=_limit,
-        default=_DEFAULT_LIMIT,
-        help=f"maximum records in the initial view (default: %(default)s; max: {_MAX_LIMIT})",
+        help=f"maximum initial records (default: {_DEFAULT_LIMIT}, or {_MAX_LIMIT} with --verbose=all)",
     )
     result.add_argument(
         "--follow", action="store_true", help="keep printing new retained records"
@@ -316,6 +319,7 @@ def cli(box, arguments):
                     or args.workspace is not None
                     or args.follow
                     or args.json
+                    or args.verbose is not None
                 ):
                     raise box.BoxError(
                         "'oc-box logs --path' does not take event filters or output modes."
@@ -326,15 +330,17 @@ def cli(box, arguments):
             root, workspace = _journal_scope(box, args)
             if not args.journald:
                 _configured_path(box, root)
+            all_levels = args.verbose == "all"
+            initial_limit = args.limit or (_MAX_LIMIT if all_levels else _DEFAULT_LIMIT)
             selectors = {
-                "level": args.level,
+                "level": None if all_levels else args.verbose or args.level,
                 "workspace": workspace,
                 "journald": args.journald,
                 "follow": args.follow,
             }
-            limit = _MAX_LIMIT if args.follow else args.limit
+            limit = _MAX_LIMIT if args.follow else initial_limit
             previous = _read_events(box, root, limit=limit, **selectors)
-            _emit(previous[-args.limit :], json_lines=args.json)
+            _emit(previous[-initial_limit:], json_lines=args.json)
             while args.follow:
                 time.sleep(_POLL_SECONDS)
                 current = _read_events(box, root, limit=limit, **selectors)

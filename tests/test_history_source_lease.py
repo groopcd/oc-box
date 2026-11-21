@@ -952,6 +952,12 @@ class RemoteTests(unittest.TestCase):
                 return_value=json.dumps(settings).encode() + b"\n",
             ),
             patch.object(bridge.sys, "stdout", output),
+            patch.object(bridge, "require_control_pipe", return_value=17),
+            patch.object(
+                bridge,
+                "write_control_record",
+                side_effect=lambda fd, value: output.write(json.dumps(value) + "\n"),
+            ),
             patch.object(bridge.os, "chdir"),
             patch.object(bridge.os, "read", return_value=b""),
             patch.object(bridge.select, "select", return_value=([inputs], [], [])),

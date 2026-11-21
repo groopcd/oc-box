@@ -20,7 +20,6 @@ import unicodedata
 MAX_REQUEST = 17 * 1024
 MAX_CONTENT = 256 * 1024
 MAX_PNG_INPUT = 4 * 1024 * 1024
-PNG_RESPONSE = b"OCBOXPNG1\n"
 MAX_MOUNTINFO = 4 * 1024 * 1024
 READ_DEADLINE = 3
 REFUSAL = 1
@@ -375,13 +374,7 @@ def main():
                 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
                 from file_preview_png import normalize
 
-                normalized, raster = normalize(bytes(data))
-                data = (
-                    PNG_RESPONSE
-                    + json.dumps(raster, separators=(",", ":")).encode("ascii")
-                    + b"\n"
-                    + normalized
-                )
+                data, _ = normalize(data)
         finally:
             signal.alarm(0)
         # Emit only after all validation. A failed/aborted pipe transfer is not

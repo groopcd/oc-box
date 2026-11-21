@@ -190,6 +190,35 @@ class EncryptedVaultTests(VaultFixture):
             vault.manage("remove", "EXAMPLE_TOKEN", path=self.path)
         self.assertEqual(vault.unlock(vault.read_envelope(self.path), new), {})
 
+    def test_list_projects_sorted_names_only_after_authenticated_validation(self):
+        self.path.parent.mkdir(mode=0o700)
+        vault.write_encrypted(
+            self.path, {"Z_TOKEN": VALUE, "A_TOKEN": "another value"}, PASSPHRASE
+        )
+        with (
+            patch.object(vault, "hidden", return_value=PASSPHRASE),
+            patch.object(
+                vault, "unlock", side_effect=AssertionError("unexpected value lookup")
+            ),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            vault.manage("list", path=self.path)
+        self.assertEqual(output.getvalue(), "NAME\nA_TOKEN\nZ_TOKEN\n")
+
+        # Construct malformed but authenticated fixture content without
+        # changing the actual list/unlock validator.
+        for malformed in ({"invalid name": VALUE}, {"A_TOKEN": VALUE, "Z_TOKEN": None}):
+            with self.subTest(names=tuple(malformed)):
+                with patch.object(vault, "validate_secrets"):
+                    vault.write_encrypted(self.path, malformed, PASSPHRASE)
+                with (
+                    patch.object(vault, "hidden", return_value=PASSPHRASE),
+                    contextlib.redirect_stdout(io.StringIO()) as output,
+                    self.assertRaises(vault.VaultError),
+                ):
+                    vault.manage("list", path=self.path)
+                self.assertEqual(output.getvalue(), "")
+
     def test_prompt_mismatch_and_duplicate_initialization_never_overwrite(self):
         self.encrypted()
         before = self.path.read_bytes()

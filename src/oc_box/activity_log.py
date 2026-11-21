@@ -404,6 +404,18 @@ def _sanitize(record):
     return cleaned
 
 
+def make_record(event, **fields):
+    """Build a validated activity record, without touching the journal."""
+    record = {
+        "timestamp": datetime.now(timezone.utc)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z"),
+        "event": event,
+    }
+    record.update((name, value) for name, value in fields.items() if value is not None)
+    return _sanitize(record)
+
+
 def event_level(record) -> str:
     """Return stored severity or the fixed default for an unlevelled record."""
     level = record.get("level")
@@ -840,26 +852,18 @@ def record_event(
     No exception text or arbitrary caller field is ever written.
     """
     try:
-        record = {
-            "timestamp": datetime.now(timezone.utc)
-            .isoformat(timespec="milliseconds")
-            .replace("+00:00", "Z"),
-            "event": event,
-        }
-        for name, value in (
-            ("command", command),
-            ("workspace", workspace),
-            ("outcome", outcome),
-            ("exit_code", exit_code),
-            ("duration_ms", duration_ms),
-            ("level", level),
-            ("stage", stage),
-            ("reason", reason),
-            ("metrics", metrics),
-        ):
-            if value is not None:
-                record[name] = value
-        record = _sanitize(record)
+        record = make_record(
+            event,
+            command=command,
+            workspace=workspace,
+            outcome=outcome,
+            exit_code=exit_code,
+            duration_ms=duration_ms,
+            level=level,
+            stage=stage,
+            reason=reason,
+            metrics=metrics,
+        )
         if record is None:
             return False
         payload = (

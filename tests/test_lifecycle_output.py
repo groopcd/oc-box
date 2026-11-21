@@ -8,9 +8,17 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
-from oc_box import activity_log, journal_output, lifecycle_output, log_config
+from oc_box import (
+    activity_log,
+    history_recovery,
+    host_drop,
+    journal_output,
+    lifecycle_output,
+    log_config,
+)
 from oc_box import oc_box as box
 
 WORKSPACE = "a" * 32
@@ -132,6 +140,181 @@ class LifecycleOutputTests(unittest.TestCase):
             )
             lifecycle_output.flush()
             self.assertEqual(writer.call_count, 64)
+
+    def test_verbose_launcher_levels_print_only_validated_details(self):
+        def launch():
+            lifecycle_output.bind_workspace(WORKSPACE)
+            lifecycle_output.record(
+                "lifecycle.stage", stage="configuration", level="debug"
+            )
+            lifecycle_output.record("history.result", outcome="success", level="info")
+            lifecycle_output.record("lifecycle.notice", reason="pending", level="warn")
+            lifecycle_output.record("history.result", outcome="failure", level="error")
+            lifecycle_output.record(
+                "history.result", reason="PRIVATE_SENTINEL", level="error"
+            )
+            return 7
+
+        messages = (
+            "DEBUG lifecycle.stage",
+            "INFO history.result",
+            "WARN lifecycle.notice",
+            "ERROR history.result",
+        )
+        cases = (
+            ([], 4),
+            (["--verbose"], 0),
+            (["--verb"], 0),
+            (["--verbose=ALL"], 0),
+            (["--verbose", "debug"], 0),
+            (["--verbose=INFO"], 1),
+            (["--verbose=warn"], 2),
+            (["--verbose=error"], 3),
+        )
+        for flags, index in cases:
+            with (
+                self.subTest(flags=flags),
+                patch.object(sys, "argv", ["oc-box", *flags, "sync"]),
+                patch.object(box, "main", side_effect=launch),
+                contextlib.redirect_stderr(io.StringIO()) as output,
+            ):
+                self.assertEqual(box.entrypoint(), 7)
+            text = output.getvalue()
+            for message in messages[:index]:
+                self.assertNotIn(message, text)
+            for message in messages[index:]:
+                self.assertIn(message, text)
+            self.assertEqual("INFO command.started" in text, index <= 1)
+            self.assertEqual("ERROR command.failed" in text, bool(flags))
+            self.assertNotIn(WORKSPACE, text)
+            self.assertNotIn("PRIVATE_SENTINEL", text)
+        records = activity_log.read_events(self.root)
+        self.assertEqual(len(records), len(cases) * 6)
+        self.assertTrue(any(row.get("workspace") == WORKSPACE for row in records))
+
+    def test_verbose_details_wait_for_reporting_and_do_not_depend_on_a_journal_write(
+        self,
+    ):
+        with (
+            contextlib.redirect_stderr(io.StringIO()) as output,
+            patch.object(activity_log, "record_event", return_value=False) as writer,
+            lifecycle_output.invocation("sync", self.root, console_level="all"),
+        ):
+            history_recovery.report_skipped(
+                ["clients-not-detached", "PRIVATE_SENTINEL"]
+            )
+            writer.assert_not_called()
+            self.assertEqual(output.getvalue(), "")
+            lifecycle_output.flush()
+            self.assertIn("clients-not-detached, unavailable", output.getvalue())
+            self.assertNotIn("PRIVATE_SENTINEL", output.getvalue())
+            writer.assert_called_once()
+
+    def test_verbose_launch_does_not_flush_before_main_and_preserves_start_interrupt(
+        self,
+    ):
+        errors = io.StringIO()
+
+        def interrupt_start(event, **fields):
+            if event == "command.started":
+                self.assertEqual(errors.getvalue(), "")
+                raise KeyboardInterrupt
+            return True
+
+        with (
+            patch.object(sys, "argv", ["oc-box", "reset", "--verbose=all"]),
+            contextlib.redirect_stderr(errors),
+            patch.object(box, "main") as launch,
+            patch.object(activity_log, "record_event", side_effect=interrupt_start),
+        ):
+            self.assertEqual(box.entrypoint(), 130)
+            launch.assert_not_called()
+            self.assertIn("INFO command.started", errors.getvalue())
+
+    def test_verbose_recovery_reports_specific_fixed_failure_category(self):
+        source = SimpleNamespace(container_id="PRIVATE_CONTAINER")
+        with (
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+            patch.object(activity_log, "record_event", return_value=False),
+            patch.object(box.workspace_service, "live_connection", return_value={}),
+            lifecycle_output.invocation("sync", self.root, console_level="all"),
+        ):
+            self.assertFalse(history_recovery.recover(box, self.root, {}, source))
+            self.assertEqual(errors.getvalue(), "")
+            lifecycle_output.flush()
+            self.assertIn("snapshot unavailable (old-connection)", errors.getvalue())
+            self.assertNotIn("PRIVATE_CONTAINER", errors.getvalue())
+
+    def test_feature_startup_notices_only_expand_at_informational_verbosity(self):
+        for level, legacy, symlinks, details in (
+            (None, False, True, False),
+            ("warn", False, True, False),
+            ("info", False, True, True),
+            ("all", False, False, True),
+            (None, True, True, True),
+        ):
+            relay, reader = MagicMock(), MagicMock()
+            with (
+                self.subTest(level=level, legacy=legacy, symlinks=symlinks),
+                lifecycle_output.invocation(
+                    "start", verbose=legacy, console_level=level
+                ),
+                patch.object(box, "validate_host_drop", return_value="konsole"),
+                patch.object(host_drop, "Relay", return_value=relay),
+                patch.object(box, "run_tui", return_value=7),
+                contextlib.redirect_stdout(io.StringIO()) as output,
+            ):
+                self.assertEqual(
+                    box.run_native_tui(
+                        {"opencode_version": "2.3.0"},
+                        ["native-fixture"],
+                        {},
+                        host_drop_enabled=True,
+                        host_clipboard_reader=reader,
+                        host_clipboard_symlinks=symlinks,
+                    ),
+                    7,
+                )
+            lines = output.getvalue().splitlines()
+            self.assertEqual(len(lines), 5 if details else 2)
+            self.assertIn("oc-box: " + host_drop.DROP_ENABLED, lines)
+            self.assertIn("oc-box: " + host_drop.CLIPBOARD_ENABLED, lines)
+            self.assertEqual(host_drop.DROP_DETAILS in output.getvalue(), details)
+            self.assertEqual(host_drop.CLIPBOARD_DETAILS in output.getvalue(), details)
+            self.assertEqual(
+                host_drop.CLIPBOARD_SYMLINKS_WARNING in output.getvalue(),
+                details and symlinks,
+            )
+            self.assertEqual(
+                host_drop.CLIPBOARD_STRICT_WARNING in output.getvalue(),
+                details and not symlinks,
+            )
+            reader.read_selection.assert_not_called()
+
+    def test_relay_failure_warns_without_announcing_that_imports_are_enabled(self):
+        relay = MagicMock()
+        relay.__enter__.side_effect = host_drop.DropError("PRIVATE_SENTINEL")
+        with (
+            lifecycle_output.invocation("start", self.root, console_level="all"),
+            patch.object(box, "validate_host_drop", return_value="konsole"),
+            patch.object(host_drop, "Relay", return_value=relay),
+            patch.object(box, "run_tui", return_value=7) as native,
+            contextlib.redirect_stdout(io.StringIO()) as output,
+        ):
+            self.assertEqual(
+                box.run_native_tui(
+                    {"opencode_version": "2.3.0"},
+                    ["native"],
+                    {},
+                    host_drop_enabled=True,
+                    host_drop_required=False,
+                ),
+                7,
+            )
+        native.assert_called_once_with(["native"])
+        self.assertIn("could not start", output.getvalue())
+        self.assertNotIn("enabled", output.getvalue())
+        self.assertNotIn("PRIVATE_SENTINEL", output.getvalue())
 
     def test_log_help_and_empty_read_never_create_state(self):
         with (
@@ -302,6 +485,8 @@ class LifecycleOutputTests(unittest.TestCase):
             ["--log-dir", str(directory), "--journald", "web"],
             ["upgrade", "--check", "--journald"],
             ["upgrade", "--check", "--journa"],
+            ["upgrade", "--check", "--verbose=all"],
+            ["--status", "--verbose=all"],
             ["tui", "--read-only", "--log-dir", str(directory)],
         ):
             with (

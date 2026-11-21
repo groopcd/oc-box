@@ -324,17 +324,14 @@ their checkout ownership distinct from unrelated source and flat installations.
   an exact patch allowlist; retain private-client, transfer and terminal contract
   refusals. No public API proves future composer attachment behavior. Do not
   reuse this eligibility policy as a shortcut for unrelated compatibility guards.
-- `file_preview.py` / `file_preview_io.py` / `file_preview_tui.tsx`: experimental,
-  per-native-TUI opt-in for stable 2.3.x. The private renderer hook recognizes
-  matching Ctrl-press/release on assistant transcript file links only. Keep
-  read-only text snapshots in the container, validate mounts and descriptors,
-  and close the bounded non-PTY reader before displaying. PNG previews use
-  normalized image snapshots and terminal cells. Host PNG export is separate:
-  child PTY output proposes bytes only, a fresh typed host challenge authorizes
-  one checked snapshot, and a fixed default-app opener receives only a private
-  expiring copy. No automatic opens, arbitrary URL handlers, saved permissions,
-  clipboard coupling or mainline patches. Offline evidence does not validate
-  physical Yakuake/Podman use.
+- `file_preview*.py` / `file_preview_tui.tsx` / `file_open_formats.py`:
+  experimental host open, per native 2.3.x TUI opt-in. Require a fresh
+  matched Ctrl-click from host terminal input and native assistant link
+  hit-testing. Child output must not independently grant file opens. Validate
+  mount/descriptor boundaries, bound each read and transfer, and open only
+  verified private PNG/text/Markdown/static HTML copies. Avoid clipboard
+  coupling, active HTML, arbitrary protocol dispatch, and mainline patches.
+  Native PTY evidence is not physical Yakuake/Podman acceptance.
 - `ui_state.py` / `ui_state_*.js`: public-SDK container TUI/server/RPC reports,
   installed only during normal eligible V2 owning preparation, never on attach.
   Canonical stable native `2.x.y` is eligible, not proof of SDK compatibility.

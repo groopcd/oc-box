@@ -1015,13 +1015,15 @@ def export_pass(box, data):
                 from . import lifecycle_output
             else:
                 import lifecycle_output
-            if not lifecycle_output.concise():
+            message = (
+                "History export helper cleanup unverified. "
+                "Container data retained; retry with 'oc-box sync'."
+            )
+            if lifecycle_output.concise():
+                lifecycle_output.fixed_detail("warn", message)
+            else:
                 with contextlib.suppress(OSError, ValueError):
-                    print(
-                        "oc-box: History export helper cleanup unverified. "
-                        "Container data retained; retry with 'oc-box sync'.",
-                        file=sys.stderr,
-                    )
+                    print(f"oc-box: {message}", file=sys.stderr)
         else:
             if original is None and stream.failed:
                 raise stream.fail("history-command")

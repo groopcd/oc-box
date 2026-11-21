@@ -111,6 +111,15 @@ fi
             self.complete("logs", "--level", ""), ["debug", "info", "warn", "error"]
         )
         self.assertEqual(self.complete("logs", "--level=w"), ["warn"])
+        self.assertEqual(
+            self.complete("logs", "--verbose", ""),
+            ["all", "debug", "info", "warn", "error"],
+        )
+        self.assertEqual(
+            self.complete("--project", ".", "sync", "--verbose=d"), ["debug"]
+        )
+        self.assertTrue("--project" in self.complete("--verbose", "stop", "--"))
+        self.assertEqual(self.complete("logs", "--verbose", "=", "w"), ["warn"])
         self.assertEqual(self.complete("logs", "--limit", ""), [])
         self.assertEqual(self.complete("sync", "--fo"), [])
         controls = {
@@ -118,6 +127,7 @@ fi
             "--no-journald",
             "--log-dir",
             "--lifecycle-diagnostics",
+            "--verbose",
         }
         for command in ("start", "reset", "stop", "sync", "terminal", "web"):
             self.assertTrue(controls.issubset(self.complete(command, "--")))
@@ -125,7 +135,7 @@ fi
             self.assertTrue(controls.isdisjoint(self.complete(command, "--")))
         self.assertEqual(
             controls.intersection(self.complete("logs", "--")),
-            {"--journald", "--log-dir"},
+            {"--journald", "--log-dir", "--verbose"},
         )
         credential_modes = next(
             action.choices

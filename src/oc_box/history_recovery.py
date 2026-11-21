@@ -123,18 +123,19 @@ def report_compatibility_refusal(reason):
         reason=category,
         outcome="refused",
     )
-    if lifecycle_output.concise():
-        return
-    print(
-        "oc-box: Automatic post-stop history recovery is unavailable: "
+    message = (
+        "Automatic post-stop history recovery is unavailable: "
         f"the OpenCode compatibility contract was not recognized ({reason}). "
         "Check for an oc-box update first; upgrade OpenCode too if it is older "
         "than a supported release. If both are current, report this compatibility "
         "refusal. Keep workspace/history intact; do not reset or downgrade state "
         "to bypass the check. If shutdown history remains pending, retry with "
-        "'oc-box sync'.",
-        file=sys.stderr,
+        "'oc-box sync'."
     )
+    if lifecycle_output.concise():
+        lifecycle_output.fixed_detail("warn", message)
+    else:
+        print(f"oc-box: {message}", file=sys.stderr)
 
 
 class RecoveryError(ValueError):
@@ -410,14 +411,15 @@ def report_skipped(reasons):
         reason=reason,
         outcome="unavailable",
     )
-    if lifecycle_output.concise():
-        return
-    print(
-        "oc-box: Automatic persisted-history snapshot not attempted ("
+    message = (
+        "Automatic persisted-history snapshot not attempted ("
         + ", ".join(safe or ["unavailable"])
-        + ").",
-        file=sys.stderr,
+        + ")."
     )
+    if lifecycle_output.concise():
+        lifecycle_output.fixed_detail("debug", message)
+    else:
+        print(f"oc-box: {message}", file=sys.stderr)
 
 
 def _command(box, arguments):
@@ -590,7 +592,14 @@ def recover(box, path, data, source):
         outcome="success" if saved else "failure",
         duration_ms=int(max(0, min(time.monotonic() - started, 9999)) * 1000),
     )
+    # The selected category comes from internal fixed refusals, never str(exc).
+    failure_message = (
+        f"Automatic persisted-history snapshot unavailable ({category}). "
+        "Container data retained; retry with 'oc-box sync'."
+    )
     if lifecycle_output.concise():
+        if not saved:
+            lifecycle_output.fixed_detail("warn", failure_message)
         return saved
     if saved:
         if report is None:  # A launcher will announce only after its own final stop.
@@ -603,10 +612,6 @@ def recover(box, path, data, source):
                 "Execution was interrupted; background work is not declared complete.",
                 file=sys.stderr,
             )
-        print(
-            f"oc-box: Automatic persisted-history snapshot unavailable ({category}). "
-            "Container data retained; retry with 'oc-box sync'.",
-            file=sys.stderr,
-        )
+        print(f"oc-box: {failure_message}", file=sys.stderr)
         report_compatibility_refusal(compatibility_reason)
     return saved

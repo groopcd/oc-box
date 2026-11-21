@@ -103,6 +103,13 @@ class PreviewAdmissionTests(unittest.TestCase):
             patch.object(
                 file_preview, "_mount_identity", side_effect=[("1", "2"), ("3", "4")]
             ),
+            patch.object(
+                file_preview, "host_export_mounts", return_value=("/initial",)
+            ),
+            patch.object(file_preview_host, "ready", return_value=True),
+            patch("oc_box.host_drop.preflight", return_value="konsole"),
+            patch.object(box.sys.stdin, "isatty", return_value=True),
+            patch.object(box.sys.stdout, "isatty", return_value=True),
         ):
             command = self.command()
         self.assertEqual(engine.call_count, 2)
@@ -189,7 +196,7 @@ class PreviewAdmissionTests(unittest.TestCase):
                 )
                 observe.assert_not_called()
 
-    def test_host_proposal_keeps_preview_if_staging_is_in_another_mount(self):
+    def test_host_open_disabled_if_staging_is_in_another_mount(self):
         verified = (self.container_id, {"roots": [self.project, self.data["home"]]})
         with (
             patch.object(file_preview, "client_binding", return_value=verified),
@@ -197,16 +204,31 @@ class PreviewAdmissionTests(unittest.TestCase):
                 file_preview, "host_export_mounts", return_value=("/run/user",)
             ),
             patch.object(file_preview_host, "ready", side_effect=[True, False]),
+            patch("oc_box.host_drop.preflight", return_value="konsole"),
             patch.object(box.sys.stdin, "isatty", return_value=True),
             patch.object(box.sys.stdout, "isatty", return_value=True),
         ):
             command = self.command()
         values = json.loads(command[command.index("-c") + 2])
-        self.assertIn(file_preview.ROOTS, values)
-        self.assertNotIn("OC_BOX_FILE_PREVIEW_HOST_OPEN", values)
+        self.assertNotIn(file_preview.ROOTS, values)
         self.assertFalse(hasattr(command, "preview_host_open"))
 
-    def test_host_opener_rechecks_private_inventory_after_consent(self):
+    def test_kitty_does_not_get_host_open_even_with_a_desktop(self):
+        verified = (self.container_id, {"roots": [self.project, self.data["home"]]})
+        with (
+            patch.object(file_preview, "client_binding", return_value=verified),
+            patch.object(file_preview, "host_export_mounts") as inventory,
+            patch.object(file_preview_host, "ready", return_value=True),
+            patch("oc_box.host_drop.preflight", return_value="kitty"),
+            patch.object(box.sys.stdin, "isatty", return_value=True),
+            patch.object(box.sys.stdout, "isatty", return_value=True),
+        ):
+            command = self.command()
+        self.assertNotIn(file_preview.ROOTS, " ".join(command))
+        self.assertFalse(hasattr(command, "preview_host_open"))
+        inventory.assert_not_called()
+
+    def test_host_opener_rechecks_private_inventory_after_click(self):
         verified = (self.container_id, {"roots": [self.project, self.data["home"]]})
         with (
             patch.object(file_preview, "client_binding", return_value=verified),
@@ -216,18 +238,21 @@ class PreviewAdmissionTests(unittest.TestCase):
                 side_effect=[("/initial",), None, ("/latest",)],
             ) as mounts,
             patch.object(file_preview_host, "ready", return_value=True),
-            patch.object(file_preview_host, "open_png") as open_png,
+            patch("oc_box.host_drop.preflight", return_value="konsole"),
+            patch.object(file_preview_host, "open_artifact") as open_artifact,
             patch.object(box.sys.stdin, "isatty", return_value=True),
             patch.object(box.sys.stdout, "isatty", return_value=True),
         ):
             command = self.command()
-            self.assertIn("OC_BOX_FILE_PREVIEW_HOST_OPEN", " ".join(command))
-            open_png.assert_not_called()
+            self.assertIn(file_preview.ROOTS, " ".join(command))
+            open_artifact.assert_not_called()
             with self.assertRaisesRegex(ValueError, "host-mounts-unverified"):
-                command.preview_host_open(b"synthetic")
-            open_png.assert_not_called()
-            command.preview_host_open(b"synthetic")
-            open_png.assert_called_once_with(b"synthetic", host_mounts=("/latest",))
+                command.preview_host_open("txt", b"synthetic")
+            open_artifact.assert_not_called()
+            command.preview_host_open("txt", b"synthetic")
+            open_artifact.assert_called_once_with(
+                "txt", b"synthetic", host_mounts=("/latest",)
+            )
             self.assertEqual(mounts.call_count, 3)
 
     def test_inventory_lists_stopped_mounts_and_refuses_churn_or_external_volume(self):

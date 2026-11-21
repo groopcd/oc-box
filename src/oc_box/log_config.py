@@ -275,6 +275,28 @@ def overrides(*, directory: Path | str | None = None, journald: bool | None = No
         _OVERRIDES.reset(token)
 
 
+def _verbosity(value):
+    if __package__:
+        from .activity_log import LEVELS
+    else:
+        from activity_log import LEVELS
+    value = value.lower()
+    if value not in ("all", *LEVELS):
+        raise argparse.ArgumentTypeError("expected all, debug, info, warn, or error")
+    return value
+
+
+def add_verbosity(parser, *, help_text):
+    parser.add_argument(
+        "--verbose",
+        nargs="?",
+        const="all",
+        type=_verbosity,
+        metavar="LEVEL",
+        help=help_text + "; all (default if omitted), debug, info, warn, or error",
+    )
+
+
 def add_launch_arguments(parser: argparse.ArgumentParser) -> None:
     """Register launcher log policy and expanded diagnostic flags."""
     parser.add_argument(
@@ -301,6 +323,9 @@ def add_launch_arguments(parser: argparse.ArgumentParser) -> None:
         "--lifecycle-diagnostics",
         action="store_true",
         help="show expanded launcher lifecycle diagnostics",
+    )
+    add_verbosity(
+        parser, help_text="print safe launcher activity at this level or higher"
     )
 
 

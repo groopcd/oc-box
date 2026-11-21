@@ -101,6 +101,7 @@ class LogsCliTests(unittest.TestCase):
                 ("--workspace", _ID),
                 ("--follow",),
                 ("--json",),
+                ("--verbose",),
             ):
                 with (
                     self.subTest(args=args),
@@ -180,6 +181,8 @@ class LogsCliTests(unittest.TestCase):
                 ("--limit", "10001"),
                 ("--limit", "1.5"),
                 ("--level", "warning"),
+                ("--verbose=PRIVATE_SENTINEL",),
+                ("--verbose=all", "--level", "debug"),
                 ("--log-dir",),
                 ("--log-dir", ""),
                 ("--log-dir", "/"),
@@ -234,6 +237,28 @@ class LogsCliTests(unittest.TestCase):
                 call(None, limit=10000, level="debug", workspace=None),
             ],
         )
+
+    def test_verbose_all_removes_the_default_limit_but_respects_an_explicit_limit(self):
+        for source in ((), ("--journald",)):
+            for verbosity, limit, expected in (
+                (("--verbose",), (), (None, 10_000)),
+                (("--verbose=ALL",), ("--limit", "4"), (None, 4)),
+                (("--verbose", "WARN"), (), ("warn", 100)),
+            ):
+                with (
+                    self.subTest(source=source, verbosity=verbosity, limit=limit),
+                    patch.object(logs_cli, "_read_events", return_value=[]) as read,
+                ):
+                    self.assertEqual(self.run_cli(*source, *verbosity, *limit), (0, ""))
+                    self.assertEqual(
+                        (
+                            read.call_args.kwargs["level"],
+                            read.call_args.kwargs["limit"],
+                        ),
+                        expected,
+                    )
+                    self.assertEqual(read.call_args.kwargs["journald"], bool(source))
+        self.assertFalse(self.root.exists())
 
     def test_missing_journal_is_empty_and_never_initialized(self):
         override = self.base / "missing logs"

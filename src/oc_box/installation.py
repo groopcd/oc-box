@@ -43,7 +43,7 @@ RUNTIME_FILES = (
     "file_preview_tui.tsx",
     "file_preview_png.py",
     "file_preview_host.py",
-    "file_preview_consent.py",
+    "file_open_formats.py",
     "session_terminal.py",
     "sharing.py",
     "attachments.py",

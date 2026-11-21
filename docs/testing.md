@@ -153,6 +153,13 @@ arbitrary mutations by processes running as the same user.
 Check lifecycle flag scope for `start` (including the implicit command),
 `reset`, `stop`, `sync`, `terminal`, and `web`. Check `--lifecycle-diagnostics`
 separately from the quiet default; it must not persist to later invocations.
+Check bare `--verbose`, case-insensitive `ALL` and minimum-severity filtering
+on the launcher console. Only allowlisted activity fields may appear in its
+added output, even when the private journal is unavailable. Native import
+notices stay short by default and disclose details only at informational
+verbosity (`info`, `debug` or `ALL`); actionable refusals remain visible.
+For the read-only `logs` command, cover `--verbose=ALL` with both source
+choices and an explicit limit that overrides its larger initial view.
 For version-pinned scripted checks that parse legacy launcher output, pass
 the flag only to the invocation under test. In the sharing host fixture that
 is the owner expecting an explicit stop, solely for its legacy pending-history
@@ -215,6 +222,13 @@ helper reaping, a success does not replenish that allowance, and unverified
 transfer stops all import routes in that client. Check fixed refusal categories
 and bounded cleanup without restart, replay or automatic prompt admission.
 The earlier human observations do not test this recovery behavior.
+
+The follow-up input-framing regressions exercise pasted C0/DEL and CSI control
+bytes across read splits. Check that these frames pass unchanged and cannot
+grant while open, a later top-level shortcut can grant after a trusted end, and
+remaining ambiguous frames still fail closed. The fixed exit notice
+`input-framing-recovered` contains no frame data. These are offline checks, not
+a reproduction or validation of the reported Yakuake failure.
 
 The owner's earlier "it worked" report covers the PNG workflow on native 2.3.2.
 On diagnostic revision `af73035d848daa93ca832351564ba9635082568c`, the owner

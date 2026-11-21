@@ -1,4 +1,4 @@
-"""Untrusted PTY image proposals and the separate, consent-only host opener."""
+"""Bounded artifact transfer, armed by a fresh Ctrl-click on the host input."""
 
 import base64
 import binascii
@@ -11,25 +11,33 @@ import subprocess
 import time
 from contextlib import contextmanager
 
-PREFIX = b"\x1b]778;oc-box-png:v1:"
+PREFIX = b"\x1b]778;oc-box-open:v1:"
+_GRANT_PREFIX = b"\x1b]778;oc-box-click:v1:"
+_PREFIXES = (PREFIX, _GRANT_PREFIX)
+_FRAME_START = re.compile(rb"\x1b\]778;oc-box-(?:open|click):v1:")
+_MOUSE = re.compile(
+    rb"\x1b\[<((?:0|[1-9][0-9]{0,2}));([1-9][0-9]{0,4});([1-9][0-9]{0,4})([Mm])"
+)
+_KINDS = frozenset((b"png", b"txt", b"md", b"html"))
 MAX_BYTES = 5 * 1024 * 1024
 CHUNK_BYTES = 4096
 REQUEST_TIMEOUT = 15.0
 FRAME_TIMEOUT = 2.0
-PENDING_TIMEOUT = 45.0
+PENDING_TIMEOUT = 2.0
+_CLICK_TIMEOUT = 2.0
 _ID_BYTES = 32
-_MAX_IDS = 4096
 _ID = re.compile(rb"[0-9a-f]{32}")
 _LENGTH = re.compile(rb"[1-9][0-9]*")
 _TERMINATOR = re.compile(rb"\x07|\x1b\\")
 _MAX_BODY = _ID_BYTES + len(b":data:") + 4 * ((CHUNK_BYTES + 2) // 3)
 
-_BASENAME = re.compile(r"preview-[0-9a-f]{32}\.png")
+_BASENAME = re.compile(r"artifact-[0-9a-f]{32}\.(?:png|txt|md|html)")
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _RETENTION_SECONDS = 24 * 60 * 60
 _MAX_FILES = 8
 _OPENER = "/usr/bin/xdg-open"
+_MIME = "/usr/bin/xdg-mime"
 _OPEN_TIMEOUT = 5.0
 _DESKTOP_ENV = frozenset(
     (
@@ -62,11 +70,7 @@ class RelayError(PreviewError):
 
 
 class Relay:
-    """Strip exact reserved OSC frames, offering at most one untrusted proposal.
-
-    A proposal is only immutable bytes, not validated PNG or user approval.
-    Neither parsing nor consuming a proposal touches files, processes or input.
-    """
+    """Issue a single-use grant from host input; never infer it from PTY output."""
 
     def __init__(self, *, clock=None):
         self._clock = time.monotonic if clock is None else clock
@@ -74,10 +78,13 @@ class Relay:
         self._body = None
         self._body_deadline = 0.0
         self._body_esc = False
+        self._echo = False
         self._failed = False
-        self._seen = set()
+        self._press = None
+        self._grant = None
         self._active_id = None
         self._active_size = 0
+        self._active_kind = None
         self._active_deadline = 0.0
         self._payload = bytearray()
         self._pending = None
@@ -85,6 +92,7 @@ class Relay:
 
     def _discard_active(self):
         self._active_id = None
+        self._active_kind = None
         self._payload.clear()
 
     def _fail(self):
@@ -92,8 +100,9 @@ class Relay:
         self._body = None
         self._tail = b""
         self._pending = None
+        self._grant = self._press = None
         self._discard_active()
-        raise RelayError("Host PNG preview lost the PTY frame boundary.")
+        raise RelayError("Host artifact transfer lost the PTY frame boundary.")
 
     def _expire(self, now):
         if self._failed or (self._body is not None and now >= self._body_deadline):
@@ -102,8 +111,44 @@ class Relay:
             self._discard_active()
         if self._pending is not None and now >= self._pending_deadline:
             self._pending = None
+        if self._grant is not None and now >= self._grant[1]:
+            self._grant = None
+
+    def mouse(self, packet):
+        """Forward mouse bytes; attach a nonce to a matched host Ctrl-click."""
+        if self._failed:
+            return packet
+        event = _MOUSE.fullmatch(packet)
+        previous, self._press = self._press, None
+        if event is None:
+            return packet
+        code, x, y, edge = event.groups()
+        now = self._clock()
+        if code == b"16" and edge == b"M":
+            self._press = (x, y, now + _CLICK_TIMEOUT)
+            return packet
+        if (
+            code != b"16"
+            or edge != b"m"
+            or previous is None
+            or (x, y) != previous[:2]
+            or now >= previous[2]
+        ):
+            return packet
+        # Another deliberate gesture supersedes unread bytes from the old one.
+        self._discard_active()
+        self._pending = None
+        grant = secrets.token_hex(16).encode("ascii")
+        self._grant = grant, now + REQUEST_TIMEOUT
+        return packet + _GRANT_PREFIX + grant + b":" + x + b":" + y + b"\x07"
+
+    def break_press(self):
+        """Intervening host input other than the matching release cancels a press."""
+        self._press = None
 
     def _receive(self, now, *, valid_end):
+        if self._echo:
+            return
         request_id, sep, message = bytes(self._body).partition(b":")
         if not _ID.fullmatch(request_id):
             return
@@ -117,21 +162,23 @@ class Relay:
             if request_id == self._active_id:
                 self._discard_active()
                 return
+            format_, _, length = payload.partition(b":")
+            if self._grant is None or request_id != self._grant[0]:
+                return
+            self._grant = None
+            limit = MAX_BYTES if format_ == b"png" else 256 * 1024
             if (
                 not sep
-                or len(payload) > len(str(MAX_BYTES))
-                or not _LENGTH.fullmatch(payload)
-                or (size := int(payload)) > MAX_BYTES
-                or request_id in self._seen
-                or len(self._seen) >= _MAX_IDS
+                or format_ not in _KINDS
+                or len(length) > len(str(limit))
+                or not _LENGTH.fullmatch(length)
+                or (size := int(length)) > limit
             ):
                 return
-            # Retire IDs even for concurrent proposals. Never make a stale
-            # stream valid again within this TUI relay by evicting earlier IDs.
-            self._seen.add(request_id)
             if self._active_id is None and self._pending is None:
                 self._active_id = request_id
                 self._active_size = size
+                self._active_kind = format_.decode("ascii")
                 self._active_deadline = now + REQUEST_TIMEOUT
             return
 
@@ -151,7 +198,7 @@ class Relay:
                 return
         elif kind == b"end" and not sep:
             if len(self._payload) == self._active_size:
-                self._pending = bytes(self._payload)
+                self._pending = (self._active_kind, bytes(self._payload))
                 self._pending_deadline = now + PENDING_TIMEOUT
         self._discard_active()
 
@@ -167,19 +214,25 @@ class Relay:
         cursor = 0
         while cursor < len(data):
             if self._body is None:
-                start = data.find(PREFIX, cursor)
-                if start < 0:
+                match = _FRAME_START.search(data, cursor)
+                if match is None:
                     # Only a suffix that could be part of the exact sentinel
                     # must wait for the following PTY read.
-                    for size in range(min(len(PREFIX) - 1, len(data) - cursor), 0, -1):
-                        if data.endswith(PREFIX[:size]):
+                    for size in range(
+                        min(max(map(len, _PREFIXES)) - 1, len(data) - cursor), 0, -1
+                    ):
+                        if any(
+                            size < len(prefix) and data.endswith(prefix[:size])
+                            for prefix in _PREFIXES
+                        ):
                             self._tail = data[-size:]
                             break
                     visible.extend(view[cursor : len(data) - len(self._tail)])
                     break
-                visible.extend(view[cursor:start])
-                cursor = start + len(PREFIX)
+                visible.extend(view[cursor : match.start()])
+                cursor = match.end()
                 self._body = bytearray()
+                self._echo = match.group() == _GRANT_PREFIX
                 self._body_deadline = now + FRAME_TIMEOUT
                 self._body_esc = False
                 continue
@@ -226,8 +279,8 @@ class Relay:
         """Expire stale state on idle ticks; raise on an unclosed timed-out OSC."""
         self._expire(self._clock())
 
-    def take(self) -> bytes | None:
-        """Consume the pending proposal once, with no side effects on the host."""
+    def take(self) -> tuple[str, bytes] | None:
+        """Consume one complete transfer; no staging or process work here."""
         self.check()
         if self._body is not None or self._tail:
             return None
@@ -235,13 +288,13 @@ class Relay:
         return pending
 
 
-def _validate_canonical(data):
+def _prepare(kind, data):
     if __package__:
-        from .file_preview_png import validate_canonical
+        from .file_open_formats import MIME_TYPES, prepare
     else:
-        from file_preview_png import validate_canonical
+        from file_open_formats import MIME_TYPES, prepare
 
-    validate_canonical(data)
+    return prepare(kind, data), MIME_TYPES[kind]
 
 
 def _private_directory(info, uid):
@@ -267,7 +320,7 @@ def _storage_root():
 
 
 def _storage_name(uid):
-    return f"oc-box-png-{uid}"
+    return f"oc-box-open-{uid}"
 
 
 def _desktop_env():
@@ -278,17 +331,21 @@ def _desktop_env():
     return env
 
 
-def _opener_available():
+def _trusted_exec(path):
     try:
-        info = os.stat(_OPENER)
+        info = os.stat(path)
         return (
             stat.S_ISREG(info.st_mode)
             and info.st_uid == 0
             and not info.st_mode & 0o022
-            and os.access(_OPENER, os.X_OK)
+            and os.access(path, os.X_OK)
         )
     except OSError:
         return False
+
+
+def _opener_available():
+    return _trusted_exec(_OPENER) and _trusted_exec(_MIME)
 
 
 def _ancestors(path):
@@ -417,9 +474,9 @@ def _storage(host_mounts):
         os.close(parent)
 
 
-def _stage_png(data, host_mounts):
+def _stage(kind, data, host_mounts):
     with _storage(host_mounts) as (directory, path, uid):
-        name = f"preview-{secrets.token_hex(16)}.png"
+        name = f"artifact-{secrets.token_hex(16)}.{kind}"
         fd = os.open(name, _FILE_FLAGS, mode=0o600, dir_fd=directory)
         complete = False
         try:
@@ -441,20 +498,24 @@ def _stage_png(data, host_mounts):
         return os.path.join(path, name)
 
 
-def open_png(data: bytes, *, host_mounts=()) -> None:
-    """Only call after host consent; validate and open the exact approved bytes.
+def open_artifact(kind: str, data: bytes, *, host_mounts=()) -> None:
+    """Only call for a complete click-authorized request; open a private copy.
 
     The launcher does not reap a file within a day of staging it, even when
     opener status is uncertain. A later approved open can reap expired files
     across client exits. Runtime-directory teardown may clear them sooner, and
     a viewer may retain its own copy.
     """
-    if type(data) is not bytes or not 0 < len(data) <= MAX_BYTES:
-        raise PreviewError("Host PNG preview refused: invalid canonical PNG.")
+    if (
+        type(data) is not bytes
+        or kind not in ("png", "txt", "md", "html")
+        or not 0 < len(data) <= MAX_BYTES
+    ):
+        raise PreviewError("Host artifact refused.")
     try:
-        _validate_canonical(data)
+        data, types = _prepare(kind, data)
     except ValueError:
-        raise PreviewError("Host PNG preview refused: invalid canonical PNG.") from None
+        raise PreviewError("Host artifact refused.") from None
 
     env = _desktop_env()
     if env is None:
@@ -468,10 +529,30 @@ def open_png(data: bytes, *, host_mounts=()) -> None:
     if not ready(host_mounts=host_mounts):
         raise PreviewError("Host PNG preview storage is not trusted.")
     try:
-        path = _stage_png(data, host_mounts)
+        path = _stage(kind, data, host_mounts)
     except OSError:
         raise PreviewError("Host PNG preview storage is unavailable.") from None
     try:
+        # Do not dispatch a filename that the local desktop classifies as a
+        # script, desktop launcher, executable or any other unexpected type.
+        mime = subprocess.run(
+            (_MIME, "query", "filetype", path),
+            env=env,
+            cwd="/",
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+            timeout=_OPEN_TIMEOUT,
+            check=False,
+        )
+        if (
+            mime.returncode
+            or len(mime.stdout) > 256
+            or mime.stdout.decode("ascii").strip() not in types
+        ):
+            raise PreviewError("Host artifact has an unexpected desktop file type.")
         result = subprocess.run(
             (_OPENER, path),
             env=env,
@@ -489,6 +570,8 @@ def open_png(data: bytes, *, host_mounts=()) -> None:
         raise PreviewError(
             "Host PNG preview opener did not report completion."
         ) from None
+    except PreviewError:
+        raise
     except (OSError, ValueError, subprocess.SubprocessError):
         raise PreviewError("Host PNG preview opener is unavailable.") from None
     if result.returncode != 0:

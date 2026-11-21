@@ -16,7 +16,7 @@ export default Plugin.define({
       if (!stopped) stopPreview = install(context)
     }).catch(() => {
       if (!stopped) context.ui.toast.show({
-        message: "Experimental file preview is unavailable on this client.",
+        message: "Experimental host file opening is unavailable on this client.",
         variant: "warning",
       })
     })

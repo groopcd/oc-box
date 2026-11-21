@@ -555,31 +555,44 @@ def client_command(
             if verified is not None:
                 # Use the inspected immutable container ID, not a mutable name.
                 container, mounts = verified
-                command[-1] = container
-                names[preview.ROOTS] = json.dumps(mounts)
-                # The bytes from this process are proposals. A separate host
-                # confirmation precedes any extraction to a host file.
                 if sys.stdin.isatty() and sys.stdout.isatty():
                     if __package__:
-                        from . import file_preview_host
+                        from . import file_preview_host, host_drop
                     else:
                         import file_preview_host
-                    if file_preview_host.ready():
+                        import host_drop
+                    try:
+                        profile = host_drop.preflight(data["opencode_version"])
+                    except host_drop.DropError:
+                        terminal_supported = False
+                    else:
+                        # Kitty's optional TTY remote control lets child
+                        # output inject bytes resembling a real mouse report.
+                        terminal_supported = profile == "konsole"
+                    if terminal_supported and file_preview_host.ready():
                         sources = preview.host_export_mounts(box, data, container)
                         if sources is not None and file_preview_host.ready(
                             host_mounts=sources
                         ):
-                            names["OC_BOX_FILE_PREVIEW_HOST_OPEN"] = "1"
+                            command[-1] = container
+                            names[preview.ROOTS] = json.dumps(mounts)
 
-                            def preview_host_open(candidate):
+                            def preview_host_open(kind, candidate):
                                 sources = preview.host_export_mounts(
                                     box, data, container
                                 )
                                 if sources is None:
                                     raise ValueError("host-mounts-unverified")
-                                file_preview_host.open_png(
-                                    candidate, host_mounts=sources
+                                file_preview_host.open_artifact(
+                                    kind, candidate, host_mounts=sources
                                 )
+
+                if preview_host_open is None:
+                    print(
+                        "oc-box: Experimental host opening is off: desktop, "
+                        "terminal or private staging checks could not be verified.",
+                        flush=True,
+                    )
 
     if (
         image_preview
@@ -819,13 +832,21 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
 
     def fail(category):
         if category == "activity-timeout":
-            error = box.HistoryWaitTimeout(
+            diagnostic = (
                 f"History wait timeout: phase={phase}; "
                 f"last complete job kinds: {kind_observation}; "
-                f"last complete observation: {observation}.",
+                f"last complete observation: {observation}."
+            )
+            timing = timing_diagnostic()
+            # These strings contain only the fixed query phases and validated
+            # counts above, never a native payload or an exception's text.
+            lifecycle_output.fixed_detail("debug", diagnostic)
+            lifecycle_output.fixed_detail("debug", timing)
+            error = box.HistoryWaitTimeout(
+                diagnostic,
                 recovery_eligible=job_pairs >= 2 or foreground_pairs >= 2,
                 recovery_reason=recovery_reason,
-                timing_diagnostic=timing_diagnostic(),
+                timing_diagnostic=timing,
                 interrupted_foreground=foreground_observed,
             )
             # Keep the deadline and routing diagnostics; a native response

@@ -25,7 +25,7 @@ oc-box completion bash
 oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [LIFECYCLE-LOG-OPTIONS]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
-oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level debug|info|warn|error] [--limit N] [--follow] [--json]
+oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--follow] [--json]
 oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
@@ -49,7 +49,7 @@ without sudo. It manages rootless Podman; container root is mapped to the
 unprivileged host user.
 
 `LIFECYCLE-LOG-OPTIONS` are `[--journald | --no-journald] [--log-dir PATH]
-[--lifecycle-diagnostics]`. They apply only to the current invocation; see
+[--lifecycle-diagnostics] [--verbose[=LEVEL]]`. They apply only to the current invocation; see
 the [activity journal settings](#dashboard-state-and-activity-journal).
 
 ## Description
@@ -92,7 +92,9 @@ shows transient stage progress on one line and clears it instead of leaving a
 transcript of each step. Noninteractive output, including pipes and `TERM=dumb`,
 does not get routine stage start/done lines. Actionable warnings, errors and
 confirmation or credential prompts remain visible. Native OpenCode output and
-the native terminal and browser UIs are not changed.
+the native terminal and browser UIs are not changed. Native host drops and
+clipboard importing print one short line each when enabled. Use
+`oc-box start --verbose` for the full behavior, limits and clipboard symlink policy.
 
 After a history sync or recovery attempt, oc-box reports one final history
 result: saved normally, recovered after stop, partial, failed, empty, or cleanup
@@ -102,9 +104,10 @@ work finished. Incomplete results retain guidance for retrying
 `oc-box sync` when appropriate. The presentation does not change lifecycle steps,
 recovery eligibility, history verification or exit codes.
 
-Use `oc-box logs --level debug` to inspect retained stage details. For additional
-launcher messages on a particular invocation, see
-[`--lifecycle-diagnostics`](#launcher-diagnostics).
+Use `oc-box logs --verbose=ALL` to inspect retained stage details, or
+`oc-box start --verbose=ALL` for safe activity diagnostics from the current
+launch. See [Launcher diagnostics](#launcher-diagnostics) for the older
+`--lifecycle-diagnostics` option.
 
 ### OpenCode versions
 
@@ -1551,7 +1554,10 @@ history. It does not read Podman output or native OpenCode logfiles.
 
 By default, show the latest 100 retained entries at `info` or above.
 `--level debug` includes lower-severity stage detail; `--level warn` or
-`--level error` narrows the output. `--project PATH` and `--workspace ID` are
+`--level error` narrows the output. Alternatively use `--verbose=LEVEL`. Bare
+`--verbose` or `--verbose=ALL` displays all validated retained levels, up to
+10,000 matching entries unless you supply `--limit`. It never reveals unlogged
+data or reads a different source. `--project PATH` and `--workspace ID` are
 mutually exclusive filters and require a valid workspace registration. With
 neither, show entries across workspaces, including entries with no workspace.
 Severity and workspace filters apply before the limit. Use `--follow` to keep
@@ -1580,6 +1586,7 @@ under [Dashboard state and activity journal](#dashboard-state-and-activity-journ
 
 ```sh
 oc-box logs
+oc-box logs --verbose=ALL
 oc-box logs --path
 oc-box logs --log-dir ~/.local/state/oc-box-diagnostics --path
 oc-box logs --project ~/devel/demo --level debug --limit 50
@@ -2294,8 +2301,8 @@ what gets journaled or what an owning launcher prints.
 ### --limit N
 
 For `logs`, set the maximum number of matching retained entries in the initial
-output, from 1 to 10,000. Default: 100. Rotation may leave fewer entries
-available.
+output, from 1 to 10,000. Default: 100, or 10,000 with `--verbose=ALL`.
+Rotation may leave fewer entries available.
 
 ### --follow
 
@@ -2339,12 +2346,29 @@ invocation of `start` (including when the command is omitted), `reset`,
 no saved diagnostic setting. This option does not change native OpenCode output,
 journaling or lifecycle results. See [Launcher diagnostics](#launcher-diagnostics).
 
+### --verbose[=LEVEL]
+
+For `start` (including when omitted), `reset`, `stop`, `sync`, `terminal` and
+`web`, emit validated activity diagnostics on stderr at the selected minimum
+severity: `debug`, `info`, `warn`, or `error`. Levels are case-insensitive.
+Activity diagnostics are buffered and may appear at command exit.
+Bare `--verbose` means `--verbose=ALL`; both include every severity. With
+`info`, `debug`, or `ALL`, the native TUI startup
+notices also explain the enabled host-import features. This option never adds
+raw arguments, environment values, credentials, native errors or output, or
+clipboard content to these diagnostics. It does not suppress existing warnings,
+refusals or prompts, alter native output, or change what gets journaled.
+
+For `logs`, this is a read filter rather than a launcher setting. Use it instead
+of `--level`; `ALL` includes all validated retained records within the read
+bounds. It works with `--follow`, `--json` and the same explicit source choices.
+
 ### --path
 
 For `logs`, display the effective private `activity.jsonl` pathname without
 reading or creating the journal. Use `oc-box logs --path` alone or with
-`--log-dir PATH`, not with `--journald`, workspace filters, `--follow`, or
-`--json`.
+`--log-dir PATH`, not with `--journald`, workspace filters, `--follow`,
+`--verbose`, or `--json`.
 
 ### --about
 
@@ -2529,53 +2553,49 @@ oc-box --project ~/devel/demo --image-preview
 oc-box reset --project ~/devel/demo --image-preview
 ```
 
-### Experimental container file preview
+### Experimental Ctrl-click host file opening
 
 Opt in for one native TUI client running OpenCode 2.3.x:
 
 ```sh
-OC_BOX_EXPERIMENTAL_FILE_PREVIEW=1 oc-box --project ~/devel/demo
+OC_BOX_EXPERIMENTAL_FILE_OPEN=1 oc-box --project ~/devel/demo
 ```
 
-**Ctrl-click** a file link in an assistant reply to show a read-only text
-snapshot in OpenCode. It must be an actual link, for example
+**Ctrl-left-click** a file link in an assistant reply to open a private local
+snapshot in the host's associated application. It must be an actual link, for example
 `[Notes](/tmp/notes.md)`; unlinked paths and paths shown as inline code are not
 clickable. Absolute paths and local `file://` URIs resolve inside the container.
 Relative paths resolve against the active session's directory, not the host
-shell's directory. Close the panel with **Close preview**; another click reads
-a fresh snapshot. No file descriptor or reader stays open while the panel is
-visible.
+shell's directory. Hold Ctrl until after releasing the mouse button. Each
+successful click reads a fresh file; there is no panel or confirmation step.
 
-The experiment accepts up to 256 KiB of UTF-8 text, displayed literally,
-including Markdown. For `.png` links, it shows a downsampled color preview using
-terminal cells, without requiring a terminal graphics protocol. PNG input is
-limited to 4 MiB, 4,194,304 pixels and 4,096 pixels per side. The normalized PNG
-can be up to 5 MiB. Malformed, animated, interlaced and unsupported PNG encodings
-are refused. Special files, filesystem links, unsafe paths, changing files and
-mounts other than the registered project bind and named workspace home are
-refused. Custom Podman arguments disable the experiment.
+- PNG: opens a normalized static image, retaining the resolution and alpha but
+  not embedded metadata. Input is limited to 4 MiB and 4,194,304 pixels
+  (up to 4,096 per side). Animation and interlacing are refused.
+- TXT and Markdown: opens the UTF-8 snapshot, up to 256 KiB, in the host's
+  associated application.
+- HTML: opens a safe static copy of the article structure and text in the
+  browser. Scripts, styles, links and remote resources do not carry over.
+  This is not a test of the original page's appearance or behavior.
 
-On a supported Linux desktop with `/usr/bin/xdg-open` and a private
-`XDG_RUNTIME_DIR`, a PNG preview offers **Open in host app**. Click it, then
-press **F8** within 45 seconds to review the candidate in the host terminal.
-Only F8 on a pending proposal opens the **oc-box HOST** prompt. Check the
-host-rendered thumbnail, then type its short code within 20 seconds to approve
-that one export. Escape cancels. A link or terminal output alone cannot open
-the prompt or launch the viewer. The preview sends its current, normalized
-snapshot, not a path for the host to read. The host revalidates the candidate.
-The default PNG application receives a private temporary copy with the original
-resolution and alpha, but without embedded metadata. The copy is not deleted
-when the opener exits: it is eligible for cleanup after 24 hours on a later
-approved export, and the OS may remove it when the desktop session ends. There
-are at most eight retained copies per user. The viewer may retain its own copy.
-Host export checks the active local Podman store and the registered project
-paths for mounts overlapping the staging directory. An incomplete inventory or
-unsupported mount disables host opening without disabling the in-TUI preview.
-This does not audit other engines or make mount inspection atomic.
+Other formats, special files, filesystem links, unsafe paths, changing files
+and unexpected mounts are refused. Custom Podman arguments disable the
+experiment. Use direct Konsole or Yakuake with mouse reporting enabled.
+Kitty is not supported by this experiment: its optional terminal remote control
+can inject raw input. The host must have trusted `/usr/bin/xdg-open` and
+`/usr/bin/xdg-mime` and a private `XDG_RUNTIME_DIR`. Incomplete mount inspection
+disables host opening. The check covers the current local Podman store and
+registered projects; it is not a census of other engines or atomic with
+container starts.
 
-Neither action starts a live share or writes back to the container, and the
-preview is not sent to the model. The experiment does not use clipboard
-permissions or change normal web links.
+The host relay grants at most one bounded transfer per observed Ctrl-click.
+OpenCode chooses the link target; opt in only for a workspace whose programs
+you trust to honor that click. A rendered link or container output alone does
+not mint a grant. No new listener or share is created, no file is written
+back, and no clipboard or model access is granted. The host copy survives the
+asynchronous viewer handoff. The launcher keeps up to eight copies, clears
+copies older than 24 hours on a later open, and leaves earlier removal to the
+desktop runtime-directory policy.
 
 The switch is not saved and does not change host OpenCode or terminal settings.
 If the existing owner was started before upgrading oc-box, exit it normally and
@@ -2787,11 +2807,17 @@ strict mode.
 An ordinary paste above the 16 KiB pathname-capture limit passes through
 unchanged. While it is still framed as paste, it cannot trigger clipboard
 reads or pathname imports. Only an exact, valid paste end lets interception
-resume for later input. Ambiguous or malformed input instead disables
-interception for the client; an unfinished terminal reply or paste also cannot
-grant a read.
-The relay reports a fixed reason on client exit. Open a fresh native TUI client
-if that happens; the relay does not restart OpenCode or the workspace.
+resume for later input. A recognized paste or ASCII CSI sequence with certain
+embedded control bytes also passes unchanged without granting an import. The
+relay resumes only after an unambiguous closing delimiter or final byte, and
+a later Ctrl+Y press is required for a clipboard read. An unfinished terminal
+reply or paste never grants a read. Ambiguous
+encoding, possible nested frames and other untrusted boundaries still stop
+interception for that client.
+On exit, `input-framing-recovered` reports that interception resumed;
+`input-framing` or `input-incomplete` means it did not recover from a framing
+problem. If needed, open a fresh native TUI client; the relay does not restart
+OpenCode or the workspace.
 
 After an unexpected clipboard-read error, one later qualifying Ctrl+Y key
 event may try again only if desktop helper reaping was verified. There is no
@@ -3878,27 +3904,26 @@ archives; an unrelated replacement directory will not be deleted.
 
 ### Launcher diagnostics
 
-Use `oc-box logs --level debug` to inspect retained activity details without
-restarting a workspace. To see the launcher's expanded stage messages and
-fixed-category diagnostics during an invocation, opt in explicitly:
+Use `oc-box logs --verbose=ALL` to inspect retained activity without restarting
+a workspace. For diagnostics from the current invocation:
 
 ```sh
-oc-box start --project ~/devel/demo --lifecycle-diagnostics
+oc-box start --project ~/devel/demo --verbose=ALL
+oc-box sync --project ~/devel/demo --verbose=warn
 ```
 
-Scripts that consume older verbose lifecycle messages should pass the flag
-to the launcher invocation under test instead of expecting routine start/done
-text in a pipe. The flag does not enable native debug logging, add raw child
-output to the journal or change lifecycle behavior. Continue to treat native
-output and interactive prompts as separate from the activity journal.
+Scripts that consume older verbose lifecycle messages should continue using
+`--lifecycle-diagnostics` for routine start/done lines in a pipe. Neither flag
+enables native debug logging, adds raw child output to the journal or changes
+lifecycle behavior. Native output and interactive prompts remain separate.
 
 ### Private output capture and uv Python
 
 V2 startup copies native OpenCode saved/OAuth credentials independently of the
 oc-box vault. `--no-vault` skips vault entries, not native authentication or the
-private output capture that protects it. There is no oc-box `--verbose` flag;
-the final error after cleanup explains a failed startup stage. Use the launcher
-diagnostic setting above for additional stage details.
+private output capture that protects it. The final error after cleanup
+explains a failed startup stage. Use the launcher diagnostic settings above
+for additional safe stage details; they do not expose captured private output.
 
 Some older uv-managed Python builds omit `os.memfd_create` even on capable Linux
 hosts. oc-box first uses the Python binding, or, when it is absent, lazily calls

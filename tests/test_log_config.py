@@ -117,7 +117,12 @@ class LogConfigTests(unittest.TestCase):
         add_launch_arguments(parser)
         self.assertEqual(
             vars(parser.parse_args([])),
-            {"log_dir": None, "journald": None, "lifecycle_diagnostics": False},
+            {
+                "log_dir": None,
+                "journald": None,
+                "lifecycle_diagnostics": False,
+                "verbose": None,
+            },
         )
         self.assertEqual(
             vars(
@@ -127,6 +132,7 @@ class LogConfigTests(unittest.TestCase):
                         "~/log space",
                         "--journald",
                         "--lifecycle-diagnostics",
+                        "--verbose=ALL",
                     ]
                 )
             ),
@@ -134,12 +140,14 @@ class LogConfigTests(unittest.TestCase):
                 "log_dir": self.home / "log space",
                 "journald": True,
                 "lifecycle_diagnostics": True,
+                "verbose": "all",
             },
         )
         self.assertIs(parser.parse_args(["--no-journald"]).journald, False)
         for arguments in (
             ["--journald", "--no-journald"],
             ["--log-dir", "relative-synthetic-private-value"],
+            ["--verbose=synthetic-private-value"],
         ):
             stderr = io.StringIO()
             with redirect_stderr(stderr), self.assertRaises(SystemExit) as caught:

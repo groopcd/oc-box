@@ -9,6 +9,9 @@ Callbacks are trusted policy code, not a way to establish input provenance.
 
 _ESC = 0x1B
 _BEL = 0x07
+_CAN = 0x18
+_SUB = 0x1A
+_DEL = 0x7F
 _CSI = 0x9B
 _ST = 0x9C
 _OSC = 0x9D
@@ -43,16 +46,7 @@ _CLIPBOARD_KEYS = {
     },
     b"27;5;121~": True,
 }
-# F8 is reserved only by a TUI with a host PNG proposal handler. Ignore
-# distinct repeat/release events; never accept a printable/pasted alias.
-_HOST_PREVIEW_KEYS = {
-    b"19~": True,
-    **{
-        b"19;" + mods + suffix: suffix in (b"~", b":1~")
-        for mods in (b"1", b"65", b"129", b"193")
-        for suffix in (b"~", b":1~", b":2~", b":3~")
-    },
-}
+_MOUSE_PARAMETERS = frozenset(b"<;0123456789")
 
 # Includes the ASCII "72;" selector, but not the introducer or terminator.
 # The broker must independently validate its protocol/chunk/session limits.
@@ -141,7 +135,8 @@ class _Framing:
         transform=None,
         on_osc72=None,
         on_clipboard=None,
-        on_host_preview=None,
+        on_host_mouse=None,
+        on_mouse_boundary=None,
         max_paste=0,
         reserve_osc72=False,
     ):
@@ -152,7 +147,8 @@ class _Framing:
         self._transform = transform
         self._on_osc72 = on_osc72
         self._on_clipboard = on_clipboard
-        self._on_host_preview = on_host_preview
+        self._on_host_mouse = on_host_mouse
+        self._on_mouse_boundary = on_mouse_boundary
         self._max_paste = max_paste
         self._units = _Units()
         self._state = "text"
@@ -160,6 +156,8 @@ class _Framing:
         self._closed = False
         self._disabled = False
         self._disable_reason = None
+        self._opaque_frame = False
+        self._recovered_framing = False
         self._string_kind = None
         self._string_escape = False
         self._osc_probe = None
@@ -213,7 +211,7 @@ class _Framing:
         result = b"" if discard else bytes(self._held) + pending
         self._held.clear()
         if self._transform is not None:
-            if self._state in ("paste", "string"):
+            if self._state != "text" or pending:
                 self._disable_callbacks("input-incomplete")
             self._disabled = True
         return result
@@ -222,6 +220,13 @@ class _Framing:
         output.extend(self._held)
         self._held.clear()
         output.extend(raw)
+
+    def _end_frame(self):
+        self._state = "text"
+        if self._opaque_frame:
+            self._opaque_frame = False
+            if not self._disabled:
+                self._recovered_framing = True
 
     def _disable(self, output, raw=b""):
         self._flush(output, raw)
@@ -336,6 +341,12 @@ class _Framing:
             self._held[:] = prefix
 
     def _consume(self, code, raw, output):
+        if (
+            self._on_mouse_boundary is not None
+            and self._state == "text"
+            and code != _ESC
+        ):
+            self._on_mouse_boundary()
         if self._state == "paste":
             self._paste_unit(code, raw, output)
         elif self._state == "string":
@@ -379,6 +390,8 @@ class _Framing:
                 prefix = bytes(self._held) + raw
                 self._start_csi(prefix)
                 return
+            if self._on_mouse_boundary is not None:
+                self._on_mouse_boundary()
             if code in _ESC_STRINGS:
                 prefix = bytes(self._held) + raw
                 self._held.clear()
@@ -406,7 +419,20 @@ class _Framing:
         intermediate = 0x20 <= code <= 0x2F
         final = 0x40 <= code <= 0x7E
         if not (parameter or intermediate or final):
-            if not self._framing_only():
+            if self._on_mouse_boundary is not None:
+                self._on_mouse_boundary()
+            if (
+                not self._framing_only()
+                and self._csi_ascii
+                and (code < 0x20 or code == _DEL)
+                and code not in (_ESC, _CAN, _SUB)
+            ):
+                # A non-cancelling C0 or DEL cannot be a CSI final. It is
+                # native input, not a shortcut; this CSI can no longer grant.
+                self._opaque_frame = True
+                self._csi_candidate = None
+                self._flush(output, raw)
+            elif not self._framing_only():
                 self._refuse_unit(code, raw, output)
             elif code < 0x20 and code != _ESC:
                 self._flush(output, raw)
@@ -432,9 +458,19 @@ class _Framing:
             candidates = (b"200~", b"201~")
             if self._on_clipboard is not None and not self._child_output:
                 candidates += tuple(_CLIPBOARD_KEYS)
-            if self._on_host_preview is not None:
-                candidates += tuple(_HOST_PREVIEW_KEYS)
-            if not any(value.startswith(candidate) for value in candidates):
+            mouse = (
+                self._on_host_mouse is not None
+                and candidate.startswith(b"<")
+                and len(candidate) <= 32
+                and all(
+                    byte in _MOUSE_PARAMETERS
+                    for byte in (candidate[:-1] if final else candidate)
+                )
+                and (not final or candidate[-1] in b"Mm")
+            )
+            if not mouse and not any(
+                value.startswith(candidate) for value in candidates
+            ):
                 candidate = None
         self._csi_candidate = candidate
         if candidate is None:
@@ -443,18 +479,35 @@ class _Framing:
             self._held.extend(raw)
         if not final:
             return
+        if self._opaque_frame and not self._framing_only():
+            if code in b"~M[":
+                # Do not recover on possible paste, mouse or legacy function
+                # key prefixes. Those may have a body beyond the CSI final.
+                self._disable(output)
+            else:
+                self._end_frame()
+            return
         if (
             not self._framing_only()
             and self._csi_ascii
-            and self._on_host_preview is not None
-            and candidate in _HOST_PREVIEW_KEYS
+            and self._on_host_mouse is not None
+            and candidate is not None
+            and candidate.startswith(b"<")
         ):
             original = bytes(self._held)
             self._held.clear()
             self._state = "text"
-            if not self._on_host_preview(_HOST_PREVIEW_KEYS[candidate]):
-                output.extend(original)
+            try:
+                replacement = self._on_host_mouse(original)
+                if not isinstance(replacement, bytes):
+                    raise TypeError("invalid host mouse observer reply")
+            except Exception:
+                self._on_host_mouse = None
+                replacement = original
+            output.extend(replacement)
             return
+        if self._on_mouse_boundary is not None:
+            self._on_mouse_boundary()
         if (
             not self._framing_only()
             and self._csi_ascii
@@ -495,7 +548,7 @@ class _Framing:
             self._held.extend(raw)
             self._paste_end += 1
             if self._paste_end == len(_PASTE_END):
-                self._state = "text"
+                self._end_frame()
                 if self._paste_passthrough:
                     self._flush(output)
                     self._paste_passthrough = False
@@ -519,8 +572,14 @@ class _Framing:
                     self._disable_callbacks("paste-callback")
                     output.extend(original)
             return
-        if (code < 0x20 and code not in (0x09, 0x0A, 0x0D)) or 0x7F <= code <= 0x9F:
+        if 0x80 <= code <= 0x9F:
             self._refuse_unit(code, raw, output)
+            return
+        if (code < 0x20 and code not in (0x09, 0x0A, 0x0D)) or code == _DEL:
+            # These bytes cannot open or close a paste. Stream this paste
+            # without using it for import; only the exact end rearms input.
+            self._opaque_frame = self._paste_passthrough = True
+            self._flush(output, raw)
             return
         if self._paste_passthrough:
             output.extend(raw)
@@ -652,10 +711,12 @@ class PasteInput(_Framing):
     Policy callbacks must validate their own paths, metadata and replacement.
     Exceptions/invalid return types disable interception.
 
-    Ambiguous/malformed encoding or paste/control framing permanently sets
-    ``disabled``. Normally the original and subsequent bytes pass unchanged;
-    there is no interior rescan or timing-based re-arm. Over-limit ordinary
-    pastes stream unchanged until their exact canonical end without callbacks.
+    Ambiguous encoding or paste/control framing permanently sets ``disabled``.
+    Normally the original and subsequent bytes pass unchanged. Embedded C0/DEL
+    in a recognized paste or non-cancelling C0/DEL in ASCII CSI are forwarded
+    opaquely; only an unambiguous frame end permits interception of later input.
+    There is no interior rescan or timing-based re-arm. Over-limit ordinary
+    pastes also stream unchanged until their exact canonical end.
     With ``reserve_osc72=True``, refused/malformed/oversized private packets and
     partial private packets at EOF are discarded, never forwarded to the child.
     After failure only framing/reservation continues, with all authorization
@@ -679,7 +740,8 @@ class PasteInput(_Framing):
         *,
         on_osc72=None,
         on_clipboard=None,
-        on_host_preview=None,
+        on_host_mouse=None,
+        on_mouse_boundary=None,
         max_paste=16384,
         reserve_osc72=False,
     ):
@@ -689,8 +751,8 @@ class PasteInput(_Framing):
             raise TypeError("on_osc72 must be callable or None")
         if on_clipboard is not None and not callable(on_clipboard):
             raise TypeError("on_clipboard must be callable or None")
-        if on_host_preview is not None and not callable(on_host_preview):
-            raise TypeError("on_host_preview must be callable or None")
+        if on_host_mouse is not None and not callable(on_host_mouse):
+            raise TypeError("on_host_mouse must be callable or None")
         if (
             isinstance(max_paste, bool)
             or not isinstance(max_paste, int)
@@ -704,7 +766,8 @@ class PasteInput(_Framing):
             transform=transform,
             on_osc72=on_osc72,
             on_clipboard=on_clipboard,
-            on_host_preview=on_host_preview,
+            on_host_mouse=on_host_mouse,
+            on_mouse_boundary=on_mouse_boundary,
             max_paste=max_paste,
             reserve_osc72=reserve_osc72,
         )
@@ -719,19 +782,15 @@ class PasteInput(_Framing):
         """First fixed reason for failing closed, not normal stream closure."""
         return self._disable_reason
 
-    def set_host_preview(self, callback):
-        """Install the host-local F8 handler before any input is parsed."""
-        self._on_host_preview = callback
+    @property
+    def recovered_framing(self):
+        """Whether any opaque control/paste recovered at a known frame end."""
+        return self._recovered_framing
 
-    def safe_for_host_prompt(self):
-        """Do not steal the tail of a paste/reply following F8 in one read."""
-        return (
-            not self._closed
-            and not self._disabled
-            and self._state == "text"
-            and not self._held
-            and not self._units.pending
-        )
+    def set_host_mouse(self, callback, boundary):
+        """Install a relay-owned observer before reading any host input."""
+        self._on_host_mouse = callback
+        self._on_mouse_boundary = boundary
 
 
 MAX_OUTPUT_CONTROL = 262144 - 256

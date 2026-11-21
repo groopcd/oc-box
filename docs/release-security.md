@@ -33,11 +33,14 @@ scheduled Code Scanning results; the release jobs themselves do not upload SARIF
 under a tag. The GitHub release is still a maintainer action: its **pre-publication**
 review is procedural, while the subsequent PyPI upload is technically gated.
 For a manual `publish=true` retry, select the matching channel branch and the
-existing release tag. The retry refuses if the tag's workflow definitions differ
-from the caller's; use the original release run in that case. These workflow-level
-gates apply to candidates containing this policy, not to historical tags.
+existing release tag. The tag must identify the commit that triggered the run,
+not select different code to execute. If the channel has moved on, rerun the
+original release event instead of dispatching from a different commit.
+These gates apply to candidates containing this policy, not to historical tags.
 
-Scheduled CodeQL analysis and report parsing run with read-only permissions.
+Scheduled CodeQL analysis treats the branch snapshot as data; a separate
+read-only job parses the SARIF using the event checkout. The Python audit
+reads the snapshotted manifest without running the other branch's scripts.
 A separate upload job handles the SARIF with `security-events: write`; it uses
 the matching source only for file fingerprints and does not execute it.
 

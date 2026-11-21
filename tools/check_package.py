@@ -106,7 +106,7 @@ def check_archives(directory):
             "file_preview_tui.tsx",
             "file_preview_png.py",
             "file_preview_host.py",
-            "file_preview_consent.py",
+            "file_open_formats.py",
             "session_terminal.py",
             "sharing.py",
             "attachments.py",
@@ -323,12 +323,13 @@ def check_archives(directory):
             "src/oc_box/file_preview_tui.tsx",
             "src/oc_box/file_preview_png.py",
             "src/oc_box/file_preview_host.py",
-            "src/oc_box/file_preview_consent.py",
+            "src/oc_box/file_open_formats.py",
             "tests/test_file_preview.py",
             "tests/test_file_preview_io.py",
             "tests/test_file_preview_png.py",
             "tests/test_file_preview_host.py",
-            "tests/test_file_preview_consent.py",
+            "tests/test_file_open_formats.py",
+            "tests/test_file_open_relay.py",
             "tests/smoke_file_preview_v2.py",
             "tests/test_ui_state.py",
             "tests/ui_state_fixture.mjs",
@@ -426,6 +427,7 @@ def check(directory, *, with_vault=False, with_tui=False):
         log_help = run(cli, "logs", "--help")
         for option in (
             "--level",
+            "--verbose",
             "--limit",
             "--follow",
             "--json",
@@ -441,17 +443,20 @@ def check(directory, *, with_vault=False, with_tui=False):
             "--no-journald",
             "--log-dir",
             "--lifecycle-diagnostics",
+            "--verbose",
         ):
             assert option in begin_help, option
         sync_help = run(cli, "sync", "--help")
         assert (
             "--lifecycle-diagnostics" in sync_help
+            and "--verbose" in sync_help
             and "--image-preview" not in sync_help
         )
         logdir = work / "one-invocation-log"
         assert run(cli, "logs", "--log-dir", str(logdir), "--path").strip() == str(
             logdir / "activity.jsonl"
         )
+        assert not run(cli, "logs", "--log-dir", str(logdir), "--verbose=ALL", "--json")
         assert not logdir.exists()
         assert (
             run(python, "-m", "oc_box", "--version").strip()

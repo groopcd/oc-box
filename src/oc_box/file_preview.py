@@ -9,11 +9,11 @@ import subprocess
 import unicodedata
 
 RELEASE = re.compile(r"2\.3\.(?:0|[1-9][0-9]*)")
-FLAG = "OC_BOX_EXPERIMENTAL_FILE_PREVIEW"
+FLAG = "OC_BOX_EXPERIMENTAL_FILE_OPEN"
 ROOTS = "OC_BOX_FILE_PREVIEW_ROOTS"
 NOTICE = (
-    "oc-box: Experimental Ctrl-click file preview requires an ordinary "
-    "native OpenCode 2.3.x workspace with verified mounts; preview is off."
+    "oc-box: Experimental Ctrl-click host opening requires an ordinary "
+    "native OpenCode 2.3.x workspace with verified mounts; host opening is off."
 )
 
 

@@ -623,19 +623,6 @@ def run_native_tui(
         from . import host_drop
     else:
         import host_drop
-    if host_drop_enabled:
-        print("oc-box: " + host_drop.WARNING, flush=True)
-    if host_clipboard_reader is not None:
-        print("oc-box: " + host_drop.CLIPBOARD_WARNING, flush=True)
-        print(
-            "oc-box: "
-            + (
-                host_drop.CLIPBOARD_SYMLINKS_WARNING
-                if host_clipboard_symlinks
-                else host_drop.CLIPBOARD_STRICT_WARNING
-            ),
-            flush=True,
-        )
     client_started = False
     try:
         with host_drop.Relay(
@@ -654,6 +641,21 @@ def run_native_tui(
             ),
         ) as drops:
             client_started = True
+            details = lifecycle_output.feature_details()
+            if host_drop_enabled:
+                print("oc-box: " + host_drop.DROP_ENABLED, flush=True)
+                if details:
+                    print("oc-box: " + host_drop.DROP_DETAILS, flush=True)
+            if host_clipboard_reader is not None:
+                print("oc-box: " + host_drop.CLIPBOARD_ENABLED, flush=True)
+                if details:
+                    policy = (
+                        host_drop.CLIPBOARD_SYMLINKS_WARNING
+                        if host_clipboard_symlinks
+                        else host_drop.CLIPBOARD_STRICT_WARNING
+                    )
+                    print("oc-box: " + host_drop.CLIPBOARD_DETAILS, flush=True)
+                    print("oc-box: " + policy, flush=True)
             return run_tui(command, file_drops=drops)
     except host_drop.DropError:
         if not client_started and not required:
@@ -4423,7 +4425,13 @@ def completion_parser():
 
 
 _LOGGING_COMMANDS = frozenset({"start", "reset", "stop", "sync", "terminal", "web"})
-_LOGGING_FLAGS = ("--log-dir", "--journald", "--no-journald", "--lifecycle-diagnostics")
+_LOGGING_FLAGS = (
+    "--log-dir",
+    "--journald",
+    "--no-journald",
+    "--lifecycle-diagnostics",
+    "--verbose",
+)
 _LOGGING_SCOPE_ERROR = "Launcher logging options apply only to start, reset, stop, sync, terminal, and web."
 _WEB_ORDER_ERROR = (
     "Use 'oc-box web' first, followed by --project/--workspace/--port/--no-open."
@@ -4435,6 +4443,7 @@ def _logging_options_requested(args):
         args.journald is not None
         or args.log_dir is not None
         or args.lifecycle_diagnostics
+        or args.verbose is not None
     )
 
 
@@ -4536,6 +4545,7 @@ def main(argv=None):
         args.log_dir = web.log_dir
         args.journald = web.journald
         args.lifecycle_diagnostics = web.lifecycle_diagnostics
+        args.verbose = web.verbose
         args._opencode_release = detect_opencode_release()
         if opencode_compat.major(args._opencode_release) != 2:
             raise BoxError(
@@ -4560,7 +4570,9 @@ def main(argv=None):
         with (
             log_config.overrides(directory=args.log_dir, journald=args.journald),
             lifecycle_output.invocation(
-                args.command, verbose=args.lifecycle_diagnostics
+                args.command,
+                verbose=args.lifecycle_diagnostics,
+                console_level=args.verbose,
             ),
         ):
             return _main_command(args, argv)
@@ -5321,19 +5333,20 @@ def entrypoint():
         if not journaled:
             return
         try:
+            fields = dict(
+                command=lifecycle_output.command_name() or command,
+                workspace=lifecycle_output.workspace(),
+                exit_code=code,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+            lifecycle_output.console_event(event, **fields)
             if event != "command.started":
                 lifecycle_output.flush()
             if __package__:
                 from .activity_log import record_event
             else:
                 from activity_log import record_event
-            record_event(
-                event,
-                command=lifecycle_output.command_name() or command,
-                workspace=lifecycle_output.workspace(),
-                exit_code=code,
-                duration_ms=int((time.monotonic() - started) * 1000),
-            )
+            record_event(event, **fields)
         except Exception:
             # Diagnostics must never alter lifecycle results or expose private
             # errors. No argv/env/native output is sent to the journal.
@@ -5344,7 +5357,9 @@ def entrypoint():
 
     reporting = (
         lifecycle_output.invocation(
-            command, verbose=launch_options.lifecycle_diagnostics
+            command,
+            verbose=launch_options.lifecycle_diagnostics,
+            console_level=launch_options.verbose,
         )
         if journaled and command in _LOGGING_COMMANDS
         else contextlib.nullcontext()

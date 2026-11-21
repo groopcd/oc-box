@@ -1,6 +1,7 @@
 """Help views for the launcher without changing its shared argument grammar."""
 
 import argparse
+import sys
 
 
 class _ImplicitCommand(str):
@@ -87,7 +88,7 @@ _OPTION_GROUPS = {
     "vault": ("Credential delivery", ("no_vault",)),
     "logging": (
         "Lifecycle logging",
-        ("log_dir", "journald", "lifecycle_diagnostics"),
+        ("log_dir", "journald", "lifecycle_diagnostics", "verbose"),
     ),
     "terminal": ("Terminal mode", ("maintenance",)),
     "status": ("Output", ("json",)),
@@ -209,6 +210,22 @@ class LauncherParser(argparse.ArgumentParser):
         )
 
     def parse_known_args(self, args=None, namespace=None):
+        if args is None:
+            args = sys.argv[1:]
+        args = list(args)
+        # A bare verbosity flag must not consume a following launcher command.
+        # The optional level can always be supplied explicitly with '='.
+        for index, arg in enumerate(args):
+            if arg == "--":
+                break
+            if arg in ("--ve", "--ver", "--vers"):
+                args[index] = "--version"
+            elif (
+                arg in ("--verb", "--verbo", "--verbos", "--verbose")
+                and index + 1 < len(args)
+                and args[index + 1] in _COMMAND_DESCRIPTIONS
+            ):
+                args[index] = "--verbose=all"
         namespace, extras = super().parse_known_args(args, namespace)
         if getattr(namespace, "command", None) is DEFAULT_COMMAND:
             namespace.command = "start"

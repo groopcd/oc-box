@@ -722,7 +722,8 @@ class ReleaseArtifactTests(unittest.TestCase):
         publish_job = workflow.split("\n  publish:\n", 1)[1]
         self.assertIn("success() &&", publish_job)
         self.assertIn("(github.event_name == 'release' || inputs.publish)", publish_job)
-        self.assertIn('test "$commit" = "$EVENT_SHA"', workflow)
+        self.assertIn('refs/tags/$RELEASE_TAG^{commit}")" = "$EVENT_SHA"', workflow)
+        self.assertNotIn("ref: ${{ needs.candidate.outputs.commit }}", workflow)
         self.assertLess(gate, workflow.index("echo 'publish_validated=true'"))
         self.assertLess(gate, workflow.index("actions/upload-artifact@"))
         self.assertIn("steps.artifacts.outputs.publish_validated", workflow)

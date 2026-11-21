@@ -19,10 +19,8 @@ See [installation](../installation.md) and [channels](../update-channels.md).
 [per-image approval](#require-independent-host-approval-for-every-image),
 and [direct messages](#queue-a-direct-image-message).
 
-To view a container file, no share or host copy is needed:
-see [experimental Ctrl-click container previews](../cli.md#experimental-container-file-preview).
-For PNGs, an optional **Open in host app** action exports the already-previewed
-snapshot only after a separate host confirmation.
+To open a container file on the host without a live share, see
+[experimental Ctrl-click host opening](../cli.md#experimental-ctrl-click-host-file-opening).
 
 **Choose the consent boundary first.** Live sharing needs an initial typed
 `share` disclosure consent. On supported TUI clients, host importing is enabled
