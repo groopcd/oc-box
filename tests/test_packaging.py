@@ -2,6 +2,8 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -335,6 +337,7 @@ class PackagingTests(unittest.TestCase):
 
     def test_console_entrypoint_preserves_readable_error_and_interrupt_handling(self):
         with (
+            patch.object(sys, "argv", ["oc-box"]),
             patch.object(
                 oc_box, "main", side_effect=oc_box.BoxError("fixture failure")
             ),
@@ -342,7 +345,10 @@ class PackagingTests(unittest.TestCase):
         ):
             self.assertEqual(oc_box.entrypoint(), 1)
         self.assertEqual(output.getvalue(), "oc-box: fixture failure\n")
-        with patch.object(oc_box, "main", side_effect=KeyboardInterrupt):
+        with (
+            patch.object(sys, "argv", ["oc-box"]),
+            patch.object(oc_box, "main", side_effect=KeyboardInterrupt),
+        ):
             self.assertEqual(oc_box.entrypoint(), 130)
 
     def test_package_metadata_and_workflow_keep_both_distribution_channels(self):
@@ -359,7 +365,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("fetch-depth: 0", workflow)
         self.assertIn("tools/check_package.py dist", workflow)
         self.assertIn("tools/check_package.py dist --with-vault --with-tui", workflow)
-        self.assertIn("'textual>=8.2.8,<9' 'pyte>=0.8.2,<0.9'", workflow)
+        self.assertIn("python tools/release_python_deps.py", workflow)
+        self.assertIn("--upgrade -r", workflow)
         self.assertIn("--mirror azure --force-ipv4", workflow)
         self.assertIn("default: false", workflow)
         self.assertNotIn("PYPI_TOKEN", workflow)
@@ -367,6 +374,44 @@ class PackagingTests(unittest.TestCase):
         self.assertIn(
             "https://github.com/groopcd/oc-box.git", (APP / "install.sh").read_text()
         )
+
+    @unittest.skipIf(sys.version_info < (3, 11), "release tool uses stdlib tomllib")
+    def test_release_dependency_generator_reads_optional_extras(self):
+        resolved_inputs = subprocess.run(
+            [sys.executable, "tools/release_python_deps.py"],
+            cwd=APP,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        ).stdout.splitlines()
+        self.assertIn("textual>=8.2.8,<9", resolved_inputs)
+        self.assertIn("pyte>=0.8.2,<0.9", resolved_inputs)
+
+    @unittest.skipIf(sys.version_info < (3, 11), "release tool uses stdlib tomllib")
+    def test_release_dependency_generator_rejects_non_index_inputs(self):
+        with tempfile.TemporaryDirectory() as work:
+            manifest = Path(work) / "pyproject.toml"
+            for requirement in (
+                "demo @ https://example.invalid/demo.whl",
+                "-r /tmp/other",
+            ):
+                with self.subTest(requirement=requirement):
+                    manifest.write_text(
+                        '[build-system]\nrequires=["wheel"]\n'
+                        "[project.optional-dependencies]\nvault=["
+                        + json.dumps(requirement)
+                        + "]\n"
+                    )
+                    result = subprocess.run(
+                        [sys.executable, "tools/release_python_deps.py", str(manifest)],
+                        cwd=APP,
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertNotIn(requirement, result.stdout + result.stderr)
 
 
 if __name__ == "__main__":

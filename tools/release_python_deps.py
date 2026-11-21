@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """List the Python dependencies installed into the audited release build env."""
 
+import argparse
+import re
 import tomllib
 from pathlib import Path
 
@@ -20,17 +22,24 @@ def requirements(project):
 
 
 def main():
-    with Path("pyproject.toml").open("rb") as manifest:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "manifest", nargs="?", type=Path, default=Path("pyproject.toml")
+    )
+    args = parser.parse_args()
+    with args.manifest.open("rb") as manifest:
         dependencies = requirements(tomllib.load(manifest))
     for dependency in dependencies:
-        if (
-            not dependency
-            or dependency != dependency.strip()
-            or "\n" in dependency
-            or "\r" in dependency
-            or dependency.startswith("-")
+        # Accept the index package/specifier subset used by this project, never
+        # direct URLs, local paths, requirements-file options, or shell input.
+        if not isinstance(dependency, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]*"
+            r"(?:\[[A-Za-z0-9_.-]+(?:,[A-Za-z0-9_.-]+)*\])?"
+            r"(?:(?:~=|==|!=|<=|>=|<|>)[A-Za-z0-9_.+!*]+"
+            r"(?:,(?:~=|==|!=|<=|>=|<|>)[A-Za-z0-9_.+!*]+)*)?",
+            dependency,
         ):
-            raise SystemExit("Invalid release dependency")
+            raise SystemExit("Invalid index-only release dependency")
         print(dependency)
 
 

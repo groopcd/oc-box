@@ -382,6 +382,11 @@ def unlock(envelope, passphrase):
         ) from exc
 
 
+def unlocked_names(envelope, passphrase):
+    """Project only validated credential names from the authenticated payload."""
+    return sorted(unlock(envelope, passphrase).keys())
+
+
 def write_encrypted(path, values, passphrase):
     validate_secrets(values)
     aes, _, _ = crypto()
@@ -475,12 +480,13 @@ def manage(action, name=None, *, path=None, min_passphrase_length=None):
         envelope = read_envelope(target)
         crypto()
         passphrase = hidden("Vault passphrase: ")
-        values = unlock(envelope, passphrase)
         if action == "list":
+            names = unlocked_names(envelope, passphrase)
             print("NAME")
-            for entry in sorted(values):
+            for entry in names:
                 print(entry)
             return
+        values = unlock(envelope, passphrase)
         if action == "set":
             value = hidden("Secret value: ", allow_reveal=True, maximum=MAX_SECRET)
             validate_value(value)
