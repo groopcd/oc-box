@@ -57,43 +57,31 @@ jobs:
           if [[ "$EVENT" == workflow_dispatch && "$PUBLISH_REQUESTED" == true ]]; then
             case "$EVENT_REF" in refs/heads/master|refs/heads/devel) ;; *) exit 1 ;; esac
           fi
-          commit="$EVENT_SHA"
+          [[ "$EVENT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$EVENT_SHA"
           if [[ -n "$RELEASE_TAG" || "$PUBLISH_REQUESTED" == true ]]; then
             [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.dev0)?$ ]]
-            commit=$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")
-            if [[ "$EVENT" == release ]]; then
-              test "$commit" = "$EVENT_SHA"
-            else
+            test "$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")" = "$EVENT_SHA"
+            if [[ "$EVENT" == workflow_dispatch ]]; then
               branch=master
               if [[ "$RELEASE_TAG" == *.dev0 ]]; then branch=devel; fi
               test "$EVENT_REF" = "refs/heads/$branch"
-              # Local workflow calls use the caller revision, not the candidate
-              # checkout. Do not substitute a different test/security policy.
-              git diff --quiet "$EVENT_SHA" "$commit" -- \
-                .github/workflows/{publish,ci,distros,security-codeql}.yml
             fi
           fi
-          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
-          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
-          printf 'Candidate: `%s`\n' "$commit" >> "$GITHUB_STEP_SUMMARY"
+          printf 'commit=%s\n' "$EVENT_SHA" >> "$GITHUB_OUTPUT"
+          printf 'Candidate: `%s`\n' "$EVENT_SHA" >> "$GITHUB_STEP_SUMMARY"
 
   source:
     needs: candidate
     uses: ./.github/workflows/ci.yml
-    with:
-      candidate: ${{ needs.candidate.outputs.commit }}
 
   distros:
     needs: candidate
     uses: ./.github/workflows/distros.yml
-    with:
-      candidate: ${{ needs.candidate.outputs.commit }}
 
   codeql:
     needs: candidate
     uses: ./.github/workflows/security-codeql.yml
-    with:
-      commit: ${{ needs.candidate.outputs.commit }}
 
   build:
     needs: candidate
@@ -106,7 +94,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ needs.candidate.outputs.commit }}
+          ref: ${{ github.sha }}
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'

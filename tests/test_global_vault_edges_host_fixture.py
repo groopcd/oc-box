@@ -2,7 +2,6 @@
 
 import io
 import importlib.util
-import hashlib
 import copy
 import os
 from pathlib import Path
@@ -17,6 +16,7 @@ from oc_box import oc_box as box, session_terminal, vault
 from tools import test_global_vault_edges_podman as edge
 
 fixture = edge.fixture
+PUBLIC_PTY_VECTOR = "synthetic-typed-only-secret"
 
 
 class GlobalVaultEdgesHostFixtureTests(unittest.TestCase):
@@ -648,24 +648,36 @@ class GlobalVaultEdgesHostFixtureTests(unittest.TestCase):
                 edge.assert_host_scope(expected)
 
     def test_actual_controlling_tty_masked_prompt_no_secret_in_command_or_result(self):
-        password = "synthetic-typed-only-secret"
-        digest = hashlib.sha256(password.encode()).hexdigest()
         bootstrap = (
             edge.TTY_BOOTSTRAP
-            + "import hashlib,json,sys; sys.path.insert(0,sys.argv[1]+'/src'); from oc_box import vault; value=vault.hidden('Vault passphrase: '); print('OC_BOX_EDGES_CHILD:'+json.dumps({'match':hashlib.sha256(value.encode()).hexdigest()==sys.argv[2]}),flush=True)"
+            + "import json,runpy,sys; sys.path[:0]=[sys.argv[1]+'/src',sys.argv[1]];"
+            "from oc_box import vault;"
+            "expected=runpy.run_path(sys.argv[2])['PUBLIC_PTY_VECTOR'];"
+            "value=vault.hidden('Vault passphrase: ');"
+            "print('OC_BOX_EDGES_CHILD:'+json.dumps({'match':value==expected}),flush=True)"
         )
-        command = [sys.executable, "-I", "-B", "-c", bootstrap, str(edge.APP), digest]
-        self.assertNotIn(password, repr(command))
-        result = edge.drive_child(
-            command,
-            environment={"PATH": os.defpath, "HOME": str(self.root)},
-            password=password,
-            timeout=10,
-        )
-        self.assertEqual(result["value"], {"match": True})
-        self.assertEqual(result["prompts"], 1)
-        self.assertEqual(result["exit_code"], 0)
-        self.assertNotIn(password, repr(result))
+        command = [
+            sys.executable,
+            "-I",
+            "-B",
+            "-c",
+            bootstrap,
+            str(edge.APP),
+            __file__,
+        ]
+        for typed, match in ((PUBLIC_PTY_VECTOR, True), ("synthetic-mismatch", False)):
+            with self.subTest(match=match):
+                self.assertNotIn(typed, repr(command))
+                result = edge.drive_child(
+                    command,
+                    environment={"PATH": os.defpath, "HOME": str(self.root)},
+                    password=typed,
+                    timeout=10,
+                )
+                self.assertEqual(result["value"], {"match": match})
+                self.assertEqual(result["prompts"], 1)
+                self.assertEqual(result["exit_code"], 0)
+                self.assertNotIn(typed, repr(result))
         self.engine.assert_not_called()
 
     def test_pty_echo_enabled_unexpected_prompt_timeout_and_duplicate_prompt_fail_closed(
@@ -1105,6 +1117,8 @@ raise SystemExit(97)
     def test_diagnostic_native_log_is_read_only_scanned_for_memory_only_secrets(self):
         log = self.root / "host-data-2" / edge.NATIVE_LOG
         log.parent.mkdir(parents=True)
+        log.write_bytes(b"synthetic harmless native metadata\n")
+        before = edge.interactive.file_hash(log)
         forbidden = (
             "synthetic-vault-value-never-in-report",
             "synthetic-passphrase-never-in-report",
@@ -1114,11 +1128,16 @@ raise SystemExit(97)
                 secret_kind="vault" if secret == forbidden[0] else "passphrase"
             ):
                 content = b"x" * (1048576 - 7) + secret.encode() + b"\n"
-                log.write_bytes(content)
-                before = edge.interactive.file_hash(log)
+                real_fdopen = os.fdopen
+
+                def memory_log(descriptor, mode, *args, **kwargs):
+                    with real_fdopen(descriptor, mode, *args, **kwargs):
+                        return io.BytesIO(content)
+
                 with (
                     patch.object(edge, "checkpoint"),
                     patch.object(fixture, "workspace_records") as resources,
+                    patch.object(edge.os, "fdopen", side_effect=memory_log),
                 ):
                     with self.assertRaisesRegex(
                         fixture.FixtureError, "native-log-secret"
@@ -1127,8 +1146,6 @@ raise SystemExit(97)
                 self.assertNotIn(secret, str(caught.exception))
                 resources.assert_not_called()
                 self.assertEqual(edge.interactive.file_hash(log), before)
-        log.write_bytes(b"synthetic harmless native metadata\n")
-        before = edge.interactive.file_hash(log)
         edge.assert_native_log_clean(self.root, forbidden)
         self.assertEqual(edge.interactive.file_hash(log), before)
         log.unlink()

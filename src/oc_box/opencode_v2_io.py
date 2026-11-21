@@ -12,12 +12,42 @@ from pathlib import Path
 import secrets
 import select
 import signal
+import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import time
 from urllib.parse import quote, urlparse
 from urllib.request import Request, build_opener, ProxyHandler
+
+
+def require_control_pipe():
+    """Refuse credential-bearing readiness on a terminal or a disk file."""
+    descriptor = sys.stdout.fileno()
+    mode = os.fstat(descriptor).st_mode
+    if stat.S_ISFIFO(mode):
+        return descriptor
+    if stat.S_ISSOCK(mode):
+        # Some exec transports supply a local stream socket instead of a pipe.
+        with socket.socket(fileno=os.dup(descriptor)) as channel:
+            if channel.family == socket.AF_UNIX and channel.type == socket.SOCK_STREAM:
+                channel.getpeername()
+                return descriptor
+    raise ValueError("Private OpenCode control output requires a local pipe or socket.")
+
+
+def write_control_record(descriptor, record):
+    """Send a bounded readiness frame to the already-checked control channel."""
+    frame = (json.dumps(record) + "\n").encode("utf-8")
+    if len(frame) > 4096:
+        raise ValueError("Invalid private OpenCode control record.")
+    while frame:
+        size = os.write(descriptor, frame)
+        if size <= 0:
+            raise OSError("Private OpenCode control channel closed.")
+        frame = frame[size:]
+
 
 # Constant, secret-free explanations that may be shown on the host. Only these
 # exact strings are ever surfaced; every other failure stays generic because
@@ -373,10 +403,11 @@ def main(argv):
             )
             print(json.dumps(value), flush=True)
     elif action == "lease":
+        descriptor = require_control_pipe()
         with server(binary) as request:
             # Control credentials are returned only through the owner's pipe,
             # kept in memory, and never written to the workspace or service.json.
-            print(json.dumps(request.endpoint), flush=True)
+            write_control_record(descriptor, request.endpoint)
             while request.alive():
                 if select.select([sys.stdin], [], [], 0.2)[0] and not os.read(
                     sys.stdin.fileno(), 4096

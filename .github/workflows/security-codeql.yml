@@ -4,8 +4,10 @@ on:
   workflow_call:
     inputs:
       commit:
-        required: true
+        description: Off-ref advisory snapshot; release scans use the workflow event SHA
+        required: false
         type: string
+        default: ''
       branch:
         description: Retain advisory SARIF for this branch; empty means enforce the release gate without uploading
         required: false
@@ -30,30 +32,59 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          ref: ${{ inputs.commit }}
+          ref: ${{ inputs.commit || github.sha }}
           persist-credentials: false
+          path: scan-source
       - name: Verify the exact scan source
         env:
-          CANDIDATE: ${{ inputs.commit }}
+          CANDIDATE: ${{ inputs.commit || github.sha }}
           BRANCH: ${{ inputs.branch }}
         run: |
           [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
-          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git -C scan-source rev-parse HEAD)" = "$CANDIDATE"
           case "$BRANCH" in ''|master|devel) ;; *) exit 1 ;; esac
+          if [[ -z "$BRANCH" ]]; then test "$CANDIDATE" = "$GITHUB_SHA"; fi
           printf 'Candidate: `%s`\n' "$CANDIDATE" >> "$GITHUB_STEP_SUMMARY"
       - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: none
+          source-root: scan-source
       - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
         with:
           output: ${{ runner.temp }}/oc-box-codeql
           upload: never
           upload-database: false
           category: /language:${{ matrix.language }}
+          checkout_path: ${{ github.workspace }}/scan-source
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codeql-${{ inputs.branch || 'release' }}-${{ inputs.commit || github.sha }}-${{ matrix.language }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oc-box-codeql/${{ matrix.language }}.sarif
+          if-no-files-found: error
+          retention-days: 2
+
+  evaluate:
+    needs: codeql
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, javascript, python]
+    steps:
+      # The analyzer treats off-ref source as data. Only the event's checker
+      # executes here, and downloaded SARIF stays outside the working tree.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: codeql-${{ inputs.branch || 'release' }}-${{ inputs.commit || github.sha }}-${{ matrix.language }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/oc-box-codeql
       - name: Evaluate findings (blocking only on release candidates)
         env:
-          CANDIDATE: ${{ inputs.commit }}
+          CANDIDATE: ${{ inputs.commit || github.sha }}
           BRANCH: ${{ inputs.branch }}
           LANGUAGE: ${{ matrix.language }}
         run: |
@@ -63,10 +94,3 @@ jobs:
           python3 tools/check_security_scan.py codeql \
             "$RUNNER_TEMP/oc-box-codeql/$LANGUAGE.sarif" \
             --commit "$CANDIDATE" "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
-      - if: inputs.branch != ''
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: codeql-${{ inputs.branch }}-${{ inputs.commit }}-${{ matrix.language }}
-          path: ${{ runner.temp }}/oc-box-codeql/${{ matrix.language }}.sarif
-          if-no-files-found: error
-          retention-days: 2

@@ -11,7 +11,12 @@ trap 'rm -r -- "$work"' EXIT
 python3 -m venv "$work/scanner"
 "$work/scanner/bin/python" -m pip install --only-binary=:all: 'pip-audit==2.10.1'
 
-site=$("$target/bin/python" -c 'import sysconfig; print(sysconfig.get_path("purelib"))')
+# Resolve the venv's installed metadata without importing packages or .pth
+# hooks from the environment being audited.
+site=$("$target/bin/python" -I -S -c 'import sys, sysconfig
+from pathlib import Path
+root = str(Path(sys.argv[1]).absolute())
+print(sysconfig.get_path("purelib", "venv", vars={"base": root, "platbase": root}))' "$target")
 status=0
 "$work/scanner/bin/python" -m pip_audit --path "$site" --strict \
     --progress-spinner off --timeout 20 --format json --output "$work/audit.json" \
