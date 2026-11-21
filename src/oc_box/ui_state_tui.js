@@ -6,78 +6,100 @@ import { createReporter, MAX_TABS, nonce, sessionID } from "./ui_state_memory.js
 export default Plugin.define({
   id: "oc-box.ui-state.tui",
   setup(context) {
-    // The launcher supplies NONSECRET per-process labels only to native TUI
-    // clients. No global CLI plugin-list override, provider values or host reads.
-    const client = process.env.OC_BOX_UI_STATE_CLIENT
-    const generation = process.env.OC_BOX_UI_STATE_GENERATION
-    if (!nonce(client) || !nonce(generation)) return
-    const controlLocation = context.data.location.default()
-    const [sequence, updateSequence] = context.storage.memory("sequence", { initial: { value: 0 } })
-    let reporter
-    const unregister = context.ui.slot({
-      append: "app",
-      render: () => {
-        const [focus, setFocus] = createSignal("unknown")
-        const rpc = context.client.rpc(UIState)
-        reporter = createReporter(
-          (method, input, signal) => rpc[method](input, { location: controlLocation, signal }),
-          {
-            client, generation,
-            nextSequence() {
-              return untrack(() => {
-                let result
-                updateSequence((draft) => { result = ++draft.value })
-                return result
-              })
-            },
-          },
-        )
-        const focused = () => setFocus("focused")
-        const blurred = () => setFocus("blurred")
-        context.renderer.on("focus", focused)
-        context.renderer.on("blur", blurred)
-        const stops = [
-          context.data.on("server.connected", () => reporter.refresh()),
-          context.data.on("plugin.updated", () => reporter.refresh()),
-          context.data.on("config.updated", () => reporter.refresh()),
-        ]
-        createEffect(() => {
-          // All reactive properties are read synchronously; never defer reading
-          // the live route proxy into the asynchronous RPC request.
-          const route = context.ui.router.current()
-          const routeType = route.type
-          const selected = routeType === "session" ? route.sessionID : null
-          const tabsEnabled = context.ui.tabs.enabled()
-          const entries = tabsEnabled ? context.ui.tabs.list() : []
-          const tabs = entries.map((entry) => entry.sessionID)
-          const active = entries.filter((entry) => entry.active).map((entry) => entry.sessionID)
-          const common = { focus: focus() }
-          if (tabs.length > MAX_TABS || !tabs.every(sessionID) ||
-              (selected !== null && !sessionID(selected)) ||
-              (tabsEnabled && routeType === "session" && active.length !== 1)) {
-            reporter.publish({
-              ...common, routeType: "unknown", selected: null,
-              tabsEnabled: false, tabs: [], activeRoot: null,
-            })
-            return
-          }
-          reporter.publish({
-            ...common, routeType, selected, tabsEnabled, tabs,
-            activeRoot: tabsEnabled && routeType === "session" ? active[0] : null,
-          })
-        })
-        onCleanup(() => {
-          context.renderer.off("focus", focused)
-          context.renderer.off("blur", blurred)
-          stops.forEach((stop) => stop())
-          void reporter.stop()
-        })
-        return null
-      },
+    const stopReporter = setupReporter(context)
+    if (!process.env.OC_BOX_FILE_PREVIEW_ROOTS) {
+      return stopReporter
+    }
+    let stopped = false
+    let stopPreview
+    void import("./file_preview_tui.tsx").then(({ install }) => {
+      if (!stopped) stopPreview = install(context)
+    }).catch(() => {
+      if (!stopped) context.ui.toast.show({
+        message: "Experimental file preview is unavailable on this client.",
+        variant: "warning",
+      })
     })
     return async () => {
-      unregister()
-      await reporter?.stop()
+      stopped = true
+      stopPreview?.()
+      await stopReporter?.()
     }
   },
 })
+
+function setupReporter(context) {
+  // The launcher supplies NONSECRET per-process labels only to native TUI
+  // clients. No global CLI plugin-list override, provider values or host reads.
+  const client = process.env.OC_BOX_UI_STATE_CLIENT
+  const generation = process.env.OC_BOX_UI_STATE_GENERATION
+  if (!nonce(client) || !nonce(generation)) return
+  const controlLocation = context.data.location.default()
+  const [sequence, updateSequence] = context.storage.memory("sequence", { initial: { value: 0 } })
+  let reporter
+  const unregister = context.ui.slot({
+    append: "app",
+    render: () => {
+      const [focus, setFocus] = createSignal("unknown")
+      const rpc = context.client.rpc(UIState)
+      reporter = createReporter(
+        (method, input, signal) => rpc[method](input, { location: controlLocation, signal }),
+        {
+          client, generation,
+          nextSequence() {
+            return untrack(() => {
+              let result
+              updateSequence((draft) => { result = ++draft.value })
+              return result
+            })
+          },
+        },
+      )
+      const focused = () => setFocus("focused")
+      const blurred = () => setFocus("blurred")
+      context.renderer.on("focus", focused)
+      context.renderer.on("blur", blurred)
+      const stops = [
+        context.data.on("server.connected", () => reporter.refresh()),
+        context.data.on("plugin.updated", () => reporter.refresh()),
+        context.data.on("config.updated", () => reporter.refresh()),
+      ]
+      createEffect(() => {
+        // All reactive properties are read synchronously; never defer reading
+        // the live route proxy into the asynchronous RPC request.
+        const route = context.ui.router.current()
+        const routeType = route.type
+        const selected = routeType === "session" ? route.sessionID : null
+        const tabsEnabled = context.ui.tabs.enabled()
+        const entries = tabsEnabled ? context.ui.tabs.list() : []
+        const tabs = entries.map((entry) => entry.sessionID)
+        const active = entries.filter((entry) => entry.active).map((entry) => entry.sessionID)
+        const common = { focus: focus() }
+        if (tabs.length > MAX_TABS || !tabs.every(sessionID) ||
+            (selected !== null && !sessionID(selected)) ||
+            (tabsEnabled && routeType === "session" && active.length !== 1)) {
+          reporter.publish({
+            ...common, routeType: "unknown", selected: null,
+            tabsEnabled: false, tabs: [], activeRoot: null,
+          })
+          return
+        }
+        reporter.publish({
+          ...common, routeType, selected, tabsEnabled, tabs,
+          activeRoot: tabsEnabled && routeType === "session" ? active[0] : null,
+        })
+      })
+      onCleanup(() => {
+        context.renderer.off("focus", focused)
+        context.renderer.off("blur", blurred)
+        stops.forEach((stop) => stop())
+        void reporter.stop()
+      })
+      return null
+    },
+  })
+  return async () => {
+    unregister()
+    await reporter?.stop()
+  }
+}

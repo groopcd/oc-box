@@ -19,6 +19,9 @@ See [installation](../installation.md) and [channels](../update-channels.md).
 [per-image approval](#require-independent-host-approval-for-every-image),
 and [direct messages](#queue-a-direct-image-message).
 
+To read a file in the **opposite direction**, no share or host copy is needed:
+see [experimental Ctrl-click container previews](../cli.md#experimental-container-file-preview).
+
 **Choose the consent boundary first.** Live sharing needs an initial typed
 `share` disclosure consent. On supported TUI clients, host importing is enabled
 by default: a qualifying pathname paste anywhere authorizes copying with no

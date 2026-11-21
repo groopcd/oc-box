@@ -2529,6 +2529,38 @@ oc-box --project ~/devel/demo --image-preview
 oc-box reset --project ~/devel/demo --image-preview
 ```
 
+### Experimental container file preview
+
+Opt in for one native TUI client running OpenCode 2.3.x:
+
+```sh
+OC_BOX_EXPERIMENTAL_FILE_PREVIEW=1 oc-box --project ~/devel/demo
+```
+
+**Ctrl-click** a file link in an assistant reply to show a read-only text
+snapshot in OpenCode. It must be an actual link, for example
+`[Notes](/tmp/notes.md)`; unlinked paths and paths shown as inline code are not
+clickable. Absolute paths and local `file://` URIs resolve inside the container.
+Relative paths resolve against the active session's directory, not the host
+shell's directory. Close the panel with **Close preview**; another click reads
+a fresh snapshot. No file descriptor or reader stays open while the panel is
+visible.
+
+The experiment accepts up to 256 KiB of UTF-8 text, displayed literally,
+including Markdown. It refuses special files, links on the filesystem, unsafe
+paths, changing files, and mounts other than the registered project bind and
+named workspace home. Custom Podman arguments disable the experiment. It never
+opens a host app, starts a file share, writes back, or sends the contents to
+the model. It does not use clipboard permissions or change normal web links.
+
+The switch is not saved and does not change host OpenCode or terminal settings.
+If the existing owner was started before upgrading oc-box, exit it normally and
+start it again so the container gets the updated plugin. This is a private
+native renderer integration that may stop working after a 2.3.x update or in
+terminals that do not pass Ctrl-click to OpenCode. Leave terminal hyperlink
+handlers at their normal settings; this feature does not use them. It is not available in web,
+V1, plain host OpenCode, or the maintenance/session terminals.
+
 ### --host-drop
 
 Experimental and **enabled by default per workspace** for supported native

@@ -3770,6 +3770,7 @@ def launch_client(path, data, args, version, exported, owner=None):
                     command,
                     interactive=True,
                     ui_owner=True,
+                    file_preview=True,
                 )
                 if owner
                 else exec_command(data, command, interactive=True),
@@ -5093,6 +5094,7 @@ def _main_command(args, argv):
                         ),
                     ],
                     interactive=True,
+                    file_preview=True,
                 )
                 return run_native_tui(
                     data,

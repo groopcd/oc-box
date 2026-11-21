@@ -487,6 +487,7 @@ def client_command(
     interactive=False,
     force_tty=False,
     ui_owner=False,
+    file_preview=False,
 ):
     """No host pass_env, auth refresh, profiles, or vault unlock on attach."""
     image_preview = connection.get("image_preview", False)
@@ -544,6 +545,16 @@ def client_command(
                 binding["ownerClient"] if ui_owner else secrets.token_hex(16)
             )
             names["OC_BOX_UI_STATE_GENERATION"] = binding["generation"]
+        if file_preview:
+            if __package__:
+                from . import file_preview as preview
+            else:
+                import file_preview as preview
+            verified = preview.client_binding(box, data, connection)
+            if verified is not None:
+                # Use the inspected immutable container ID, not a mutable name.
+                command[-1], mounts = verified
+                names[preview.ROOTS] = json.dumps(mounts)
     if (
         image_preview
         and interactive
