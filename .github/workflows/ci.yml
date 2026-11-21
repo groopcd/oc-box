@@ -4,6 +4,11 @@ on:
   push:
     branches: [master, devel, 'feature/**', 'fix/**']
   pull_request:
+  workflow_call:
+    inputs:
+      candidate:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -24,6 +29,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ inputs.candidate || '' }}
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: ${{ matrix.python }}
@@ -37,7 +43,11 @@ jobs:
           bash -n completions/oc-box
           shellcheck --shell=bash completions/oc-box
           python -m venv "$RUNNER_TEMP/tests"
-          "$RUNNER_TEMP/tests/bin/python" -m pip install 'cryptography>=44' 'textual>=8.2.8,<9' 'pyte>=0.8.2,<0.9' 'Pillow>=11,<13'
+          "$RUNNER_TEMP/tests/bin/python" -m pip install 'cryptography>=44' 'textual>=8.2.8,<9' 'pyte>=0.8.2,<0.9'
+          # Release-card rendering uses Pillow 13 (Python 3.11+), not a runtime dependency.
+          if [[ "${{ matrix.python }}" == '3.13' ]]; then
+            "$RUNNER_TEMP/tests/bin/python" -m pip install 'Pillow>=13,<14'
+          fi
           "$RUNNER_TEMP/tests/bin/python" -B -m unittest discover -s tests -v
           python tools/build_docs.py --check
           git diff --check
@@ -56,6 +66,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ inputs.candidate || '' }}
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
@@ -105,6 +116,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ inputs.candidate || '' }}
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
@@ -135,6 +147,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ inputs.candidate || '' }}
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'

@@ -81,6 +81,9 @@ unrelated projects; see the [manager guide](docs/tui.md#launch-and-navigation).
 
 ## Checks
 
+Use focused checks for ordinary changes; full release checks and scheduled
+security reporting are described in [release security](docs/release-security.md).
+
 See [the test strategy and audit](docs/testing.md) before adding/removing tests.
 Keep distinct data-loss/security regressions; consolidate repeated cases and
 fixture/prose checks, not an arbitrary number of test methods.

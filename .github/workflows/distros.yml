@@ -5,6 +5,11 @@ on:
     branches: [master, devel, 'feature/**', 'fix/**']
   pull_request:
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      candidate:
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -35,6 +40,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+          ref: ${{ inputs.candidate || '' }}
       - name: Install providers and exercise doctor in a disposable distro
         env:
           DISTRO: ${{ matrix.distro }}

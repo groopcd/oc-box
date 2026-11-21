@@ -1,0 +1,64 @@
+name: Candidate CodeQL scan
+
+on:
+  workflow_call:
+    inputs:
+      commit:
+        required: true
+        type: string
+      branch:
+        description: Upload advisory results to this branch; empty means enforce the release gate without uploading
+        required: false
+        type: string
+        default: ''
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  codeql:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, javascript, python]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - name: Verify the exact scan source
+        env:
+          CANDIDATE: ${{ inputs.commit }}
+          BRANCH: ${{ inputs.branch }}
+        run: |
+          [[ "$CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          case "$BRANCH" in ''|master|devel) ;; *) exit 1 ;; esac
+          printf 'Candidate: `%s`\n' "$CANDIDATE" >> "$GITHUB_STEP_SUMMARY"
+      - uses: github/codeql-action/init@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+      - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
+        with:
+          output: ${{ runner.temp }}/oc-box-codeql
+          upload: ${{ inputs.branch != '' && 'always' || 'never' }}
+          upload-database: false
+          category: /language:${{ matrix.language }}
+          ref: ${{ inputs.branch != '' && format('refs/heads/{0}', inputs.branch) || '' }}
+          sha: ${{ inputs.branch != '' && inputs.commit || '' }}
+      - name: Evaluate findings (blocking only on release candidates)
+        env:
+          CANDIDATE: ${{ inputs.commit }}
+          BRANCH: ${{ inputs.branch }}
+          LANGUAGE: ${{ matrix.language }}
+        run: |
+          args=()
+          if [[ -z "$BRANCH" ]]; then args+=(--gate); fi
+          printf 'Language: `%s`\n' "$LANGUAGE" >> "$GITHUB_STEP_SUMMARY"
+          python3 tools/check_security_scan.py codeql \
+            "$RUNNER_TEMP/oc-box-codeql/$LANGUAGE.sarif" \
+            --commit "$CANDIDATE" "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"

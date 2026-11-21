@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       publish:
-        description: Publish an existing GitHub release to PyPI after checks (false builds only)
+        description: Publish an existing GitHub release to PyPI (false runs release preflight only)
         type: boolean
         default: false
       release_tag:
@@ -21,6 +21,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: bash
+
 env:
   PYTHONPATH: ${{ github.workspace }}/src
 
@@ -29,9 +33,72 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  candidate:
+    if: github.repository == 'groopcd/oc-box'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 5
+    outputs:
+      commit: ${{ steps.resolve.outputs.commit }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - id: resolve
+        name: Pin the release or preflight candidate
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          EVENT_REF: ${{ github.ref }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          PUBLISH_REQUESTED: ${{ github.event_name == 'release' || inputs.publish }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT" == workflow_dispatch && "$PUBLISH_REQUESTED" == true ]]; then
+            case "$EVENT_REF" in refs/heads/master|refs/heads/devel) ;; *) exit 1 ;; esac
+          fi
+          commit="$EVENT_SHA"
+          if [[ -n "$RELEASE_TAG" || "$PUBLISH_REQUESTED" == true ]]; then
+            [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.dev0)?$ ]]
+            commit=$(git rev-parse --verify "refs/tags/$RELEASE_TAG^{commit}")
+            if [[ "$EVENT" == release ]]; then
+              test "$commit" = "$EVENT_SHA"
+            else
+              branch=master
+              if [[ "$RELEASE_TAG" == *.dev0 ]]; then branch=devel; fi
+              test "$EVENT_REF" = "refs/heads/$branch"
+              # Local workflow calls use the caller revision, not the candidate
+              # checkout. Do not substitute a different test/security policy.
+              git diff --quiet "$EVENT_SHA" "$commit" -- \
+                .github/workflows/{publish,ci,distros,security-codeql}.yml
+            fi
+          fi
+          [[ "$commit" =~ ^[0-9a-f]{40}$ ]]
+          printf 'commit=%s\n' "$commit" >> "$GITHUB_OUTPUT"
+          printf 'Candidate: `%s`\n' "$commit" >> "$GITHUB_STEP_SUMMARY"
+
+  source:
+    needs: candidate
+    uses: ./.github/workflows/ci.yml
+    with:
+      candidate: ${{ needs.candidate.outputs.commit }}
+
+  distros:
+    needs: candidate
+    uses: ./.github/workflows/distros.yml
+    with:
+      candidate: ${{ needs.candidate.outputs.commit }}
+
+  codeql:
+    needs: candidate
+    uses: ./.github/workflows/security-codeql.yml
+    with:
+      commit: ${{ needs.candidate.outputs.commit }}
+
+  build:
+    needs: candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
     outputs:
       publish_validated: ${{ steps.artifacts.outputs.publish_validated }}
     steps:
@@ -39,19 +106,30 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ github.event.release.tag_name || inputs.release_tag || github.ref }}
+          ref: ${{ needs.candidate.outputs.commit }}
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
-          python-version: '3.10'
+          python-version: '3.13'
       - name: Create isolated build tools
+        env:
+          CANDIDATE: ${{ needs.candidate.outputs.commit }}
         run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
           apt_root=$(mktemp -d /tmp/oc-box-ci-apt.XXXXXXXX)
           chmod 755 "$apt_root"
           apt_config=$(python3 tools/ci_ubuntu_apt.py --output "$apt_root/config" --mirror azure --force-ipv4)
           sudo apt-get -c "$apt_config" update
           sudo apt-get -c "$apt_config" install -y --no-install-recommends age
           python -m venv "$RUNNER_TEMP/oc-box-build"
-          "$RUNNER_TEMP/oc-box-build/bin/python" -m pip install build twine 'cryptography>=44' 'textual>=8.2.8,<9' 'pyte>=0.8.2,<0.9' 'Pillow>=11,<13'
+          python tools/release_python_deps.py > "$RUNNER_TEMP/release-requirements.txt"
+          "$RUNNER_TEMP/oc-box-build/bin/python" -m pip install --only-binary=:all: \
+            --upgrade -r "$RUNNER_TEMP/release-requirements.txt"
+      - name: Gate the resolved Python release dependencies
+        env:
+          CANDIDATE: ${{ needs.candidate.outputs.commit }}
+        run: |
+          bash tools/audit_release_python.sh "$RUNNER_TEMP/oc-box-build" "$CANDIDATE" --gate \
+            | tee -a "$GITHUB_STEP_SUMMARY"
       - name: Validate source and release version
         id: release
         env:
@@ -81,7 +159,7 @@ jobs:
         run: '"$RUNNER_TEMP/oc-box-build/bin/python" -B -m unittest discover -s tests -v'
       - name: Build wheel and source distribution
         run: |
-          "$RUNNER_TEMP/oc-box-build/bin/python" -m build
+          "$RUNNER_TEMP/oc-box-build/bin/python" -m build --no-isolation
           "$RUNNER_TEMP/oc-box-build/bin/python" -m twine check dist/*
       - name: Verify isolated package installation and resources
         run: python tools/check_package.py dist --with-vault --with-tui
@@ -114,8 +192,11 @@ jobs:
           retention-days: 7
 
   publish:
-    if: (github.event_name == 'release' || inputs.publish) && needs.build.outputs.publish_validated == 'true'
-    needs: build
+    if: >-
+      success() &&
+      (github.event_name == 'release' || inputs.publish) &&
+      needs.build.outputs.publish_validated == 'true'
+    needs: [candidate, source, distros, codeql, build]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     environment:
@@ -129,10 +210,13 @@ jobs:
           name: python-distributions
           path: release-artifacts
       - name: Verify transferred identity and checksums; select only distributions
+        env:
+          VERIFIED_CANDIDATE: ${{ needs.candidate.outputs.commit }}
         run: |
           python - <<'PY'
           import hashlib
           import json
+          import os
           from pathlib import Path
           import re
           import shutil
@@ -141,6 +225,7 @@ jobs:
           version = identity["distribution_version"]
           assert isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+(?:\.dev0)?", version)
           assert identity["publish_validated"] is True and identity["dirty"] is False
+          assert identity["commit"] == os.environ["VERIFIED_CANDIDATE"]
           packages = {f"oc_box-{version}-py3-none-any.whl", f"oc_box-{version}.tar.gz"}
           expected = packages | {"validated-identity.json"}
           lines = (bundle / "SHA256SUMS").read_text().splitlines()
