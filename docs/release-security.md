@@ -19,7 +19,9 @@ is not a lockfile for end-user installs. The regular source matrix still checks
 Python 3.10; release-card rendering tests use Pillow 13 only on Python 3.13.
 Pillow is not an oc-box runtime dependency. Scanners and builds have no PyPI OIDC
 permission. The upload job rechecks candidate identity and checksums and receives
-only the validated distributions.
+only the validated distributions. It anonymously rechecks the live public tag
+immediately before uploading, including annotated tag peeling. This narrows but
+cannot eliminate races with an administrator moving a mutable release tag.
 
 **Release policy:** CodeQL high and critical findings (security score at least
 7.0), findings without a trusted score, and any unresolved Python advisory block
@@ -34,6 +36,10 @@ For a manual `publish=true` retry, select the matching channel branch and the
 existing release tag. The retry refuses if the tag's workflow definitions differ
 from the caller's; use the original release run in that case. These workflow-level
 gates apply to candidates containing this policy, not to historical tags.
+
+Scheduled CodeQL analysis and report parsing run with read-only permissions.
+A separate upload job handles the SARIF with `security-events: write`; it uses
+the matching source only for file fingerprints and does not execute it.
 
 ## Reading OWASP coverage
 

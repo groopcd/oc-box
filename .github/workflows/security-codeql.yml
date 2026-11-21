@@ -7,7 +7,7 @@ on:
         required: true
         type: string
       branch:
-        description: Upload advisory results to this branch; empty means enforce the release gate without uploading
+        description: Retain advisory SARIF for this branch; empty means enforce the release gate without uploading
         required: false
         type: string
         default: ''
@@ -15,6 +15,9 @@ on:
 defaults:
   run:
     shell: bash
+
+permissions:
+  contents: read
 
 jobs:
   codeql:
@@ -45,11 +48,9 @@ jobs:
       - uses: github/codeql-action/analyze@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4
         with:
           output: ${{ runner.temp }}/oc-box-codeql
-          upload: ${{ inputs.branch != '' && 'always' || 'never' }}
+          upload: never
           upload-database: false
           category: /language:${{ matrix.language }}
-          ref: ${{ inputs.branch != '' && format('refs/heads/{0}', inputs.branch) || '' }}
-          sha: ${{ inputs.branch != '' && inputs.commit || '' }}
       - name: Evaluate findings (blocking only on release candidates)
         env:
           CANDIDATE: ${{ inputs.commit }}
@@ -62,3 +63,10 @@ jobs:
           python3 tools/check_security_scan.py codeql \
             "$RUNNER_TEMP/oc-box-codeql/$LANGUAGE.sarif" \
             --commit "$CANDIDATE" "${args[@]}" | tee -a "$GITHUB_STEP_SUMMARY"
+      - if: inputs.branch != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: codeql-${{ inputs.branch }}-${{ inputs.commit }}-${{ matrix.language }}
+          path: ${{ runner.temp }}/oc-box-codeql/${{ matrix.language }}.sarif
+          if-no-files-found: error
+          retention-days: 2

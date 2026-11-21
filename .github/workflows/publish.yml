@@ -244,6 +244,25 @@ jobs:
           for name in sorted(packages):
               shutil.copyfile(bundle / name, destination / name)
           PY
+      - name: Recheck the live public tag before uploading
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+          VERIFIED_CANDIDATE: ${{ needs.candidate.outputs.commit }}
+        run: |
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(\.dev0)?$ ]]
+          [[ "$VERIFIED_CANDIDATE" =~ ^[0-9a-f]{40}$ ]]
+          ref="refs/tags/$RELEASE_TAG"
+          observed=$(timeout 30 git -c credential.helper= ls-remote --exit-code \
+            https://github.com/groopcd/oc-box.git "$ref" "$ref^{}")
+          peeled=$(awk -F '\t' -v ref="$ref" '
+            $2 == ref { tip=$1; count++ }
+            $2 == ref "^{}" { commit=$1; peeled_count++ }
+            END {
+              if (count != 1 || peeled_count > 1 || NR != count + peeled_count) exit 1
+              print (peeled_count == 1 ? commit : tip)
+            }
+          ' <<< "$observed")
+          test "$peeled" = "$VERIFIED_CANDIDATE"
       - name: Publish with PyPI Trusted Publishing
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
         with:
