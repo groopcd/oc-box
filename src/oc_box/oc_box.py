@@ -400,10 +400,22 @@ def run_tui(command, *, file_drops=None):
     else:
         from terminal_ui import run_tui as relay
 
+    preview_options = {}
+    preview_open = getattr(command, "preview_host_open", None)
+    if callable(preview_open):
+        if __package__:
+            from . import file_preview_host
+        else:
+            import file_preview_host
+        preview_options = {
+            "preview_relay": file_preview_host.Relay(),
+            "preview_open": preview_open,
+        }
     return relay(
         command,
         env=getattr(command, "environment", None),
         **({"file_drops": file_drops} if file_drops is not None else {}),
+        **preview_options,
     )
 
 

@@ -169,3 +169,112 @@ def client_binding(box, data, connection):
     if binding is None:
         print(NOTICE, flush=True)
     return binding
+
+
+def host_export_mounts(box, data, container):
+    """Inspect the active local engine for host mounts that could see the spool."""
+    if not _root(data.get("project")):
+        return None
+    # `ps` and inspect share one sanitized environment. Never silently use a
+    # remote server's paths as if they were local paths.
+    env = box.maintenance_host_env()
+    try:
+
+        def query(*args):
+            return box.podman(
+                "--remote=false",
+                *args,
+                capture=True,
+                check=False,
+                private=True,
+                timeout=4,
+                env=env,
+            )
+
+        listing = query("ps", "--all", "--quiet", "--no-trunc")
+        ids = listing.stdout.splitlines()
+        if (
+            listing.returncode
+            or container not in ids
+            or len(ids) > 128
+            or len(set(ids)) != len(ids)
+            or not all(re.fullmatch(r"[0-9a-f]{64}", ident) for ident in ids)
+        ):
+            return None
+        result = query("container", "inspect", *ids)
+        if result.returncode or len(result.stdout) > 8 * 1024 * 1024:
+            return None
+        entries = json.loads(result.stdout)
+        if not isinstance(entries, list) or len(entries) != len(ids):
+            return None
+        remaining = set(ids)
+        sources = {data["project"]}
+        volumes = {}
+        for path in box.workspace_paths():
+            if len(sources) > 512:
+                return None
+            project = box.read_json(path).get("project")
+            if not _root(project):
+                return None
+            if os.path.lexists(project):
+                sources.add(project)
+        for item in entries:
+            ident = item.get("Id")
+            if ident not in remaining:
+                return None
+            remaining.remove(ident)
+            if ident == container and verify_roots(box, data, item) is None:
+                return None
+            mounts = item.get("Mounts")
+            if not isinstance(mounts, list):
+                return None
+            for mount in mounts:
+                source = mount.get("Source")
+                kind = mount.get("Type")
+                if kind == "tmpfs" and not source:
+                    continue
+                if kind not in ("bind", "volume") or not _root(source):
+                    return None
+                if kind == "volume":
+                    name = mount.get("Name")
+                    if not isinstance(name, str) or not re.fullmatch(
+                        r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name
+                    ):
+                        return None
+                    if volumes.setdefault(name, source) != source:
+                        return None
+                sources.add(source)
+        if remaining or len(sources) > 512 or len(volumes) > 128:
+            return None
+        if volumes:
+            result = query("volume", "inspect", *sorted(volumes))
+            if result.returncode or len(result.stdout) > 2 * 1024 * 1024:
+                return None
+            entries = json.loads(result.stdout)
+            if not isinstance(entries, list) or len(entries) != len(volumes):
+                return None
+            for volume in entries:
+                source = volumes.pop(volume.get("Name"))
+                if (
+                    volume.get("Driver") != "local"
+                    or volume.get("Scope") != "local"
+                    or volume.get("Mountpoint") != source
+                    or volume.get("Options") not in (None, {})
+                ):
+                    return None
+        listed_again = query("ps", "--all", "--quiet", "--no-trunc")
+        if listed_again.returncode or sorted(ids) != sorted(
+            listed_again.stdout.splitlines()
+        ):
+            return None
+        return tuple(sorted(sources))
+    except (
+        OSError,
+        ValueError,
+        AttributeError,
+        TypeError,
+        KeyError,
+        subprocess.SubprocessError,
+        box.BoxError,
+    ):
+        return None

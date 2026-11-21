@@ -19,6 +19,8 @@ import unicodedata
 
 MAX_REQUEST = 17 * 1024
 MAX_CONTENT = 256 * 1024
+MAX_PNG_INPUT = 4 * 1024 * 1024
+PNG_RESPONSE = b"OCBOXPNG1\n"
 MAX_MOUNTINFO = 4 * 1024 * 1024
 READ_DEADLINE = 3
 REFUSAL = 1
@@ -251,11 +253,11 @@ def _namespace(stack, roots):
     return pid, pinned, stamp
 
 
-def _file_stamp(info):
+def _file_stamp(info, limit=MAX_CONTENT):
     if (
         not stat.S_ISREG(info.st_mode)
         or info.st_nlink != 1
-        or not 0 <= info.st_size <= MAX_CONTENT
+        or not 0 <= info.st_size <= limit
     ):
         raise Refused()
     return (
@@ -282,9 +284,9 @@ def _read_file(fd, size):
     return data
 
 
-def _content(pid, fd, mount):
+def _content(pid, fd, mount, *, limit=MAX_CONTENT, text=True):
     info = os.fstat(fd)
-    before = _file_stamp(info)  # O_PATH has not opened the file for data access.
+    before = _file_stamp(info, limit)  # O_PATH has not opened the file for data access.
     if _mount_id(pid, fd) != mount:
         raise Refused()
     with ExitStack() as stack:
@@ -305,7 +307,7 @@ def _content(pid, fd, mount):
             ),
         )
         if (
-            _file_stamp(os.fstat(readable)) != before
+            _file_stamp(os.fstat(readable), limit) != before
             or _mount_id(pid, readable) != mount
         ):
             raise Refused()
@@ -315,15 +317,17 @@ def _content(pid, fd, mount):
         os.lseek(readable, 0, os.SEEK_SET)
         if (
             _read_file(readable, info.st_size) != data
-            or _file_stamp(os.fstat(readable)) != before
+            or _file_stamp(os.fstat(readable), limit) != before
         ):
             raise Refused()
-    if any(char not in "\t\r\n" and _control(char) for char in data.decode("utf-8")):
+    if text and any(
+        char not in "\t\r\n" and _control(char) for char in data.decode("utf-8")
+    ):
         raise Refused()
     return data, before
 
 
-def _snapshot(path, roots, expected=None):
+def _snapshot(path, roots, expected=None, *, png=False):
     system = os.uname()
     if system.sysname != "Linux" or system.machine not in ARCHITECTURES:
         raise Refused()
@@ -337,13 +341,14 @@ def _snapshot(path, roots, expected=None):
         relative = path[len(base) :].lstrip(b"/") or b"."
         root, mount = pinned[base]
         target = _keep(stack, _openat2(root, relative, os.O_PATH))
-        data, before = _content(pid, target, mount[0])
+        limit = MAX_PNG_INPUT if png else MAX_CONTENT
+        data, before = _content(pid, target, mount[0], limit=limit, text=not png)
 
         _, after, current_stamp = _namespace(stack, roots)
-        if current_stamp != stamp or _file_stamp(os.fstat(target)) != before:
+        if current_stamp != stamp or _file_stamp(os.fstat(target), limit) != before:
             raise Refused()
         current = _keep(stack, _openat2(after[base][0], relative, os.O_PATH))
-        if _file_stamp(os.fstat(current)) != before:
+        if _file_stamp(os.fstat(current), limit) != before:
             raise Refused()
         return data
 
@@ -354,11 +359,29 @@ def _timeout(*_):
 
 def main():
     try:
+        png = sys.argv[1:] == ["--png"]
+        if sys.argv[1:] and not png:
+            raise Refused()
         signal.signal(signal.SIGALRM, _timeout)
-        signal.alarm(READ_DEADLINE)
+        signal.alarm(12 if png else READ_DEADLINE)
         try:
             path, roots, expected = _request(sys.stdin.buffer.read(MAX_REQUEST + 1))
-            data = _snapshot(path, roots, expected)
+            if png and not path.lower().endswith(b".png"):
+                raise Refused()
+            data = _snapshot(path, roots, expected, png=png)
+            if png:
+                # Python -I -S excludes the script directory. Add the shipped
+                # helpers' directory explicitly, never the project / cwd.
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                from file_preview_png import normalize
+
+                normalized, raster = normalize(bytes(data))
+                data = (
+                    PNG_RESPONSE
+                    + json.dumps(raster, separators=(",", ":")).encode("ascii")
+                    + b"\n"
+                    + normalized
+                )
         finally:
             signal.alarm(0)
         # Emit only after all validation. A failed/aborted pipe transfer is not
@@ -374,6 +397,7 @@ def main():
         ValueError,
         LookupError,
         AttributeError,
+        ImportError,
         OverflowError,
         RecursionError,
         KeyboardInterrupt,

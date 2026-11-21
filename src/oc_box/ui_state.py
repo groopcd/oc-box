@@ -34,6 +34,7 @@ RESOURCES = (
     "ui_state_memory.js",
     "file_preview_tui.tsx",
     "file_preview_io.py",
+    "file_preview_png.py",
 )
 
 

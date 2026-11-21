@@ -7,6 +7,7 @@ the real reader against ordinary synthetic Linux bind mounts.
 """
 
 import argparse
+import binascii
 import codecs
 from contextlib import contextmanager
 import fcntl
@@ -23,6 +24,7 @@ import sys
 import tempfile
 import termios
 import time
+import zlib
 from unittest.mock import patch
 
 import pyte
@@ -42,6 +44,23 @@ def project_cwd(project):
         yield
     finally:
         os.chdir(previous)
+
+
+def png_for_test():
+    def chunk(kind, body):
+        return (
+            struct.pack(">I", len(body))
+            + kind
+            + body
+            + struct.pack(">I", binascii.crc32(kind + body))
+        )
+
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", struct.pack(">IIBBBBB", 2, 2, 8, 2, 0, 0, 0))
+        + chunk(b"IDAT", zlib.compress(b"\x00\xff\x00\x00\x00\xff\x00" * 2))
+        + chunk(b"IEND", b"")
+    )
 
 
 def exercise(binary, root, *, private_mounts=False):
@@ -141,6 +160,8 @@ sys.stdout.buffer.write(path.read_bytes())
     file.write_text("PREVIEW_FIRST_SNAPSHOT\n# This stays literal\n")
     second.write_text("PREVIEW_OTHER_SNAPSHOT\n")
     if private_mounts:
+        (project / "sample.png").write_bytes(png_for_test())
+        env["OC_BOX_FILE_PREVIEW_HOST_OPEN"] = "1"
         (project / "binary.txt").write_bytes(b"REFUSED-MUST-NOT-SHOW\x1b")
         (project / "overflow.txt").write_bytes(
             b"OVERFLOW-MUST-NOT-SHOW" + b"A" * (256 * 1024)
@@ -199,6 +220,11 @@ sys.stdout.buffer.write(path.read_bytes())
                 "content": [
                     {"type": "text", "text": text},
                     {"type": "text", "text": "[PART_LINK](other.md)" + mount_links},
+                    *(
+                        [{"type": "text", "text": "[PNG_LINK](sample.png)"}]
+                        if private_mounts
+                        else []
+                    ),
                 ],
             }
         )
@@ -262,6 +288,12 @@ def run_client(
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
     reads = root / "reads"
     opened = root / "opened"
+    wire = bytearray()
+    preview_wire = None
+    if private_mounts:
+        from oc_box import file_preview_host
+
+        preview_wire = file_preview_host.Relay()
 
     def log():
         return reads.read_text().splitlines() if reads.exists() else []
@@ -274,6 +306,10 @@ def run_client(
                     data = os.read(master, 65536)
                 except OSError:
                     return
+                wire.extend(data)
+                assert len(wire) < 4 * 1024 * 1024
+                if preview_wire is not None:
+                    data = preview_wire.output_bytes(data)
                 stream.feed(decoder.decode(data))
 
     def locate(label):
@@ -372,6 +408,24 @@ def run_client(
                 wait("File preview unavailable")
             assert not locate("File preview (read-only)") and not locate(text)
         if private_mounts:
+            click("PNG_LINK")
+            wait("[Open in host app]")
+            wait("▀")
+            assert b"oc-box-png:v1:" not in wire
+            # Replace the source after showing it: the button must propose
+            # the already-viewed snapshot, never a second path read.
+            (project / "sample.png").write_bytes(b"changed since preview")
+            click("[Open in host app]", 0)
+            from oc_box import file_preview_png
+
+            candidate = preview_wire.take()
+            assert (
+                candidate is not None
+                and candidate == file_preview_png.normalize(png_for_test())[0]
+            )
+            assert preview_wire.take() is None and not opened.exists()
+            wait("[Close preview]")
+            dismiss()
             for label, value in (
                 ("HOME_LINK", "PREVIEW_HOME_SNAPSHOT"),
                 ("OVERLAY_LINK", "PREVIEW_ORDINARY_ROOT_SNAPSHOT"),

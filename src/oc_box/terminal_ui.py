@@ -75,6 +75,8 @@ def run_tui(
     refresh=1.0,
     show_loading=True,
     file_drops=None,
+    preview_relay=None,
+    preview_open=None,
 ):
     """Preserve terminal queries/input/resize; stop drawing at first UI text.
 
@@ -87,9 +89,21 @@ def run_tui(
     interactive = os.isatty(input_fd) and os.isatty(output_fd)
     if file_drops is not None and not interactive:
         raise ValueError("Host file drops require interactive terminal input/output.")
+    if preview_relay is not None and (not interactive or not callable(preview_open)):
+        raise ValueError("Host preview opening requires an interactive terminal.")
+    relay_errors = ()
+    if preview_relay is not None:
+        if __package__:
+            from .file_preview_host import RelayError
+            from .host_drop_input import PasteInput
+        else:
+            from file_preview_host import RelayError
+            from host_drop_input import PasteInput
+        relay_errors = (RelayError,)
     master = slave = None
     process = None
     old_terminal = None
+    preview_failed = False
     handlers = {}
     try:
         if interactive:
@@ -128,6 +142,7 @@ def run_tui(
             return process.wait()
 
         detector = VisibleOutput()
+        preview_boundary = VisibleOutput() if preview_relay is not None else None
         if file_drops is not None:
             file_drops.start()
         loading = show_loading
@@ -156,6 +171,50 @@ def run_tui(
             )
             banner_drawn = not clear
 
+        chosen = None
+        if preview_relay is not None:
+            preview_input = (
+                file_drops.input
+                if file_drops is not None
+                else PasteInput(lambda _: None)
+            )
+
+            def request_preview(press):
+                nonlocal chosen
+                if chosen is not None:
+                    return True
+                if press and preview_boundary.safe_to_draw():
+                    chosen = preview_relay.take()
+                return chosen is not None
+
+            preview_input.set_host_preview(request_preview)
+
+        def offer_preview():
+            nonlocal preview_failed, chosen
+            candidate, chosen = chosen, None
+            if (
+                candidate is None
+                or process.poll() is not None
+                or not preview_input.safe_for_host_prompt()
+            ):
+                return
+            if __package__:
+                from .file_preview_consent import confirm
+                from .file_preview_png import canonical_raster
+            else:
+                from file_preview_consent import confirm
+                from file_preview_png import canonical_raster
+            try:
+                raster = canonical_raster(candidate)
+                if (
+                    confirm(input_fd, output_fd, raster=raster)
+                    and process.poll() is None
+                ):
+                    preview_open(candidate)
+            except (OSError, ValueError, subprocess.SubprocessError):
+                # No candidate path or viewer stderr in the native UI.
+                preview_failed = True
+
         while True:
             now = time.monotonic()
             if file_drops is not None:
@@ -167,6 +226,8 @@ def run_tui(
                 next_update = now + refresh
             readers = [master] + ([input_fd] if stdin_open else [])
             ready, _, _ = select.select(readers, [], [], refresh)
+            if preview_relay is not None:
+                preview_relay.check()
             if master in ready:
                 try:
                     output = os.read(master, 65536)
@@ -175,13 +236,21 @@ def run_tui(
                         raise
                     output = b""
                 if not output:
+                    if preview_relay is not None:
+                        trailing = preview_relay.finish_output()
+                        if trailing:
+                            write_all(output_fd, trailing)
                     if file_drops is not None:
                         trailing = file_drops.finish_output()
                         if trailing:
                             write_all(output_fd, trailing)
                     break
+                if preview_relay is not None:
+                    output = preview_relay.output_bytes(output)
                 if file_drops is not None:
                     output = file_drops.output_bytes(output)
+                if preview_boundary is not None:
+                    preview_boundary.feed(output)
                 if loading and detector.feed(output):
                     if banner_drawn:
                         banner(clear=True)
@@ -192,18 +261,29 @@ def run_tui(
                 if content:
                     if file_drops is not None:
                         content = file_drops.input_bytes(content)
+                    elif preview_relay is not None:
+                        content = preview_input.feed(content)
                     write_all(master, content)
                 else:
                     if file_drops is not None:
                         trailing = file_drops.finish_input()
                         if trailing:
                             write_all(master, trailing)
+                    elif preview_relay is not None:
+                        write_all(master, preview_input.finish())
                     stdin_open = False
+                offer_preview()
             if process.poll() is not None and not ready:
                 break
         if banner_drawn and detector.safe_to_draw():
             banner(clear=True)
         return process.wait()
+    except relay_errors:
+        print(
+            "oc-box: Host PNG export framing failed; no pending image was opened.",
+            file=sys.stderr,
+        )
+        return 1
     finally:
         if old_terminal is not None:
             termios.tcsetattr(input_fd, termios.TCSADRAIN, old_terminal)
@@ -224,3 +304,5 @@ def run_tui(
                 write_all(output_fd, file_drops.stop())
             except OSError:
                 pass
+        if preview_failed:
+            print("oc-box: The host PNG opener could not be started.", file=sys.stderr)

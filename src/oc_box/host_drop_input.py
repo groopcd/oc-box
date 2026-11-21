@@ -43,6 +43,16 @@ _CLIPBOARD_KEYS = {
     },
     b"27;5;121~": True,
 }
+# F8 is reserved only by a TUI with a host PNG proposal handler. Ignore
+# distinct repeat/release events; never accept a printable/pasted alias.
+_HOST_PREVIEW_KEYS = {
+    b"19~": True,
+    **{
+        b"19;" + mods + suffix: suffix in (b"~", b":1~")
+        for mods in (b"1", b"65", b"129", b"193")
+        for suffix in (b"~", b":1~", b":2~", b":3~")
+    },
+}
 
 # Includes the ASCII "72;" selector, but not the introducer or terminator.
 # The broker must independently validate its protocol/chunk/session limits.
@@ -131,6 +141,7 @@ class _Framing:
         transform=None,
         on_osc72=None,
         on_clipboard=None,
+        on_host_preview=None,
         max_paste=0,
         reserve_osc72=False,
     ):
@@ -141,6 +152,7 @@ class _Framing:
         self._transform = transform
         self._on_osc72 = on_osc72
         self._on_clipboard = on_clipboard
+        self._on_host_preview = on_host_preview
         self._max_paste = max_paste
         self._units = _Units()
         self._state = "text"
@@ -420,6 +432,8 @@ class _Framing:
             candidates = (b"200~", b"201~")
             if self._on_clipboard is not None and not self._child_output:
                 candidates += tuple(_CLIPBOARD_KEYS)
+            if self._on_host_preview is not None:
+                candidates += tuple(_HOST_PREVIEW_KEYS)
             if not any(value.startswith(candidate) for value in candidates):
                 candidate = None
         self._csi_candidate = candidate
@@ -428,6 +442,18 @@ class _Framing:
         else:
             self._held.extend(raw)
         if not final:
+            return
+        if (
+            not self._framing_only()
+            and self._csi_ascii
+            and self._on_host_preview is not None
+            and candidate in _HOST_PREVIEW_KEYS
+        ):
+            original = bytes(self._held)
+            self._held.clear()
+            self._state = "text"
+            if not self._on_host_preview(_HOST_PREVIEW_KEYS[candidate]):
+                output.extend(original)
             return
         if (
             not self._framing_only()
@@ -653,6 +679,7 @@ class PasteInput(_Framing):
         *,
         on_osc72=None,
         on_clipboard=None,
+        on_host_preview=None,
         max_paste=16384,
         reserve_osc72=False,
     ):
@@ -662,6 +689,8 @@ class PasteInput(_Framing):
             raise TypeError("on_osc72 must be callable or None")
         if on_clipboard is not None and not callable(on_clipboard):
             raise TypeError("on_clipboard must be callable or None")
+        if on_host_preview is not None and not callable(on_host_preview):
+            raise TypeError("on_host_preview must be callable or None")
         if (
             isinstance(max_paste, bool)
             or not isinstance(max_paste, int)
@@ -675,6 +704,7 @@ class PasteInput(_Framing):
             transform=transform,
             on_osc72=on_osc72,
             on_clipboard=on_clipboard,
+            on_host_preview=on_host_preview,
             max_paste=max_paste,
             reserve_osc72=reserve_osc72,
         )
@@ -688,6 +718,20 @@ class PasteInput(_Framing):
     def disable_reason(self):
         """First fixed reason for failing closed, not normal stream closure."""
         return self._disable_reason
+
+    def set_host_preview(self, callback):
+        """Install the host-local F8 handler before any input is parsed."""
+        self._on_host_preview = callback
+
+    def safe_for_host_prompt(self):
+        """Do not steal the tail of a paste/reply following F8 in one read."""
+        return (
+            not self._closed
+            and not self._disabled
+            and self._state == "text"
+            and not self._held
+            and not self._units.pending
+        )
 
 
 MAX_OUTPUT_CONTROL = 262144 - 256

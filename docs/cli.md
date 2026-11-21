@@ -2547,11 +2547,35 @@ a fresh snapshot. No file descriptor or reader stays open while the panel is
 visible.
 
 The experiment accepts up to 256 KiB of UTF-8 text, displayed literally,
-including Markdown. It refuses special files, links on the filesystem, unsafe
-paths, changing files, and mounts other than the registered project bind and
-named workspace home. Custom Podman arguments disable the experiment. It never
-opens a host app, starts a file share, writes back, or sends the contents to
-the model. It does not use clipboard permissions or change normal web links.
+including Markdown. For `.png` links, it shows a downsampled color preview using
+terminal cells, without requiring a terminal graphics protocol. PNG input is
+limited to 4 MiB, 4,194,304 pixels and 4,096 pixels per side. The normalized PNG
+can be up to 5 MiB. Malformed, animated, interlaced and unsupported PNG encodings
+are refused. Special files, filesystem links, unsafe paths, changing files and
+mounts other than the registered project bind and named workspace home are
+refused. Custom Podman arguments disable the experiment.
+
+On a supported Linux desktop with `/usr/bin/xdg-open` and a private
+`XDG_RUNTIME_DIR`, a PNG preview offers **Open in host app**. Click it, then
+press **F8** within 45 seconds to review the candidate in the host terminal.
+Only F8 on a pending proposal opens the **oc-box HOST** prompt. Check the
+host-rendered thumbnail, then type its short code within 20 seconds to approve
+that one export. Escape cancels. A link or terminal output alone cannot open
+the prompt or launch the viewer. The preview sends its current, normalized
+snapshot, not a path for the host to read. The host revalidates the candidate.
+The default PNG application receives a private temporary copy with the original
+resolution and alpha, but without embedded metadata. The copy is not deleted
+when the opener exits: it is eligible for cleanup after 24 hours on a later
+approved export, and the OS may remove it when the desktop session ends. There
+are at most eight retained copies per user. The viewer may retain its own copy.
+Host export checks the active local Podman store and the registered project
+paths for mounts overlapping the staging directory. An incomplete inventory or
+unsupported mount disables host opening without disabling the in-TUI preview.
+This does not audit other engines or make mount inspection atomic.
+
+Neither action starts a live share or writes back to the container, and the
+preview is not sent to the model. The experiment does not use clipboard
+permissions or change normal web links.
 
 The switch is not saved and does not change host OpenCode or terminal settings.
 If the existing owner was started before upgrading oc-box, exit it normally and

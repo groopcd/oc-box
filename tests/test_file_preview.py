@@ -6,7 +6,7 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from oc_box import file_preview, oc_box as box, workspace_service
+from oc_box import file_preview, file_preview_host, oc_box as box, workspace_service
 
 
 class PreviewAdmissionTests(unittest.TestCase):
@@ -188,3 +188,84 @@ class PreviewAdmissionTests(unittest.TestCase):
                     )
                 )
                 observe.assert_not_called()
+
+    def test_host_proposal_keeps_preview_if_staging_is_in_another_mount(self):
+        verified = (self.container_id, {"roots": [self.project, self.data["home"]]})
+        with (
+            patch.object(file_preview, "client_binding", return_value=verified),
+            patch.object(
+                file_preview, "host_export_mounts", return_value=("/run/user",)
+            ),
+            patch.object(file_preview_host, "ready", side_effect=[True, False]),
+            patch.object(box.sys.stdin, "isatty", return_value=True),
+            patch.object(box.sys.stdout, "isatty", return_value=True),
+        ):
+            command = self.command()
+        values = json.loads(command[command.index("-c") + 2])
+        self.assertIn(file_preview.ROOTS, values)
+        self.assertNotIn("OC_BOX_FILE_PREVIEW_HOST_OPEN", values)
+        self.assertFalse(hasattr(command, "preview_host_open"))
+
+    def test_host_opener_rechecks_private_inventory_after_consent(self):
+        verified = (self.container_id, {"roots": [self.project, self.data["home"]]})
+        with (
+            patch.object(file_preview, "client_binding", return_value=verified),
+            patch.object(
+                file_preview,
+                "host_export_mounts",
+                side_effect=[("/initial",), None, ("/latest",)],
+            ) as mounts,
+            patch.object(file_preview_host, "ready", return_value=True),
+            patch.object(file_preview_host, "open_png") as open_png,
+            patch.object(box.sys.stdin, "isatty", return_value=True),
+            patch.object(box.sys.stdout, "isatty", return_value=True),
+        ):
+            command = self.command()
+            self.assertIn("OC_BOX_FILE_PREVIEW_HOST_OPEN", " ".join(command))
+            open_png.assert_not_called()
+            with self.assertRaisesRegex(ValueError, "host-mounts-unverified"):
+                command.preview_host_open(b"synthetic")
+            open_png.assert_not_called()
+            command.preview_host_open(b"synthetic")
+            open_png.assert_called_once_with(b"synthetic", host_mounts=("/latest",))
+            self.assertEqual(mounts.call_count, 3)
+
+    def test_inventory_lists_stopped_mounts_and_refuses_churn_or_external_volume(self):
+        other = "e" * 64
+        info2 = {
+            "Id": other,
+            "Config": {"Labels": {}},
+            "State": {"Running": False},
+            "Mounts": [{"Type": "bind", "Source": "/other/workspace"}],
+        }
+        ids = self.container_id + "\n" + other + "\n"
+        for replaced, stable, expected in (
+            ({}, True, ("/other/workspace", "/synthetic/project", "/synthetic/volume")),
+            ({}, False, None),
+            ({"Options": {"type": "none", "o": "bind"}}, True, None),
+        ):
+            replies = (
+                ids,
+                json.dumps([info2, self.info]),
+                json.dumps([{**self.volume, **replaced}]),
+                ids if stable else self.container_id + "\n",
+            )
+            with (
+                self.subTest(replaced=replaced, stable=stable),
+                patch.object(box, "workspace_paths", return_value=[]),
+                patch.object(
+                    box,
+                    "podman",
+                    side_effect=[
+                        SimpleNamespace(returncode=0, stdout=reply) for reply in replies
+                    ],
+                ) as engine,
+            ):
+                self.assertEqual(
+                    file_preview.host_export_mounts(box, self.data, self.container_id),
+                    expected,
+                )
+                self.assertEqual(
+                    engine.call_args_list[0].args,
+                    ("--remote=false", "ps", "--all", "--quiet", "--no-trunc"),
+                )

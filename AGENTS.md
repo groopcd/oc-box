@@ -328,9 +328,13 @@ their checkout ownership distinct from unrelated source and flat installations.
   per-native-TUI opt-in for stable 2.3.x. The private renderer hook recognizes
   matching Ctrl-press/release on assistant transcript file links only. Keep
   read-only text snapshots in the container, validate mounts and descriptors,
-  and close the bounded non-PTY reader before displaying. No host transfers,
-  arbitrary URL handlers, saved permissions, clipboard coupling or mainline
-  patches. Offline evidence does not validate physical Yakuake/Podman use.
+  and close the bounded non-PTY reader before displaying. PNG previews use
+  normalized image snapshots and terminal cells. Host PNG export is separate:
+  child PTY output proposes bytes only, a fresh typed host challenge authorizes
+  one checked snapshot, and a fixed default-app opener receives only a private
+  expiring copy. No automatic opens, arbitrary URL handlers, saved permissions,
+  clipboard coupling or mainline patches. Offline evidence does not validate
+  physical Yakuake/Podman use.
 - `ui_state.py` / `ui_state_*.js`: public-SDK container TUI/server/RPC reports,
   installed only during normal eligible V2 owning preparation, never on attach.
   Canonical stable native `2.x.y` is eligible, not proof of SDK compatibility.

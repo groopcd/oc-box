@@ -66,7 +66,8 @@ class PackagingTests(unittest.TestCase):
                 path.relative_to(APP).as_posix()
                 for directory in ("src", "tests", "tools", "docs")
                 for path in (APP / directory).rglob("*")
-                if path.suffix in (".py", ".js", ".mjs", ".md", ".1", ".texi", ".info")
+                if path.suffix
+                in (".py", ".js", ".tsx", ".mjs", ".md", ".1", ".texi", ".info")
             ),
         }
         cases = (
@@ -99,6 +100,9 @@ class PackagingTests(unittest.TestCase):
                     "file_preview.py",
                     "file_preview_io.py",
                     "file_preview_tui.tsx",
+                    "file_preview_png.py",
+                    "file_preview_host.py",
+                    "file_preview_consent.py",
                     "sharing.py",
                     "attachments.py",
                     "attachment_io.py",
@@ -173,8 +177,14 @@ class PackagingTests(unittest.TestCase):
                     "src/oc_box/file_preview.py",
                     "src/oc_box/file_preview_io.py",
                     "src/oc_box/file_preview_tui.tsx",
+                    "src/oc_box/file_preview_png.py",
+                    "src/oc_box/file_preview_host.py",
+                    "src/oc_box/file_preview_consent.py",
                     "tests/test_file_preview.py",
                     "tests/test_file_preview_io.py",
+                    "tests/test_file_preview_png.py",
+                    "tests/test_file_preview_host.py",
+                    "tests/test_file_preview_consent.py",
                     "tests/smoke_file_preview_v2.py",
                     "tests/test_ui_state.py",
                     "tests/ui_state_fixture.mjs",
@@ -368,7 +378,8 @@ class PackagingTests(unittest.TestCase):
         self.assertIn("fetch-depth: 0", workflow)
         self.assertIn("tools/check_package.py dist", workflow)
         self.assertIn("tools/check_package.py dist --with-vault --with-tui", workflow)
-        self.assertIn("'textual>=8.2.8,<9' 'pyte>=0.8.2,<0.9'", workflow)
+        self.assertIn("python tools/release_python_deps.py", workflow)
+        self.assertIn("--upgrade -r", workflow)
         self.assertIn("--mirror azure --force-ipv4", workflow)
         self.assertIn("default: false", workflow)
         self.assertNotIn("PYPI_TOKEN", workflow)

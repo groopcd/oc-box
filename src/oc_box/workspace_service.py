@@ -522,6 +522,7 @@ def client_command(
         "XDG_CACHE_HOME": data["home"] + "/.cache",
         "OPENCODE_DB": "oc-box-v2.db",
     }
+    preview_host_open = None
     if (
         interactive
         and len(arguments) >= 2
@@ -553,8 +554,33 @@ def client_command(
             verified = preview.client_binding(box, data, connection)
             if verified is not None:
                 # Use the inspected immutable container ID, not a mutable name.
-                command[-1], mounts = verified
+                container, mounts = verified
+                command[-1] = container
                 names[preview.ROOTS] = json.dumps(mounts)
+                # The bytes from this process are proposals. A separate host
+                # confirmation precedes any extraction to a host file.
+                if sys.stdin.isatty() and sys.stdout.isatty():
+                    if __package__:
+                        from . import file_preview_host
+                    else:
+                        import file_preview_host
+                    if file_preview_host.ready():
+                        sources = preview.host_export_mounts(box, data, container)
+                        if sources is not None and file_preview_host.ready(
+                            host_mounts=sources
+                        ):
+                            names["OC_BOX_FILE_PREVIEW_HOST_OPEN"] = "1"
+
+                            def preview_host_open(candidate):
+                                sources = preview.host_export_mounts(
+                                    box, data, container
+                                )
+                                if sources is None:
+                                    raise ValueError("host-mounts-unverified")
+                                file_preview_host.open_png(
+                                    candidate, host_mounts=sources
+                                )
+
     if (
         image_preview
         and interactive
@@ -578,7 +604,10 @@ def client_command(
     )
     bridge = "import os,sys,json; env=json.loads(sys.argv[1]); env['OPENCODE_PASSWORD']=os.environ['OPENCODE_PASSWORD']; os.execvpe(sys.argv[2],sys.argv[2:],env)"
     command.extend(["python3", "-I", "-S", "-c", bridge, json.dumps(names), *arguments])
-    return box.ContainerCommand(command, env)
+    result = box.ContainerCommand(command, env)
+    if preview_host_open is not None:
+        result.preview_host_open = preview_host_open
+    return result
 
 
 def tab_inventory(box, data, connection, *, timeout=4):

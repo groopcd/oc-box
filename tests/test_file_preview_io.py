@@ -336,8 +336,8 @@ class ReaderTests(unittest.TestCase):
         self.path.write_bytes(b"synthetic original")
         content = preview._content
 
-        def replace_after_content(pid, target, mount):
-            result = content(pid, target, mount)
+        def replace_after_content(pid, target, mount, **options):
+            result = content(pid, target, mount, **options)
             self.path.rename(self.directory / "old")
             self.path.write_bytes(b"synthetic replacement")
             return result
