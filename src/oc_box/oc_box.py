@@ -5319,8 +5319,6 @@ def entrypoint():
         if not journaled:
             return
         try:
-            if event != "command.started":
-                lifecycle_output.flush()
             fields = dict(
                 command=lifecycle_output.command_name() or command,
                 workspace=lifecycle_output.workspace(),
@@ -5328,7 +5326,8 @@ def entrypoint():
                 duration_ms=int((time.monotonic() - started) * 1000),
             )
             lifecycle_output.console_event(event, **fields)
-            lifecycle_output.flush_console()
+            if event != "command.started":
+                lifecycle_output.flush()
             if __package__:
                 from .activity_log import record_event
             else:

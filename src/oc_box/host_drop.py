@@ -112,7 +112,10 @@ CLIPBOARD_SYMLINKS_WARNING = (
 CLIPBOARD_STRICT_WARNING = (
     "Strict clipboard sources: symlinks in files or parent folders are refused."
 )
-DROP_ENABLED = "Experimental host file drops enabled."
+DROP_ENABLED = (
+    "Experimental host file drops enabled; pasting a supported host path "
+    "anywhere in this client can copy the file into the workspace."
+)
 DROP_DETAILS = (
     "A supported absolute pathname "
     "pasted anywhere in this native TUI connection authorizes a temporary "

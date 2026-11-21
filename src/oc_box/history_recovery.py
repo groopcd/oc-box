@@ -592,7 +592,14 @@ def recover(box, path, data, source):
         outcome="success" if saved else "failure",
         duration_ms=int(max(0, min(time.monotonic() - started, 9999)) * 1000),
     )
+    # The selected category comes from internal fixed refusals, never str(exc).
+    failure_message = (
+        f"Automatic persisted-history snapshot unavailable ({category}). "
+        "Container data retained; retry with 'oc-box sync'."
+    )
     if lifecycle_output.concise():
+        if not saved:
+            lifecycle_output.fixed_detail("warn", failure_message)
         return saved
     if saved:
         if report is None:  # A launcher will announce only after its own final stop.
@@ -605,10 +612,6 @@ def recover(box, path, data, source):
                 "Execution was interrupted; background work is not declared complete.",
                 file=sys.stderr,
             )
-        print(
-            f"oc-box: Automatic persisted-history snapshot unavailable ({category}). "
-            "Container data retained; retry with 'oc-box sync'.",
-            file=sys.stderr,
-        )
+        print(f"oc-box: {failure_message}", file=sys.stderr)
         report_compatibility_refusal(compatibility_reason)
     return saved

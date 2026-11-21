@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from oc_box import (
@@ -208,6 +209,41 @@ class LifecycleOutputTests(unittest.TestCase):
             self.assertIn("clients-not-detached, unavailable", output.getvalue())
             self.assertNotIn("PRIVATE_SENTINEL", output.getvalue())
             writer.assert_called_once()
+
+    def test_verbose_launch_does_not_flush_before_main_and_preserves_start_interrupt(
+        self,
+    ):
+        errors = io.StringIO()
+
+        def interrupt_start(event, **fields):
+            if event == "command.started":
+                self.assertEqual(errors.getvalue(), "")
+                raise KeyboardInterrupt
+            return True
+
+        with (
+            patch.object(sys, "argv", ["oc-box", "reset", "--verbose=all"]),
+            contextlib.redirect_stderr(errors),
+            patch.object(box, "main") as launch,
+            patch.object(activity_log, "record_event", side_effect=interrupt_start),
+        ):
+            self.assertEqual(box.entrypoint(), 130)
+            launch.assert_not_called()
+            self.assertIn("INFO command.started", errors.getvalue())
+
+    def test_verbose_recovery_reports_specific_fixed_failure_category(self):
+        source = SimpleNamespace(container_id="PRIVATE_CONTAINER")
+        with (
+            contextlib.redirect_stderr(io.StringIO()) as errors,
+            patch.object(activity_log, "record_event", return_value=False),
+            patch.object(box.workspace_service, "live_connection", return_value={}),
+            lifecycle_output.invocation("sync", self.root, console_level="all"),
+        ):
+            self.assertFalse(history_recovery.recover(box, self.root, {}, source))
+            self.assertEqual(errors.getvalue(), "")
+            lifecycle_output.flush()
+            self.assertIn("snapshot unavailable (old-connection)", errors.getvalue())
+            self.assertNotIn("PRIVATE_CONTAINER", errors.getvalue())
 
     def test_feature_startup_notices_only_expand_at_informational_verbosity(self):
         for level, legacy, symlinks, details in (
