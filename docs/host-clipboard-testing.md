@@ -28,6 +28,10 @@ intercepted. Clipboard importing defaults to off when no workspace choice is sav
 repeating the flag. `--no-host-clipboard` saves disabled. Running clients do not
 live-toggle, and no clipboard read happens until the dedicated shortcut.
 
+Startup shows a short notice for each enabled import feature. Use
+`oc-box start --verbose=ALL` with your normal workspace selector to see
+the full behavior, limits and current clipboard symlink policy.
+
 Clipboard file sources now follow symlinks by default, including linked folders.
 There is no approval popup or folder setup. Copy the file in Dolphin and use
 Ctrl+Y as usual. A link changed after Copy can select a different target at

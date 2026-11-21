@@ -408,6 +408,7 @@ def check(directory, *, with_vault=False, with_tui=False):
         log_help = run(cli, "logs", "--help")
         for option in (
             "--level",
+            "--verbose",
             "--limit",
             "--follow",
             "--json",
@@ -423,17 +424,20 @@ def check(directory, *, with_vault=False, with_tui=False):
             "--no-journald",
             "--log-dir",
             "--lifecycle-diagnostics",
+            "--verbose",
         ):
             assert option in begin_help, option
         sync_help = run(cli, "sync", "--help")
         assert (
             "--lifecycle-diagnostics" in sync_help
+            and "--verbose" in sync_help
             and "--image-preview" not in sync_help
         )
         logdir = work / "one-invocation-log"
         assert run(cli, "logs", "--log-dir", str(logdir), "--path").strip() == str(
             logdir / "activity.jsonl"
         )
+        assert not run(cli, "logs", "--log-dir", str(logdir), "--verbose=ALL", "--json")
         assert not logdir.exists()
         assert (
             run(python, "-m", "oc_box", "--version").strip()

@@ -779,13 +779,21 @@ def wait_history(box, data, connection, *, timeout=30, interval=0.2):
 
     def fail(category):
         if category == "activity-timeout":
-            error = box.HistoryWaitTimeout(
+            diagnostic = (
                 f"History wait timeout: phase={phase}; "
                 f"last complete job kinds: {kind_observation}; "
-                f"last complete observation: {observation}.",
+                f"last complete observation: {observation}."
+            )
+            timing = timing_diagnostic()
+            # These strings contain only the fixed query phases and validated
+            # counts above, never a native payload or an exception's text.
+            lifecycle_output.fixed_detail("debug", diagnostic)
+            lifecycle_output.fixed_detail("debug", timing)
+            error = box.HistoryWaitTimeout(
+                diagnostic,
                 recovery_eligible=job_pairs >= 2 or foreground_pairs >= 2,
                 recovery_reason=recovery_reason,
-                timing_diagnostic=timing_diagnostic(),
+                timing_diagnostic=timing,
                 interrupted_foreground=foreground_observed,
             )
             # Keep the deadline and routing diagnostics; a native response

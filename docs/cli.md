@@ -25,7 +25,7 @@ oc-box completion bash
 oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [LIFECYCLE-LOG-OPTIONS]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
-oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level debug|info|warn|error] [--limit N] [--follow] [--json]
+oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--follow] [--json]
 oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
@@ -49,7 +49,7 @@ without sudo. It manages rootless Podman; container root is mapped to the
 unprivileged host user.
 
 `LIFECYCLE-LOG-OPTIONS` are `[--journald | --no-journald] [--log-dir PATH]
-[--lifecycle-diagnostics]`. They apply only to the current invocation; see
+[--lifecycle-diagnostics] [--verbose[=LEVEL]]`. They apply only to the current invocation; see
 the [activity journal settings](#dashboard-state-and-activity-journal).
 
 ## Description
@@ -92,7 +92,9 @@ shows transient stage progress on one line and clears it instead of leaving a
 transcript of each step. Noninteractive output, including pipes and `TERM=dumb`,
 does not get routine stage start/done lines. Actionable warnings, errors and
 confirmation or credential prompts remain visible. Native OpenCode output and
-the native terminal and browser UIs are not changed.
+the native terminal and browser UIs are not changed. Native host drops and
+clipboard importing print one short line each when enabled. Use
+`oc-box start --verbose` for the full behavior, limits and clipboard symlink policy.
 
 After a history sync or recovery attempt, oc-box reports one final history
 result: saved normally, recovered after stop, partial, failed, empty, or cleanup
@@ -102,9 +104,10 @@ work finished. Incomplete results retain guidance for retrying
 `oc-box sync` when appropriate. The presentation does not change lifecycle steps,
 recovery eligibility, history verification or exit codes.
 
-Use `oc-box logs --level debug` to inspect retained stage details. For additional
-launcher messages on a particular invocation, see
-[`--lifecycle-diagnostics`](#launcher-diagnostics).
+Use `oc-box logs --verbose=ALL` to inspect retained stage details, or
+`oc-box start --verbose=ALL` for safe activity diagnostics from the current
+launch. See [Launcher diagnostics](#launcher-diagnostics) for the older
+`--lifecycle-diagnostics` option.
 
 ### OpenCode versions
 
@@ -1551,7 +1554,10 @@ history. It does not read Podman output or native OpenCode logfiles.
 
 By default, show the latest 100 retained entries at `info` or above.
 `--level debug` includes lower-severity stage detail; `--level warn` or
-`--level error` narrows the output. `--project PATH` and `--workspace ID` are
+`--level error` narrows the output. Alternatively use `--verbose=LEVEL`. Bare
+`--verbose` or `--verbose=ALL` displays all validated retained levels, up to
+10,000 matching entries unless you supply `--limit`. It never reveals unlogged
+data or reads a different source. `--project PATH` and `--workspace ID` are
 mutually exclusive filters and require a valid workspace registration. With
 neither, show entries across workspaces, including entries with no workspace.
 Severity and workspace filters apply before the limit. Use `--follow` to keep
@@ -1580,6 +1586,7 @@ under [Dashboard state and activity journal](#dashboard-state-and-activity-journ
 
 ```sh
 oc-box logs
+oc-box logs --verbose=ALL
 oc-box logs --path
 oc-box logs --log-dir ~/.local/state/oc-box-diagnostics --path
 oc-box logs --project ~/devel/demo --level debug --limit 50
@@ -2294,8 +2301,8 @@ what gets journaled or what an owning launcher prints.
 ### --limit N
 
 For `logs`, set the maximum number of matching retained entries in the initial
-output, from 1 to 10,000. Default: 100. Rotation may leave fewer entries
-available.
+output, from 1 to 10,000. Default: 100, or 10,000 with `--verbose=ALL`.
+Rotation may leave fewer entries available.
 
 ### --follow
 
@@ -2339,12 +2346,29 @@ invocation of `start` (including when the command is omitted), `reset`,
 no saved diagnostic setting. This option does not change native OpenCode output,
 journaling or lifecycle results. See [Launcher diagnostics](#launcher-diagnostics).
 
+### --verbose[=LEVEL]
+
+For `start` (including when omitted), `reset`, `stop`, `sync`, `terminal` and
+`web`, emit validated activity diagnostics on stderr at the selected minimum
+severity: `debug`, `info`, `warn`, or `error`. Levels are case-insensitive.
+Activity diagnostics are buffered and may appear at command exit.
+Bare `--verbose` means `--verbose=ALL`; both include every severity. With
+`info`, `debug`, or `ALL`, the native TUI startup
+notices also explain the enabled host-import features. This option never adds
+raw arguments, environment values, credentials, native errors or output, or
+clipboard content to these diagnostics. It does not suppress existing warnings,
+refusals or prompts, alter native output, or change what gets journaled.
+
+For `logs`, this is a read filter rather than a launcher setting. Use it instead
+of `--level`; `ALL` includes all validated retained records within the read
+bounds. It works with `--follow`, `--json` and the same explicit source choices.
+
 ### --path
 
 For `logs`, display the effective private `activity.jsonl` pathname without
 reading or creating the journal. Use `oc-box logs --path` alone or with
-`--log-dir PATH`, not with `--journald`, workspace filters, `--follow`, or
-`--json`.
+`--log-dir PATH`, not with `--journald`, workspace filters, `--follow`,
+`--verbose`, or `--json`.
 
 ### --about
 
@@ -3822,27 +3846,26 @@ archives; an unrelated replacement directory will not be deleted.
 
 ### Launcher diagnostics
 
-Use `oc-box logs --level debug` to inspect retained activity details without
-restarting a workspace. To see the launcher's expanded stage messages and
-fixed-category diagnostics during an invocation, opt in explicitly:
+Use `oc-box logs --verbose=ALL` to inspect retained activity without restarting
+a workspace. For diagnostics from the current invocation:
 
 ```sh
-oc-box start --project ~/devel/demo --lifecycle-diagnostics
+oc-box start --project ~/devel/demo --verbose=ALL
+oc-box sync --project ~/devel/demo --verbose=warn
 ```
 
-Scripts that consume older verbose lifecycle messages should pass the flag
-to the launcher invocation under test instead of expecting routine start/done
-text in a pipe. The flag does not enable native debug logging, add raw child
-output to the journal or change lifecycle behavior. Continue to treat native
-output and interactive prompts as separate from the activity journal.
+Scripts that consume older verbose lifecycle messages should continue using
+`--lifecycle-diagnostics` for routine start/done lines in a pipe. Neither flag
+enables native debug logging, adds raw child output to the journal or changes
+lifecycle behavior. Native output and interactive prompts remain separate.
 
 ### Private output capture and uv Python
 
 V2 startup copies native OpenCode saved/OAuth credentials independently of the
 oc-box vault. `--no-vault` skips vault entries, not native authentication or the
-private output capture that protects it. There is no oc-box `--verbose` flag;
-the final error after cleanup explains a failed startup stage. Use the launcher
-diagnostic setting above for additional stage details.
+private output capture that protects it. The final error after cleanup
+explains a failed startup stage. Use the launcher diagnostic settings above
+for additional safe stage details; they do not expose captured private output.
 
 Some older uv-managed Python builds omit `os.memfd_create` even on capable Linux
 hosts. oc-box first uses the Python binding, or, when it is absent, lazily calls

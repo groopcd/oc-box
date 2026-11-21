@@ -153,6 +153,13 @@ arbitrary mutations by processes running as the same user.
 Check lifecycle flag scope for `start` (including the implicit command),
 `reset`, `stop`, `sync`, `terminal`, and `web`. Check `--lifecycle-diagnostics`
 separately from the quiet default; it must not persist to later invocations.
+Check bare `--verbose`, case-insensitive `ALL` and minimum-severity filtering
+on the launcher console. Only allowlisted activity fields may appear in its
+added output, even when the private journal is unavailable. Native import
+notices stay short by default and disclose details only at informational
+verbosity (`info`, `debug` or `ALL`); actionable refusals remain visible.
+For the read-only `logs` command, cover `--verbose=ALL` with both source
+choices and an explicit limit that overrides its larger initial view.
 For version-pinned scripted checks that parse legacy launcher output, pass
 the flag only to the invocation under test. In the sharing host fixture that
 is the owner expecting an explicit stop, solely for its legacy pending-history

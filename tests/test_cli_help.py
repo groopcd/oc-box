@@ -40,7 +40,7 @@ _COMMANDS = (
     "web",
 )
 _SELECTORS = "--project --workspace"
-_LAUNCH_LOGGING = "--log-dir --journald --no-journald --lifecycle-diagnostics"
+_LAUNCH_LOGGING = "--log-dir --journald --no-journald --lifecycle-diagnostics --verbose"
 
 _GUARDED_ENTRYPOINT = """\
 import sys
@@ -275,7 +275,7 @@ class CliHelpTests(unittest.TestCase):
         logs = self.help("logs", "--help", command="logs")
         self.assert_options(
             logs,
-            show=f"{_SELECTORS} --journald --log-dir --path --level --limit --follow --json",
+            show=f"{_SELECTORS} --journald --log-dir --path --level --verbose --limit --follow --json",
             hide="--no-journald --lifecycle-diagnostics --port --no-open",
         )
         self.assertRegex(logs, r"(?im)^[ \t]+--journald\b\s+[^\n]*\bread\b")
@@ -334,6 +334,13 @@ class LauncherParserCompatibilityTests(unittest.TestCase):
         self.assertTrue(implicit.new)
         self.assertEqual(implicit.pids_limit, 128)
         self.assertIs(implicit.journald, False)
+        for spelling in ("--ve", "--ver", "--vers", "--version"):
+            self.assertTrue(parser.parse_args([spelling]).version)
+        self.assertEqual(parser.parse_args(["--verbose=ALL"]).verbose, "all")
+        self.assertEqual(
+            parser.parse_args(["--project", ".", "--verb", "sync"]).command,
+            "sync",
+        )
 
     def test_help_filter_does_not_change_legacy_parsing_or_exclusion_rules(self):
         parser = box.parser()

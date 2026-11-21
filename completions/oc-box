@@ -30,7 +30,7 @@ _oc_box()
     local command='' action='' word skip=0 positional=0 ended=0 broker=0 i
     local commands='start stop sync reset repair terminal web tui share attach preferences upgrade secrets credentials backup backup-info restore purge list distros status logs doctor completion'
     local selectors='--project --workspace'
-    local launch_logs='--journald --no-journald --log-dir --lifecycle-diagnostics'
+    local launch_logs='--journald --no-journald --log-dir --lifecycle-diagnostics --verbose'
     local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks'
     local help='-h --help' options
     COMPREPLY=()
@@ -52,6 +52,11 @@ _oc_box()
         if (( ! ended )); then
             case $word in
                 --*=*) continue ;;
+                --verbose)
+                    case ${COMP_WORDS[i+1],,} in
+                        =|all|debug|info|warn|error) skip=1 ;;
+                    esac
+                    continue ;;
                 --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--min-passphrase-length|--feature|--port|--session|--text|--level|--limit|--log-dir)
                     skip=1; continue ;;
                 --broker) broker=1; continue ;;
@@ -100,6 +105,13 @@ _oc_box()
                 if [[ $command == logs ]]; then
                     _oc_box_words 'debug info warn error'; return 0
                 fi ;;
+            --verbose)
+                if [[ $cur != -* ]]; then
+                    case $command in
+                        ''|start|reset|stop|sync|terminal|web|logs)
+                            _oc_box_words 'all debug info warn error'; return 0 ;;
+                    esac
+                fi ;;
             --host-drop|--host-clipboard|--host-clipboard-symlinks)
                 if [[ $command == preferences ]]; then
                     _oc_box_words 'on off'; return 0
@@ -124,7 +136,7 @@ _oc_box()
             options="$help $selectors --session --broker"
             (( broker )) || options+=' --text --send --acknowledge-risk' ;;
         status) options="$help $selectors --json" ;;
-        logs) options="$help $selectors --level --limit --follow --json --journald --log-dir --path" ;;
+        logs) options="$help $selectors --level --verbose --limit --follow --json --journald --log-dir --path" ;;
         purge) options="$help $selectors --delete-sessions --all -y --yes" ;;
         credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;
         preferences) options="$help $selectors --host-drop --host-clipboard --host-clipboard-symlinks --json" ;;

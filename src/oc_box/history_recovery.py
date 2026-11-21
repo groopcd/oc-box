@@ -123,18 +123,19 @@ def report_compatibility_refusal(reason):
         reason=category,
         outcome="refused",
     )
-    if lifecycle_output.concise():
-        return
-    print(
-        "oc-box: Automatic post-stop history recovery is unavailable: "
+    message = (
+        "Automatic post-stop history recovery is unavailable: "
         f"the OpenCode compatibility contract was not recognized ({reason}). "
         "Check for an oc-box update first; upgrade OpenCode too if it is older "
         "than a supported release. If both are current, report this compatibility "
         "refusal. Keep workspace/history intact; do not reset or downgrade state "
         "to bypass the check. If shutdown history remains pending, retry with "
-        "'oc-box sync'.",
-        file=sys.stderr,
+        "'oc-box sync'."
     )
+    if lifecycle_output.concise():
+        lifecycle_output.fixed_detail("warn", message)
+    else:
+        print(f"oc-box: {message}", file=sys.stderr)
 
 
 class RecoveryError(ValueError):
@@ -410,14 +411,15 @@ def report_skipped(reasons):
         reason=reason,
         outcome="unavailable",
     )
-    if lifecycle_output.concise():
-        return
-    print(
-        "oc-box: Automatic persisted-history snapshot not attempted ("
+    message = (
+        "Automatic persisted-history snapshot not attempted ("
         + ", ".join(safe or ["unavailable"])
-        + ").",
-        file=sys.stderr,
+        + ")."
     )
+    if lifecycle_output.concise():
+        lifecycle_output.fixed_detail("debug", message)
+    else:
+        print(f"oc-box: {message}", file=sys.stderr)
 
 
 def _command(box, arguments):

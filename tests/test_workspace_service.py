@@ -18,6 +18,8 @@ from urllib.parse import urlparse
 from urllib.request import urlopen
 
 from oc_box import (
+    activity_log,
+    lifecycle_output,
     native_tabs,
     oc_box as box,
     web_sessions,
@@ -700,6 +702,26 @@ class HistoryWaitTests(unittest.TestCase):
             "last complete observation: foreground=9999+, jobs-running=0, "
             "jobs-completed=9999+, jobs-error=0, jobs-cancelled=0.",
         )
+
+    def test_verbose_timeout_reports_safe_timing_at_the_reporting_boundary(self):
+        def request(*args, **kwargs):
+            self.advance(kwargs["timeout"])
+            raise box.BoxError("private-sentinel")
+
+        self.api.side_effect = request
+        with (
+            contextlib.redirect_stderr(io.StringIO()) as output,
+            patch.object(activity_log, "record_event", return_value=False),
+            lifecycle_output.invocation("sync", console_level="all"),
+        ):
+            self.assert_wait_error("activity-timeout", timeout=1)
+            self.assertEqual(output.getvalue(), "")
+            lifecycle_output.flush()
+            self.assertIn(
+                "History wait timeout: phase=foreground-query", output.getvalue()
+            )
+            self.assertIn("History wait timing:", output.getvalue())
+            self.assertNotIn("private-sentinel", output.getvalue())
 
     def test_query_timings_separate_completed_polls_from_poll_delay(self):
         def request(*args, **kwargs):

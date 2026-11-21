@@ -26,7 +26,7 @@ oc\-box completion bash
 oc\-box web [\-\-project PATH | \-\-workspace ID] [\-\-session ID] [\-\-port N] [\-\-no\-open] [\-\-no\-vault] [\-\-attachments] [LIFECYCLE\-LOG\-OPTIONS]
 oc\-box \-\-status [\-\-project PATH | \-\-workspace ID] [\-\-json]
 oc\-box status [\-\-project PATH | \-\-workspace ID] [\-\-json]
-oc\-box logs [\-\-journald | \-\-log\-dir PATH] [\-\-project PATH | \-\-workspace ID] [\-\-level debug|info|warn|error] [\-\-limit N] [\-\-follow] [\-\-json]
+oc\-box logs [\-\-journald | \-\-log\-dir PATH] [\-\-project PATH | \-\-workspace ID] [\-\-level LEVEL | \-\-verbose[=LEVEL]] [\-\-limit N] [\-\-follow] [\-\-json]
 oc\-box logs [\-\-log\-dir PATH] \-\-path
 oc\-box tui [\-\-project PATH | \-\-workspace ID] [\-\-read\-only] [\-\-demo]
 oc\-box upgrade [\-\-check] [\-\-stable | \-\-devel] [\-\-vault] [\-\-tui]
@@ -46,7 +46,7 @@ oc\-box COMMAND \-\-help
 .PP
 The command defaults to \fBstart\fR\&. For \fBstart\fR, \fBreset\fR, \fBstop\fR, \fBsync\fR and \fBterminal\fR, options may appear before or after the command. For \fBlogs\fR and \fBweb\fR, put the command first. Run the launcher on the host as your regular user, without sudo. It manages rootless Podman; container root is mapped to the unprivileged host user.
 .PP
-\fBLIFECYCLE\-LOG\-OPTIONS\fR are \fB[\-\-journald | \-\-no\-journald] [\-\-log\-dir PATH] [\-\-lifecycle\-diagnostics]\fR\&. They apply only to the current invocation; see the [activity journal settings](#dashboard\-state\-and\-activity\-journal).
+\fBLIFECYCLE\-LOG\-OPTIONS\fR are \fB[\-\-journald | \-\-no\-journald] [\-\-log\-dir PATH] [\-\-lifecycle\-diagnostics] [\-\-verbose[=LEVEL]]\fR\&. They apply only to the current invocation; see the [activity journal settings](#dashboard\-state\-and\-activity\-journal).
 .SH DESCRIPTION
 .PP
 oc\-box starts unmodified OpenCode and its local MCP servers, plugins, formatters, shell, and file tools together inside a persistent development container. It associates one environment with one canonical project directory. The entire project, including hidden files, Git history, untracked files, and unfinished edits, is mounted writable at the same absolute path.
@@ -58,11 +58,11 @@ On normal exit, oc\-box exports conversation history to separate archive session
 The default resource limits are 4 CPU cores, 8 GiB RAM, and 2048 processes. These are ceilings, not reservations: resources are consumed dynamically up to those limits, and OpenCode itself has no fixed 4/8 GiB minimum requirement. There is no disk quota. Containers share the host kernel and can reach network services, including configured host services at \fBhost.containers.internal\fR\&. The project is intentionally writable and can be deleted by container commands. Additional Podman options and devices explicitly extend these defaults.
 .SS Lifecycle output
 .PP
-Startup and shutdown are quiet by default. On an interactive terminal, oc\-box shows transient stage progress on one line and clears it instead of leaving a transcript of each step. Noninteractive output, including pipes and \fBTERM=dumb\fR, does not get routine stage start/done lines. Actionable warnings, errors and confirmation or credential prompts remain visible. Native OpenCode output and the native terminal and browser UIs are not changed.
+Startup and shutdown are quiet by default. On an interactive terminal, oc\-box shows transient stage progress on one line and clears it instead of leaving a transcript of each step. Noninteractive output, including pipes and \fBTERM=dumb\fR, does not get routine stage start/done lines. Actionable warnings, errors and confirmation or credential prompts remain visible. Native OpenCode output and the native terminal and browser UIs are not changed. Native host drops and clipboard importing print one short line each when enabled. Use \fBoc\-box start \-\-verbose\fR for the full behavior, limits and clipboard symlink policy.
 .PP
 After a history sync or recovery attempt, oc\-box reports one final history result: saved normally, recovered after stop, partial, failed, empty, or cleanup unverified. The recovery result itself carries the interruption and unconfirmed\-background\-completion caution; archived history does not prove work finished. Incomplete results retain guidance for retrying \fBoc\-box sync\fR when appropriate. The presentation does not change lifecycle steps, recovery eligibility, history verification or exit codes.
 .PP
-Use \fBoc\-box logs \-\-level debug\fR to inspect retained stage details. For additional launcher messages on a particular invocation, see [\fB\-\-lifecycle\-diagnostics\fR](#launcher\-diagnostics).
+Use \fBoc\-box logs \-\-verbose=ALL\fR to inspect retained stage details, or \fBoc\-box start \-\-verbose=ALL\fR for safe activity diagnostics from the current launch. See [Launcher diagnostics](#launcher\-diagnostics) for the older \fB\-\-lifecycle\-diagnostics\fR option.
 .SS OpenCode versions
 .PP
 **OpenCode 2.x is the primary documentation path.** OpenCode 1.x remains supported as a **legacy** line, with [separate operating guidance](legacy/README.md). The [documentation hub](README.md) and task guides focus on 2.x. This complete reference retains both versions' conditional rules so legacy behavior, history preservation and downgrade constraints remain discoverable.
@@ -551,7 +551,7 @@ oc\-box \-\-status \-\-json
 .PP
 Read the [oc\-box activity journal](#dashboard\-state\-and\-activity\-journal) on the host. The default private\-file reader uses only the Python standard library; no systemd, dashboard extras, Podman, native OpenCode, vault unlock or running workspace is needed. The command does not create, trim or rotate logs, start a container, or modify the workspace registry, project files or session history. It does not read Podman output or native OpenCode logfiles.
 .PP
-By default, show the latest 100 retained entries at \fBinfo\fR or above. \fB\-\-level debug\fR includes lower\-severity stage detail; \fB\-\-level warn\fR or \fB\-\-level error\fR narrows the output. \fB\-\-project PATH\fR and \fB\-\-workspace ID\fR are mutually exclusive filters and require a valid workspace registration. With neither, show entries across workspaces, including entries with no workspace. Severity and workspace filters apply before the limit. Use \fB\-\-follow\fR to keep watching after the initial output, and Ctrl\-C to stop. Use \fB\-\-json\fR for one validated event per line (JSON Lines), including when following. With no matches, JSON Lines output is empty, not \fB[]\fR or a placeholder. The default reader treats missing or unsafe private journal data as empty. Lifecycle detail can appear after the invocation finishes: history and shutdown diagnostics are queued so journal writes do not run inside verification deadlines or while a client lease is held.
+By default, show the latest 100 retained entries at \fBinfo\fR or above. \fB\-\-level debug\fR includes lower\-severity stage detail; \fB\-\-level warn\fR or \fB\-\-level error\fR narrows the output. Alternatively use \fB\-\-verbose=LEVEL\fR\&. Bare \fB\-\-verbose\fR or \fB\-\-verbose=ALL\fR displays all validated retained levels, up to 10,000 matching entries unless you supply \fB\-\-limit\fR\&. It never reveals unlogged data or reads a different source. \fB\-\-project PATH\fR and \fB\-\-workspace ID\fR are mutually exclusive filters and require a valid workspace registration. With neither, show entries across workspaces, including entries with no workspace. Severity and workspace filters apply before the limit. Use \fB\-\-follow\fR to keep watching after the initial output, and Ctrl\-C to stop. Use \fB\-\-json\fR for one validated event per line (JSON Lines), including when following. With no matches, JSON Lines output is empty, not \fB[]\fR or a placeholder. The default reader treats missing or unsafe private journal data as empty. Lifecycle detail can appear after the invocation finishes: history and shutdown diagnostics are queued so journal writes do not run inside verification deadlines or while a client lease is held.
 .PP
 Use \fB\-\-log\-dir PATH\fR to read a different private journal for this invocation. It works with the private event filters or with \fB\-\-path\fR to print the resulting pathname without opening the journal. It does not create the directory or change the saved policy.
 .PP
@@ -560,6 +560,7 @@ Use \fB\-\-journald\fR to explicitly read this user's mirrored oc\-box activity 
 .nf
 .fam C
 oc\-box logs
+oc\-box logs \-\-verbose=ALL
 oc\-box logs \-\-path
 oc\-box logs \-\-log\-dir ~/.local/state/oc\-box\-diagnostics \-\-path
 oc\-box logs \-\-project ~/devel/demo \-\-level debug \-\-limit 50
@@ -857,7 +858,7 @@ oc\-box \-\-status \-\-json > status.json
 For \fBlogs\fR, set the minimum severity displayed, from \fBdebug\fR (all levels) to \fBerror\fR (errors only). Default: \fBinfo\fR\&. This is a read filter; it does not change what gets journaled or what an owning launcher prints.
 .SS \-\-limit N
 .PP
-For \fBlogs\fR, set the maximum number of matching retained entries in the initial output, from 1 to 10,000. Default: 100. Rotation may leave fewer entries available.
+For \fBlogs\fR, set the maximum number of matching retained entries in the initial output, from 1 to 10,000. Default: 100, or 10,000 with \fB\-\-verbose=ALL\fR\&. Rotation may leave fewer entries available.
 .SS \-\-follow
 .PP
 For \fBlogs\fR, keep displaying newly retained matching entries after the initial output. Follow is best\-effort: entries rotated out before they are read cannot be recovered. Stop following with Ctrl\-C.
@@ -875,9 +876,14 @@ Override the saved \fBlogs.directory\fR for this invocation of \fBstart\fR (incl
 .SS \-\-lifecycle\-diagnostics
 .PP
 Show expanded launcher stage messages and fixed\-category diagnostics for this invocation of \fBstart\fR (including when the command is omitted), \fBreset\fR, \fBstop\fR, \fBsync\fR, \fBterminal\fR or \fBweb\fR\&. Quiet output is the default and there is no saved diagnostic setting. This option does not change native OpenCode output, journaling or lifecycle results. See [Launcher diagnostics](#launcher\-diagnostics).
+.SS \-\-verbose[=LEVEL]
+.PP
+For \fBstart\fR (including when omitted), \fBreset\fR, \fBstop\fR, \fBsync\fR, \fBterminal\fR and \fBweb\fR, emit validated activity diagnostics on stderr at the selected minimum severity: \fBdebug\fR, \fBinfo\fR, \fBwarn\fR, or \fBerror\fR\&. Levels are case\-insensitive. Activity diagnostics are buffered and may appear at command exit. Bare \fB\-\-verbose\fR means \fB\-\-verbose=ALL\fR; both include every severity. With \fBinfo\fR, \fBdebug\fR, or \fBALL\fR, the native TUI startup notices also explain the enabled host\-import features. This option never adds raw arguments, environment values, credentials, native errors or output, or clipboard content to these diagnostics. It does not suppress existing warnings, refusals or prompts, alter native output, or change what gets journaled.
+.PP
+For \fBlogs\fR, this is a read filter rather than a launcher setting. Use it instead of \fB\-\-level\fR; \fBALL\fR includes all validated retained records within the read bounds. It works with \fB\-\-follow\fR, \fB\-\-json\fR and the same explicit source choices.
 .SS \-\-path
 .PP
-For \fBlogs\fR, display the effective private \fBactivity.jsonl\fR pathname without reading or creating the journal. Use \fBoc\-box logs \-\-path\fR alone or with \fB\-\-log\-dir PATH\fR, not with \fB\-\-journald\fR, workspace filters, \fB\-\-follow\fR, or \fB\-\-json\fR\&.
+For \fBlogs\fR, display the effective private \fBactivity.jsonl\fR pathname without reading or creating the journal. Use \fBoc\-box logs \-\-path\fR alone or with \fB\-\-log\-dir PATH\fR, not with \fB\-\-journald\fR, workspace filters, \fB\-\-follow\fR, \fB\-\-verbose\fR, or \fB\-\-json\fR\&.
 .SS \-\-about
 .PP
 Print oc\-box version, author Paulo Dias and email, OpenAI coding\-assistant contribution, GPL\-3.0\-or\-later licensing, and source commit. No Podman or workspace is required. Use alone, without lifecycle selectors/options.
@@ -1574,18 +1580,19 @@ The last command deletes its remaining managed resources and recorded host archi
 .SH TROUBLESHOOTING
 .SS Launcher diagnostics
 .PP
-Use \fBoc\-box logs \-\-level debug\fR to inspect retained activity details without restarting a workspace. To see the launcher's expanded stage messages and fixed\-category diagnostics during an invocation, opt in explicitly:
+Use \fBoc\-box logs \-\-verbose=ALL\fR to inspect retained activity without restarting a workspace. For diagnostics from the current invocation:
 .PP
 .nf
 .fam C
-oc\-box start \-\-project ~/devel/demo \-\-lifecycle\-diagnostics
+oc\-box start \-\-project ~/devel/demo \-\-verbose=ALL
+oc\-box sync \-\-project ~/devel/demo \-\-verbose=warn
 .fam T
 .fi
 .PP
-Scripts that consume older verbose lifecycle messages should pass the flag to the launcher invocation under test instead of expecting routine start/done text in a pipe. The flag does not enable native debug logging, add raw child output to the journal or change lifecycle behavior. Continue to treat native output and interactive prompts as separate from the activity journal.
+Scripts that consume older verbose lifecycle messages should continue using \fB\-\-lifecycle\-diagnostics\fR for routine start/done lines in a pipe. Neither flag enables native debug logging, adds raw child output to the journal or changes lifecycle behavior. Native output and interactive prompts remain separate.
 .SS Private output capture and uv Python
 .PP
-V2 startup copies native OpenCode saved/OAuth credentials independently of the oc\-box vault. \fB\-\-no\-vault\fR skips vault entries, not native authentication or the private output capture that protects it. There is no oc\-box \fB\-\-verbose\fR flag; the final error after cleanup explains a failed startup stage. Use the launcher diagnostic setting above for additional stage details.
+V2 startup copies native OpenCode saved/OAuth credentials independently of the oc\-box vault. \fB\-\-no\-vault\fR skips vault entries, not native authentication or the private output capture that protects it. The final error after cleanup explains a failed startup stage. Use the launcher diagnostic settings above for additional safe stage details; they do not expose captured private output.
 .PP
 Some older uv\-managed Python builds omit \fBos.memfd_create\fR even on capable Linux hosts. oc\-box first uses the Python binding, or, when it is absent, lazily calls libc's \fBmemfd_create\fR with close\-on\-exec enabled. Both paths use the same kernel facility, never disk\-backed temporary files or architecture\-specific raw syscalls. A denied/failed native call is not retried through libc. Capability checks happen before container startup or reset deletion; preflight failures leave the existing container and workspace intact.
 .PP

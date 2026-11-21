@@ -93,8 +93,8 @@ _CLIPBOARD_REFUSALS = {
         "clipboard-disabled",
     )
 }
-CLIPBOARD_WARNING = (
-    "Experimental host clipboard paste enabled for this TUI client. "
+CLIPBOARD_ENABLED = "Experimental host clipboard paste enabled (Ctrl+Y)."
+CLIPBOARD_DETAILS = (
     "Ctrl+Y imports a PNG image or up to four copied local "
     "PNG/JPEG/GIF/WebP/PDF files (8 MiB each, 16 MiB per batch) into this "
     "workspace; ordinary Ctrl+V is unchanged. Ctrl+Y is reserved throughout this "
@@ -112,8 +112,9 @@ CLIPBOARD_SYMLINKS_WARNING = (
 CLIPBOARD_STRICT_WARNING = (
     "Strict clipboard sources: symlinks in files or parent folders are refused."
 )
-WARNING = (
-    "Experimental host file drops enabled. A supported absolute pathname "
+DROP_ENABLED = "Experimental host file drops enabled."
+DROP_DETAILS = (
+    "A supported absolute pathname "
     "pasted anywhere in this native TUI connection authorizes a temporary "
     "container copy, not just a Spectacle drag. PNG/JPEG/GIF/WebP/PDF only, "
     "8 MiB each. Model support varies. Files may be read by workspace tools, "

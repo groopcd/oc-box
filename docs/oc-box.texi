@@ -62,7 +62,7 @@ oc-box completion bash
 oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [LIFECYCLE-LOG-OPTIONS]
 oc-box --status [--project PATH | --workspace ID] [--json]
 oc-box status [--project PATH | --workspace ID] [--json]
-oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level debug|info|warn|error] [--limit N] [--follow] [--json]
+oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--follow] [--json]
 oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
@@ -81,7 +81,7 @@ oc-box COMMAND --help
 
 The command defaults to @code{start}. For @code{start}, @code{reset}, @code{stop}, @code{sync} and @code{terminal}, options may appear before or after the command. For @code{logs} and @code{web}, put the command first. Run the launcher on the host as your regular user, without sudo. It manages rootless Podman; container root is mapped to the unprivileged host user.
 
-@code{LIFECYCLE-LOG-OPTIONS} are @code{[--journald | --no-journald] [--log-dir PATH] [--lifecycle-diagnostics]}. They apply only to the current invocation; see the [activity journal settings](#dashboard-state-and-activity-journal).
+@code{LIFECYCLE-LOG-OPTIONS} are @code{[--journald | --no-journald] [--log-dir PATH] [--lifecycle-diagnostics] [--verbose[=LEVEL]]}. They apply only to the current invocation; see the [activity journal settings](#dashboard-state-and-activity-journal).
 
 @node Description
 @chapter Description
@@ -96,11 +96,11 @@ The default resource limits are 4 CPU cores, 8 GiB RAM, and 2048 processes. Thes
 
 @section Lifecycle output
 
-Startup and shutdown are quiet by default. On an interactive terminal, oc-box shows transient stage progress on one line and clears it instead of leaving a transcript of each step. Noninteractive output, including pipes and @code{TERM=dumb}, does not get routine stage start/done lines. Actionable warnings, errors and confirmation or credential prompts remain visible. Native OpenCode output and the native terminal and browser UIs are not changed.
+Startup and shutdown are quiet by default. On an interactive terminal, oc-box shows transient stage progress on one line and clears it instead of leaving a transcript of each step. Noninteractive output, including pipes and @code{TERM=dumb}, does not get routine stage start/done lines. Actionable warnings, errors and confirmation or credential prompts remain visible. Native OpenCode output and the native terminal and browser UIs are not changed. Native host drops and clipboard importing print one short line each when enabled. Use @code{oc-box start --verbose} for the full behavior, limits and clipboard symlink policy.
 
 After a history sync or recovery attempt, oc-box reports one final history result: saved normally, recovered after stop, partial, failed, empty, or cleanup unverified. The recovery result itself carries the interruption and unconfirmed-background-completion caution; archived history does not prove work finished. Incomplete results retain guidance for retrying @code{oc-box sync} when appropriate. The presentation does not change lifecycle steps, recovery eligibility, history verification or exit codes.
 
-Use @code{oc-box logs --level debug} to inspect retained stage details. For additional launcher messages on a particular invocation, see [@code{--lifecycle-diagnostics}](#launcher-diagnostics).
+Use @code{oc-box logs --verbose=ALL} to inspect retained stage details, or @code{oc-box start --verbose=ALL} for safe activity diagnostics from the current launch. See [Launcher diagnostics](#launcher-diagnostics) for the older @code{--lifecycle-diagnostics} option.
 
 @section OpenCode versions
 
@@ -575,7 +575,7 @@ oc-box --status --json
 
 Read the [oc-box activity journal](#dashboard-state-and-activity-journal) on the host. The default private-file reader uses only the Python standard library; no systemd, dashboard extras, Podman, native OpenCode, vault unlock or running workspace is needed. The command does not create, trim or rotate logs, start a container, or modify the workspace registry, project files or session history. It does not read Podman output or native OpenCode logfiles.
 
-By default, show the latest 100 retained entries at @code{info} or above. @code{--level debug} includes lower-severity stage detail; @code{--level warn} or @code{--level error} narrows the output. @code{--project PATH} and @code{--workspace ID} are mutually exclusive filters and require a valid workspace registration. With neither, show entries across workspaces, including entries with no workspace. Severity and workspace filters apply before the limit. Use @code{--follow} to keep watching after the initial output, and Ctrl-C to stop. Use @code{--json} for one validated event per line (JSON Lines), including when following. With no matches, JSON Lines output is empty, not @code{[]} or a placeholder. The default reader treats missing or unsafe private journal data as empty. Lifecycle detail can appear after the invocation finishes: history and shutdown diagnostics are queued so journal writes do not run inside verification deadlines or while a client lease is held.
+By default, show the latest 100 retained entries at @code{info} or above. @code{--level debug} includes lower-severity stage detail; @code{--level warn} or @code{--level error} narrows the output. Alternatively use @code{--verbose=LEVEL}. Bare @code{--verbose} or @code{--verbose=ALL} displays all validated retained levels, up to 10,000 matching entries unless you supply @code{--limit}. It never reveals unlogged data or reads a different source. @code{--project PATH} and @code{--workspace ID} are mutually exclusive filters and require a valid workspace registration. With neither, show entries across workspaces, including entries with no workspace. Severity and workspace filters apply before the limit. Use @code{--follow} to keep watching after the initial output, and Ctrl-C to stop. Use @code{--json} for one validated event per line (JSON Lines), including when following. With no matches, JSON Lines output is empty, not @code{[]} or a placeholder. The default reader treats missing or unsafe private journal data as empty. Lifecycle detail can appear after the invocation finishes: history and shutdown diagnostics are queued so journal writes do not run inside verification deadlines or while a client lease is held.
 
 Use @code{--log-dir PATH} to read a different private journal for this invocation. It works with the private event filters or with @code{--path} to print the resulting pathname without opening the journal. It does not create the directory or change the saved policy.
 
@@ -583,6 +583,7 @@ Use @code{--journald} to explicitly read this user's mirrored oc-box activity ev
 
 @example
 oc-box logs
+oc-box logs --verbose=ALL
 oc-box logs --path
 oc-box logs --log-dir ~/.local/state/oc-box-diagnostics --path
 oc-box logs --project ~/devel/demo --level debug --limit 50
@@ -878,7 +879,7 @@ For @code{logs}, set the minimum severity displayed, from @code{debug} (all leve
 
 @section --limit N
 
-For @code{logs}, set the maximum number of matching retained entries in the initial output, from 1 to 10,000. Default: 100. Rotation may leave fewer entries available.
+For @code{logs}, set the maximum number of matching retained entries in the initial output, from 1 to 10,000. Default: 100, or 10,000 with @code{--verbose=ALL}. Rotation may leave fewer entries available.
 
 @section --follow
 
@@ -902,9 +903,15 @@ Override the saved @code{logs.directory} for this invocation of @code{start} (in
 
 Show expanded launcher stage messages and fixed-category diagnostics for this invocation of @code{start} (including when the command is omitted), @code{reset}, @code{stop}, @code{sync}, @code{terminal} or @code{web}. Quiet output is the default and there is no saved diagnostic setting. This option does not change native OpenCode output, journaling or lifecycle results. See [Launcher diagnostics](#launcher-diagnostics).
 
+@section --verbose[=LEVEL]
+
+For @code{start} (including when omitted), @code{reset}, @code{stop}, @code{sync}, @code{terminal} and @code{web}, emit validated activity diagnostics on stderr at the selected minimum severity: @code{debug}, @code{info}, @code{warn}, or @code{error}. Levels are case-insensitive. Activity diagnostics are buffered and may appear at command exit. Bare @code{--verbose} means @code{--verbose=ALL}; both include every severity. With @code{info}, @code{debug}, or @code{ALL}, the native TUI startup notices also explain the enabled host-import features. This option never adds raw arguments, environment values, credentials, native errors or output, or clipboard content to these diagnostics. It does not suppress existing warnings, refusals or prompts, alter native output, or change what gets journaled.
+
+For @code{logs}, this is a read filter rather than a launcher setting. Use it instead of @code{--level}; @code{ALL} includes all validated retained records within the read bounds. It works with @code{--follow}, @code{--json} and the same explicit source choices.
+
 @section --path
 
-For @code{logs}, display the effective private @code{activity.jsonl} pathname without reading or creating the journal. Use @code{oc-box logs --path} alone or with @code{--log-dir PATH}, not with @code{--journald}, workspace filters, @code{--follow}, or @code{--json}.
+For @code{logs}, display the effective private @code{activity.jsonl} pathname without reading or creating the journal. Use @code{oc-box logs --path} alone or with @code{--log-dir PATH}, not with @code{--journald}, workspace filters, @code{--follow}, @code{--verbose}, or @code{--json}.
 
 @section --about
 
@@ -1599,17 +1606,18 @@ The last command deletes its remaining managed resources and recorded host archi
 
 @section Launcher diagnostics
 
-Use @code{oc-box logs --level debug} to inspect retained activity details without restarting a workspace. To see the launcher's expanded stage messages and fixed-category diagnostics during an invocation, opt in explicitly:
+Use @code{oc-box logs --verbose=ALL} to inspect retained activity without restarting a workspace. For diagnostics from the current invocation:
 
 @example
-oc-box start --project ~/devel/demo --lifecycle-diagnostics
+oc-box start --project ~/devel/demo --verbose=ALL
+oc-box sync --project ~/devel/demo --verbose=warn
 @end example
 
-Scripts that consume older verbose lifecycle messages should pass the flag to the launcher invocation under test instead of expecting routine start/done text in a pipe. The flag does not enable native debug logging, add raw child output to the journal or change lifecycle behavior. Continue to treat native output and interactive prompts as separate from the activity journal.
+Scripts that consume older verbose lifecycle messages should continue using @code{--lifecycle-diagnostics} for routine start/done lines in a pipe. Neither flag enables native debug logging, adds raw child output to the journal or changes lifecycle behavior. Native output and interactive prompts remain separate.
 
 @section Private output capture and uv Python
 
-V2 startup copies native OpenCode saved/OAuth credentials independently of the oc-box vault. @code{--no-vault} skips vault entries, not native authentication or the private output capture that protects it. There is no oc-box @code{--verbose} flag; the final error after cleanup explains a failed startup stage. Use the launcher diagnostic setting above for additional stage details.
+V2 startup copies native OpenCode saved/OAuth credentials independently of the oc-box vault. @code{--no-vault} skips vault entries, not native authentication or the private output capture that protects it. The final error after cleanup explains a failed startup stage. Use the launcher diagnostic settings above for additional safe stage details; they do not expose captured private output.
 
 Some older uv-managed Python builds omit @code{os.memfd_create} even on capable Linux hosts. oc-box first uses the Python binding, or, when it is absent, lazily calls libc's @code{memfd_create} with close-on-exec enabled. Both paths use the same kernel facility, never disk-backed temporary files or architecture-specific raw syscalls. A denied/failed native call is not retried through libc. Capability checks happen before container startup or reset deletion; preflight failures leave the existing container and workspace intact.
 
