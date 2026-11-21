@@ -301,7 +301,7 @@ class PreviewAdmissionTests(unittest.TestCase):
         info2 = {
             "Id": other,
             "Config": {"Labels": {}},
-            "State": {"Running": False},
+            "State": {"Status": "exited", "Running": False, "Paused": False},
             "Mounts": [{"Type": "bind", "Source": "/other/workspace"}],
         }
         ids = self.container_id + "\n" + other + "\n"
@@ -309,7 +309,11 @@ class PreviewAdmissionTests(unittest.TestCase):
             (
                 {},
                 True,
-                ("/other/workspace", "/synthetic/project", "/synthetic/volume"),
+                (
+                    "/synthetic/project",
+                    "/synthetic/volume",
+                    file_preview_host.InactiveMountSource("/other/workspace"),
+                ),
                 [],
             ),
             ({}, False, None, ["container-list-changed"]),
@@ -349,3 +353,62 @@ class PreviewAdmissionTests(unittest.TestCase):
                     engine.call_args_list[0].args,
                     ("--remote=false", "ps", "--all", "--quiet", "--no-trunc"),
                 )
+
+    def test_inactive_exception_never_applies_to_paused_unknown_or_shared_sources(self):
+        source = "/other/workspace"
+
+        def inventory(state, *, shared=False):
+            ids = [self.container_id, "e" * 64]
+            entries = [
+                self.info,
+                {
+                    "Id": ids[1],
+                    "State": state,
+                    "Mounts": [{"Type": "bind", "Source": source}],
+                },
+            ]
+            if shared:
+                ids.append("d" * 64)
+                entries.append(
+                    {
+                        "Id": ids[2],
+                        "State": {
+                            "Status": "running",
+                            "Running": True,
+                            "Paused": False,
+                        },
+                        "Mounts": [{"Type": "bind", "Source": source}],
+                    }
+                )
+            listing = "\n".join(ids)
+            with (
+                patch.object(box, "workspace_paths", return_value=[]),
+                patch.object(
+                    box,
+                    "podman",
+                    side_effect=[
+                        SimpleNamespace(returncode=0, stdout=reply)
+                        for reply in (
+                            listing,
+                            json.dumps(entries),
+                            json.dumps([self.volume]),
+                            listing,
+                        )
+                    ],
+                ),
+            ):
+                return file_preview.host_export_mounts(
+                    box, self.data, self.container_id
+                )
+
+        stopped = {"Status": "exited", "Running": False, "Paused": False}
+        self.assertIn(file_preview_host.InactiveMountSource(source), inventory(stopped))
+        for state in (
+            {"Status": "paused", "Running": True, "Paused": True},
+            {"Status": "restarting", "Running": False, "Paused": False},
+            {"Status": "exited", "Running": False},
+            {**stopped, "Restarting": True},
+        ):
+            with self.subTest(state=state):
+                self.assertIn(source, inventory(state))
+        self.assertIn(source, inventory(stopped, shared=True))

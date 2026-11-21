@@ -2896,7 +2896,11 @@ optional terminal remote control can inject raw input.  The host must
 have trusted ‘/usr/bin/xdg-open’ and ‘/usr/bin/xdg-mime’ and a private
 ‘XDG_RUNTIME_DIR’.  Incomplete mount inspection disables host opening.
 The check covers the current local Podman store and registered projects;
-it is not a census of other engines or atomic with container starts.
+it is not a census of other engines or atomic with container starts.  If
+a stopped container references a missing mount source, oc-box checks the
+path and its nearest existing parent for overlap.  Missing active
+sources, dangling links, and inaccessible sources still block host
+opening.
 
 The host relay grants at most one bounded transfer per observed
 Ctrl-click.  OpenCode chooses the link target; opt in only for a
@@ -4833,19 +4837,19 @@ Node: Synopsis930
 Node: Description3846
 Node: Commands9273
 Node: Options132652
-Node: Lifecycle and persistence187401
-Node: Distribution images189701
-Node: Sessions and recovery194665
-Node: Devices and host permissions201250
-Node: Resource reports203596
-Node: Configuration and environment205707
-Node: Files217088
-Node: Exit status227998
-Node: Examples229406
-Node: Troubleshooting231545
-Node: Installation and manuals243591
-Node: Authors and license253781
-Node: See also254388
+Node: Lifecycle and persistence187620
+Node: Distribution images189920
+Node: Sessions and recovery194884
+Node: Devices and host permissions201469
+Node: Resource reports203815
+Node: Configuration and environment205926
+Node: Files217307
+Node: Exit status228217
+Node: Examples229625
+Node: Troubleshooting231764
+Node: Installation and manuals243810
+Node: Authors and license254000
+Node: See also254607
 
 End Tag Table
 

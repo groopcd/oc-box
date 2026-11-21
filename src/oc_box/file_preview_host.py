@@ -10,6 +10,7 @@ import stat
 import subprocess
 import time
 from contextlib import contextmanager
+from dataclasses import dataclass
 
 PREFIX = b"\x1b]778;oc-box-open:v1:"
 _GRANT_PREFIX = b"\x1b]778;oc-box-click:v1:"
@@ -63,6 +64,13 @@ _DESKTOP_ENV = frozenset(
 
 class PreviewError(ValueError):
     """Fixed categories only, never paths, payloads or executable diagnostics."""
+
+
+@dataclass(frozen=True)
+class InactiveMountSource:
+    """A configured mount of a container verified to be inactive."""
+
+    path: str
 
 
 class RelayError(PreviewError):
@@ -362,6 +370,37 @@ def _identity(path):
     return info.st_dev, info.st_ino
 
 
+def _resolve_mount_source(path, *, missing_ok):
+    """Resolve an existing source or project an absent suffix from a real parent."""
+    missing = []
+    while True:
+        try:
+            existing = os.path.realpath(path, strict=True)
+        except FileNotFoundError:
+            if not missing_ok:
+                raise
+            # A dangling symlink is not an absent path component. Do not
+            # guess where it may lead (or swallow a permission failure).
+            try:
+                os.lstat(path)
+            except FileNotFoundError:
+                pass
+            else:
+                raise
+            parent, component = os.path.split(path)
+            if not component or parent == path:
+                raise
+            missing.append(component)
+            path = parent
+        else:
+            suffix = tuple(reversed(missing))
+            return (
+                os.path.join(existing, *suffix) if suffix else existing,
+                existing,
+                suffix,
+            )
+
+
 def _spool_not_mounted(parent, root, name, uid, host_mounts):
     root_info = os.fstat(parent)
     if not _private_directory(root_info, uid) or (
@@ -380,17 +419,30 @@ def _spool_not_mounted(parent, root, name, uid, host_mounts):
             return False
         spool_identity = info.st_dev, info.st_ino
 
-    spool_parents = {_identity(path) for path in _ancestors(root)}
+    def overlaps(path):
+        return os.path.commonpath((spool, path)) in (spool, path)
+
+    spool_parents = {}
+    for path in _ancestors(root):
+        spool_parents.setdefault(_identity(path), []).append(path)
     for source in host_mounts:
-        if not os.path.isabs(source):
+        inactive = isinstance(source, InactiveMountSource)
+        path = os.fspath(source.path if inactive else source)
+        if not os.path.isabs(path) or os.path.normpath(path) != path:
             return False
-        source = os.path.realpath(source)
-        if os.path.commonpath((spool, source)) in (spool, source):
+        if overlaps(path):
             return False
-        if _identity(source) in spool_parents:
+        resolved, existing, suffix = _resolve_mount_source(path, missing_ok=inactive)
+        if overlaps(resolved):
             return False
+        # If the closest existing parent is a bind alias for a staging
+        # ancestor, test the missing suffix at that ancestor too. A missing
+        # sibling outside the spool is not the same as a missing spool path.
+        for alias in spool_parents.get(_identity(existing), ()):
+            if overlaps(os.path.join(alias, *suffix) if suffix else alias):
+                return False
         if spool_identity is not None and any(
-            _identity(path) == spool_identity for path in _ancestors(source)
+            _identity(path) == spool_identity for path in _ancestors(existing)
         ):
             return False
     return True

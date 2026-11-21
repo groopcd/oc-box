@@ -8,6 +8,11 @@ import stat
 import subprocess
 import unicodedata
 
+if __package__:
+    from .file_preview_host import InactiveMountSource
+else:
+    from file_preview_host import InactiveMountSource
+
 RELEASE = re.compile(r"2\.3\.(?:0|[1-9][0-9]*)")
 FLAG = "OC_BOX_EXPERIMENTAL_FILE_OPEN"
 ROOTS = "OC_BOX_FILE_PREVIEW_ROOTS"
@@ -217,6 +222,7 @@ def host_export_mounts(box, data, container, *, refusals=None):
             return refuse(phase)
         remaining = set(ids)
         sources = {data["project"]}
+        inactive_sources = set()
         volumes = {}
         phase = "workspace-registry-unverified"
         registry = box.workspace_paths()
@@ -238,6 +244,18 @@ def host_export_mounts(box, data, container, *, refusals=None):
             remaining.remove(ident)
             if ident == container and verify_roots(box, data, item) is None:
                 return refuse("workspace-mounts-changed")
+            state = item.get("State")
+            # Only positively known inactive states get the absent-source
+            # exception. Paused, restarting and unknown states stay strict.
+            inactive = (
+                ident != container
+                and isinstance(state, dict)
+                and state.get("Status")
+                in ("configured", "created", "exited", "stopped")
+                and state.get("Running") is False
+                and state.get("Paused") is False
+                and state.get("Restarting", False) is False
+            )
             mounts = item.get("Mounts")
             if not isinstance(mounts, list):
                 return refuse(phase)
@@ -256,8 +274,8 @@ def host_export_mounts(box, data, container, *, refusals=None):
                         return refuse(phase)
                     if volumes.setdefault(name, source) != source:
                         return refuse(phase)
-                sources.add(source)
-        if remaining or len(sources) > 512 or len(volumes) > 128:
+                (inactive_sources if inactive else sources).add(source)
+        if remaining or len(sources | inactive_sources) > 512 or len(volumes) > 128:
             return refuse(phase)
         if volumes:
             phase = "volume-inspect-unverified"
@@ -282,7 +300,11 @@ def host_export_mounts(box, data, container, *, refusals=None):
             listed_again.stdout.splitlines()
         ):
             return refuse(phase)
-        return tuple(sorted(sources))
+        # An active or registered source wins if both inventories name it.
+        return (
+            *sorted(sources),
+            *(InactiveMountSource(path) for path in sorted(inactive_sources - sources)),
+        )
     except (
         OSError,
         ValueError,

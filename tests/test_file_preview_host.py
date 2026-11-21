@@ -554,6 +554,64 @@ class HostOpenerTests(unittest.TestCase):
         self.assertFalse(self.spool.exists())
         self.run_desktop.assert_not_called()
 
+    def test_missing_inactive_paths_are_checked_but_active_paths_stay_strict(self):
+        missing = self.base / "old-project" / "old-bind"
+        inactive = host.InactiveMountSource
+        self.assertEqual(
+            host.readiness_reason(host_mounts=(missing,)),
+            "runtime-staging-unverified",
+        )
+        self.assertTrue(host.ready(host_mounts=(inactive(missing),)))
+        self.assertEqual(
+            host.readiness_reason(host_mounts=(inactive(self.spool / "absent"),)),
+            "runtime-staging-overlaps-mount",
+        )
+        dangling = self.base / "broken-alias"
+        dangling.symlink_to(self.base / "missing")
+        self.assertEqual(
+            host.readiness_reason(host_mounts=(inactive(dangling / "subdir"),)),
+            "runtime-staging-unverified",
+        )
+        self.assertFalse(self.spool.exists())
+        self.run_desktop.assert_not_called()
+
+    def test_inactive_missing_suffix_is_compared_through_a_bind_alias(self):
+        alias = self.base / "alias"
+        alias.mkdir()
+        identity = host._identity
+
+        def fixture_identity(path):
+            return identity(self.base if Path(path) == alias else path)
+
+        with patch.object(host, "_identity", side_effect=fixture_identity):
+            self.assertTrue(
+                host.ready(host_mounts=(host.InactiveMountSource(alias / "other"),))
+            )
+            self.assertEqual(
+                host.readiness_reason(
+                    host_mounts=(
+                        host.InactiveMountSource(alias / self.spool.name / "missing"),
+                    )
+                ),
+                "runtime-staging-overlaps-mount",
+            )
+        self.assertFalse(self.spool.exists())
+
+    def test_stale_inactive_source_cannot_mask_permission_error(self):
+        denied = self.base / "uninspectable"
+        realpath = os.path.realpath
+
+        def resolve(path, **kwargs):
+            if Path(path) == denied:
+                raise PermissionError("synthetic private path")
+            return realpath(path, **kwargs)
+
+        with patch.object(host.os.path, "realpath", side_effect=resolve):
+            self.assertEqual(
+                host.readiness_reason(host_mounts=(host.InactiveMountSource(denied),)),
+                "runtime-staging-unverified",
+            )
+
     def test_runtime_directory_has_no_fallback_and_must_be_canonical_and_private(self):
         alias = self.base / "runtime-alias"
         alias.symlink_to(self.base, target_is_directory=True)

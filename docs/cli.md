@@ -2586,7 +2586,10 @@ can inject raw input. The host must have trusted `/usr/bin/xdg-open` and
 `/usr/bin/xdg-mime` and a private `XDG_RUNTIME_DIR`. Incomplete mount inspection
 disables host opening. The check covers the current local Podman store and
 registered projects; it is not a census of other engines or atomic with
-container starts.
+container starts. If a stopped container references a missing mount source,
+oc-box checks the path and its nearest existing parent for overlap. Missing
+active sources, dangling links, and inaccessible sources still block host
+opening.
 
 The host relay grants at most one bounded transfer per observed Ctrl-click.
 OpenCode chooses the link target; opt in only for a workspace whose programs
