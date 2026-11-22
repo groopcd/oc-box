@@ -23,8 +23,20 @@ account does not issue certificates, modify browser trust, or enable a listener.
 | Setup | Proposed operator flow | Client trust |
 | --- | --- | --- |
 | Localhost | `oc-box web tls setup localhost` runs a guided setup. Offer to use an existing trusted certificate or an optional `mkcert` installation to generate one covering the loopback names/IPs printed by oc-box. Explain any trust-store change and ask the operator to approve it explicitly. | Check the actual browser profiles. A successful certificate-generation step alone does not prove Chrome, Firefox, or Brave trusts it. Keep this profile loopback-only. |
-| Private LAN | Supply a certificate chain and key from an existing private CA for the DNS name or IP clients actually use. Verify the endpoint before enabling the network listener. | Install only the CA's **public certificate** on client devices, explicitly or via existing device management. Never distribute the CA private key. |
-| Publicly trusted | Supply an existing certificate and key, or provision and renew them with an external ACME client such as Certbot or Caddy. A DNS challenge can work with a LAN-only origin under a domain the operator controls. | Normal public-CA trust; users visit the certified hostname. Keep the listener explicitly enabled and scoped to the desired network. |
+| Private LAN | Use a private CA for an internal name or private IP, **or** a Let's Encrypt certificate for a hostname under a domain you control. Verify the endpoint before enabling the network listener. | Private CA: install only its **public certificate** on client devices; never distribute the CA private key. Let's Encrypt: normal browser trust when clients use the certified hostname. |
+| Publicly trusted | Supply an existing certificate and key, or provision and renew them with an external ACME client such as Certbot or Caddy. Public certificate trust does not require making oc-box publicly reachable. | Normal public-CA trust; users visit the certified hostname. Keep the listener explicitly enabled and scoped to the desired network. |
+
+For example, issue a Let's Encrypt certificate for `workspace.example.com`
+using [DNS-01 validation](https://letsencrypt.org/docs/challenge-types/#dns-01-challenge).
+The challenge's TXT record must be visible in public DNS, but your LAN DNS
+can resolve the hostname to a private IP (split DNS). No inbound internet
+port is required for issuance or renewal; keep the listener restricted to
+the intended network. Clients must use the certified hostname, not the private
+IP directly. Let's Encrypt cannot certify a private IP or a LAN-only name
+such as `workspace.local`. Keep DNS credentials with the external ACME
+client, preferably scoped to challenge records, not in the workspace.
+Public certificate issuance can disclose the hostname in Certificate
+Transparency logs; use a private CA if that matters.
 
 The localhost command should check prerequisites, validate the hostnames,
 certificate dates and key match, and explain how to verify trust in a real

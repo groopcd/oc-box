@@ -733,7 +733,8 @@
       <p class="muted" id="tls-local-status" role="status"></p>
     </div>
     <div id="tls-lan" hidden>
-      <p class="muted">Supply a chain and key issued by your private CA for the private hostname or IP. Client devices trust the CA’s public certificate; its private key is never distributed.</p>
+      <p class="muted"><strong>Private CA:</strong> supply a chain and key for the private hostname or IP. Client devices trust the CA’s public certificate; its private key is never distributed.</p>
+      <p class="muted"><strong>Let’s Encrypt:</strong> use DNS-01 for a hostname under a domain you control. LAN DNS can point that hostname to a private IP. No inbound internet port is required, and clients open the certified hostname.</p>
     </div>
     <div id="tls-public" hidden>
       <p class="muted">Use a hostname you control and an existing public certificate, or provision one with an ACME tool such as Certbot or Caddy. A DNS challenge can work even for a LAN-only service.</p>
