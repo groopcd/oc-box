@@ -323,6 +323,7 @@
       <summary id="web-account-toggle"><svg class="icon" aria-hidden="true"><use href="#i-user"/></svg><span class="mono" id="web-account-name"></span><span aria-hidden="true">▾</span></summary>
       <div class="account-menu">
         <p class="muted" id="web-account-method"></p>
+        <p class="muted" id="web-account-reach"><small>Localhost only</small></p>
         <button type="button" class="text-action" id="web-logout">Log out</button>
       </div>
     </details>
@@ -677,6 +678,7 @@
       <p class="eyebrow">oc-box / Web sign-in</p>
       <h1 id="login-title">Sign in to orbit-web</h1>
       <p class="muted" id="login-description">Use the dedicated web password for this workspace.</p>
+      <p class="muted" id="login-reach"><small id="login-reach-label"></small></p>
       <form id="login-form" class="login-form" autocomplete="off">
         <label class="manager-field">Web username
           <input type="text" id="login-user" required autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="64" aria-describedby="login-help login-error">
@@ -797,8 +799,11 @@
     const shell = byId("workspace-shell"), tui = byId("tui-mode");
     const loginStage = byId("login-stage"), loginUser = byId("login-user"), loginPassword = byId("login-password"), loginShow = byId("login-show");
     const demoWebUsers = new Map([["workspace-demo","oc-box-demo"],["review-demo","oc-box-review"]]);
-    let signedInUser = null, passwordEntrance = new URLSearchParams(location.search).get("auth") === "password";
-    const loggedOutLink = new URLSearchParams(location.search).get("auth") === "link-ended";
+    const previewQuery = new URLSearchParams(location.search);
+    const passwordEntrance = previewQuery.get("auth") === "password";
+    const loggedOutLink = previewQuery.get("auth") === "link-ended";
+    const networkEntrance = passwordEntrance && previewQuery.get("bind") === "all";
+    let signedInUser = null;
     const terminalCard = byId("terminal-card");
     const terminalElement = (id) => terminalCard.querySelector(`#${id}`);
     const terminalScreen = terminalElement("terminal-screen");
@@ -841,6 +846,8 @@
       loginStage.hidden = !open;
       byId("login-title").textContent = ended ? "You’re logged out" : "Sign in to orbit-web";
       byId("login-description").textContent = ended ? "The one-use link has already been used." : "Use the dedicated web password for this workspace.";
+      byId("login-reach").hidden = ended;
+      byId("login-reach-label").textContent = networkEntrance ? "Network-accessible sign-in preview · HTTPS required" : "Localhost only";
       byId("login-form").hidden = ended;
       byId("login-help").parentElement.hidden = ended;
       byId("logout-link").hidden = !ended;
@@ -849,6 +856,7 @@
       byId("web-account").hidden = open;
       byId("web-account-name").textContent = signedInUser ?? "Workspace guest";
       byId("web-account-method").textContent = signedInUser ? "Password sign-in" : "One-use link";
+      byId("web-account-reach").firstElementChild.textContent = signedInUser && networkEntrance ? "Network access · HTTPS" : "Localhost only";
       byId("preview-password").hidden = !!signedInUser;
       if (open) (ended ? byId("demo-new-link") : loginUser).focus();
       else byId(signedInUser ? "web-account-toggle" : "preview-password").focus();
@@ -1829,11 +1837,13 @@
     byId("web-logout").addEventListener("click", () => {
       const url = new URL(location.href);
       url.searchParams.set("auth", signedInUser ? "password" : "link-ended");
+      if (!signedInUser || !networkEntrance) url.searchParams.delete("bind");
       location.replace(url.href);
     });
     byId("demo-new-link").addEventListener("click", () => {
       const url = new URL(location.href);
       url.searchParams.delete("auth");
+      url.searchParams.delete("bind");
       location.replace(url.href);
     });
     document.addEventListener("click", (event) => {

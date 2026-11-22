@@ -7,6 +7,8 @@ It opens directly by default. Use **Preview sign-in** or append
 `workspace-demo` / `oc-box-demo` or `review-demo` / `oc-box-review`. Never
 enter real credentials. The top-left account menu shows the signed-in name or
 **Workspace guest** for the one-use-link preview, with **Log out** inside.
+Use `?auth=password&bind=all` to preview the explicit network sign-in variant.
+The HTML never opens a listener.
 See the [web sign-in design](web-sign-in.md) for the proposed launcher modes.
 
 - **Studio** keeps chat, sessions and the inspector side by side. Drag a
