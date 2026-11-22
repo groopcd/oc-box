@@ -191,8 +191,27 @@
     .manager-split details { margin-top:11px }
     .manager-panel .action:disabled,.manager-split .action:disabled { opacity:.55; cursor:not-allowed; background:none }
     .manager-table .child-name { padding-inline-start:24px }
-    .terminal-placeholder { min-height:154px; margin-top:11px; padding:13px; background:var(--bg);
-      border:1px solid var(--line); border-radius:6px; color:var(--muted); overflow-wrap:anywhere }
+    .terminal-card[data-floating] { position:fixed; z-index:4; right:16px; bottom:16px;
+      width:min(960px,calc(100vw - 32px)); max-height:calc(100dvh - 32px); overflow:auto;
+      box-shadow:0 15px 55px #000a; border-color:#42637b }
+    .terminal-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px }
+    .terminal-grid { display:flex; flex-wrap:wrap; gap:10px 18px; margin-top:11px }
+    .terminal-grid label { display:flex; flex-wrap:wrap; align-items:center; gap:6px; color:var(--muted) }
+    .terminal-grid input { accent-color:var(--accent); max-width:125px }
+    .terminal-screen { width:100%; max-width:100%; min-width:min(100%,180px); height:280px;
+      min-height:130px; max-height:65dvh; margin:11px 0 0; padding:13px; resize:both; overflow:auto;
+      white-space:pre-wrap; overflow-wrap:anywhere; background:var(--bg); border:1px solid var(--line);
+      border-radius:6px; color:var(--muted); font:13px/1.6 var(--mono) }
+    .terminal-screen:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
+    .terminal-card[data-attached] .terminal-screen { color:var(--text) }
+    .backup-section { margin-top:13px; padding-top:11px; border-top:1px solid var(--line) }
+    .backup-switches { display:grid; gap:3px; margin:10px 0 }
+    .backup-switches .manager-check { min-height:27px; align-items:start }
+    .backup-switches input { margin-top:4px }
+    .backup-switches label:has(input:disabled) { opacity:.65 }
+    .review-plan { margin:10px 0; padding-inline-start:20px }
+    .review-plan li + li { margin-top:5px }
+    .review-plan li { overflow-wrap:anywhere }
     @media (max-width:850px) { .manager-split { grid-template-columns:minmax(0,1fr) } }
     @media (max-width:1000px) {
       .inspector:not([hidden]) { position:fixed; z-index:3; top:0; bottom:0; right:0;
@@ -396,11 +415,26 @@
       </div>
     </section>
     <section role="tabpanel" id="manager-terminals" aria-labelledby="tab-terminals" tabindex="0" hidden>
-      <div class="view-head"><div><h2>Terminals</h2><p class="muted">A dedicated view for existing native session terminals.</p></div><span class="tag">Disconnected</span></div>
-      <div class="card manager-panel"><h3>Session terminal</h3>
-        <div class="toolbar"><label class="manager-field">Session<select><option>Improve history sync</option><option>Polish session tabs</option></select></label><button type="button" class="action" disabled>Attach terminal</button></div>
-        <div class="terminal-placeholder mono">No terminal is attached. This preview does not send keystrokes, open a shell or display live output.</div>
+      <div class="view-head"><div><h2>Terminals</h2><p class="muted">A dedicated view for existing native session terminals.</p></div><span class="tag demo">Simulated connection</span></div>
+      <div id="terminal-dock">
+      <div class="card manager-panel terminal-card" id="terminal-card">
+        <div class="terminal-heading"><h3>Session terminal</h3><span class="tag" id="terminal-state" role="status"></span></div>
+        <div class="toolbar">
+          <label class="manager-field">Session<select id="terminal-session"><option value="sync">Improve history sync</option><option value="tabs">Polish session tabs</option></select></label>
+          <button type="button" class="action" id="terminal-attach" aria-controls="terminal-screen"></button>
+          <button type="button" class="action push" id="terminal-float" aria-pressed="false">Float panel</button>
+        </div>
+        <pre class="terminal-screen" id="terminal-screen" aria-label="Simulated terminal viewport" tabindex="0"></pre>
+        <div class="terminal-grid">
+          <label>Width <input id="terminal-width" type="range" min="180" max="880" step="1" value="880"></label>
+          <label>Height <input id="terminal-height" type="range" min="130" max="600" step="1" value="280"></label>
+          <output id="terminal-size" class="tag" for="terminal-width terminal-height" aria-live="off"></output>
+          <button type="button" class="action" id="terminal-reset">Reset size</button>
+        </div>
+        <p class="muted"><small>Drag the bottom-right corner or use the size controls. Ctrl+] detaches the sample session; it doesn’t end it. This preview never opens a shell or forwards input.</small></p>
       </div>
+      </div>
+      <p id="terminal-floating-note" class="muted" hidden>The terminal panel is floating over the manager. Use <strong>Dock panel</strong> to put it back here.</p>
     </section>
     <section role="tabpanel" id="manager-logs" aria-labelledby="tab-logs" tabindex="0" hidden>
       <div class="view-head"><div><h2>Logs</h2><p class="muted">Filter retained activity by severity or message.</p></div><span class="tag">Private activity · Demo</span></div>
@@ -428,15 +462,58 @@
     <section role="tabpanel" id="manager-backups" aria-labelledby="tab-backups" tabindex="0" hidden>
       <div class="view-head"><div><h2>Backup and restore</h2><p class="muted">Choose an operation and review what would be included before proceeding.</p></div><span class="tag">No archive access</span></div>
       <div class="manager-split">
-        <div class="card"><h3>Operation</h3>
+        <div class="card">
+          <h3>Operation</h3>
           <div class="manager-fields">
             <label class="manager-field">Action<select id="manager-backup-action"><option value="backup">Create backup</option><option value="restore">Restore backup</option></select></label>
-            <label class="manager-field">Archive kind<select id="manager-backup-kind"><option value="portable">Portable workspace</option><option value="full">Full workspace</option><option value="sessions">Native session history</option></select></label>
           </div>
+          <div id="backup-create" class="backup-section">
+            <h3>Create options</h3>
+            <div class="manager-fields">
+              <label class="manager-field" id="backup-source-field">Source scope<select id="backup-source"><option value="workspace">Selected workspace</option><option value="all">All registered workspaces · choose one</option><option value="host">Host OpenCode · individual sessions</option></select></label>
+              <label class="manager-field" id="backup-kind-field">Archive type<select id="manager-backup-kind"><option value="workspace">Workspace / host settings (.ocbox)</option><option value="sessions">Session tree · history (.ocsession)</option></select></label>
+              <p class="muted" id="backup-host-kind" hidden>Host OpenCode source: session tree history (.ocsession).</p>
+              <label class="manager-field" id="backup-workspace-field">Workspace<select id="backup-workspace"></select></label>
+              <label class="manager-field" id="backup-root-field" hidden>Session tree<select id="backup-root"></select></label>
+              <label class="manager-field">Sample output path<input id="backup-output" readonly></label>
+            </div>
+            <div class="backup-switches" id="backup-create-switches">
+              <label class="manager-check"><input type="checkbox" id="backup-include-workspace" checked> Include workspace data</label>
+              <label class="manager-check"><input type="checkbox" id="backup-portable"> Portable backup (omit OS image)</label>
+              <label class="manager-check"><input type="checkbox" id="backup-include-host"> Include host settings and encrypted vault</label>
+              <label class="manager-check"><input type="checkbox" id="backup-include-export"> Include native credential export</label>
+              <label class="manager-field" id="backup-export-field" hidden>Existing private export file · sample path<input value="/example/migration/opencode-auth-export.json" readonly></label>
+            </div>
+            <p class="muted"><small>For host-only backup, turn off workspace data and turn on host settings. Native credentials require an existing private export; the manager doesn’t create one.</small></p>
+          </div>
+          <div id="backup-restore" class="backup-section" hidden>
+            <h3>Restore options</h3>
+            <div class="manager-fields">
+              <label class="manager-field">Sample encrypted archive<select id="backup-sample"><option value="combined">workspace-and-host.ocbox</option><option value="host">host-settings.ocbox</option><option value="workspace">workspace-only.ocbox</option><option value="sessions">session-tree.ocsession</option></select></label>
+              <div><button type="button" class="action" id="backup-inspect">Inspect sample archive</button></div>
+              <p id="backup-layout" class="muted" role="status"></p>
+              <label class="manager-field" id="backup-destination-field" hidden>New destination · sample path<input value="/example/projects/orbit-web-restored" readonly></label>
+            </div>
+            <div class="backup-switches">
+              <label class="manager-check"><input type="checkbox" id="backup-restore-workspace"> Restore workspace</label>
+              <label class="manager-check"><input type="checkbox" id="backup-restore-host"> Restore host settings and vault</label>
+              <label class="manager-check"><input type="checkbox" id="backup-restore-native"> Restore native OpenCode config, plugins and saved credentials</label>
+            </div>
+            <p class="muted"><small>Changing the sample archive clears component choices. Native restoration requires a separate review and the <code>restore-opencode</code> confirmation in the real workflow.</small></p>
+          </div>
+          <details class="backup-section">
+            <summary>Advanced · age recipients / identity files</summary>
+            <div class="manager-fields">
+              <label class="manager-field" id="backup-age-recipient-field">Encrypt to public age recipient<select id="backup-age-recipient"><option value="">None · use private password prompt</option><option value="migration">Migration key · sample public recipient</option></select></label>
+              <label class="manager-field" id="backup-age-identity-field" hidden>Existing private identity-file path<select id="backup-age-identity"><option value="">None · use private password prompt</option><option value="migration">/example/migration/age-identity.txt</option></select></label>
+              <p class="muted">No password, credential contents or real key material can be entered in this demo.</p>
+            </div>
+          </details>
         </div>
-        <div class="card"><h3>Review</h3><p id="manager-backup-summary" class="muted" aria-live="polite"></p><p><button type="button" class="action" disabled>Continue to review</button></p></div>
+        <div class="card"><h3>Plan preview</h3><p id="manager-backup-summary" class="muted" aria-live="polite"></p><ul id="backup-plan" class="review-plan"></ul><p><button type="button" class="action" disabled>No live operation</button></p></div>
       </div>
     </section>
+    <div id="floating-terminal"></div>
   </main>
 
   <script>
@@ -509,6 +586,14 @@
     let selected = sessions[0], scope = "all", panel = "status", created = 0, inspectorReturn, activeDrag;
     let panePriority = "left", managerView = "status", managerWorkspace = workspaceRows[0];
     const shell = byId("workspace-shell"), tui = byId("tui-mode");
+    const terminalCard = byId("terminal-card"), terminalScreen = byId("terminal-screen");
+    const terminalSizes = { width:byId("terminal-width"), height:byId("terminal-height") };
+    const sampleTerminals = {
+      sync: "$ git status --short\n M src/history_reader.py\n$ pytest tests/test_history.py -q\n8 passed\n$ ",
+      tabs: "$ git status --short\n M src/web_sessions.js\n$ pytest tests/test_web_sessions.py -q\n6 passed\n$ ",
+    };
+    const seenTerminals = new Set();
+    let terminalAttached = false, inspectedArchive = null;
     const draft = byId("draft"), library = byId("library"), inspector = byId("inspector");
     const narrow = matchMedia("(max-width: 680px)"), overlay = matchMedia("(max-width: 1000px)");
     const background = all(".top, .review, .library, .splitter, .shell > main");
@@ -670,10 +755,105 @@
       byId("manager-storage-list").innerHTML = table(["Scope","Size"], rows.map((cells) => ({ cells })));
     }
 
+    function renderTerminal() {
+      const selector = byId("terminal-session"), id = selector.value, retained = seenTerminals.has(id);
+      byId("terminal-state").textContent = terminalAttached ? "Attached · Simulation" : retained ? "Detached · Session retained" : "Not attached";
+      byId("terminal-attach").textContent = terminalAttached ? "Detach session" : retained ? "Reattach session" : "Attach session";
+      selector.disabled = terminalAttached;
+      terminalCard.toggleAttribute("data-attached", terminalAttached);
+      terminalScreen.textContent = terminalAttached ?
+        `Simulated native terminal · ${selector.selectedOptions[0].textContent}\n\n${sampleTerminals[id]}` :
+        retained ? "Viewer detached. Reattach to see this session’s sample output again." :
+          "No terminal attached. Choose a session and select Attach session to see sample output.";
+    }
+
+    function toggleTerminalAttachment() {
+      terminalAttached = !terminalAttached;
+      if (terminalAttached) seenTerminals.add(byId("terminal-session").value);
+      renderTerminal();
+    }
+
+    function syncTerminalSize() {
+      if (!terminalScreen.getClientRects().length) return;
+      const available = Math.max(1, terminalCard.clientWidth - 28);
+      const maxHeight = Math.max(130, Math.floor(window.innerHeight * .65));
+      const { width, height } = terminalScreen.getBoundingClientRect();
+      terminalSizes.width.min = Math.min(180, available);
+      terminalSizes.width.max = available;
+      terminalSizes.height.max = maxHeight;
+      terminalSizes.width.value = Math.round(width);
+      terminalSizes.height.value = Math.round(height);
+      byId("terminal-size").value = `${Math.round(width)} × ${Math.round(height)} px`;
+    }
+
     function renderManagerBackups() {
-      const action = byId("manager-backup-action").value === "restore" ? "Restore" : "Create";
-      const kind = byId("manager-backup-kind").selectedOptions[0].textContent;
-      byId("manager-backup-summary").textContent = `${action} · ${kind}. A live operation would require an explicit review. No files are opened or written here.`;
+      const restoring = byId("manager-backup-action").value === "restore";
+      byId("backup-create").hidden = restoring;
+      byId("backup-restore").hidden = !restoring;
+      byId("backup-age-recipient-field").hidden = restoring;
+      byId("backup-age-identity-field").hidden = !restoring;
+      const plan = [];
+      let title;
+      if (restoring) {
+        const workspace = byId("backup-restore-workspace"), host = byId("backup-restore-host"), native = byId("backup-restore-native");
+        workspace.disabled = !["combined","workspace"].includes(inspectedArchive);
+        host.disabled = !["combined","host"].includes(inspectedArchive);
+        if (workspace.disabled) workspace.checked = false;
+        if (host.disabled) host.checked = false;
+        native.disabled = !host.checked;
+        if (native.disabled) native.checked = false;
+        byId("backup-destination-field").hidden = !workspace.checked;
+        const layoutNotes = { combined:"Workspace and host settings", host:"Host settings only", workspace:"Workspace only", sessions:"Session tree only" };
+        byId("backup-layout").textContent = inspectedArchive ? `Sample layout: ${layoutNotes[inspectedArchive]}. No archive was read.` :
+          "Inspect the sample to reveal available components.";
+        title = inspectedArchive ? "Restore · example scope" : "Restore · inspect the sample first";
+        if (workspace.checked) plan.push("Workspace data → a new destination, with fresh IDs. Does not start it.");
+        if (host.checked) plan.push("Host settings and encrypted vault. Existing host files are not overwritten.");
+        if (native.checked) plan.push("Native OpenCode config, plugins and credentials. Requires an additional authenticated review and explicit consent.");
+        if (inspectedArchive === "sessions") plan.push("Session tree → the connected Sessions source in a live workflow. Restores with fresh IDs.");
+        if (!plan.length) plan.push("No restore components selected.");
+        plan.push(byId("backup-age-identity").value ? "Unlock method: example age identity file." : "Unlock method: private password prompt in the live workflow.");
+      } else {
+        const kind = byId("manager-backup-kind"), source = byId("backup-source").value;
+        const workspace = byId("backup-include-workspace"), host = byId("backup-include-host");
+        const portable = byId("backup-portable"), native = byId("backup-include-export");
+        kind.disabled = source === "host";
+        byId("backup-kind-field").hidden = kind.disabled;
+        byId("backup-host-kind").hidden = !kind.disabled;
+        const sessionTree = kind.disabled || kind.value === "sessions";
+        byId("backup-create-switches").hidden = sessionTree;
+        portable.disabled = !workspace.checked;
+        if (portable.disabled) portable.checked = false;
+        native.disabled = !host.checked;
+        if (native.disabled) native.checked = false;
+        byId("backup-export-field").hidden = !native.checked;
+        byId("backup-workspace-field").hidden = sessionTree || (!workspace.checked && host.checked) || source !== "all";
+        byId("backup-root-field").hidden = !sessionTree;
+        const root = byId("backup-root");
+        const sourceCatalog = source === "host" ? hostCatalog : source === "all" ? [...workspaceCatalog,...otherCatalogs["atlas-api"]] :
+          managerWorkspace.name === "orbit-web" ? workspaceCatalog : otherCatalogs[managerWorkspace.name] ?? [];
+        const rootChoices = sourceCatalog.filter((row) => row[1] === "Root").map((row) => row[0]);
+        const previous = root.value;
+        if (Array.from(root.options, (option) => option.value).join("\n") !== rootChoices.join("\n")) {
+          root.replaceChildren(...rootChoices.map((name) => new Option(name, name)));
+          if (rootChoices.includes(previous)) root.value = previous;
+        }
+        const workspaceName = source === "all" ? byId("backup-workspace").value : managerWorkspace.name;
+        const target = sessionTree ? "session-tree.ocsession" : workspace.checked ? `${workspaceName}.ocbox` : "host-settings.ocbox";
+        byId("backup-output").value = `/example/archives/${target}`;
+        title = sessionTree ? "Create · session tree" : workspace.checked ? (portable.checked ? "Create · portable workspace" : "Create · full workspace") :
+          host.checked ? "Create · host-only backup" : "Create · choose what to include";
+        if (sessionTree) plan.push(root.value ? `One native session tree: ${root.value}. Includes history, not running state.` : "No sample session tree is available for this workspace.");
+        else {
+          if (workspace.checked) plan.push(`Workspace: ${workspaceName}. ${portable.checked ? "Container OS image omitted." : "Container OS image included."}`);
+          if (host.checked) plan.push("Host settings and the encrypted vault. Does not include the host database.");
+          if (native.checked) plan.push("Include the existing sample private credential export; do not generate an export.");
+        }
+        if (!plan.length) plan.push("No backup components selected.");
+        plan.push(byId("backup-age-recipient").value ? "Encryption: Migration key (sample public age recipient)." : "Encryption: password (default).");
+      }
+      byId("manager-backup-summary").textContent = title;
+      byId("backup-plan").replaceChildren(...plan.map((line) => Object.assign(document.createElement("li"), { textContent:line })));
     }
 
     function setLayout(name) {
@@ -853,6 +1033,7 @@
       renderManagerStatus();
       renderManagerSessions();
       renderManagerStorage();
+      renderManagerBackups();
       byId("manager-workspaces").querySelector("[aria-pressed=true]").focus();
     });
     byId("manager-density").addEventListener("change", (event) => tui.toggleAttribute("data-compact", event.target.value === "Compact"));
@@ -867,7 +1048,44 @@
     for (const id of ["manager-session-source","manager-session-search","manager-include-archives"]) byId(id).addEventListener("input", renderManagerSessions);
     for (const id of ["manager-log-search","manager-log-severity"]) byId(id).addEventListener("input", renderManagerLogs);
     byId("manager-storage-scope").addEventListener("change", renderManagerStorage);
-    for (const id of ["manager-backup-action","manager-backup-kind"]) byId(id).addEventListener("change", renderManagerBackups);
+    byId("terminal-attach").addEventListener("click", toggleTerminalAttachment);
+    byId("terminal-session").addEventListener("change", renderTerminal);
+    byId("terminal-float").addEventListener("click", (event) => {
+      const floating = !terminalCard.hasAttribute("data-floating");
+      if (!floating) showTuiView("terminals");
+      terminalCard.toggleAttribute("data-floating", floating);
+      byId(floating ? "floating-terminal" : "terminal-dock").append(terminalCard);
+      byId("terminal-floating-note").hidden = !floating;
+      event.target.textContent = floating ? "Dock panel" : "Float panel";
+      event.target.setAttribute("aria-pressed", floating);
+      event.target.focus();
+      syncTerminalSize();
+    });
+    for (const [axis, slider] of Object.entries(terminalSizes)) slider.addEventListener("input", () => {
+      terminalScreen.style[axis] = `${slider.value}px`;
+      syncTerminalSize();
+    });
+    byId("terminal-reset").addEventListener("click", () => {
+      terminalScreen.style.removeProperty("width");
+      terminalScreen.style.removeProperty("height");
+      syncTerminalSize();
+    });
+    new ResizeObserver(syncTerminalSize).observe(terminalScreen);
+    byId("manager-backups").addEventListener("change", (event) => {
+      if (event.target.id === "backup-sample") {
+        inspectedArchive = null;
+        for (const id of ["backup-restore-workspace","backup-restore-host","backup-restore-native"]) byId(id).checked = false;
+      }
+      renderManagerBackups();
+    });
+    byId("backup-inspect").addEventListener("click", () => {
+      const sample = byId("backup-sample").value;
+      if (sample !== inspectedArchive) {
+        inspectedArchive = sample;
+        byId("backup-restore-workspace").checked = sample === "workspace" || sample === "combined";
+      }
+      renderManagerBackups();
+    });
     overlay.addEventListener("change", () => showInspector(!overlay.matches && layout() === "studio", inspector.contains(document.activeElement)));
     narrow.addEventListener("change", () => showLibrary(false));
     for (const button of all("[data-scope]")) button.addEventListener("click", () => {
@@ -892,6 +1110,10 @@
     });
     document.addEventListener("keydown", (event) => {
       if (layout() === "tui") {
+        if (event.target.closest("#terminal-card") && terminalAttached && event.ctrlKey && !event.altKey && !event.metaKey && event.code === "BracketRight") {
+          toggleTerminalAttachment();
+          event.preventDefault();
+        }
         if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing &&
             event.target.closest("[role=tablist]") && /^[1-7]$/.test(event.key)) {
           showTuiView(managerTabs[Number(event.key) - 1].dataset.tuiView, true);
@@ -946,7 +1168,9 @@
     renderManagerSessions();
     renderManagerLogs();
     renderManagerStorage();
+    byId("backup-workspace").replaceChildren(...workspaceRows.map((w) => new Option(w.name, w.name)));
     renderManagerBackups();
+    renderTerminal();
     setLayout(location.hash.slice(1));
     selectSession(selected);
   </script>
