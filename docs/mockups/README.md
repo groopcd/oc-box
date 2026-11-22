@@ -18,8 +18,9 @@ companion files, dependencies, network requests or live service connections.
   Use the tabs, or focus the tab bar and use arrow keys or 1–7.
   - **Logs:** Use the dedicated Search logs bar and the severity filter. Clear
     search independently of severity.
-  - **Terminals:** Drag the corner grip or focus it and use the arrow keys to
-    resize, in the manager or in a separate browser window. There are no
+  - **Terminals:** In the manager, drag the corner grip or focus it and use
+    the arrow keys. In a separate window, the terminal automatically fills
+    the space available when the browser window is resized. There are no
     resize sliders or visible scrollback bars. Attach, detach (`Ctrl+]`
     while focused), and reattach in either context. Returning to the manager
     or closing the pop-out keeps the simulated session state. If the browser

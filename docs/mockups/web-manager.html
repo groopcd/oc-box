@@ -191,10 +191,20 @@
     .manager-split details { margin-top:11px }
     .manager-panel .action:disabled,.manager-split .action:disabled { opacity:.55; cursor:not-allowed; background:none }
     .manager-table .child-name { padding-inline-start:24px }
-    .terminal-window { padding:12px }
+    .terminal-window { display:grid; grid-template-rows:auto minmax(0,1fr); height:100dvh; min-height:245px; padding:12px }
     .terminal-window-title { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:10px }
     .terminal-window-title h1 { font-size:18px }
-    .terminal-window .terminal-viewport { height:max(130px,calc(100dvh - 270px)); max-height:max(130px,calc(100dvh - 210px)) }
+    .terminal-window .terminal-card { display:flex; flex-direction:column; min-height:0; min-width:0 }
+    .terminal-window .terminal-viewport { flex:1 1 0; width:100%; height:auto; min-height:0; max-height:none }
+    .terminal-window .terminal-screen { padding:13px }
+    .terminal-window .terminal-card > :not(.terminal-viewport) { flex:none }
+    @media (max-width:540px) {
+      .terminal-window { padding:8px }
+      .terminal-window .terminal-card { padding:9px }
+      .terminal-window .toolbar { gap:5px }
+      .terminal-window .toolbar .push { margin-left:0 }
+      .terminal-window .terminal-card > .muted { display:none }
+    }
     .terminal-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px }
     .terminal-grid { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-top:10px }
     .terminal-viewport { position:relative; width:100%; max-width:100%; min-width:min(100%,180px); height:280px;
@@ -445,7 +455,7 @@
           <output id="terminal-size" class="tag" aria-live="off"></output>
           <button type="button" class="action" id="terminal-reset">Reset size</button>
         </div>
-        <p class="muted"><small>Drag the corner grip to resize, or focus it and use the arrow keys. Ctrl+] detaches the sample session without ending it. This preview never opens a shell or forwards input.</small></p>
+        <p class="muted"><small><span id="terminal-dock-hint">Drag the corner grip to resize, or focus it and use the arrow keys. </span><span id="terminal-window-hint" hidden>Resize this window to fit the terminal. </span>Ctrl+] detaches the sample session without ending it. No live shell.</small></p>
       </div>
       </div>
       <div id="terminal-window-panel" class="card manager-panel" hidden>
@@ -826,6 +836,13 @@
       if (terminalGrip.hasPointerCapture(pointerId)) terminalGrip.releasePointerCapture(pointerId);
     }
 
+    function setTerminalResizeContext(poppedOut) {
+      terminalGrip.hidden = poppedOut;
+      terminalElement("terminal-reset").hidden = poppedOut;
+      terminalElement("terminal-dock-hint").hidden = poppedOut;
+      terminalElement("terminal-window-hint").hidden = !poppedOut;
+    }
+
     function dockTerminal(popup, { close = false, focus = false } = {}) {
       if (popup !== terminalWindow) return;
       finishTerminalDrag();
@@ -834,6 +851,7 @@
       terminalViewport.style.width = dockedTerminalSize.width;
       terminalViewport.style.height = dockedTerminalSize.height;
       dockedTerminalSize = null;
+      setTerminalResizeContext(false);
       terminalElement("terminal-popout").textContent = "Open in new window";
       terminalElement("terminal-popout").setAttribute("aria-describedby", "terminal-window-notice");
       byId("terminal-window-panel").hidden = true;
@@ -883,6 +901,7 @@
         doc.body.append(terminalCard);
         terminalViewport.style.removeProperty("width");
         terminalViewport.style.removeProperty("height");
+        setTerminalResizeContext(true);
         terminalElement("terminal-popout").textContent = "Return to manager";
         terminalElement("terminal-popout").removeAttribute("aria-describedby");
         byId("terminal-window-panel").hidden = false;
