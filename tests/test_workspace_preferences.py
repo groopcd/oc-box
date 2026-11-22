@@ -1312,16 +1312,27 @@ class WorkspacePreferenceCliTests(_WorkspaceFixture):
             for arguments in (
                 (),
                 ("--json",),
+                ("--table",),
                 ("--host-drop", "off"),
                 ("--host-clipboard", "on"),
             ):
                 with self.assertRaises(box.BoxError) as raised:
                     self.invoke(box, *arguments)
                 self.assertEqual(str(raised.exception), preferences.HOST_ONLY)
-            with contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.redirect_stdout(io.StringIO()) as help_text:
                 with self.assertRaises(SystemExit) as raised:
                     preferences.cli(box, ["--help"])
                 self.assertEqual(raised.exception.code, 0)
+            for token in (
+                "--project PATH",
+                "--workspace ID",
+                "--host-drop on|off",
+                "--host-clipboard on|off",
+                "--host-clipboard-symlinks on|off",
+                "--table",
+                "--json",
+            ):
+                self.assertIn(token, help_text.getvalue())
         self.assertEqual(box.calls, [])
         self.assertFalse(self.file.exists())
         self.assertFalse(self.lock.exists())
@@ -1420,6 +1431,65 @@ class WorkspacePreferenceCliTests(_WorkspaceFixture):
             self.assertNotIn(str(self.path), text)
             self.assertNotIn(WORKSPACE, text)
         self.assertEqual(preferences.read(self.path, WORKSPACE)["future"], PRIVATE)
+
+    def test_table_projects_values_and_scope_and_saves_explicit_changes_only(self):
+        box = self.box()
+        with patch.dict(os.environ, {}, clear=True):
+            default = self.invoke(box, "--table")
+            self.assertEqual(list(self.parent.iterdir()), [self.path])
+            self.seed(
+                {
+                    "version": 1,
+                    "workspace": WORKSPACE,
+                    "host_drop": False,
+                    "future": PRIVATE,
+                }
+            )
+            updated = self.invoke(box, "--host-clipboard-symlinks", "off", "--table")
+        for pattern in (
+            r"Host drop[^\n]*enabled[^\n]*default",
+            r"Host clipboard[^\n]*disabled[^\n]*default",
+            r"Host clipboard symlinks[^\n]*enabled[^\n]*default",
+        ):
+            self.assertRegex(default, pattern)
+        for pattern in (
+            r"Host drop[^\n]*disabled[^\n]*saved",
+            r"Host clipboard[^\n]*disabled[^\n]*default",
+            r"Host clipboard symlinks[^\n]*disabled[^\n]*saved",
+        ):
+            self.assertRegex(updated, pattern)
+        for text in (default, updated):
+            self.assertIn("Future workspace TUI clients (host only)", text)
+            self.assertRegex(text, r"Current clients[^\n]*unchanged")
+            self.assertNotIn(PRIVATE, text)
+            self.assertNotIn(str(self.path), text)
+            self.assertNotIn(WORKSPACE, text)
+        self.assertNotIn("Explicit preferences saved", default)
+        self.assertIn("Explicit preferences saved", updated)
+        self.assertEqual(
+            preferences.read(self.path, WORKSPACE),
+            {
+                "version": 1,
+                "workspace": WORKSPACE,
+                "host_drop": False,
+                "host_clipboard_symlinks": False,
+                "future": PRIVATE,
+            },
+        )
+
+    def test_table_and_json_conflict_before_lookup_or_preference_save(self):
+        box = self.box()
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            contextlib.redirect_stdout(io.StringIO()) as output,
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as raised,
+        ):
+            preferences.cli(box, ["--host-drop", "off", "--table", "--json"])
+        self.assertEqual(raised.exception.code, 2)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(box.calls, [])
+        self.assertEqual(list(self.parent.iterdir()), [self.path])
 
     def test_clipboard_preferences_save_without_discovery_or_runtime_and_project_safely(
         self,

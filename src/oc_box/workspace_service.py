@@ -1752,6 +1752,7 @@ def web_parser():
     result = argparse.ArgumentParser(
         prog="oc-box web",
         description="Open the native web UI on the private V2 workspace service; attach to a running session or own a new foreground lease.",
+        epilog="Run on the host with OpenCode 2.x. Keep the command open while using the browser relay.",
     )
     group = result.add_mutually_exclusive_group()
     group.add_argument(
@@ -1759,21 +1760,23 @@ def web_parser():
         type=Path,
         help="host project directory (default: current directory)",
     )
-    group.add_argument("--workspace", help="existing workspace ID")
+    group.add_argument("--workspace", metavar="ID", help="existing workspace ID")
     result.add_argument(
         "--session",
+        metavar="ID",
         help="explicit existing private-service conversation ID; overrides the launcher selection",
     )
     result.add_argument(
         "--port",
         type=int,
+        metavar="N",
         default=0,
-        help="host loopback browser relay port; default selects a free port",
+        help="host loopback browser relay port, 1..65535; 0 (default) selects a free port",
     )
     result.add_argument(
         "--no-open",
         action="store_true",
-        help="print the pairing link without opening a browser",
+        help="print the pairing link without opening a browser; keep the relay running",
     )
     result.add_argument(
         "--attachments",

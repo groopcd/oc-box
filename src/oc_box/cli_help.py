@@ -30,7 +30,7 @@ _COMMAND_GROUPS = (
             ("terminal", "Open a session terminal or a maintenance shell"),
             ("web", "Open the native OpenCode browser interface"),
             ("tui", "Open the experimental workspace manager"),
-            ("share", "Share host paths read-only with a live workspace"),
+            ("share", "Share a host file or directory read-only with a live workspace"),
             ("attach", "Attach a host image to a native OpenCode session"),
         ),
     ),
@@ -91,7 +91,7 @@ _OPTION_GROUPS = {
         ("log_dir", "journald", "lifecycle_diagnostics", "verbose"),
     ),
     "terminal": ("Terminal mode", ("maintenance",)),
-    "status": ("Output", ("json",)),
+    "status": ("Output", ("json", "table")),
     "purge": ("Removal options", ("delete_sessions", "all", "yes")),
     "credentials": (
         "Credential policy",
@@ -124,21 +124,26 @@ _SCOPE_OMISSIONS = {"reset": ("import_session",)}
 
 _WORKSPACE_NOTE = "With no workspace selector, use the current directory."
 _LOGGING_NOTE = "Logging options apply to this invocation only."
+_LAUNCH_REQUIREMENTS = "Run on the Linux host as a regular user with rootless Podman and native OpenCode installed."
 _COMMAND_NOTES = {
     "start": (
         "This is the default command.",
+        _LAUNCH_REQUIREMENTS,
         _WORKSPACE_NOTE,
         "Use 'oc-box reset' to change settings for an existing container.",
         _LOGGING_NOTE,
     ),
     "reset": (
+        _LAUNCH_REQUIREMENTS,
         _WORKSPACE_NOTE,
         "Rebuilding retains the project, private home, and session history.",
+        "Exit the owning client first. System packages installed in the old container must be recreated.",
         _LOGGING_NOTE,
     ),
     "stop": (_WORKSPACE_NOTE, _LOGGING_NOTE),
     "sync": (
         _WORKSPACE_NOTE,
+        "Exports workspace conversations to the host and stops the container afterward; it may prepare or recreate the environment.",
         (
             "Set resource limits only when recreating a missing container for a "
             "registered workspace; use reset for an existing container."
@@ -147,23 +152,49 @@ _COMMAND_NOTES = {
     ),
     "terminal": (
         _WORKSPACE_NOTE,
-        "OpenCode 1.x only supports the maintenance shell.",
+        "Requires an interactive host terminal. The V2 session shell needs an existing private owner; OpenCode 1.x only supports the maintenance shell.",
         _LOGGING_NOTE,
     ),
-    "repair": (_WORKSPACE_NOTE,),
+    "repair": (
+        _WORKSPACE_NOTE,
+        "Repair the original registered directory and its marker; never overwrite another workspace's marker.",
+    ),
     "purge": (
         _WORKSPACE_NOTE,
         "Without deletion flags, keep project files and host session archives.",
     ),
     "credentials": (
         _WORKSPACE_NOTE,
-        "Without policy options, show saved forwarding mode and credential names only.",
+        "Without policy options, show the selected or default forwarding policy and credential names only.",
+        "Global vault mode does not take a name list; use --clear-credentials when switching from named selections.",
     ),
-    "upgrade": ("Use --auto-update separately from release selection options.",),
+    "upgrade": (
+        "Run on the host as a regular user. Updates require a supported launcher installation.",
+        "Successful explicit channel choices are remembered; previews do not save them.",
+        "Use --auto-update separately from release selection options.",
+    ),
     "status": (
         "'oc-box --status' is equivalent.",
         "With no workspace selector, report all registered workspaces.",
     ),
+    "list": (
+        "Lists every registration; STATUS describes project or marker health, not container state.",
+    ),
+    "distros": (
+        "Shows supported container image references and marks the host default.",
+    ),
+}
+_COMMAND_EXAMPLES = {
+    "start": "oc-box start --project ~/devel/demo --new",
+    "reset": "oc-box reset --project ~/devel/demo --cpus 8",
+    "stop": "oc-box stop --project ~/devel/demo",
+    "sync": "oc-box sync --project ~/devel/demo",
+    "terminal": "oc-box terminal --maintenance --project ~/devel/demo",
+    "repair": "oc-box repair --workspace WORKSPACE_ID",
+    "purge": "oc-box purge --workspace WORKSPACE_ID",
+    "credentials": "oc-box credentials --project ~/devel/demo",
+    "upgrade": "oc-box upgrade --devel --check",
+    "status": "oc-box status --project ~/devel/demo --table",
 }
 _COMMAND_DESCRIPTIONS = {
     name: description
@@ -220,6 +251,9 @@ class LauncherParser(argparse.ArgumentParser):
                 break
             if arg in ("--ve", "--ver", "--vers"):
                 args[index] = "--version"
+            elif arg.partition("=")[0] == "--t":
+                # This spelling selected upgrade --tui before --table existed.
+                args[index] = "--tui" + arg[len("--t") :]
             elif (
                 arg in ("--verb", "--verbo", "--verbos", "--verbose")
                 and index + 1 < len(args)
@@ -310,4 +344,6 @@ class LauncherParser(argparse.ArgumentParser):
         for title, group_actions in sections:
             self._add_help_group(formatter, title, group_actions)
         formatter.add_text(" ".join(_COMMAND_NOTES.get(command, ())))
+        if command in _COMMAND_EXAMPLES:
+            formatter.add_text("Example: " + _COMMAND_EXAMPLES[command])
         return formatter.format_help()

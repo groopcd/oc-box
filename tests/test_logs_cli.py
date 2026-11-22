@@ -101,6 +101,7 @@ class LogsCliTests(unittest.TestCase):
                 ("--workspace", _ID),
                 ("--follow",),
                 ("--json",),
+                ("--table",),
                 ("--verbose",),
             ):
                 with (
@@ -183,6 +184,7 @@ class LogsCliTests(unittest.TestCase):
                 ("--level", "warning"),
                 ("--verbose=PRIVATE_SENTINEL",),
                 ("--verbose=all", "--level", "debug"),
+                ("--table", "--json"),
                 ("--log-dir",),
                 ("--log-dir", ""),
                 ("--log-dir", "/"),
@@ -549,6 +551,27 @@ class LogsCliTests(unittest.TestCase):
             self.run_cli("--path"), (0, str(self.root / "log/activity.jsonl") + "\n")
         )
 
+    def test_table_follow_prints_its_heading_once_on_first_match(self):
+        first, second = (_event(number, level="warn") for number in (1, 2))
+        with (
+            patch.object(
+                logs_cli.activity_log,
+                "read_events",
+                side_effect=[[], [first], [first, second]],
+            ),
+            patch.object(
+                logs_cli.time, "sleep", side_effect=[None, None, KeyboardInterrupt]
+            ),
+        ):
+            code, output = self.run_cli("--table", "--follow", "--level", "warn")
+        self.assertEqual(code, 130)
+        self.assertEqual(output.count("TIMESTAMP"), 1)
+        self.assertEqual(
+            [line.split()[-1] for line in output.splitlines()[1:]],
+            ["duration_ms=1", "duration_ms=2"],
+        )
+        self.assertFalse(self.root.exists())
+
     def test_private_follow_ignores_gap_and_resumes_without_replay(self):
         log = self.root / "log"
         self.root.mkdir(mode=0o700)
@@ -616,16 +639,20 @@ class LogsCliTests(unittest.TestCase):
         mirror.assert_not_called()
 
     def test_broken_pipe_from_buffer_flush_ends_without_shutdown_error(self):
-        read_fd, write_fd = os.pipe()
-        os.close(read_fd)
-        with (
-            os.fdopen(write_fd, "w") as stdout,
-            contextlib.redirect_stdout(stdout),
-            patch.object(logs_cli.activity_log, "read_events", return_value=[_event()]),
-            patch.object(logs_cli.time, "sleep") as sleep,
-        ):
-            self.assertEqual(logs_cli.cli(self.box, ["--follow"]), 0)
-        sleep.assert_not_called()
+        for options in (["--follow"], ["--follow", "--table"]):
+            read_fd, write_fd = os.pipe()
+            os.close(read_fd)
+            with (
+                self.subTest(options=options),
+                os.fdopen(write_fd, "w") as stdout,
+                contextlib.redirect_stdout(stdout),
+                patch.object(
+                    logs_cli.activity_log, "read_events", return_value=[_event()]
+                ),
+                patch.object(logs_cli.time, "sleep") as sleep,
+            ):
+                self.assertEqual(logs_cli.cli(self.box, options), 0)
+                sleep.assert_not_called()
 
 
 if __name__ == "__main__":

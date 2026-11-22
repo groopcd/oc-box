@@ -10,20 +10,29 @@ import sys
 def parser():
     result = argparse.ArgumentParser(
         prog="oc-box tui",
-        description="Browse status, settings, sessions, live terminals and searchable logs.",
+        description="Browse workspace resources, sessions, terminals, logs, storage and backups in the dashboard. Requires the optional TUI extra and an interactive terminal.",
     )
     selectors = result.add_mutually_exclusive_group()
-    selectors.add_argument("--project", type=Path)
-    selectors.add_argument("--workspace")
+    selectors.add_argument(
+        "--project",
+        type=Path,
+        metavar="PATH",
+        help="initially select a registered host project directory",
+    )
+    selectors.add_argument(
+        "--workspace",
+        metavar="ID",
+        help="initially select a registered workspace by ID",
+    )
     result.add_argument(
         "--read-only",
         action="store_true",
-        help="disable session mutations and terminal attachment",
+        help="disable session/storage changes, backup mutations and terminal attachment; allow archive inspection",
     )
     result.add_argument(
         "--demo",
         action="store_true",
-        help="preview with synthetic data only, including inside oc-box",
+        help="run a synthetic read-only preview; ignores workspace selectors and also works inside oc-box",
     )
     return result
 

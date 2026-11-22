@@ -16,37 +16,49 @@ oc-box terminal [--project PATH | --workspace ID] [--maintenance] [LIFECYCLE-LOG
 oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
 oc-box attach PATH --session ID [--project PATH | --workspace ID] [--text TEXT] [--send] [--acknowledge-risk]
 oc-box attach --broker --session ID [--project PATH | --workspace ID]
-oc-box preferences [--project PATH | --workspace ID] [--host-drop on|off] [--json]
+oc-box preferences [--project PATH | --workspace ID] [--host-drop on|off] [--host-clipboard on|off] [--host-clipboard-symlinks on|off] [--json | --table]
 oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
 oc-box list
 oc-box distros
-oc-box doctor [--json] [--feature FEATURE ...]
+oc-box doctor [--json | --table] [--feature FEATURE]...
 oc-box completion bash
 oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [LIFECYCLE-LOG-OPTIONS]
-oc-box --status [--project PATH | --workspace ID] [--json]
-oc-box status [--project PATH | --workspace ID] [--json]
-oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--follow] [--json]
+oc-box --status [--project PATH | --workspace ID] [--json | --table]
+oc-box status [--project PATH | --workspace ID] [--json | --table]
+oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--follow] [--json | --table]
 oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
 oc-box upgrade --auto-update on|off
-oc-box secrets init|list|passwd
+oc-box secrets init|passwd [--min-passphrase-length N]
+oc-box secrets list
 oc-box secrets set|remove NAME
 oc-box credentials [--project PATH | --workspace ID] [CREDENTIAL-OPTIONS]
-oc-box backup [--project PATH | --workspace ID] --output FILE [--portable] [--host] [--opencode-auth-export FILE] [--recipient AGE_KEY ...]
-oc-box backup-info FILE [--identity FILE ...]
-oc-box restore FILE [--project NEW_PATH] [--host [--include-opencode]] [--identity FILE ...]
+oc-box backup [--project PATH | --workspace ID] --output FILE [--portable] [--host [--opencode-auth-export FILE|-]] [--recipient AGE_KEY]...
+oc-box backup [--project PATH | --workspace ID] --output FILE [--portable] [--host [--opencode-auth-export FILE|-]] [--min-passphrase-length N]
+oc-box backup-info FILE [--identity FILE]... [--json | --table]
+oc-box restore FILE --project NEW_PATH [--host [--include-opencode]] [--identity FILE]...
+oc-box restore FILE --host [--include-opencode] [--identity FILE]...
 oc-box --about
 oc-box --version
 oc-box -h | --help
 oc-box COMMAND --help
 ```
 
-The command defaults to `start`. For `start`, `reset`, `stop`, `sync` and
-`terminal`, options may appear before or after the command. For `logs` and
-`web`, put the command first. Run the launcher on the host as your regular user,
+The command defaults to `start`. For the shared launcher commands, such as
+`start`, `reset`, `stop`, `sync` and `terminal`, options may appear before or
+after the command. Put dedicated commands (`attach`, `backup`, `backup-info`,
+`completion`, `doctor`, `logs`, `preferences`, `restore`, `secrets`, `share`,
+`tui` and `web`) first. Run the launcher on the host as your regular user,
 without sudo. It manages rootless Podman; container root is mapped to the
 unprivileged host user.
+
+`START-OPTIONS` cover session selection, model, container setup, native TUI
+features and credential delivery. `RESET-OPTIONS` use the corresponding reset
+options but do not import a host session. See [start](#start) and [reset](#reset)
+for their effects, or `oc-box start --help` and `oc-box reset --help` for the
+scoped flags. `CREDENTIAL-OPTIONS` are `--credential-mode`, `--env-secret`,
+`--vault-secret` and `--clear-credentials`; see [credentials](#credentials).
 
 `LIFECYCLE-LOG-OPTIONS` are `[--journald | --no-journald] [--log-dir PATH]
 [--lifecycle-diagnostics] [--verbose[=LEVEL]]`. They apply only to the current invocation; see
@@ -167,6 +179,7 @@ oc-box doctor
 oc-box doctor --feature private-output
 oc-box doctor --feature backup --feature vault
 oc-box doctor --feature backup-info --json
+oc-box doctor --feature backup-info --table
 ```
 
 Feature selectors: `launch`, `private-output`, `maintenance`, `history`, `backup`, `backup-info`, `restore`,
@@ -177,6 +190,8 @@ feature's prerequisites are present; exit 1 means at least one is missing or
 incompatible. JSON schema version 1 includes scope, detected distro, feature
 availability, dependency details, missing providers, package names, installation
 commands, and notes. Missing optional features never disable unrelated commands.
+`--table` shows feature readiness, missing prerequisites and package guidance
+in columns, without changing the checks or exit status.
 Feature commands check their prerequisites before secret prompts or destructive
 workspace changes and include OS-specific fixes.
 
@@ -260,9 +275,11 @@ not force autoaccept or copy the container's preferences back to the host.
 
 An owner may be ready at native home without a default conversation. Additional
 terminal TUIs preserve that state instead of forcing a historical root. Default
-session-shell and browser attachments require a verified open root; otherwise
-they refuse with guidance to open one or explicitly start with `--new`.
-Location-scoped sharing and metadata browsing do not invent a session.
+session shells need an eligible native session. The browser can still pair and
+show native Home, or select an existing session with `web --session ID`.
+The browser image-drop adapter has its own target checks; pairing alone does not
+authorize a file upload. Location-scoped sharing and metadata browsing do not
+invent a session.
 
 Experimental outside-host image/PDF drops into the native TUI are enabled by
 default for supported clients. Save `--no-host-drop` to disable importing for
@@ -291,6 +308,7 @@ oc-box preferences --project ~/devel/demo --host-clipboard on
 oc-box preferences --project ~/devel/demo --host-clipboard-symlinks off
 oc-box preferences --project ~/devel/demo --host-clipboard off
 oc-box preferences --project ~/devel/demo --json
+oc-box preferences --project ~/devel/demo --table
 ```
 
 `--project` and `--workspace` are mutually exclusive. With no change option this
@@ -311,6 +329,8 @@ read the clipboard, even when saving an enable choice.
 JSON output includes the effective `host_clipboard` and
 `host_clipboard_symlinks` booleans; `source` still indicates whether a preference
 file is saved or defaults are in use, not the origin of each individual field.
+Use `--table` to see effective values and whether each preference is saved or
+default. The presentation does not save a preference by itself.
 
 Corrupt, unsafe or mismatched preferences refuse rather than silently granting
 access. Changes apply to future clients only. Preferences survive ordinary
@@ -1048,7 +1068,7 @@ workspace overview. The header workspace picker permits switching registrations
 from every section without connecting to a native source.
 Browsing does not create/start a workspace, take lifecycle
 ownership, reset, sync, refresh credentials or unlock the vault. `--read-only`
-disables native session mutation, backup creation/restore/deletion, workspace
+disables native session mutation, backup creation/restore, workspace
 removal and terminal control/input. Explicit backup inspection remains available.
 `--demo` is a
 synthetic-only preview with fixed CPU/RAM/storage readings that also permits
@@ -1341,9 +1361,9 @@ instead of starting OpenCode. Select the current project, `--project PATH`, or
 redirected input/output is refused.
 
 ```sh
-oc-box terminal
-oc-box terminal --project ~/devel/demo
-oc-box terminal --workspace WORKSPACE_ID
+oc-box terminal --maintenance
+oc-box terminal --maintenance --project ~/devel/demo
+oc-box terminal --maintenance --workspace WORKSPACE_ID
 ```
 
 Exit the active OpenCode launcher first: maintenance holds the same exclusive
@@ -1538,12 +1558,17 @@ Alias of `--status`. Report all registered environments unless `--project` or
 `--workspace` selects one. A selector must refer to an existing workspace.
 Status is read-only and can run while OpenCode is active; it does not start,
 stop, or execute commands inside managed containers. Use `--json` for numeric,
-machine-readable output. See Resource reports for metric interpretation.
+machine-readable output, or `--table` for a bounded field/value view that omits
+saved Podman option values. Status output can contain private paths and
+metadata; the default and JSON reports also retain raw saved Podman options.
+Review the output before sharing it. The default remains the resource summary.
+See Resource reports for metric interpretation.
 
 ```sh
 oc-box status
 oc-box --status --project ~/devel/demo
 oc-box --status --json
+oc-box status --project ~/devel/demo --table
 ```
 
 ### logs
@@ -1568,6 +1593,8 @@ watching after the initial output, and Ctrl-C to stop. Use `--json` for one
 validated event per line (JSON Lines), including when following. With no
 matches, JSON Lines output is empty, not `[]` or a placeholder. The default
 reader treats missing or unsafe private journal data as empty.
+Use `--table` for timestamp, severity and activity columns; when following,
+the heading appears once on the first match. No matches still produce no output.
 Lifecycle detail can appear after the invocation finishes: history and shutdown
 diagnostics are queued so journal writes do not run inside verification deadlines
 or while a client lease is held.
@@ -1595,6 +1622,7 @@ oc-box logs --log-dir ~/.local/state/oc-box-diagnostics --path
 oc-box logs --project ~/devel/demo --level debug --limit 50
 oc-box logs --workspace WORKSPACE_ID --level warn --follow --json
 oc-box logs --journald --level warn --follow --json
+oc-box logs --table --level warn --follow
 ```
 
 ### upgrade
@@ -2054,18 +2082,23 @@ whole-machine backup nor a credential revocation mechanism.
 ### backup-info
 
 Decrypt/verify a backup's manifest and ciphertext checksums without starting
-Podman or extracting workspace contents. Requires age and a controlling terminal
-for passphrase backups, or a native private --identity file for recipient backups.
-Output is JSON metadata including kind, source path/ID, architecture, component
+Podman or extracting workspace contents. Requires `age`, `age-keygen` and
+Linux anonymous-memory file support. Use a controlling terminal for passphrase
+backups or a native private `--identity` file for recipient backups.
+Default output (or explicit `--json`) is JSON metadata including kind, source
+path/ID, architecture, component
 sizes/checksums, saved session IDs, settings, and documented limitations. Raw
 additional Podman option values are omitted to avoid printing saved secrets.
 It never prints archived file contents or the host vault and does not execute
 container image code. Metadata itself may contain private paths/session names.
 Host-only inspection reports the archive type and version, not filenames from
 the host profile, setting values, or credential records.
+Use `--table` for a bounded field/value view of supported archive metadata.
+It omits raw Podman values and unknown manifest fields.
 
 ```sh
 oc-box backup-info /backup/demo.ocbox
+oc-box backup-info /backup/demo.ocbox --table
 oc-box backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt
 ```
 
@@ -2268,17 +2301,19 @@ the existing maintenance shell.
 
 ### --read-only
 
-Tui-only. Disable native session mutations and terminal control/input while
-retaining inspection and refresh. Explicit native host Connect may still start
+Tui-only. Disable session changes, terminal attachment/control, backup
+creation/restore, workspace removal and host logging saves. The dashboard
+does not delete archive files in any mode. Inspection
+and refresh remain available. Explicit native host Connect may still start
 the normal host service; this flag is not an offline/service-free mode. Opening
 the dashboard itself does not start a workspace or unlock credentials.
 
 ### --demo
 
-Tui-only. Use synthetic data with no host services, real workspace registry or
-log access, or host/workspace actions. Allows a dashboard preview inside a
-container; it does not relax the normal manager's host/regular-user/TTY boundary
-or establish live host acceptance.
+Tui-only. Use synthetic data, force read-only mode and ignore workspace selectors.
+No host service, real registry, journal or workspace action is used. A demo may
+run inside a container but still requires optional TUI dependencies and an
+interactive terminal. It is not live host acceptance.
 
 ### --port N
 
@@ -2335,10 +2370,11 @@ where every file always needs independent typed host approval.
 
 ### --project PATH
 
-Select an existing project directory; relative paths resolve from the host
-working directory. Quote paths containing spaces. For lifecycle commands the
-default is the current directory. For status, omission means all workspaces.
-For `tui`, it narrows the dashboard to an existing project; omit both selectors
+Select a project directory; for `restore`, this instead names a new, nonexistent
+destination. Relative paths resolve from the host working directory. Quote paths
+containing spaces. For lifecycle commands and `preferences`, the default is the
+current directory. For status, omission means all workspaces.
+For `tui`, it initially selects a registered project; omit both selectors
 for the registered workspace overview. `tui` accepts only one selector.
 For `logs`, it filters journal entries by a registered project path, cannot be
 combined with `--workspace`, and does not default to the current directory.
@@ -2363,7 +2399,7 @@ For `logs`, this is an exact workspace ID filter and cannot be combined with
 ### --status
 
 Report CPU, RAM, storage, state, limits, and sessions without opening OpenCode.
-Equivalent to `status`. Only selectors and `--json` apply. It cannot be combined
+Equivalent to `status`. Only selectors and `--json` or `--table` apply. It cannot be combined
 with another command, session mode, resource change, or deletion action.
 
 ### --json
@@ -2373,9 +2409,26 @@ numeric bytes and unavailable values are `null`; notes explain partial results.
 Progress goes to stderr, not the JSON stream. Doctor uses its own versioned
 feature/dependency schema. `logs` instead emits JSON Lines, one event per line,
 not a single JSON object or array.
+`preferences` reports one object with the effective workspace UI settings on a
+read or a save; `--json` does not stop explicit preference changes from saving.
+`backup-info` already defaults to JSON. `--json` and `--table` are mutually exclusive.
 
 ```sh
 oc-box --status --json > status.json
+```
+
+### --table
+
+Select human-readable tables instead of JSON or the usual text. Available with
+`status` (including `--status`), `logs`, `preferences`, `doctor` and
+`backup-info`. It uses the same source, filters and exit status as the
+corresponding report. Status and backup inspection tables show bounded
+metadata and omit saved Podman option values. It is mutually exclusive with
+`--json` and does not apply to `logs --path`.
+
+```sh
+oc-box backup-info /backup/demo.ocbox --table
+oc-box logs --follow --table
 ```
 
 ### --level debug|info|warn|error
@@ -2454,7 +2507,8 @@ bounds. It works with `--follow`, `--json` and the same explicit source choices.
 For `logs`, display the effective private `activity.jsonl` pathname without
 reading or creating the journal. Use `oc-box logs --path` alone or with
 `--log-dir PATH`, not with `--journald`, workspace filters, `--follow`,
-`--verbose`, or `--json`.
+`--verbose`, `--json`, or `--table`. `--level` and `--limit` have no effect
+when showing a path.
 
 ### --about
 
@@ -2464,8 +2518,9 @@ workspace is required. Use alone, without lifecycle selectors/options.
 
 ### --version
 
-Print oc-box's commit-derived version and exit without Podman. The format is
-`1.7.N+gHASH`, with N the full-history commit count minus 29 (the original 1.0.0
+Print oc-box's commit-derived version and exit without Podman. Stable releases
+use `1.7.N+gHASH`; development builds use `1.7.N.dev0+gHASH`. N is the
+full-history commit count minus 29 (the original 1.0.0
 baseline). Each later commit advances N; shallow history cannot supply a release
 identity. Tracked uncommitted changes add `.dirty`. Untracked files do not. Installed
 copies retain their installation-time identity in `build-info.json`; reinstall
@@ -2476,7 +2531,8 @@ The OpenCode V2-compatible 1.5 series, 1.6 refactoring series and 1.7 manager/sh
 series retain the same commit-derived patch count; a first published patch is
 not required to be zero. Installed older copies keep their original
 0.1/1.0/1.5/1.6 identity.
-PyPI distribution metadata uses only `1.7.N`, because public PyPI versions
+PyPI distribution metadata uses `1.7.N` for stable releases and `1.7.N.dev0`
+for development releases, because public PyPI versions
 cannot contain the local `+gHASH` suffix. Its packaged build-info still includes
 the full source identity displayed by this command, so the exact Git commit is
 retained even in a wheel/source distribution installed without Git.
@@ -2561,15 +2617,16 @@ Example: `oc-box upgrade --auto-update on`.
 
 ### --new
 
-Start a new root conversation while retaining the same container and files.
-Use with start (the default) or reset. Mutually exclusive with `--resume` and
+Select a new root conversation. `start` keeps the existing environment; `reset`
+still replaces its container OS before launching. An additional client cannot
+use this option against an existing V2 owner. Mutually exclusive with `--resume` and
 `--import-session`. Example: `oc-box --project ~/devel/demo --new`.
 
 ### --resume
 
-Explicitly request the normal resume behavior. Requires a registered workspace;
-if one exists but no root session has been recorded, OpenCode can start a new
-conversation. Use with start/reset. Mutually exclusive with `--new` and
+Require a registered workspace and select its recorded eligible root rather than
+the default saved-tab selection on supported V2 launches. If no eligible root
+exists, OpenCode can start a new conversation. Use with start/reset. Mutually exclusive with `--new` and
 `--import-session`. Example: `oc-box --project ~/devel/demo --resume`.
 
 ### --import-session SESSION_ID
@@ -2588,9 +2645,9 @@ oc-box --project ~/devel/demo --import-session ses_HOST_SESSION_ID
 
 ### --model PROVIDER/MODEL
 
-Pass the provider/model choice to the OpenCode TUI on this launch. It is not a
-persistent oc-box workspace setting. Use with start/reset; otherwise normal
-OpenCode provider/model preferences apply.
+Select a model for the native launch. On V2 this can set the model on the chosen
+native session, but it does not save an oc-box workspace-wide default. Use with
+start/reset; an additional client cannot set a model on an existing V2 owner.
 
 ```sh
 oc-box --project ~/devel/demo --model github-copilot/gpt-6.1-sol
@@ -3087,8 +3144,9 @@ The archive suffix is conventional; the versioned format is checked on restore.
 
 Backup-only. Omit the container OS image while retaining project, complete
 private home, sessions, registry evidence, and limits/credential-name settings.
-Restore rebuilds the selected distro OS/baseline tools; custom system packages
-and native-cache compatibility are the user's responsibility. Example:
+The first normal launch after restore rebuilds the selected distro OS and
+baseline tools. Custom system packages and native-cache compatibility are the
+user's responsibility. Example:
 `oc-box backup --project ~/devel/demo --portable --output /backup/demo.ocbox`.
 
 ### --recipient AGE_KEY
@@ -3106,6 +3164,7 @@ For `backup`, include the [host migration component](#include-host-settings-for-
 Without a workspace selector or `--portable`, back up only the host. For `restore`,
 explicitly install the archived oc-box host settings and encrypted vault; omit
 `--project` for a host-only restore from either type of host-containing archive.
+A host-only archive cannot be used with `--project`.
 
 ### --opencode-auth-export FILE
 
@@ -3134,6 +3193,7 @@ Set the CPU quota in core units; fractions such as `2.5` are accepted by Podman.
 Default: `4`. Set at creation or reset. Existing containers, even stopped ones,
 require reset to change it; oc-box does not call `podman update`. Values are
 validated by Podman. `0` requests no CPU quota where supported.
+`sync` can save a new value when recreating a missing container for a registered workspace.
 
 ```sh
 oc-box reset --project ~/devel/demo --cpus 8
@@ -3146,6 +3206,7 @@ Default: `8g`. Set at creation or reset; not a live update. The value is saved
 for future launches. Limits require delegated cgroup controllers. Podman
 validates the size and kernel support. `0` requests no memory limit where
 supported. There is no automatic project/volume disk quota.
+`sync` can save a new value when recreating a missing container for a registered workspace.
 
 ```sh
 oc-box reset --project ~/devel/demo --memory 16g
@@ -3155,6 +3216,7 @@ oc-box reset --project ~/devel/demo --memory 16g
 
 Set the container's process limit; default `2048`. oc-box requires at least
 `32`. Set at creation or reset; changing an existing container requires reset.
+`sync` can save a new value when recreating a missing container for a registered workspace.
 Example: `oc-box reset --project ~/devel/demo --pids-limit 4096`.
 
 ### --device MAPPING
@@ -3303,7 +3365,8 @@ Python combination may need an OS upgrade rather than a package reinstall.
 | Maintenance/stop/repair/purge | Linux, Python, Podman and UID helpers; history preservation/deletion additionally uses host OpenCode |
 | Full/portable backup | Linux, Python, rootless Podman/UID helpers, age/age-keygen (both from `age`), memfd support |
 | Backup inspection | Linux, Python, age/age-keygen, memfd; no Podman/OpenCode/vault extra |
-| Restore | Backup prerequisites plus pasta, init/helper/runtime providers for container creation |
+| Host-only restore | `age`, `age-keygen` and Linux anonymous-memory file support; no Podman |
+| Workspace restore | Backup prerequisites plus pasta, init/helper/runtime providers for container creation |
 | Optional vault | `cryptography` in the same Python environment as oc-box; no age requirement |
 | GitHub installation/upgrade | Git and Python; one-line download also needs curl, mktemp and trusted CA certificates |
 | Storage reports | GNU `du` from `coreutils`; BusyBox du is insufficient; other metrics still work if absent |

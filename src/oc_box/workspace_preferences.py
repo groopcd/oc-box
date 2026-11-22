@@ -576,29 +576,79 @@ def parser():
     result = argparse.ArgumentParser(
         prog="oc-box preferences",
         description="Read or save host-only preferences for future workspace TUI clients.",
+        epilog="Output flags change only the display; explicit settings are still saved.",
     )
     selectors = result.add_mutually_exclusive_group()
-    selectors.add_argument("--project", type=Path)
-    selectors.add_argument("--workspace")
+    selectors.add_argument(
+        "--project",
+        type=Path,
+        metavar="PATH",
+        help="select the registered workspace for a project (default: current directory)",
+    )
+    selectors.add_argument(
+        "--workspace", metavar="ID", help="select an existing workspace by its ID"
+    )
     result.add_argument(
         "--host-drop",
         choices=("on", "off"),
-        help="save the future-client host-drop preference",
+        metavar="on|off",
+        help="save the future-client host-drop preference (default: on)",
     )
     result.add_argument(
         "--host-clipboard",
         choices=("on", "off"),
-        help="save the future-client Ctrl+Y host clipboard preference (default off)",
+        metavar="on|off",
+        help="save the future-client Ctrl+Y host clipboard preference (default: off)",
     )
     result.add_argument(
         "--host-clipboard-symlinks",
         choices=("on", "off"),
-        help="save whether future clipboard file imports follow symlinks (default on)",
+        metavar="on|off",
+        help="save whether future clipboard file imports follow symlinks (default: on)",
     )
-    result.add_argument(
-        "--json", action="store_true", help="print only projected preference status"
+    output = result.add_mutually_exclusive_group()
+    output.add_argument(
+        "--json", action="store_true", help="emit machine-readable preference status"
+    )
+    output.add_argument(
+        "--table",
+        action="store_true",
+        help="show preference values and sources in a table",
     )
     return result
+
+
+def _table(value, source, changed):
+    if __package__:
+        from . import cli_table
+    else:
+        import cli_table
+
+    clipboard = value.get("host_clipboard", DEFAULT_HOST_CLIPBOARD)
+    symlinks = value.get("host_clipboard_symlinks", DEFAULT_HOST_CLIPBOARD_SYMLINKS)
+    status = cli_table.render(
+        ("PREFERENCE", "VALUE", "SOURCE"),
+        (
+            ("Host drop", "enabled" if value["host_drop"] else "disabled", source),
+            (
+                "Host clipboard",
+                "enabled" if clipboard else "disabled",
+                "saved" if "host_clipboard" in value else "default",
+            ),
+            (
+                "Host clipboard symlinks",
+                "enabled" if symlinks else "disabled",
+                "saved" if "host_clipboard_symlinks" in value else "default",
+            ),
+        ),
+    )
+    scope = {
+        "Scope": "Future workspace TUI clients (host only)",
+        "Current clients": "unchanged",
+    }
+    if changed:
+        scope["Result"] = "Explicit preferences saved"
+    return status + "\n\n" + cli_table.fields(scope)
 
 
 def cli(box, args):
@@ -648,6 +698,8 @@ def cli(box, args):
                 applies_to_future_clients=True, current_clients_unchanged=True
             )
         print(json.dumps(projected, separators=(",", ":")))
+    elif args.table:
+        print(_table(value, source, changed))
     elif changed:
         for name, label in (
             ("host_drop", "host drop"),

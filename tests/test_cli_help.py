@@ -275,7 +275,7 @@ class CliHelpTests(unittest.TestCase):
         logs = self.help("logs", "--help", command="logs")
         self.assert_options(
             logs,
-            show=f"{_SELECTORS} --journald --log-dir --path --level --verbose --limit --follow --json",
+            show=f"{_SELECTORS} --journald --log-dir --path --level --verbose --limit --follow --json --table",
             hide="--no-journald --lifecycle-diagnostics --port --no-open",
         )
         self.assertRegex(logs, r"(?im)^[ \t]+--journald\b\s+[^\n]*\bread\b")
@@ -316,7 +316,7 @@ class CliHelpTests(unittest.TestCase):
         output = self.help("--status", "--help")
         self.assert_options(
             output,
-            show=f"{_SELECTORS} --json",
+            show=f"{_SELECTORS} --json --table",
             hide=f"{_LAUNCH_LOGGING} --new --import-session --cpus --all",
         )
 
@@ -336,6 +336,9 @@ class LauncherParserCompatibilityTests(unittest.TestCase):
         self.assertIs(implicit.journald, False)
         for spelling in ("--ve", "--ver", "--vers", "--version"):
             self.assertTrue(parser.parse_args([spelling]).version)
+        previous_tui = parser.parse_args(["upgrade", "--t", "--check"])
+        self.assertTrue(previous_tui.upgrade_tui)
+        self.assertTrue(previous_tui.check)
         self.assertEqual(parser.parse_args(["--verbose=ALL"]).verbose, "all")
         self.assertEqual(
             parser.parse_args(["--project", ".", "--verb", "sync"]).command,

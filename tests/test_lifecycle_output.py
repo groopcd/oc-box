@@ -488,6 +488,7 @@ class LifecycleOutputTests(unittest.TestCase):
             ["upgrade", "--check", "--verbose=all"],
             ["--status", "--verbose=all"],
             ["tui", "--read-only", "--log-dir", str(directory)],
+            ["backup", "--table"],
         ):
             with (
                 self.subTest(arguments=arguments),
@@ -504,14 +505,29 @@ class LifecycleOutputTests(unittest.TestCase):
 
     def test_abbreviated_status_is_read_only_even_when_saved_mirroring_is_enabled(self):
         self.saved_logs(journald=True)
+        for options in (["--statu"], ["--statu", "--tab"]):
+            with (
+                self.subTest(options=options),
+                patch.object(sys, "argv", ["oc-box", "start", *options]),
+                patch.object(box, "report_status", return_value=0) as report,
+                patch.object(journal_output, "emit") as mirror,
+            ):
+                self.assertEqual(box.entrypoint(), 0)
+                report.assert_called_once()
+                mirror.assert_not_called()
+        self.assertFalse(self.root.exists())
+
+    def test_completion_table_is_parser_error_without_journaling(self):
+        self.saved_logs(journald=True)
         with (
-            patch.object(sys, "argv", ["oc-box", "start", "--statu"]),
-            patch.object(box, "report_status", return_value=0) as report,
+            patch.object(sys, "argv", ["oc-box", "completion", "bash", "--table"]),
             patch.object(journal_output, "emit") as mirror,
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(SystemExit) as result,
         ):
-            self.assertEqual(box.entrypoint(), 0)
-            report.assert_called_once()
-            mirror.assert_not_called()
+            box.entrypoint()
+        self.assertEqual(result.exception.code, 2)
+        mirror.assert_not_called()
         self.assertFalse(self.root.exists())
 
     def test_direct_main_can_select_options_without_harness_environment_switches(self):

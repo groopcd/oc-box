@@ -438,6 +438,30 @@ def print_table(headers, rows):
         )
 
 
+def print_tabular_report(report):
+    """Display the structured status snapshot without JSON punctuation."""
+    if __package__:
+        from . import cli_table
+    else:
+        import cli_table
+
+    print(
+        cli_table.fields(
+            {name: value for name, value in report.items() if name != "workspaces"}
+        )
+    )
+    for item in report["workspaces"]:
+        print("\nWorkspace " + cli_table.cell(item["workspace_id"]))
+        displayed = dict(item)
+        if "podman_args" in displayed:
+            displayed["podman_args"] = cli_table.redacted_options(
+                displayed["podman_args"]
+            )
+        print(cli_table.fields(displayed))
+    if not report["workspaces"]:
+        print("\nNo oc-box workspaces registered.")
+
+
 def print_report(report):
     items = report["workspaces"]
     if not items:
