@@ -1,0 +1,524 @@
+<!doctype html>
+<html lang="en" data-layout="studio">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <meta name="color-scheme" content="dark">
+  <title>oc-box · Browser workspace concepts</title>
+  <style>
+    :root {
+      --bg:#0a111b; --panel:#0e1824; --surface:#122131; --line:#243447;
+      --text:#e5edf5; --muted:#a1b3c7; --accent:#78e0e6; --select:#17323f;
+      --green:#91e3b3; --gold:#f5c880; --sans:system-ui,sans-serif;
+      --mono:ui-monospace,"Liberation Mono",monospace;
+    }
+    * { box-sizing:border-box }
+    body { margin:0; color:var(--text); background:var(--bg); font:14px/1.5 var(--sans) }
+    button,input,textarea { font:inherit; color:inherit }
+    button { cursor:pointer; border:0; background:none }
+    button:focus-visible,input:focus-visible,textarea:focus-visible,summary:focus-visible {
+      outline:2px solid var(--accent); outline-offset:3px
+    }
+    [hidden] { display:none !important }
+    h1,h2,h3,p { margin:0 }
+    h2 { font-size:18px; letter-spacing:-.025em }
+    h3 { font-size:14px }
+    small { font-size:12px }
+    code,time,.mono,.eyebrow { font-family:var(--mono) }
+    .muted { color:var(--muted) }
+    .eyebrow { color:var(--muted); font-size:11px; letter-spacing:.09em; text-transform:uppercase }
+    .icon { width:17px; height:17px; vertical-align:middle; fill:none; stroke:currentColor;
+      stroke-width:1.65; stroke-linecap:round; stroke-linejoin:round; flex:none }
+    .dot { display:inline-block; width:7px; height:7px; margin-right:6px; border-radius:50%; background:var(--green) }
+    .tag { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:6px;
+      padding:3px 7px; white-space:nowrap; font:11px/1.45 var(--mono); color:var(--muted) }
+    .tag.accent { color:var(--accent); background:#113039; border-color:#21535b }
+    .action { display:inline-flex; align-items:center; justify-content:center; gap:6px; border:1px solid var(--line);
+      border-radius:7px; padding:6px 9px; white-space:nowrap }
+    .action:hover,.nav button:hover,.session:hover,.picker button:hover { background:var(--surface) }
+    .top { display:flex; align-items:center; gap:20px; padding:12px 22px; min-height:62px; border-bottom:1px solid var(--line); background:#0c1520 }
+    .brand { display:flex; align-items:center; gap:8px; font:800 20px var(--mono); letter-spacing:-.08em; color:var(--accent); white-space:nowrap }
+    .brand .icon { width:26px; height:26px; padding:4px; background:var(--select); border-radius:6px }
+    .project { padding:3px 0 3px 20px; border-left:1px solid var(--line); font-weight:650 }
+    .project .eyebrow { display:block; font-weight:400 }
+    .top-end { margin-left:auto; display:flex; align-items:center; gap:12px }
+    .demo { color:var(--gold); background:#292214; border-color:#504126 }
+    .review { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:10px 22px;
+      background:#0f1b28; border-bottom:1px solid var(--line) }
+    .review p { color:var(--muted); font-size:13px }
+    .review p strong { color:var(--text) }
+    .picker { display:flex; gap:3px; padding:3px; border:1px solid var(--line); border-radius:8px; flex:none; background:var(--bg) }
+    .picker button { display:flex; align-items:center; gap:6px; white-space:nowrap; border-radius:5px; padding:5px 9px; color:var(--muted); font-size:12px }
+    .picker button[aria-pressed=true] { color:var(--accent); background:var(--select) }
+    .picker b { font:11px var(--mono); opacity:.85 }
+    .shell { display:grid; grid-template-columns:248px minmax(0,1fr) 278px; min-height:calc(100dvh - 118px) }
+    .library,.inspector { min-width:0; background:var(--panel); padding:17px 14px }
+    .library { border-right:1px solid var(--line) }
+    .inspector { border-left:1px solid var(--line) }
+    .rail-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:0 1px 12px }
+    .search { display:flex; align-items:center; gap:7px; border:1px solid var(--line); border-radius:7px; padding:7px 9px; margin-bottom:12px; color:var(--muted) }
+    .search:focus-within { border-color:var(--accent) }
+    .search input { width:100%; min-width:0; outline:none; border:0; background:none }
+    .search input::placeholder,textarea::placeholder { color:var(--muted) }
+    .scopes { margin-bottom:14px; width:max-content; max-width:100% }
+    .scopes button { padding:5px 6px }
+    .group { margin:0 0 9px }
+    .group .eyebrow { margin:0 4px 5px }
+    .session { display:grid; grid-template-columns:auto minmax(0,1fr) auto; gap:8px; width:100%; align-items:start;
+      text-align:left; border:1px solid transparent; border-radius:7px; padding:6px 8px; margin-bottom:2px }
+    .session[aria-current=true] { background:var(--select); border-color:#315a65 }
+    .session .icon { color:var(--muted); margin-top:2px }
+    .session[aria-current=true] .icon { color:var(--accent) }
+    .session-title { display:block; line-height:1.35; overflow-wrap:anywhere }
+    .session small { display:block; color:var(--muted); margin-top:3px; line-height:1.25 }
+    .session .age { color:var(--muted); font:10px var(--mono) }
+    .session.child { padding-inline-start:20px }
+    .nav { border-top:1px solid var(--line); margin-top:12px; padding-top:12px }
+    .nav p { margin:0 4px 6px }
+    .nav button { display:flex; align-items:center; gap:9px; width:100%; padding:7px 8px; text-align:left; border-radius:6px; color:var(--muted) }
+    .nav button[aria-pressed=true] { background:var(--select); color:var(--accent) }
+    .rail-note { color:var(--muted); font-size:11px; margin:10px 4px 0; max-width:28ch }
+    main { min-width:0 }
+    .chat-head { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 21px;
+      border-bottom:1px solid var(--line); background:var(--panel) }
+    .chat-head .eyebrow { margin-bottom:4px }
+    .heading-tags { display:flex; align-items:center; gap:8px }
+    #sessions-toggle { display:none }
+    .chat-body { display:flex; flex-direction:column; min-height:max(455px,calc(100dvh - 190px)); width:min(100%,760px); margin:auto; padding:22px 24px 16px }
+    .transcript { flex:1 }
+    .message { margin-bottom:22px }
+    .message p { max-width:66ch; overflow-wrap:anywhere; white-space:pre-wrap }
+    .by { display:flex; align-items:center; gap:8px; font-size:12px; margin-bottom:6px }
+    .avatar { width:24px; height:24px; display:grid; place-items:center; border-radius:6px; color:var(--accent);
+      background:var(--select); font:700 12px var(--mono) }
+    .message.you p { padding:11px 13px; border:1px solid var(--line); background:var(--surface); border-radius:8px }
+    details.tool { border:1px solid var(--line); border-radius:7px; margin:5px 0 15px; background:var(--panel) }
+    details.tool summary { display:flex; align-items:center; gap:8px; cursor:pointer; padding:8px 11px }
+    details.tool summary::before { content:"▸"; color:var(--muted) }
+    details[open].tool summary::before { content:"▾" }
+    details.tool p { padding:0 12px 10px; color:var(--muted) }
+    .tool .done { margin-left:auto; color:var(--green); font-size:12px }
+    .file { display:inline-flex; align-items:center; gap:7px; background:var(--panel); border:1px solid var(--line);
+      color:var(--accent); padding:5px 9px; margin-top:10px; border-radius:6px; font:12px var(--mono) }
+    .compose { border:1px solid #36576a; background:var(--panel); border-radius:9px; padding:8px 10px }
+    .compose:focus-within { border-color:var(--accent) }
+    textarea { width:100%; min-height:54px; padding:6px; outline:none; border:0; background:none; resize:vertical }
+    .compose-foot { display:flex; align-items:center; flex-wrap:wrap; gap:6px }
+    .send { margin-left:auto; color:#09212a; background:var(--accent); border:1px solid var(--accent); border-radius:6px; padding:5px 10px; font-weight:750 }
+    .send:hover { background:#b3f4f0 }
+    .composition-note { font-size:11px; margin-top:7px; color:var(--muted) }
+    .readonly { display:flex; align-items:center; flex-wrap:wrap; gap:10px; padding:10px 12px; color:var(--gold);
+      border:1px solid #504126; background:#241e15; border-radius:7px }
+    .inspector-head { display:flex; align-items:flex-start; justify-content:space-between; gap:8px; margin-bottom:12px }
+    .inspector-head .eyebrow { margin-bottom:4px }
+    .card { min-width:0; border:1px solid var(--line); border-radius:8px; padding:11px; background:#111e2b }
+    .card + .card { margin-top:9px }
+    .card p { margin-top:6px }
+    .card .large { font:700 20px/1.3 var(--mono); color:var(--text); margin:6px 0 }
+    .metric { display:grid; grid-template-columns:1fr auto; gap:3px 6px; margin-top:10px; font-size:12px }
+    progress { grid-column:1/-1; width:100%; height:6px; accent-color:var(--accent); border:0; background:var(--line); border-radius:5px }
+    progress::-webkit-progress-bar { background:var(--line); border-radius:5px }
+    progress::-webkit-progress-value { background:var(--accent); border-radius:5px }
+    .event { display:flex; align-items:baseline; justify-content:space-between; gap:7px; margin-top:8px; font-size:12px }
+    .event time { color:var(--muted); font-size:10px; flex:none }
+    .overview { display:none; padding:19px 21px 17px; border-bottom:1px solid var(--line); background:#0d1723 }
+    .overview-head { display:flex; justify-content:space-between; align-items:end; gap:12px; margin-bottom:11px }
+    .overview h1 { font-size:25px; letter-spacing:-.04em }
+    .tiles { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px }
+    .tiles .card { margin:0 }
+    [data-layout=dashboard] .overview { display:block }
+    [data-layout=dashboard] .shell { grid-template-columns:256px minmax(0,1fr) 250px }
+    [data-layout=dashboard] .chat-body { min-height:max(420px,calc(100dvh - 374px)) }
+    [data-layout=focus] .shell { grid-template-columns:minmax(0,1fr) }
+    [data-layout=focus] .shell:has(.library[data-open]) { grid-template-columns:248px minmax(0,1fr) }
+    html:has(.inspector[hidden]):not([data-layout=focus]) .shell { grid-template-columns:248px minmax(0,1fr) }
+    [data-layout=focus] .library:not([data-open]) { display:none }
+    [data-layout=focus] .chat-head { padding-inline:max(21px,calc((100% - 714px) / 2)) }
+    [data-layout=focus] #sessions-toggle { display:inline-flex }
+    [data-layout=focus] .inspector:not([hidden]) { position:fixed; z-index:3; right:0; top:0; bottom:0;
+      width:min(310px,95vw); overflow:auto; box-shadow:0 0 0 100vmax #050a11b0 }
+    [data-layout=focus] .chat-body { min-height:calc(100dvh - 200px) }
+    @media (max-width:1000px) {
+      html[data-layout] .shell:has(.library) { grid-template-columns:216px minmax(0,1fr) }
+      html[data-layout=focus] .shell:not(:has(.library[data-open])) { grid-template-columns:minmax(0,1fr) }
+      .inspector:not([hidden]) { position:fixed; z-index:3; top:0; bottom:0; right:0;
+        width:min(300px,95vw); overflow:auto; box-shadow:0 0 0 100vmax #050a11b0 }
+    }
+    @media (max-width:680px) {
+      .top { padding:9px 12px; gap:10px; min-height:54px }
+      .project { padding-left:10px }
+      .top-end { gap:5px }
+      .top-end .connection { display:none }
+      .review { align-items:flex-start; flex-direction:column; gap:7px; padding:8px 12px }
+      html[data-layout] .shell:has(.library) { grid-template-columns:minmax(0,1fr) }
+      .library:not([data-open]) { display:none }
+      .library[data-open] { border-right:0; border-bottom:1px solid var(--line) }
+      #sessions-toggle { display:inline-flex }
+      .chat-head { flex-wrap:wrap; padding:11px 13px }
+      .chat-body,.overview { padding:14px 13px }
+      .chat-body { min-height:410px }
+      .tiles { grid-template-columns:1fr }
+    }
+  </style>
+</head>
+<body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-box" viewBox="0 0 24 24"><path d="m12 2 9 5v10l-9 5-9-5V7zM3 7l9 5 9-5m-9 5v10m-4.5-17.5 9 5"/></symbol>
+    <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 4h16v13H9l-5 4zM8 9h8m-8 4h5"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></symbol>
+    <symbol id="i-grid" viewBox="0 0 24 24"><path d="M3 4h18v16H3zm7 0v16m0-10h11"/></symbol>
+    <symbol id="i-activity" viewBox="0 0 24 24"><path d="M2 12h5l3-7 4 14 3-7h5"/></symbol>
+    <symbol id="i-terminal" viewBox="0 0 24 24"><path d="M3 4h18v16H3zm4 5 3 3-3 3m6 0h4"/></symbol>
+    <symbol id="i-archive" viewBox="0 0 24 24"><path d="M3 4h18v5H3zm2 5v11h14V9m-9 4h4"/></symbol>
+    <symbol id="i-child" viewBox="0 0 24 24"><path d="M5 4v12h14m-4-4 4 4-4 4"/></symbol>
+    <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zm8 0v5h4"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 20V4m-6 6 6-6 6 6"/></symbol>
+  </svg>
+
+  <header class="top">
+    <div class="brand"><svg class="icon" aria-hidden="true"><use href="#i-box"/></svg>oc-box</div>
+    <div class="project"><span class="eyebrow">Workspace</span> orbit-web</div>
+    <div class="top-end">
+      <span class="tag connection"><span class="dot"></span> Private workspace</span>
+      <span class="tag demo">Synthetic demo</span>
+    </div>
+  </header>
+
+  <div class="review">
+    <p id="layout-note"></p>
+    <div class="picker" role="group" aria-label="Compare layouts">
+      <button type="button" data-layout-option="studio"><b>A</b> Studio</button>
+      <button type="button" data-layout-option="dashboard"><b>B</b> Dashboard</button>
+      <button type="button" data-layout-option="focus"><b>C</b> Chat focus</button>
+    </div>
+  </div>
+
+  <div class="shell">
+    <aside id="library" class="library" aria-label="Workspace sessions and views">
+      <div class="rail-head"><h2>Sessions</h2><button type="button" class="action" id="new-session">+ New</button></div>
+      <label class="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input type="search" id="search" aria-label="Search session titles" placeholder="Search session titles"></label>
+      <div class="picker scopes" role="group" aria-label="Session source filter">
+        <button type="button" data-scope="all">All</button>
+        <button type="button" data-scope="open">TUI tabs</button>
+        <button type="button" data-scope="archive">Archived</button>
+      </div>
+      <div id="session-list"></div>
+      <nav class="nav" aria-label="Workspace manager views">
+        <p class="eyebrow">Workspace manager</p>
+        <button type="button" data-panel="status"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg> Status</button>
+        <button type="button" data-panel="activity"><svg class="icon" aria-hidden="true"><use href="#i-activity"/></svg> Activity</button>
+        <button type="button" data-panel="terminals"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg> Terminals</button>
+        <button type="button" data-panel="storage"><svg class="icon" aria-hidden="true"><use href="#i-archive"/></svg> Storage</button>
+      </nav>
+      <p class="rail-note">This demo shows one workspace, not the host’s sessions or archives.</p>
+    </aside>
+
+    <main>
+      <section class="overview" aria-labelledby="overview-title">
+        <div class="overview-head">
+          <div><p class="eyebrow">Workspace manager / Status</p><h1 id="overview-title">Workspace overview</h1></div>
+          <span class="tag">Read-only metrics</span>
+        </div>
+        <div class="tiles">
+          <div class="card"><h3 class="eyebrow">Workspace CPU</h3><p class="large">18%</p><small class="muted">of a 4-core quota</small></div>
+          <div class="card"><h3 class="eyebrow">Workspace memory</h3><p class="large">1.8 GiB</p><small class="muted">of an 8 GiB limit</small></div>
+          <div class="card"><h3 class="eyebrow">Open TUI tabs</h3><p class="large">2 roots</p><small class="muted">Separate from history</small></div>
+        </div>
+      </section>
+      <section aria-labelledby="chat-title">
+        <header class="chat-head">
+          <div><p class="eyebrow" id="chat-source"></p><h2 id="chat-title"></h2></div>
+          <div class="heading-tags">
+            <button type="button" class="action" id="sessions-toggle" aria-controls="library">Sessions</button>
+            <button type="button" class="action" id="inspector-toggle" aria-controls="inspector"><svg class="icon" aria-hidden="true"><use href="#i-grid"/></svg> Inspector</button>
+          </div>
+        </header>
+        <div class="chat-body">
+          <div class="transcript" id="transcript" role="log" aria-label="Example conversation"></div>
+          <form class="compose" id="composer">
+            <textarea id="draft" aria-label="Demo message" placeholder="Ask about the workspace…"></textarea>
+            <div class="compose-foot">
+              <span class="tag accent">Build</span><span class="tag">Example model</span>
+              <button class="send" type="submit"><svg class="icon" aria-hidden="true"><use href="#i-send"/></svg> Send demo</button>
+            </div>
+          </form>
+          <div id="readonly" class="readonly" hidden>
+            <span id="readonly-note"></span>
+            <button type="button" class="action" id="open-parent" hidden>Open parent</button>
+          </div>
+          <p class="composition-note">Chat is simulated. Drafts stay in memory until this page closes or reloads.</p>
+        </div>
+      </section>
+    </main>
+
+    <aside id="inspector" class="inspector" aria-label="Workspace inspector">
+      <div class="inspector-head">
+        <div><p class="eyebrow">Workspace inspector</p><h2 id="panel-title"></h2></div>
+        <button type="button" class="action" id="inspector-close" aria-label="Close inspector">×</button>
+      </div>
+      <div id="panel-content"></div>
+    </aside>
+  </div>
+
+  <script>
+    const byId = (id) => document.getElementById(id);
+    const all = (selector) => [...document.querySelectorAll(selector)];
+    const icon = (name) => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
+    const layouts = {
+      studio: ["Studio", "Sessions, chat and workspace context side by side."],
+      dashboard: ["Dashboard", "Manager cards first, with the selected conversation underneath."],
+      focus: ["Chat focus", "More room for the conversation; open sessions or the inspector on demand."],
+    };
+    const groups = {
+      open: "Open TUI tabs", history: "Workspace history", archive: "Archived in workspace",
+    };
+    const sessions = [
+      { id:"sync", title:"Improve history sync", group:"open", detail:"Idle · Root session", time:"2m",
+        prompt:"Can we make history sync faster without changing which sessions get archived?",
+        reply:"Yes. The first place I’d look is how often we start the private source service. We can reuse it within a guarded sync pass while keeping verification for each session.",
+        tool:"Inspect sync flow", result:"Demo result: repeated source service startup dominates this synthetic run.", file:"history_reader.py" },
+      { id:"check", title:"Check export rules", group:"open", parent:"sync", detail:"Child of open tab · Read-only", time:"4m",
+        prompt:"Check which verification steps must stay in place.",
+        reply:"A child can report its findings here. Continue any follow-up in the parent conversation." },
+      { id:"tabs", title:"Polish session tabs", group:"open", detail:"Idle · Root session", time:"18m",
+        prompt:"How should the session list distinguish open tabs from history?",
+        reply:"Give the mirrored tabs their own group. A browser selection shouldn’t silently make a session look open in the TUI." },
+      { id:"fixtures", title:"Add offline fixtures", group:"history", detail:"Not open in the TUI", time:"1h",
+        prompt:"Can we test switching sessions without a running service?",
+        reply:"Use a stable fixture with two open roots, one child, and a history-only session. Check that drafts stay with the session where they were typed." },
+      { id:"docs", title:"Write restore guide", group:"history", detail:"Not open in the TUI", time:"1d",
+        prompt:"What should the restore guide explain first?",
+        reply:"Start with what the archive preserves and what it doesn’t, then show how to verify the destination." },
+      { id:"old", title:"Workspace bootstrap", group:"archive", detail:"Archived · Preview only", time:"2d",
+        prompt:"Set up a workspace for the example project.",
+        reply:"The example workspace is ready. This conversation is shown here as an archived preview." },
+    ];
+    const activity = `<div class="card"><h3>Recent workspace activity</h3>
+      <div class="event"><span>Session opened</span><time>14:26</time></div>
+      <div class="event"><span>History sync finished</span><time>14:18</time></div>
+      <div class="event"><span>Web client attached</span><time>14:02</time></div></div>`;
+    const panels = {
+      status: ["Status", `<div class="card"><h3><span class="dot"></span>orbit-web</h3><p class="muted">Running · Debian · 1 web client</p>
+        <div class="metric"><span>CPU quota</span><span class="mono">18%</span><progress aria-label="Workspace CPU quota used" max="100" value="18"></progress></div>
+        <div class="metric"><span>Memory limit</span><span class="mono">1.8 / 8 GiB</span><progress aria-label="Workspace memory limit used" max="8" value="1.8"></progress></div>
+        <p><small class="muted">Example readings · no live polling</small></p></div>${activity}
+        <div class="card"><h3>Session source</h3><p class="muted">TUI membership and workspace history are separate. Opening a history item here doesn’t add a TUI tab.</p></div>`],
+      activity: ["Activity", `${activity}<div class="card"><p class="muted">Fixed-category events only in this concept. No transcript or terminal output goes into activity.</p></div>`],
+      terminals: ["Terminals", `<div class="card"><h3>Session terminal</h3><p class="muted">A place to show an existing native terminal connection. Attaching or typing in a real terminal isn’t part of this demo.</p></div>`],
+      storage: ["Storage", `<div class="card"><h3>Workspace private home</h3><p class="large">2.0 GiB</p><p class="muted">Example scan result. Host storage, backups and destructive actions aren’t connected.</p></div>`],
+    };
+
+    const drafts = new Map(), messages = new Map();
+    let selected = sessions[0], scope = "all", panel = "status", created = 0, inspectorReturn;
+    const draft = byId("draft"), library = byId("library"), inspector = byId("inspector");
+    const narrow = matchMedia("(max-width: 680px)"), overlay = matchMedia("(max-width: 1000px)");
+    const background = all(".top, .review, .library, main");
+    const layout = () => document.documentElement.dataset.layout;
+    const overlayMode = () => overlay.matches || layout() === "focus";
+
+    function showLibrary(open) {
+      library.toggleAttribute("data-open", open);
+      byId("sessions-toggle").setAttribute("aria-expanded", open);
+    }
+
+    function showInspector(open, focus = false) {
+      const modal = open && overlayMode();
+      if (open && focus && !inspector.contains(document.activeElement)) inspectorReturn = document.activeElement;
+      inspector.hidden = !open;
+      byId("inspector-toggle").setAttribute("aria-expanded", open);
+      for (const button of all("[data-panel]")) button.setAttribute("aria-pressed", open && button.dataset.panel === panel);
+      for (const node of background) node.inert = modal;
+      if (modal) {
+        inspector.setAttribute("role", "dialog");
+        inspector.setAttribute("aria-modal", "true");
+      } else {
+        inspector.removeAttribute("role");
+        inspector.removeAttribute("aria-modal");
+      }
+      if (open && (focus || modal)) byId("inspector-close").focus();
+      if (!open && focus) (inspectorReturn?.getClientRects().length ? inspectorReturn : byId("inspector-toggle")).focus();
+      if (!open) inspectorReturn = null;
+    }
+
+    function setLayout(name) {
+      if (!Object.hasOwn(layouts, name)) name = "studio";
+      document.documentElement.dataset.layout = name;
+      byId("layout-note").replaceChildren(Object.assign(document.createElement("strong"), { textContent: layouts[name][0] + ". " }), layouts[name][1]);
+      for (const button of all("[data-layout-option]")) button.setAttribute("aria-pressed", button.dataset.layoutOption === name);
+      showLibrary(false);
+      showInspector(name === "studio" && !overlay.matches);
+    }
+
+    function renderSessions(focusId) {
+      const list = byId("session-list");
+      const query = byId("search").value.trim().toLowerCase();
+      list.replaceChildren();
+      for (const button of all("[data-scope]")) button.setAttribute("aria-pressed", button.dataset.scope === scope);
+      for (const [group, label] of Object.entries(groups)) {
+        if (scope !== "all" && group !== scope) continue;
+        const rows = sessions.filter((s) =>
+          s.group === group && !(scope === "open" && s.parent) && s.title.toLowerCase().includes(query));
+        if (!rows.length) continue;
+        const section = document.createElement("section");
+        section.className = "group";
+        const heading = document.createElement("h3");
+        heading.className = "eyebrow";
+        heading.textContent = label;
+        section.append(heading);
+        for (const s of rows) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.className = `session${s.parent ? " child" : ""}`;
+          button.setAttribute("aria-current", s === selected);
+          button.innerHTML = `${icon(s.parent ? "child" : group === "archive" ? "archive" : "chat")}<span><span class="session-title"></span><small></small></span><span class="age"></span>`;
+          button.querySelector(".session-title").textContent = s.title;
+          button.querySelector("small").textContent = s.detail;
+          button.querySelector(".age").textContent = s.time;
+          button.addEventListener("click", () => selectSession(s, true));
+          section.append(button);
+          if (s.id === focusId) requestAnimationFrame(() => button.focus());
+        }
+        list.append(section);
+      }
+      if (!list.childElementCount) list.append(Object.assign(document.createElement("p"), { className:"muted", textContent:"No matching sessions." }));
+    }
+
+    function message(author, text) {
+      const entry = document.createElement("article");
+      entry.className = `message${author === "You" ? " you" : ""}`;
+      const label = document.createElement("div");
+      label.className = "by";
+      const badge = Object.assign(document.createElement("span"), { className:"avatar", textContent:author[0] });
+      badge.setAttribute("aria-hidden", "true");
+      label.append(badge, Object.assign(document.createElement("strong"), { textContent:author }));
+      entry.append(label, Object.assign(document.createElement("p"), { textContent:text }));
+      return entry;
+    }
+
+    function renderChat() {
+      const s = selected, log = byId("transcript");
+      byId("chat-title").textContent = s.title;
+      const source = s.parent ? "Child of open TUI tab" :
+        s.group === "open" ? "Open TUI tab" :
+        s.group === "archive" ? "Archived in workspace" :
+        s.id.startsWith("demo-") ? "Browser demo · Not a TUI tab" : "Workspace history · Not a TUI tab";
+      byId("chat-source").textContent = `OpenCode / ${source}`;
+      log.replaceChildren();
+      if (s.prompt) {
+        log.append(message("You", s.prompt));
+        const answer = message("OpenCode", s.reply);
+        if (s.tool) {
+          const tool = document.createElement("details");
+          tool.className = "tool";
+          tool.innerHTML = "<summary><strong></strong><span class=\"done\">Complete</span></summary><p></p>";
+          tool.querySelector("strong").textContent = s.tool;
+          tool.querySelector("p").textContent = s.result;
+          answer.append(tool);
+          const file = document.createElement("span");
+          file.className = "file";
+          file.innerHTML = icon("file");
+          file.append(s.file);
+          answer.append(file);
+        }
+        log.append(answer);
+      }
+      for (const text of messages.get(s.id) ?? []) {
+        log.append(message("You", text), message("OpenCode", "This is a local preview response. No message was sent to OpenCode or a model."));
+      }
+      if (!log.childElementCount) log.append(Object.assign(document.createElement("p"), { className:"muted", textContent:"Start a conversation to try the local composer." }));
+      const restriction = s.parent ? "Read-only child session." :
+        s.group === "archive" ? "Archived session preview. Editing isn’t part of this demo." : "";
+      byId("composer").hidden = !!restriction;
+      byId("readonly").hidden = !restriction;
+      byId("readonly-note").textContent = restriction;
+      byId("open-parent").hidden = !s.parent;
+      draft.value = drafts.get(s.id) ?? "";
+    }
+
+    function selectSession(session, fromList = false) {
+      selected = session;
+      if (fromList && narrow.matches) showLibrary(false);
+      renderSessions(fromList && !narrow.matches ? session.id : null);
+      renderChat();
+      if (fromList && narrow.matches) byId("sessions-toggle").focus();
+    }
+
+    function setPanel(name, focus = false) {
+      panel = name;
+      byId("panel-title").textContent = panels[name][0];
+      byId("panel-content").innerHTML = panels[name][1];
+      showInspector(true, focus);
+    }
+
+    for (const button of all("[data-layout-option]")) button.addEventListener("click", () => {
+      const name = button.dataset.layoutOption;
+      location.hash = name;
+      setLayout(name);
+    });
+    window.addEventListener("hashchange", () => {
+      const name = location.hash.slice(1);
+      if (layout() !== name) setLayout(name);
+    });
+    overlay.addEventListener("change", () => showInspector(!overlay.matches && layout() === "studio", inspector.contains(document.activeElement)));
+    narrow.addEventListener("change", () => showLibrary(false));
+    for (const button of all("[data-scope]")) button.addEventListener("click", () => {
+      scope = button.dataset.scope;
+      renderSessions();
+    });
+    for (const button of all("[data-panel]")) button.addEventListener("click", () => setPanel(button.dataset.panel, true));
+    byId("search").addEventListener("input", () => renderSessions());
+    byId("sessions-toggle").addEventListener("click", () => {
+      const open = !library.hasAttribute("data-open");
+      showLibrary(open);
+      if (open) byId("search").focus();
+    });
+    byId("inspector-toggle").addEventListener("click", () => showInspector(inspector.hidden, true));
+    byId("inspector-close").addEventListener("click", () => showInspector(false, true));
+    byId("open-parent").addEventListener("click", () => {
+      const parent = sessions.find((s) => s.id === selected.parent);
+      if (parent) {
+        selectSession(parent);
+        draft.focus();
+      }
+    });
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Tab" && !inspector.hidden && overlayMode()) {
+        event.preventDefault();
+        byId("inspector-close").focus();
+      }
+      if (event.key !== "Escape") return;
+      if (!inspector.hidden && overlayMode()) showInspector(false, true);
+      else if (library.hasAttribute("data-open")) {
+        showLibrary(false);
+        byId("sessions-toggle").focus();
+      }
+    });
+    byId("new-session").addEventListener("click", () => {
+      created += 1;
+      const s = { id:`demo-${created}`, title:`New conversation ${created}`, group:"history", detail:"Browser demo · Not a TUI tab", time:"now" };
+      sessions.splice(sessions.findIndex((row) => row.group === "history"), 0, s);
+      byId("search").value = "";
+      scope = "all";
+      if (narrow.matches) showLibrary(false);
+      selectSession(s);
+      draft.focus();
+    });
+    draft.addEventListener("input", () => drafts.set(selected.id, draft.value));
+    byId("composer").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const text = draft.value.trim();
+      if (!text || byId("composer").hidden) return;
+      messages.set(selected.id, [...(messages.get(selected.id) ?? []), text]);
+      drafts.delete(selected.id);
+      renderChat();
+      draft.focus();
+    });
+
+    byId("panel-title").textContent = panels.status[0];
+    byId("panel-content").innerHTML = panels.status[1];
+    setLayout(location.hash.slice(1));
+    selectSession(selected);
+  </script>
+</body>
+</html>
