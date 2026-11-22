@@ -86,6 +86,9 @@ class TerminalArtifactTests(unittest.TestCase):
                 # Do not include ESC in this paste: malformed bracketed-paste
                 # framing is intentionally a separate, fail-closed condition.
                 os.write(master, b"\x1b[200~[<16;6;8M[<16;6;8m\x1b[201~")
+                # An Escape followed by a complete report recovers, but that
+                # report itself neither starts nor completes an authorized click.
+                os.write(master, press + b"\x1b" + release)
                 self.assertFalse(marker.exists())
                 os.write(master, press + release)
                 await_visible(b"TRANSFERRED")

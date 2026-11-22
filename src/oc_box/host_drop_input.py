@@ -7,6 +7,9 @@ class reads files, consults UI state, decodes with replacement, or uses timers.
 Callbacks are trusted policy code, not a way to establish input provenance.
 """
 
+import re
+
+
 _ESC = 0x1B
 _BEL = 0x07
 _CAN = 0x18
@@ -47,6 +50,13 @@ _CLIPBOARD_KEYS = {
     b"27;5;121~": True,
 }
 _MOUSE_PARAMETERS = frozenset(b"<;0123456789")
+_RECOVERY_MOUSE = re.compile(
+    rb"<(?:0|[1-9][0-9]{0,2});[1-9][0-9]{0,4};[1-9][0-9]{0,4}[Mm]"
+)
+_RECOVERY_CSI = frozenset((b"I", b"O", *_CLIPBOARD_KEYS))
+_RECOVERY_CSI_PREFIXES = frozenset(
+    value[:index] for value in _RECOVERY_CSI for index in range(1, len(value) + 1)
+)
 
 # Includes the ASCII "72;" selector, but not the introducer or terminator.
 # The broker must independently validate its protocol/chunk/session limits.
@@ -156,6 +166,7 @@ class _Framing:
         self._closed = False
         self._disabled = False
         self._disable_reason = None
+        self._framing_detail = None
         self._opaque_frame = False
         self._recovered_framing = False
         self._string_kind = None
@@ -169,6 +180,7 @@ class _Framing:
         self._csi_ascii = False
         self._csi_intermediate = False
         self._csi_number = None
+        self._escape_report = bytearray()
         self._paste_length = 0
         self._paste_end = 0
         self._paste_passthrough = False
@@ -185,12 +197,12 @@ class _Framing:
             elif code is None:
                 if self._child_output or self._reserve_osc72:
                     if not self._child_output:
-                        self._disable_callbacks()
+                        self._disable_callbacks(detail="invalid-utf8")
                     if self._state == "paste":
                         self._leave_paste(output)
                     self._invalid_output(raw, output)
                 else:
-                    self._disable(output, raw)
+                    self._disable(output, raw, detail="invalid-utf8")
             else:
                 self._consume(code, raw, output)
         if self._disabled and not self._reserve_osc72:
@@ -228,15 +240,25 @@ class _Framing:
             if not self._disabled:
                 self._recovered_framing = True
 
-    def _disable(self, output, raw=b""):
+    def _disable(self, output, raw=b"", *, detail=None):
         self._flush(output, raw)
-        self._disable_callbacks()
+        self._disable_callbacks(detail=detail)
         self._state = "text"
 
-    def _disable_callbacks(self, reason="input-framing"):
+    def _disable_callbacks(self, reason="input-framing", *, detail=None):
         self._disabled = True
         if self._disable_reason is None:
             self._disable_reason = reason
+            if reason == "input-framing":
+                self._framing_detail = detail or {
+                    "escape": "escape-prefix",
+                    "intermediate": "escape-intermediate",
+                    "escape-report-intro": "escape-report-prefix",
+                    "escape-report-csi": "escape-report-csi",
+                    "csi": "csi",
+                    "paste": "bracketed-paste",
+                    "string": "control-string",
+                }.get(self._state, "other")
         if self._reserve_osc72 and self._state == "string" and self._osc_target:
             self._osc_discard = True
             self._held.clear()
@@ -355,6 +377,8 @@ class _Framing:
             self._escape_unit(code, raw, output)
         elif self._state == "csi":
             self._csi_unit(code, raw, output)
+        elif self._state in ("escape-report-intro", "escape-report-csi"):
+            self._recover_escape_report(code, raw, output)
         elif code == _ESC:
             self._state = "escape"
             self._held[:] = raw
@@ -392,6 +416,16 @@ class _Framing:
                 return
             if self._on_mouse_boundary is not None:
                 self._on_mouse_boundary()
+            if code == _ESC and not self._framing_only():
+                # Do not replay the second Escape or assume a timeout made
+                # it independent. Recover only at a recognized report end.
+                self._flush(output)
+                # Keep the second introducer pending: on Kitty it may start a
+                # reserved OSC 72 packet, which cannot be forwarded on refusal.
+                self._held.extend(raw)
+                self._state = "escape-report-intro"
+                self._escape_report.clear()
+                return
             if code in _ESC_STRINGS:
                 prefix = bytes(self._held) + raw
                 self._held.clear()
@@ -413,6 +447,45 @@ class _Framing:
             self._flush(output)
             self._state = "text"
             self._consume(code, raw, output)
+
+    def _recover_escape_report(self, code, raw, output):
+        if self._state == "escape-report-intro":
+            if code == ord("["):
+                self._state = "escape-report-csi"
+                self._flush(output, raw)
+            else:
+                self._disable_callbacks()
+                if self._reserve_osc72:
+                    self._state = "escape"
+                    self._escape_unit(code, raw, output)
+                else:
+                    self._flush(output, raw)
+                    self._state = "text"
+            return
+
+        self._escape_report.extend(raw)
+        candidate = bytes(self._escape_report)
+        final = 0x40 <= code <= 0x7E
+        if final and (
+            candidate in _RECOVERY_CSI or _RECOVERY_MOUSE.fullmatch(candidate)
+        ):
+            output.extend(raw)
+            self._escape_report.clear()
+            self._opaque_frame = True
+            self._end_frame()
+            return
+        if not final and (
+            candidate in _RECOVERY_CSI_PREFIXES
+            or (
+                candidate.startswith(b"<")
+                and len(candidate) <= 16
+                and all(byte in _MOUSE_PARAMETERS for byte in candidate)
+            )
+        ):
+            output.extend(raw)
+            return
+        self._escape_report.clear()
+        self._refuse_unit(code, raw, output)
 
     def _csi_unit(self, code, raw, output):
         parameter = 0x30 <= code <= 0x3F and not self._csi_intermediate
@@ -715,6 +788,8 @@ class PasteInput(_Framing):
     Normally the original and subsequent bytes pass unchanged. Embedded C0/DEL
     in a recognized paste or non-cancelling C0/DEL in ASCII CSI are forwarded
     opaquely; only an unambiguous frame end permits interception of later input.
+    A pending Escape followed by an exact supported mouse, focus, or Ctrl+Y
+    CSI report recovers at its end without granting on that report.
     There is no interior rescan or timing-based re-arm. Over-limit ordinary
     pastes also stream unchanged until their exact canonical end.
     With ``reserve_osc72=True``, refused/malformed/oversized private packets and
@@ -781,6 +856,11 @@ class PasteInput(_Framing):
     def disable_reason(self):
         """First fixed reason for failing closed, not normal stream closure."""
         return self._disable_reason
+
+    @property
+    def framing_detail(self):
+        """Fixed parser category, never a byte sequence or paste content."""
+        return self._framing_detail
 
     @property
     def recovered_framing(self):

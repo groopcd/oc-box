@@ -192,7 +192,9 @@ ordinary paste should be unchanged, and the shortcut should still work. Do not
 deliberately feed malformed terminal traffic to a real workspace. The
 `input-framing-recovered` notice at exit means the relay passed a frame through
 without using it for import and resumed at an unambiguous boundary; it did not
-retry any clipboard read. An `input-framing` or `input-incomplete` warning means
+retry any clipboard read. A pending Escape followed by a recognized mouse,
+focus, or Ctrl+Y report can recover this way; the recovered report does not
+grant an action. An `input-framing` or `input-incomplete` warning means
 the relay could not trust a boundary and did not resume interception from that
 problem. A fresh client can attach if the owner is still running.
 

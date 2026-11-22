@@ -305,7 +305,8 @@ class HostDropTests(unittest.TestCase):
         self.assertEqual(
             errors.getvalue(),
             "oc-box: Host clipboard importing disabled for this client (input-framing). "
-            "Open a fresh client to try again; nothing was restarted.\n",
+            "Open a fresh client to try again; nothing was restarted.\n"
+            "oc-box: Host input framing stopped at: escape-prefix.\n",
         )
 
     def test_clipboard_framing_recovery_waits_for_fresh_shortcut_in_same_client(self):

@@ -766,6 +766,11 @@ class Relay:
                 "Open a fresh client to try again; nothing was restarted.",
                 file=sys.stderr,
             )
+            detail = self.input.framing_detail
+            if reason == "input-framing" and detail is not None:
+                print(
+                    f"oc-box: Host input framing stopped at: {detail}.", file=sys.stderr
+                )
         elif self.clipboard is not None and self.input.recovered_framing:
             print(
                 "oc-box: Host clipboard input framing recovered (input-framing-recovered). "

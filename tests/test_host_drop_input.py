@@ -343,6 +343,74 @@ class PasteInputTests(FramingCase):
                         reserve_osc72=reserve,
                     )
 
+    def test_escape_before_a_recognized_report_recovers_without_authorizing_it(self):
+        for report in (
+            b"\x1b[I",
+            b"\x1b[O",
+            b"\x1b[121;5u",
+            b"\x1b[27;5;121~",
+            b"\x1b[<16;6;8M",
+            b"\x1b[<16;6;8m",
+        ):
+            for reserve in (False, True):
+                with self.subTest(report=report, reserve=reserve):
+                    frame = b"\x1b" + report
+                    self.assert_input(
+                        frame + b"\x19",
+                        frame + paste(REPLACEMENT),
+                        recovered=True,
+                        clipboard_reads=1,
+                        reserve_osc72=reserve,
+                    )
+
+    def test_double_escape_does_not_rearm_for_unknown_or_malformed_mouse(self):
+        for report in (
+            b"\x1b[<16;0001;8M",
+            b"\x1b[<16;6;8z",
+            b"\x1b[M123",
+            b"\x1b[<16;6;" + b"8" * 20 + b"M",
+            b"\x1b\x1b[I",
+            b"\x1b[121;\x195u",
+        ):
+            with self.subTest(report=report):
+                content = b"\x1b" + report + b"\x19"
+                self.assert_input(content, content, disabled=True, clipboard_reads=0)
+
+    def test_reserved_kitty_packet_is_never_exposed_after_double_escape_refusal(self):
+        for prefix in (
+            b"\x1b",
+            b"\x1b\x1b",
+            b"\x1b\x1b[<16;6;",
+            b"\x1b\x1b[<16;6;\xc3",
+        ):
+            with self.subTest(prefix=prefix):
+                content = prefix + osc72() + b"\x19"
+                self.assert_input(
+                    content,
+                    prefix + b"\x19",
+                    disabled=True,
+                    clipboard_reads=0,
+                    reserve_osc72=True,
+                )
+
+    def test_escape_recovery_mouse_report_is_not_delivered_to_click_observer(self):
+        press, release = b"\x1b[<16;6;8M", b"\x1b[<16;6;8m"
+        stream = press + b"\x1b" + release + press + release
+        for name, chunks in fragmentations(stream):
+            with self.subTest(fragmentation=name):
+                observed = []
+                parser = PasteInput(
+                    lambda _: None,
+                    on_host_mouse=lambda report: observed.append(report) or report,
+                    on_mouse_boundary=lambda: observed.append(b"boundary"),
+                )
+                self.assertEqual(
+                    b"".join(parser.feed(chunk) for chunk in chunks), stream
+                )
+                self.assertEqual(observed, [press, b"boundary", press, release])
+                self.assertTrue(parser.recovered_framing)
+                self.assertFalse(parser.disabled)
+
     def test_opaque_frame_never_recovers_from_possible_nested_or_unfinished_payload(
         self,
     ):
