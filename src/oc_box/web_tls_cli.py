@@ -83,6 +83,20 @@ def parser():
     check.add_argument("--cert", type=Path, metavar="PEM")
     check.add_argument("--key", type=Path, metavar="PEM")
     check.add_argument("--json", action="store_true", help="emit fixed result fields")
+    local_pair = commands.add_parser(
+        "check-local-pair",
+        help="read-only TLS preflight for distinct local named sign-in and workspace sites",
+        allow_abbrev=False,
+    )
+    local_pair.add_argument("--account-cert", type=Path, required=True, metavar="PEM")
+    local_pair.add_argument("--account-key", type=Path, required=True, metavar="PEM")
+    local_pair.add_argument("--workspace-cert", type=Path, required=True, metavar="PEM")
+    local_pair.add_argument("--workspace-key", type=Path, required=True, metavar="PEM")
+    local_pair.add_argument("--account-port", type=int, default=9443, metavar="PORT")
+    local_pair.add_argument("--workspace-port", type=int, default=9444, metavar="PORT")
+    local_pair.add_argument(
+        "--json", action="store_true", help="emit fixed result fields"
+    )
     setup = commands.add_parser(
         "setup",
         help="prepare localhost certificate files with optional mkcert",
@@ -158,6 +172,53 @@ class WebTLSProfileError(Exception):
     """An HTTPS origin does not fit the selected diagnostic profile."""
 
 
+def _check_local_pair(args):
+    if __package__:
+        from . import web_local_origins as local
+    else:
+        import web_local_origins as local
+    report = {
+        "profile": "named-local-pair",
+        "certificate": "valid",
+        "diagnostic": None,
+        "browser_trust": "unverified",
+        "name_resolution": "unverified",
+        "listener_started": False,
+    }
+    try:
+        origins = local.LocalOrigins(args.account_port, args.workspace_port)
+        report["account_origin"] = origins.account.value
+        report["workspace_origin"] = origins.workspace.value
+        local.check_tls(
+            origins,
+            account_cert=args.account_cert,
+            account_key=args.account_key,
+            workspace_cert=args.workspace_cert,
+            workspace_key=args.workspace_key,
+        )
+    except local.LocalOriginError as exc:
+        report.update(
+            certificate="invalid", diagnostic="local_profile", message=str(exc)
+        )
+    except web_tls.WebTLSError as exc:
+        report.update(certificate="invalid", diagnostic=exc.code, message=str(exc))
+    else:
+        report["message"] = (
+            "Account and workspace certificate files passed separate name checks."
+        )
+    if args.json:
+        print(json.dumps(report, sort_keys=True))
+    else:
+        print(report["message"])
+        if "account_origin" in report:
+            print(f"Account site: {report['account_origin']}")
+            print(f"Workspace site: {report['workspace_origin']}")
+        print(
+            "Browser trust and loopback name resolution: unverified. No listener was started."
+        )
+    return int(report["certificate"] != "valid")
+
+
 def _approve_browser_trust():
     try:
         fd = os.open("/dev/tty", os.O_RDWR | os.O_CLOEXEC)
@@ -183,6 +244,8 @@ def cli(box, argv):
         )
     if args.action == "check":
         return _check(box, args)
+    if args.action == "check-local-pair":
+        return _check_local_pair(args)
     if __package__:
         from . import web_tls_setup
     else:

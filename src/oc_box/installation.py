@@ -32,6 +32,8 @@ RUNTIME_FILES = (
     "web_tls.py",
     "web_tls_cli.py",
     "web_tls_setup.py",
+    "web_local_origins.py",
+    "web_handoff.py",
     "web_accounts.py",
     "web_admission.py",
     "web_pake_flow.py",

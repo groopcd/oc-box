@@ -26,13 +26,21 @@ that did not exercise TLS, live enrollment, cookies, origin validation or
 workspace admission. See [web sign-in](../mockups/web-sign-in.md) for the
 credential protection and deployment requirements.
 
-The next decision is which **separate trusted sign-in origin** the operator can
-configure. It cannot be the same origin that runs workspace-controlled code.
-Changing ports alone does not separate cookies. For a network deployment, a
-trusted account hostname plus a verified HTTPS workspace hostname is the
-preferred design. Start with one loopback-only named relay per verified owner
-and refuse concurrent guest access to that same owner unless independent
-admission is proven. Guest mode remains the default elsewhere.
+The selected first development profile is **local named sign-in**:
+`accounts.ocbox.test` and `workspace.ocbox-app.test`, both bound to IPv4
+loopback and using browser-trusted HTTPS. These synthetic reserved names avoid
+production DNS and deliberately separate the two sites, not just two ports.
+`oc-box web tls check-local-pair` checks supplied material separately for each
+hostname, without touching trust, name resolution or the workspace. The design
+uses one loopback-only named relay per verified owner and refuses concurrent
+guest access to that owner unless independent admission is proven. Guest mode
+remains the default elsewhere.
+
+A later LAN instance can use distinct existing sites and certificates under
+operator control. Isolated guest LAN tests can establish transport behavior
+using a synthetic private CA, without touching public DNS or requesting a
+public certificate. That does not establish public trust or DNS-01 issuance
+against an operator's production domain.
 
 Before turning on experimental named sign-in, independently review the exact
 PAKE build and applicable distribution terms, choose the certificate/hostname
@@ -42,3 +50,25 @@ cleanup on the chosen browser and Podman target. No HTTP or plaintext-password
 fallback. Only after the loopback gate passes should a separate explicit LAN
 bind be considered. Host-wide manager features require their own authorization
 design, not merely a stronger workspace login.
+
+## Isolated feasibility results
+
+- **Local HTTPS:** Two fresh, sandboxed Chromium 159 lab runs each passed
+  30 checks with separate synthetic `.test` sites and a private trust profile.
+  The browser performed enrollment and login through real OPAQUE WASM and a
+  separate native verifier; it sent protocol messages, not the password.
+  Untrusted and wrong-name certificates, a wrong password, an altered
+  final proof, a different browser session, and handoff replay were refused.
+  The successful handoff used a top-level POST and same-site confirmation,
+  then redirected to a clean app URL. The lab app was synthetic: this does
+  not validate native workspace pairing, durable enrollment, stream
+  revocation, or Firefox/Brave.
+- **Private LAN:** A disposable Fedora KVM guest passed 14 transport and
+  certificate checks with two isolated guest network namespaces and an
+  ephemeral private CA. Loopback refused the peer; an explicit guest LAN bind
+  admitted it. Chain/name, exact Host and exact Origin checks were exercised.
+  No port was forwarded to the real host, no public CA was contacted, and
+  this was not an oc-box named LAN listener or an ACME test.
+
+Option 3 is still the default: the native one-use link on localhost. Neither
+lab enables a production named or network mode.

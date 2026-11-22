@@ -67,6 +67,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [--workspace-layout] [LIFECYCLE-LOG-OPTIONS]
      oc-box web tls check localhost [--json]
      oc-box web tls check supplied --origin HTTPS_ORIGIN --cert PEM --key PEM [--json]
+     oc-box web tls check-local-pair --account-cert PEM --account-key PEM --workspace-cert PEM --workspace-key PEM [--account-port PORT] [--workspace-port PORT] [--json]
      oc-box web tls setup localhost [--install-trust]
      oc-box --status [--project PATH | --workspace ID] [--json | --table]
      oc-box status [--project PATH | --workspace ID] [--json | --table]
@@ -777,6 +778,14 @@ subject alternative names and private key match; it neither contacts a
 CA nor proves browser trust.  The supplied-file check does not require
 mkcert.  Use the name or IP covered by the certificate, not the listener
 bind address.
+
+‘oc-box web tls check-local-pair’ preflights two supplied certificate
+pairs for the local named-sign-in design:
+‘https://accounts.ocbox.test:9443’ and
+‘https://workspace.ocbox-app.test:9444’, with optional distinct
+unprivileged ports.  The names must resolve to loopback in the intended
+browser environment.  The check does not resolve DNS, edit trust or
+hosts files, start a listener, or enable named sign-in.
 
 The index lists all verified open native TUI tabs in this private
 service, including idle sessions, in native order in one outer tabstrip.
@@ -5130,22 +5139,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description5272
-Node: Commands10699
-Node: Options143377
-Node: Lifecycle and persistence204559
-Node: Distribution images206859
-Node: Sessions and recovery211936
-Node: Devices and host permissions218521
-Node: Resource reports220867
-Node: Configuration and environment222978
-Node: Files234359
-Node: Exit status245269
-Node: Examples246677
-Node: Troubleshooting248816
-Node: Installation and manuals260862
-Node: Authors and license271052
-Node: See also271659
+Node: Description5442
+Node: Commands10869
+Node: Options143971
+Node: Lifecycle and persistence205153
+Node: Distribution images207453
+Node: Sessions and recovery212530
+Node: Devices and host permissions219115
+Node: Resource reports221461
+Node: Configuration and environment223572
+Node: Files234953
+Node: Exit status245863
+Node: Examples247271
+Node: Troubleshooting249410
+Node: Installation and manuals261456
+Node: Authors and license271646
+Node: See also272253
 
 End Tag Table
 

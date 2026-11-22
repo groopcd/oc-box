@@ -57,7 +57,7 @@ _oc_box()
                         =|all|debug|info|warn|error) skip=1 ;;
                     esac
                     continue ;;
-                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--opencode-auth-export|--min-passphrase-length|--feature|--port|--session|--text|--level|--limit|--log-dir|--origin|--cert|--key)
+                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--opencode-auth-export|--min-passphrase-length|--feature|--port|--session|--text|--level|--limit|--log-dir|--origin|--cert|--key|--account-cert|--account-key|--workspace-cert|--workspace-key|--account-port|--workspace-port)
                     skip=1; continue ;;
                 --broker) broker=1; continue ;;
                 --host-drop|--host-clipboard|--host-clipboard-symlinks|--host-file-open|--image-preview)
@@ -95,7 +95,7 @@ _oc_box()
         fi
         case $option in
             --project|--log-dir) _oc_box_paths -d; return 0 ;;
-            --output|--identity|--opencode-auth-export|--cert|--key) _oc_box_paths -f; return 0 ;;
+            --output|--identity|--opencode-auth-export|--cert|--key|--account-cert|--account-key|--workspace-cert|--workspace-key) _oc_box_paths -f; return 0 ;;
             --distro)
                 _oc_box_words 'tumbleweed leap ubuntu debian fedora arch alpine opensuse opensuse-tumbleweed opensuse-leap archlinux'; return 0 ;;
             --feature)
@@ -117,7 +117,7 @@ _oc_box()
                     _oc_box_words 'on off'; return 0
                 fi ;;
             --credential-mode) _oc_box_words 'env selected vault'; return 0 ;;
-            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port|--session|--text|--limit|--origin)
+            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port|--session|--text|--limit|--origin|--account-port|--workspace-port)
                 return 0 ;;
         esac
     fi
@@ -133,8 +133,9 @@ _oc_box()
             if [[ ${COMP_WORDS[1]} == web && ${COMP_WORDS[2]} == tls ]] && (( COMP_CWORD > 2 )); then
                 case ${COMP_WORDS[3]} in
                     check) options="$help localhost supplied --origin --cert --key --json" ;;
+                    check-local-pair) options="$help --account-cert --account-key --workspace-cert --workspace-key --account-port --workspace-port --json" ;;
                     setup) options="$help localhost --install-trust" ;;
-                    *) options="$help check setup" ;;
+                    *) options="$help check check-local-pair setup" ;;
                 esac
             else
                 options="$help $selectors $launch_logs --session --port --no-open --no-vault --attachments --workspace-layout"

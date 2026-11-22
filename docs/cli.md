@@ -25,6 +25,7 @@ oc-box completion bash
 oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [--workspace-layout] [LIFECYCLE-LOG-OPTIONS]
 oc-box web tls check localhost [--json]
 oc-box web tls check supplied --origin HTTPS_ORIGIN --cert PEM --key PEM [--json]
+oc-box web tls check-local-pair --account-cert PEM --account-key PEM --workspace-cert PEM --workspace-key PEM [--account-port PORT] [--workspace-port PORT] [--json]
 oc-box web tls setup localhost [--install-trust]
 oc-box --status [--project PATH | --workspace ID] [--json | --table]
 oc-box status [--project PATH | --workspace ID] [--json | --table]
@@ -670,6 +671,13 @@ usability, validity dates, subject alternative names and private key match;
 it neither contacts a CA nor proves browser trust. The supplied-file check does
 not require mkcert. Use the name or IP covered by the certificate, not the
 listener bind address.
+
+`oc-box web tls check-local-pair` preflights two supplied certificate pairs for
+the local named-sign-in design: `https://accounts.ocbox.test:9443` and
+`https://workspace.ocbox-app.test:9444`, with optional distinct unprivileged
+ports. The names must resolve to loopback in the intended browser environment.
+The check does not resolve DNS, edit trust or hosts files, start a listener,
+or enable named sign-in.
 
 The index lists all verified open native TUI tabs in this private service,
 including idle sessions, in native order in one outer tabstrip. Click a tab to
