@@ -419,10 +419,15 @@ class _Framing:
             if code == _ESC and not self._framing_only():
                 # Do not replay the second Escape or assume a timeout made
                 # it independent. Recover only at a recognized report end.
-                self._flush(output)
-                # Keep the second introducer pending: on Kitty it may start a
-                # reserved OSC 72 packet, which cannot be forwarded on refusal.
-                self._held.extend(raw)
+                if self._reserve_osc72:
+                    self._flush(output)
+                    # The second introducer could start a reserved OSC 72
+                    # packet. Keep it until the selector is known.
+                    self._held.extend(raw)
+                else:
+                    # No private output to filter. Preserve delivery of the
+                    # second Escape even if no subsequent bytes arrive.
+                    self._flush(output, raw)
                 self._state = "escape-report-intro"
                 self._escape_report.clear()
                 return

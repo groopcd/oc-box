@@ -376,6 +376,22 @@ class PasteInputTests(FramingCase):
                 content = b"\x1b" + report + b"\x19"
                 self.assert_input(content, content, disabled=True, clipboard_reads=0)
 
+    def test_second_escape_is_delivered_without_waiting_when_osc72_is_not_reserved(
+        self,
+    ):
+        for reserve, expected in ((False, b"\x1b\x1b"), (True, b"\x1b")):
+            with self.subTest(reserve=reserve):
+                parser = PasteInput(
+                    lambda _: self.fail("unexpected paste"),
+                    on_clipboard=lambda: self.fail("unexpected clipboard read"),
+                    reserve_osc72=reserve,
+                )
+                self.assertEqual(parser.feed(b"\x1b"), b"")
+                self.assertEqual(parser.feed(b"\x1b"), expected)
+                self.assertFalse(parser.recovered_framing)
+                self.assertFalse(parser.disabled)
+                self.assertEqual(parser.finish(), b"\x1b" if reserve else b"")
+
     def test_reserved_kitty_packet_is_never_exposed_after_double_escape_refusal(self):
         for prefix in (
             b"\x1b",
