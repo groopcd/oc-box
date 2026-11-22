@@ -338,7 +338,9 @@ class HostClipboardPreferenceTests(unittest.TestCase):
         )
         self.assertEqual(
             client.call_args.kwargs,
-            {"interactive": True, "ui_owner": True, "file_preview": True},
+            # Saved clipboard consent never opts a source launch into opening
+            # container files in host applications.
+            {"interactive": True, "ui_owner": True, "file_preview": False},
         )
         owner.publish.assert_called_once_with("ses_existing")
         owner.wait_clients.assert_called_once_with()

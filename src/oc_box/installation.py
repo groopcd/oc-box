@@ -11,11 +11,9 @@ import tempfile
 import venv
 
 if __package__:
-    from . import host_file_open_policy
     from .paths import runtime_root, source_root
     from .version_info import get_version_info
 else:
-    import host_file_open_policy
     from paths import runtime_root, source_root
     from version_info import get_version_info
 
@@ -243,6 +241,11 @@ def install(
     source, home=None, *, with_vault=False, with_tui=False, verified_release=False
 ):
     """Activate a release; only the verified bootstrap can enroll a new install."""
+    # The build backend imports file inventories, not host enrollment policy.
+    if __package__:
+        from . import host_file_open_policy
+    else:
+        import host_file_open_policy
     source = source_root(source)
     if (source / "distribution.json").is_file():
         raise ValueError(
