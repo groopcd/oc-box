@@ -108,7 +108,10 @@ their checkout ownership distinct from unrelated source and flat installations.
   codes and metric names use closed sets; metric values are bounded integers.
   Never journal raw argv, errors, env, stdout/stderr, prompts, transcripts,
   pairing links, authentication, clipboard data or other free-form text.
-  `logs --tail` is the preparation-only view of this same private journal.
+  `logs --tail` reads an independent private preparation ring beneath the
+  selected log directory. Keep ordinary activity files readable and writable
+  by older launchers; never mix the newer preparation schema into them or the
+  system journal.
   Owning start/reset/web and sync preparation may append fixed task starts and
   outcomes before returning; do not move existing history/shutdown writes into
   lifecycle deadlines. Quiet setup discards selected installer streams; bare

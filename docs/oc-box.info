@@ -1802,8 +1802,12 @@ preparation runs, so you can watch them with ‘--tail --follow’.  The
 view defaults to all preparation levels; explicit severity, workspace,
 limit, and output-format options still apply.  Raw installer output is
 not saved: package managers, registries and plugin scripts can emit
-sensitive data.  ‘--tail’ reads the private activity file, not
-‘--journald’, and cannot be combined with ‘--path’.
+sensitive data.  Preparation records are stored separately in
+‘preparation/activity.jsonl’ under the selected private log directory,
+with the same retention settings applied to that ring independently.
+This keeps the ordinary activity log compatible with older launchers.
+Preparation records are not mirrored to the system journal.  ‘--tail’
+cannot be combined with ‘--journald’ or ‘--path’.
 
 By default, show the latest 100 retained entries at ‘info’ or above.
 ‘--level debug’ includes lower-severity stage detail; ‘--level warn’ or
@@ -2763,8 +2767,9 @@ are read cannot be recovered.  Stop following with Ctrl-C.
 
 Show recent environment preparation tasks and their results instead of
 general activity.  Add ‘--follow’ to watch new preparation records live.
-This is read-only, uses the same private log location and ‘--log-dir’
-override, and does not show raw installer streams.
+This is read-only, uses a separate ring under the same private log
+directory (including any ‘--log-dir’ override), and does not show raw
+installer streams.
 
 5.23 -journald
 ==============
@@ -5123,20 +5128,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5074
 Node: Commands10881
-Node: Options142196
-Node: Lifecycle and persistence203822
-Node: Distribution images206122
-Node: Sessions and recovery211199
-Node: Devices and host permissions217784
-Node: Resource reports220130
-Node: Configuration and environment222241
-Node: Files233622
-Node: Exit status244532
-Node: Examples245940
-Node: Troubleshooting248079
-Node: Installation and manuals260577
-Node: Authors and license270767
-Node: See also271374
+Node: Options142477
+Node: Lifecycle and persistence204138
+Node: Distribution images206438
+Node: Sessions and recovery211515
+Node: Devices and host permissions218100
+Node: Resource reports220446
+Node: Configuration and environment222557
+Node: Files233938
+Node: Exit status244848
+Node: Examples246256
+Node: Troubleshooting248395
+Node: Installation and manuals260893
+Node: Authors and license271083
+Node: See also271690
 
 End Tag Table
 

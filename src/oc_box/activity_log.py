@@ -160,6 +160,7 @@ MAX_METRIC_VALUE = 2**31 - 1
 _FILE = "activity.jsonl"
 _LOCK = "activity.lock"
 _PRUNE = ".activity.prune"
+_PREPARATION_DIRECTORY = "preparation"
 _MAX_FILE_BYTES = 256 * 1024
 _BACKUP_COUNT = 3
 # Safety bounds are independent of the current write/retention policy.
@@ -277,6 +278,25 @@ def _log_directory(root, *, create, policy=None):
         else:
             _private_directory(fd)
             yield fd
+
+
+@contextmanager
+def _preparation_directory(root, *, create, policy):
+    # Keep the preparation schema out of the legacy activity ring. Older
+    # launchers can still append to a shared custom directory during upgrade.
+    with _log_directory(root, create=create, policy=policy) as parent:
+        if create:
+            try:
+                os.mkdir(_PREPARATION_DIRECTORY, 0o700, dir_fd=parent)
+            except FileExistsError:
+                pass
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+        child = os.open(_PREPARATION_DIRECTORY, flags, dir_fd=parent)
+        try:
+            _private_directory(child)
+            yield child
+        finally:
+            os.close(child)
 
 
 def _check_file(info):
@@ -571,7 +591,7 @@ def _custom_inventory(directory):
     return files
 
 
-def _custom_records(directory, index, info):
+def _custom_records(directory, index, info, *, preparation_only=False):
     # An empty lock has no binding to an empty active inode. In particular,
     # a failed bootstrap must never turn a late empty file into managed data.
     # Only the empty active fd exclusively created by this append is writable.
@@ -584,7 +604,10 @@ def _custom_records(directory, index, info):
         first = None
         for line in _read_file(fd, info):
             record = _parse_record(line, strict=True)
-            if record is None:
+            if (
+                record is None
+                or (record["event"] in PREPARATION_EVENTS) != preparation_only
+            ):
                 raise ValueError("Unrecognized activity record")
             if first is None:
                 first = record
@@ -596,10 +619,12 @@ def _custom_records(directory, index, info):
     return first, b"" if line.endswith(b"\n") else b"\n"
 
 
-def _verify_custom_candidates(directory, files, candidates):
+def _verify_custom_candidates(directory, files, candidates, *, preparation_only=False):
     """Prove every candidate has managed content before any ring changes."""
     for index in candidates:
-        _custom_records(directory, index, files[index])
+        _custom_records(
+            directory, index, files[index], preparation_only=preparation_only
+        )
     for index in candidates:
         _check_snapshot(_activity_stat(directory, _filename(index)), files[index])
 
@@ -620,13 +645,15 @@ def validate_custom_directory(path):
             _verify_custom_candidates(directory, files, files)
 
 
-def _inspect_custom_files(directory, policy, now):
+def _inspect_custom_files(directory, policy, now, *, preparation_only=False):
     files = _custom_inventory(directory)
     active = files.get(0)
     if active is None:
         return files, b"", False
 
-    record, prefix = _custom_records(directory, 0, active)
+    record, prefix = _custom_records(
+        directory, 0, active, preparation_only=preparation_only
+    )
 
     aged = False
     if policy.max_file_sec:
@@ -777,7 +804,17 @@ def _available_bytes(directory, required):
     return max(0, info.f_bavail) * block_size
 
 
-def _prepare_append(directory, files, policy, now, rotate, final_size, append_size):
+def _prepare_append(
+    directory,
+    files,
+    policy,
+    now,
+    rotate,
+    final_size,
+    append_size,
+    *,
+    preparation_only=False,
+):
     """Make room and report whether to drop the outgoing active after a sync."""
     archives = sorted(index for index in files if index)
     keep = [0, *archives] if rotate else archives.copy()
@@ -798,7 +835,7 @@ def _prepare_append(directory, files, policy, now, rotate, final_size, append_si
     available = _available_bytes(directory, required) if policy.keep_free else None
     kept_archives = [index for index in keep if index]
     discarded = set(archives) - set(kept_archives)
-    custom = policy.directory is not None
+    custom = preparation_only or policy.directory is not None
     if custom:
         if rotate:
             affected = archives
@@ -815,7 +852,10 @@ def _prepare_append(directory, files, policy, now, rotate, final_size, append_si
                     if source != target
                 }
             )
-        _verify_custom_candidates(directory, files, affected)
+        if preparation_only:
+            _verify_custom_candidates(directory, files, affected, preparation_only=True)
+        else:
+            _verify_custom_candidates(directory, files, affected)
         if 0 in files:
             _check_snapshot(_activity_stat(directory, _FILE), files[0])
     for index in reversed(archives):
@@ -891,16 +931,22 @@ def record_event(
             json.dumps(record, separators=(",", ":"), ensure_ascii=True) + "\n"
         ).encode("ascii")
         policy = _policy()
-        custom = policy.directory is not None
+        preparation_only = event in PREPARATION_EVENTS
+        custom = preparation_only or policy.directory is not None
+        open_directory = _preparation_directory if preparation_only else _log_directory
         if len(payload) > min(_MAX_RECORD_BYTES, policy.max_file_size, policy.max_use):
             return False
         with (
-            _log_directory(root, create=True, policy=policy) as directory,
+            open_directory(root, create=True, policy=policy) as directory,
             _locked(directory, write=True, custom=custom),
         ):
             now = time.time()
-            inspect = _inspect_custom_files if custom else _inspect_files
-            files, prefix, aged = inspect(directory, policy, now)
+            if custom:
+                files, prefix, aged = _inspect_custom_files(
+                    directory, policy, now, preparation_only=preparation_only
+                )
+            else:
+                files, prefix, aged = _inspect_files(directory, policy, now)
             size = files[0].st_size if 0 in files else 0
             final_size = size + len(prefix) + len(payload)
             rotate = bool(size) and (
@@ -911,7 +957,14 @@ def record_event(
                 final_size = len(payload)
             pending = prefix + payload
             discard_outgoing = _prepare_append(
-                directory, files, policy, now, rotate, final_size, len(pending)
+                directory,
+                files,
+                policy,
+                now,
+                rotate,
+                final_size,
+                len(pending),
+                preparation_only=preparation_only,
             )
 
             active = files.get(0)
@@ -951,7 +1004,11 @@ def record_event(
                 os.close(fd)
             if discard_outgoing:
                 _discard_archive(directory, files, 1, custom=custom)
-        if policy.journald and os.environ.get("OC_BOX_CONTAINER") != "1":
+        if (
+            not preparation_only
+            and policy.journald
+            and os.environ.get("OC_BOX_CONTAINER") != "1"
+        ):
             try:
                 if __package__:
                     from . import journal_output
@@ -1032,8 +1089,9 @@ def _read_events(
     try:
         if policy is None:
             policy = _policy()
+        open_directory = _preparation_directory if preparation_only else _log_directory
         with (
-            _log_directory(root, create=False, policy=policy) as directory,
+            open_directory(root, create=False, policy=policy) as directory,
             _locked(directory, write=False),
         ):
             missing_newer = False
@@ -1071,10 +1129,8 @@ def _read_events(
                                 minimum is None
                                 or LEVELS.index(event_level(record)) >= minimum
                             )
-                            and (
-                                not preparation_only
-                                or record["event"] in PREPARATION_EVENTS
-                            )
+                            and (record["event"] in PREPARATION_EVENTS)
+                            == preparation_only
                         ):
                             file_records.append(record)
                     records.extendleft(reversed(file_records))

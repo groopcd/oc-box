@@ -166,7 +166,10 @@ nor stderr to the default console and that only bare `--verbose` or `ALL`
 restores those streams. The task-specific start records are visible before
 the subprocess exits, and results retain fixed failure categories and exit
 codes. Exercise `logs --tail --follow`, filters, missing/unsafe destinations,
-and untouched native/credential output. `tools/demo_preparation_logs.py`
+and untouched native/credential output. Keep preparation records in a
+separate bounded ring so older launchers can still write to the normal log.
+An interrupted final append must not replace an already-known child result.
+`tools/demo_preparation_logs.py`
 exercises these paths with disposable state and synthetic subprocesses.
 For version-pinned scripted checks that parse legacy launcher output, pass
 the flag only to the invocation under test. In the sharing host fixture that

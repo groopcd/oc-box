@@ -851,6 +851,7 @@ def run(argv, *, capture=False, check=True, private=False, preparation=None, **k
         and lifecycle_output.preparing_environment()
         and history_recovery.FENCE.get() is None
     )
+    details = {}
     try:
         command = [str(x) for x in argv]
         invoke = (
@@ -905,7 +906,8 @@ def run(argv, *, capture=False, check=True, private=False, preparation=None, **k
     except subprocess.TimeoutExpired as exc:
         if tracked_preparation:
             task = lifecycle_output.preparation_label(preparation)
-            raise BoxError(f"{task} timed out. See 'oc-box logs --tail'.") from exc
+            hint = lifecycle_output.preparation_failure_hint(details)
+            raise BoxError(f"{task} timed out. {hint}") from exc
         raise BoxError(
             f"{argv[0]} exceeded its {exc.timeout}s timeout; operation stopped."
         ) from exc
@@ -913,9 +915,8 @@ def run(argv, *, capture=False, check=True, private=False, preparation=None, **k
     if check and result.returncode:
         if tracked_preparation:
             task = lifecycle_output.preparation_label(preparation)
-            raise BoxError(
-                f"{task} failed (exit {result.returncode}). See 'oc-box logs --tail'."
-            )
+            hint = lifecycle_output.preparation_failure_hint(details)
+            raise BoxError(f"{task} failed (exit {result.returncode}). {hint}")
         detail = (
             (result.stderr or result.stdout or "").strip()
             if capture and not private

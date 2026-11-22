@@ -90,7 +90,9 @@ class LogsCliTests(unittest.TestCase):
                 activity_log.record_event("command.finished", command="start")
             )
         options = ("--tail", "--log-dir", str(custom))
-        before = (custom / "activity.jsonl").read_bytes()
+        active = custom / "activity.jsonl"
+        preparation = custom / "preparation" / "activity.jsonl"
+        before = active.read_bytes(), preparation.read_bytes()
         _, text = self.run_cli(*options)
         self.assertIn("Installing container baseline packages — started", text)
         self.assertIn(
@@ -102,7 +104,9 @@ class LogsCliTests(unittest.TestCase):
         _, table = self.run_cli(*options, "--table")
         self.assertIn("Installing container baseline packages", table)
         self.assertIn("ACTIVITY", table)
-        self.assertEqual((custom / "activity.jsonl").read_bytes(), before)
+        self.assertEqual((active.read_bytes(), preparation.read_bytes()), before)
+        self.assertNotIn(b"preparation.", before[0])
+        self.assertNotIn(b"command.finished", before[1])
         self.assertFalse(self.root.exists())
 
     def test_tail_unavailable_is_read_only_and_refuses_other_sources(self):

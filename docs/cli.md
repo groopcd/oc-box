@@ -1602,8 +1602,12 @@ exit status on failure. These are written while preparation runs, so you can
 watch them with `--tail --follow`. The view defaults to all preparation levels;
 explicit severity, workspace, limit, and output-format options still apply.
 Raw installer output is not saved: package managers, registries and plugin
-scripts can emit sensitive data. `--tail` reads the private activity file,
-not `--journald`, and cannot be combined with `--path`.
+scripts can emit sensitive data. Preparation records are stored separately
+in `preparation/activity.jsonl` under the selected private log directory,
+with the same retention settings applied to that ring independently. This
+keeps the ordinary activity log compatible with older launchers. Preparation
+records are not mirrored to the system journal. `--tail` cannot be combined
+with `--journald` or `--path`.
 
 By default, show the latest 100 retained entries at `info` or above.
 `--level debug` includes lower-severity stage detail; `--level warn` or
@@ -2480,7 +2484,8 @@ be recovered. Stop following with Ctrl-C.
 
 Show recent environment preparation tasks and their results instead of general
 activity. Add `--follow` to watch new preparation records live. This is
-read-only, uses the same private log location and `--log-dir` override, and
+read-only, uses a separate ring under the same private log directory (including
+any `--log-dir` override), and
 does not show raw installer streams.
 
 ### --journald

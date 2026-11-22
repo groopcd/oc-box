@@ -99,7 +99,7 @@ with lifecycle_output.invocation("reset", Path(sys.argv[1]), console_level=sys.a
             ]
             * 3,
         )
-        payload = (self.root / "log/activity.jsonl").read_text()
+        payload = (self.root / "log/preparation/activity.jsonl").read_text()
         self.assertNotIn("SYNTHETIC_", payload)
         self.assertNotIn("NATIVE_OUTPUT", payload)
         self.assertNotIn("setup input", payload)
@@ -164,6 +164,33 @@ with lifecycle_output.invocation("reset", Path(sys.argv[1]), console_level=sys.a
         self.assertEqual(child.call_args.kwargs["stdout"], subprocess.DEVNULL)
         self.assertEqual(list(destination.iterdir()), [])
         self.assertFalse(self.root.exists())
+
+    def test_preparation_failure_honors_selected_log_and_late_interrupt(self):
+        destination = self.root.parent / "custom journal"
+        hint = f"oc-box logs --tail --log-dir '{destination}'"
+        for final_append in (True, False, KeyboardInterrupt()):
+            with (
+                self.subTest(final_append=final_append),
+                lifecycle_output.invocation("reset", self.root),
+                log_config.overrides(directory=destination),
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+                patch.object(
+                    activity_log, "record_event", side_effect=[True, final_append]
+                ),
+                patch.object(
+                    box.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 9),
+                ),
+                self.assertRaisesRegex(box.BoxError, "failed \\(exit 9\\)") as result,
+            ):
+                box.run(["synthetic"], preparation="baseline-tools")
+            self.assertIn(hint, stderr.getvalue())
+            if final_append is True:
+                self.assertIn(hint, str(result.exception))
+            else:
+                self.assertNotIn("logs --tail", str(result.exception))
+                self.assertIn("could not be logged", str(result.exception))
 
     def test_scoped_report_context_resets_after_error_and_nested_invocation(self):
         self.assertFalse(lifecycle_output.concise())

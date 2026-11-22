@@ -85,6 +85,12 @@ def _preparation_hint():
     return "oc-box logs --tail --log-dir " + shlex.quote(path)
 
 
+def preparation_failure_hint(report):
+    if report.get("recorded"):
+        return f"Details: {_preparation_hint()}."
+    return "Preparation result could not be logged; use --verbose on a later launch for live output."
+
+
 def preparing_environment():
     return command_name() in ("start", "reset", "sync", "web")
 
@@ -139,14 +145,22 @@ def preparation(task):
         report["outcome"] = "cancelled"
         raise
     finally:
-        append(
-            "preparation.finished",
-            **report,
-            level={"success": "debug", "cancelled": "warn"}.get(
-                report["outcome"], "error"
-            ),
-            duration_ms=int((time.monotonic() - started) * 1000),
-        )
+        # The child outcome is already known, or its original exception is
+        # propagating. An interruption of this optional append cannot replace it.
+        report["recorded"] = False
+        try:
+            report["recorded"] = append(
+                "preparation.finished",
+                outcome=report["outcome"],
+                exit_code=report.get("exit_code"),
+                reason=report.get("reason"),
+                level={"success": "debug", "cancelled": "warn"}.get(
+                    report["outcome"], "error"
+                ),
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
+        except KeyboardInterrupt:
+            pass
 
 
 def console_event(event, **fields):
