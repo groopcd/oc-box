@@ -425,6 +425,43 @@ class PasteInputTests(FramingCase):
                             reserve_osc72=reserve,
                         )
 
+    def test_control_keys_after_pending_escape_wait_for_an_independent_boundary(self):
+        shortcut = b"\x19"
+        for escapes in (1, 2, 4):
+            for reserve in (False, True):
+                for boundary in (
+                    b"\x1b[A",
+                    b"\x1b[I",
+                    b"\x1bOP",
+                    b"\x1b[121;5u",  # This completes recovery but grants no read.
+                    paste(b"/host/not-authorized.png"),
+                    paste(b"/host/not-authorized.png" + shortcut),
+                ):
+                    with self.subTest(
+                        escapes=escapes, reserve=reserve, boundary=boundary
+                    ):
+                        pending = b"\x1b" * escapes + shortcut + b"\r\t\b\n\x16\x7f"
+                        frame = pending + shortcut + boundary
+                        self.assert_input(
+                            frame + shortcut,
+                            frame + paste(REPLACEMENT),
+                            clipboard_reads=1,
+                            recovered=True,
+                            reserve_osc72=reserve,
+                        )
+                        self.assert_input(
+                            pending + shortcut,
+                            pending + shortcut,
+                            clipboard_reads=0,
+                            reserve_osc72=reserve,
+                        )
+
+    def test_control_key_recovery_does_not_rearm_at_untrusted_boundaries(self):
+        for ambiguous in (b"\x18", b"\x1a", b"\xff", b"\x1b[M123", b"\x1b[0200~" + END):
+            with self.subTest(ambiguous=ambiguous):
+                wire = b"\x1b\x1b\x19" + ambiguous + b"\x1b[A\x19"
+                self.assert_input(wire, wire, clipboard_reads=0, disabled=True)
+
     def test_escape_overlap_control_strings_do_not_authorize_interior_input(self):
         frame = b"\x1b\x1b]72;opaque\x19" + START
         self.assert_input(frame, frame, clipboard_reads=0)
@@ -445,6 +482,8 @@ class PasteInputTests(FramingCase):
         for prefix in (
             b"\x1b",
             b"\x1b\x1b",
+            b"\x1b\x19",
+            b"\x1b\x1b\x19\r",
             b"\x1b\x1b[<16;6;",
             b"\x1b\x1b[<16;6;\xc3",
         ):
@@ -458,24 +497,51 @@ class PasteInputTests(FramingCase):
                     reserve_osc72=True,
                 )
 
+    def test_reserved_kitty_reply_after_control_key_cannot_grant_or_expose_its_body(
+        self,
+    ):
+        for prefix in (b"\x1b\x19", b"\x1b\x1b\x19"):
+            for selector, end in (
+                (b"72;", b"\x1b\\"),
+                (b"072;", b"\x07"),
+                (b"72;", b""),
+            ):
+                with self.subTest(prefix=prefix, selector=selector, end=end):
+                    packet = b"]" + selector + b"i=synthetic;private" + end
+                    tail = b"\x1b[A\x19" if end else b""
+                    self.assert_input(
+                        prefix + packet + tail,
+                        prefix + tail,
+                        disabled=True,
+                        clipboard_reads=0,
+                        reserve_osc72=True,
+                    )
+
     def test_escape_recovery_mouse_report_is_not_delivered_to_click_observer(self):
         press, release = b"\x1b[<16;6;8M", b"\x1b[<16;6;8m"
         for escapes in (1, 2, 4):
-            stream = press + b"\x1b" * escapes + release + press + release
-            for name, chunks in fragmentations(stream):
-                with self.subTest(escapes=escapes, fragmentation=name):
-                    observed = []
-                    parser = PasteInput(
-                        lambda _: None,
-                        on_host_mouse=lambda report: observed.append(report) or report,
-                        on_mouse_boundary=lambda: observed.append(b"boundary"),
-                    )
-                    self.assertEqual(
-                        b"".join(parser.feed(chunk) for chunk in chunks), stream
-                    )
-                    self.assertEqual(observed, [press, b"boundary", press, release])
-                    self.assertTrue(parser.recovered_framing)
-                    self.assertFalse(parser.disabled)
+            for control in (b"", b"\x19\r"):
+                # With one Escape and a control, the first Escape already
+                # breaks the click; the following release still cannot grant.
+                stream = press + b"\x1b" * escapes + control + release + press + release
+                for name, chunks in fragmentations(stream):
+                    with self.subTest(
+                        escapes=escapes, control=control, fragmentation=name
+                    ):
+                        observed = []
+                        parser = PasteInput(
+                            lambda _: None,
+                            on_host_mouse=lambda report: (
+                                observed.append(report) or report
+                            ),
+                            on_mouse_boundary=lambda: observed.append(b"boundary"),
+                        )
+                        self.assertEqual(
+                            b"".join(parser.feed(chunk) for chunk in chunks), stream
+                        )
+                        self.assertEqual(observed, [press, b"boundary", press, release])
+                        self.assertTrue(parser.recovered_framing)
+                        self.assertFalse(parser.disabled)
 
     def test_opaque_frame_never_recovers_from_possible_nested_or_unfinished_payload(
         self,

@@ -192,12 +192,13 @@ ordinary paste should be unchanged, and the shortcut should still work. Do not
 deliberately feed malformed terminal traffic to a real workspace. The
 `input-framing-recovered` notice at exit means the relay passed a frame through
 without using it for import and resumed at an unambiguous boundary; it did not
-retry any clipboard read. Press Escape several times, then use an ordinary
-arrow key or switch focus before trying Ctrl+Y again in the same client. A
-complete recognized native input frame can restore framing but cannot grant
-an action itself. An `input-framing` or `input-incomplete` warning means
-the relay could not trust a boundary and did not resume interception from that
-problem. A fresh client can attach if the owner is still running.
+retry any clipboard read. Press Escape several times, then Ctrl+Y. If a
+pending Escape prevents the clipboard read, press an arrow key, then press
+Ctrl+Y again in the same client. A complete recognized native input frame can
+restore framing but cannot grant an action itself. An `input-framing` or
+`input-incomplete` warning means the relay could not trust a boundary and did
+not resume interception from that problem. A fresh client can attach if the
+owner is still running.
 
 If `clipboard-unexpected-read` occurs, recovery can use only a later qualifying
 Ctrl+Y event after verified helper reaping. A successful read does not restore

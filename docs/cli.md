@@ -3010,14 +3010,16 @@ resume for later input. A recognized paste or ASCII CSI sequence with certain
 embedded control bytes also passes unchanged without granting an import. The
 relay resumes only after an unambiguous closing delimiter or final byte, and
 a later Ctrl+Y press is required for a clipboard read. Repeated top-level
-Escapes can also recover after a complete recognized key or terminal report.
-Recognized control strings and canonical pastes reached this way stay opaque
-until their own end. None of those recovery bytes grant a clipboard read,
-file import, or host open. An overlapping OSC introducer in Kitty's reserved
-file-drop mode still stops interception to protect OSC 72 packets. An unfinished terminal
-reply or paste never grants a read. Ambiguous
-encoding, possible nested frames and other untrusted boundaries still stop
-interception for that client.
+Escapes and common control keys after a pending Escape (including Enter, Tab,
+and Ctrl+Y) pass through without disabling imports or reading the clipboard.
+If Ctrl+Y does nothing after Escape, press an arrow key, then press Ctrl+Y
+again in the same client. A complete recognized key or terminal report can
+restore framing, but grants no import or host open itself. Recognized control
+strings and canonical pastes reached this way stay opaque until their own end.
+An overlapping OSC introducer in Kitty's reserved file-drop mode still stops
+interception to protect OSC 72 packets. Ambiguous encoding, possible nested
+frames and other untrusted boundaries still stop interception for that client.
+An unfinished terminal reply or paste never grants a read.
 On exit, `input-framing-recovered` reports that interception resumed;
 `input-framing` or `input-incomplete` means it did not recover from a framing
 problem. If needed, open a fresh native TUI client; the relay does not restart
