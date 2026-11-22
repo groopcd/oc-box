@@ -16,6 +16,7 @@ process racing host-state rename/unlink operations.
 import argparse
 from contextlib import contextmanager
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -59,6 +60,15 @@ class PreferenceError(ValueError):
 
 class _SnapshotReplaced(PreferenceError):
     """Discard a safely replaced snapshot; never weaken validation of its successor."""
+
+
+class _PublicationSettling(_SnapshotReplaced):
+    """Only ctime advanced; verify the same inode's bytes on a fresh read."""
+
+    def __init__(self, identity, digest):
+        super().__init__(UNSAFE_STORAGE)
+        self.identity = identity
+        self.digest = digest
 
 
 def _close(fd):
@@ -190,6 +200,17 @@ def _directory(workspace_path, workspace_id):
         _close(fd)
 
 
+def _discard_retired(directory, name, retired, *, private, maximum):
+    entry = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+    # A second atomic replacement can retire this observation too. Validate
+    # safety metadata, but never read either retired inode; retry the canonical
+    # name within the existing snapshot budget.
+    _file_info(entry, private=private, maximum=maximum, allow_retired=True)
+    if entry.st_nlink == 0 or _identity(entry) != _identity(retired):
+        raise _SnapshotReplaced(UNSAFE_STORAGE)
+    raise PreferenceError(UNSAFE_STORAGE)
+
+
 def _read_file_once(directory, name, *, private, maximum):
     """One stable snapshot, distinguishing safe replacement from unsafe state."""
     try:
@@ -198,11 +219,7 @@ def _read_file_once(directory, name, *, private, maximum):
         return None, None
     _file_info(observed, private=private, maximum=maximum, allow_retired=True)
     if observed.st_nlink == 0:
-        entry = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
-        _file_info(entry, private=private, maximum=maximum)
-        if _identity(entry) != _identity(observed):
-            raise _SnapshotReplaced(UNSAFE_STORAGE)
-        raise PreferenceError(UNSAFE_STORAGE)
+        _discard_retired(directory, name, observed, private=private, maximum=maximum)
     fd = os.open(name, _READ_FLAGS, dir_fd=directory.fd)
     try:
         before = os.fstat(fd)
@@ -211,11 +228,7 @@ def _read_file_once(directory, name, *, private, maximum):
         # or returned as a usable snapshot. The canonical successor stays strict.
         _file_info(before, private=private, maximum=maximum, allow_retired=True)
         if before.st_nlink == 0:
-            entry = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
-            _file_info(entry, private=private, maximum=maximum)
-            if _identity(entry) != _identity(before):
-                raise _SnapshotReplaced(UNSAFE_STORAGE)
-            raise PreferenceError(UNSAFE_STORAGE)
+            _discard_retired(directory, name, before, private=private, maximum=maximum)
         # A safe replacement before open is a valid new snapshot, not an unsafe
         # inode or permission to trust the earlier stat. Pin the validated FD as
         # the baseline; still require its canonical entry to match after reading.
@@ -236,12 +249,22 @@ def _read_file_once(directory, name, *, private, maximum):
             _file_info(after, private=private, maximum=maximum, allow_retired=True)
             raise _SnapshotReplaced(UNSAFE_STORAGE)
         _file_info(after, private=private, maximum=maximum)
-        if (
-            size > maximum
-            or size != before.st_size
-            or _stamp(after) != _stamp(before)
-            or _stamp(entry) != _stamp(before)
-        ):
+        if size > maximum or size != before.st_size:
+            raise PreferenceError(UNSAFE_STORAGE)
+        first, final, named = _stamp(before), _stamp(after), _stamp(entry)
+        if first != final or first != named:
+            if (
+                first[:-1] == final[:-1] == named[:-1]
+                and before.st_ctime_ns == before.st_mtime_ns
+                and before.st_ctime_ns <= after.st_ctime_ns <= entry.st_ctime_ns
+                and entry.st_ctime_ns > before.st_ctime_ns
+            ):
+                # The canonical name can become visible before rename finishes
+                # updating ctime. Discard these bytes and reread a stable inode;
+                # never waive a stamp check on bytes that are actually returned.
+                raise _PublicationSettling(
+                    _identity(before), hashlib.sha256(b"".join(chunks)).digest()
+                )
             raise PreferenceError(UNSAFE_STORAGE)
         return b"".join(chunks), before
     finally:
@@ -251,12 +274,17 @@ def _read_file_once(directory, name, *, private, maximum):
 def _read_file(directory, name, *, private, maximum):
     """Retry bounded, safe same-owner replacements, including owner registry writes."""
     replaced = False
+    settling = {}
     for _ in range(MAX_SNAPSHOT_ATTEMPTS):
         try:
             raw, info = _read_file_once(
                 directory, name, private=private, maximum=maximum
             )
-        except _SnapshotReplaced:
+        except _SnapshotReplaced as error:
+            if isinstance(error, _PublicationSettling):
+                expected = settling.setdefault(error.identity, error.digest)
+                if expected != error.digest:
+                    raise PreferenceError(UNSAFE_STORAGE) from None
             replaced = True
             directory.check()
             continue
@@ -264,6 +292,12 @@ def _read_file(directory, name, *, private, maximum):
             # Atomic replacement never leaves an absent canonical entry. Losing
             # observed state is not permission to fall back to default-on.
             raise PreferenceError(UNSAFE_STORAGE)
+        if raw is not None:
+            expected = settling.get(_identity(info))
+            if expected is not None and hashlib.sha256(raw).digest() != expected:
+                # An in-place rewrite that restores mtime can also look like
+                # publication ctime settling. Never accept its changed bytes.
+                raise PreferenceError(UNSAFE_STORAGE)
         return raw, info
     raise PreferenceError(BUSY) from None
 
@@ -387,7 +421,10 @@ def _locked(directory):
                     0o600,
                     dir_fd=directory.fd,
                 )
-                os.fchmod(fd, 0o600)
+                # With a usual umask the new lock is private already. A
+                # redundant chmod would race a contender's FD/name stamp check.
+                if stat.S_IMODE(os.fstat(fd).st_mode) != 0o600:
+                    os.fchmod(fd, 0o600)
             except FileExistsError:
                 fd = os.open(LOCK_NAME, flags, dir_fd=directory.fd)
         _check_lock(directory, fd)

@@ -8,6 +8,7 @@ from pathlib import Path
 import stat
 import tempfile
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -725,6 +726,32 @@ class WorkspacePreferenceTests(_WorkspaceFixture):
         ]
         return workers, start, results
 
+    def test_new_private_lock_avoids_redundant_chmod_but_normalizes_a_restrictive_umask(
+        self,
+    ):
+        chmod = os.fchmod
+        for mask, expected in ((0o077, []), (0o777, [0o600])):
+            with self.subTest(mask=oct(mask)):
+                seen = []
+
+                def observe(fd, mode):
+                    opened, lock = os.fstat(fd), self.lock.stat()
+                    if (opened.st_dev, opened.st_ino) == (lock.st_dev, lock.st_ino):
+                        seen.append(mode)
+                    return chmod(fd, mode)
+
+                previous = os.umask(mask)
+                try:
+                    with patch.object(preferences.os, "fchmod", side_effect=observe):
+                        saved = preferences.set_host_drop(self.path, WORKSPACE, False)
+                finally:
+                    os.umask(previous)
+                mode = stat.S_IMODE(self.lock.stat().st_mode)
+                self.lock.unlink()
+                self.assertEqual(seen, expected)
+                self.assertFalse(saved["host_drop"])
+                self.assertEqual(mode, 0o600)
+
     def stop_worker(self, worker):
         worker.join(timeout=10)
         if worker.is_alive():
@@ -831,6 +858,194 @@ class WorkspacePreferenceTests(_WorkspaceFixture):
         self.assertEqual(json.loads(self.path.read_bytes()), updated)
         self.assertFalse(self.lock.exists())
         self.assertFalse(self.file.exists())
+
+    def test_preference_reader_discards_two_consecutively_retired_snapshots(self):
+        opening, statting = os.open, os.stat
+        generation = {"version": 1, "workspace": WORKSPACE, "host_drop": False}
+        for phase in ("path-stat", "opened-fd", "repeat-retired-stat"):
+            for latest in ("safe", "unsafe", "missing"):
+                with (
+                    self.subTest(phase=phase, latest=latest),
+                    contextlib.ExitStack() as pins,
+                ):
+                    self.seed({**generation, "future_generation": 0})
+                    path_stats = 0
+                    retired = []
+                    first_retired = None
+
+                    def replace(next_generation):
+                        if next_generation == 2 and latest == "missing":
+                            self.file.unlink()
+                            return
+                        self.replace_fixture(
+                            self.file,
+                            value={**generation, "future_generation": next_generation},
+                            mode=0o644
+                            if next_generation == 2 and latest == "unsafe"
+                            else 0o600,
+                        )
+
+                    def observed(name, *args, **kwargs):
+                        nonlocal path_stats, first_retired
+                        if (
+                            name == preferences.FILE_NAME
+                            and kwargs.get("follow_symlinks") is False
+                        ):
+                            path_stats += 1
+                            if path_stats == 2 or (
+                                path_stats == 1 and phase != "opened-fd"
+                            ):
+                                if path_stats == 2 and phase == "repeat-retired-stat":
+                                    replace(2)
+                                    retired.append(2)
+                                    return first_retired
+                                fd = opening(
+                                    name,
+                                    preferences._READ_FLAGS,
+                                    dir_fd=kwargs["dir_fd"],
+                                )
+                                pins.callback(os.close, fd)
+                                replace(path_stats)
+                                info = os.fstat(fd)
+                                self.assertEqual(info.st_nlink, 0)
+                                if path_stats == 1:
+                                    first_retired = info
+                                retired.append(path_stats)
+                                return info
+                        return statting(name, *args, **kwargs)
+
+                    def opened(name, flags, *args, **kwargs):
+                        fd = opening(name, flags, *args, **kwargs)
+                        if (
+                            phase == "opened-fd"
+                            and name == preferences.FILE_NAME
+                            and path_stats == 1
+                        ):
+                            replace(1)
+                            self.assertEqual(os.fstat(fd).st_nlink, 0)
+                            retired.append(1)
+                        return fd
+
+                    with (
+                        patch.object(preferences.os, "stat", side_effect=observed),
+                        patch.object(preferences.os, "open", side_effect=opened),
+                    ):
+                        if latest == "safe":
+                            self.assertEqual(
+                                preferences.read(self.path, WORKSPACE)[
+                                    "future_generation"
+                                ],
+                                2,
+                            )
+                        else:
+                            self.refuse(
+                                preferences.read,
+                                self.path,
+                                WORKSPACE,
+                                message=preferences.UNSAFE_STORAGE,
+                            )
+                    self.assertEqual(retired, [1, 2])
+                    self.assertGreaterEqual(path_stats, 3)
+                    self.assertFalse(self.lock.exists())
+
+    def test_preference_reader_retries_publication_ctime_change_without_using_old_read(
+        self,
+    ):
+        statting, fstatting, reading = os.stat, os.fstat, os.read
+        expected = {
+            "version": 1,
+            "workspace": WORKSPACE,
+            "host_drop": False,
+            "future": "old",
+        }
+        for stale_fstats, rewrite in ((1, False), (2, False), (1, True)):
+            with self.subTest(stale_fstats=stale_fstats, rewrite=rewrite):
+                self.seed(expected)
+                initial = self.file.stat()
+                os.utime(
+                    self.file,
+                    ns=(initial.st_atime_ns, initial.st_mtime_ns - 1_000_000_000),
+                )
+                current = self.file.stat()
+                self.assertGreater(current.st_ctime_ns, current.st_mtime_ns)
+                path_stats = fd_stats = 0
+                rewritten = False
+
+                def before_rename(info):
+                    metadata = {
+                        name: getattr(info, name)
+                        for name in (
+                            "st_dev",
+                            "st_ino",
+                            "st_mode",
+                            "st_uid",
+                            "st_gid",
+                            "st_nlink",
+                            "st_size",
+                            "st_mtime_ns",
+                        )
+                    }
+                    return SimpleNamespace(**metadata, st_ctime_ns=info.st_mtime_ns)
+
+                def observed(name, *args, **kwargs):
+                    nonlocal path_stats
+                    info = statting(name, *args, **kwargs)
+                    if (
+                        name == preferences.FILE_NAME
+                        and kwargs.get("follow_symlinks") is False
+                    ):
+                        path_stats += 1
+                        if path_stats == 1:
+                            return before_rename(info)
+                    return info
+
+                def opened(fd):
+                    nonlocal fd_stats
+                    info = fstatting(fd)
+                    if (info.st_dev, info.st_ino) == (current.st_dev, current.st_ino):
+                        fd_stats += 1
+                        if fd_stats <= stale_fstats:
+                            return before_rename(info)
+                    return info
+
+                def read_then_rewrite(fd, maximum):
+                    nonlocal rewritten
+                    data = reading(fd, maximum)
+                    if rewrite and data and not rewritten:
+                        info = fstatting(fd)
+                        if (info.st_dev, info.st_ino) == (
+                            current.st_dev,
+                            current.st_ino,
+                        ):
+                            self.file.write_bytes(
+                                json.dumps({**expected, "future": "new"}).encode()
+                            )
+                            os.utime(
+                                self.file,
+                                ns=(current.st_atime_ns, current.st_mtime_ns),
+                            )
+                            rewritten = True
+                    return data
+
+                with (
+                    patch.object(preferences.os, "stat", side_effect=observed),
+                    patch.object(preferences.os, "fstat", side_effect=opened),
+                    patch.object(preferences.os, "read", side_effect=read_then_rewrite),
+                ):
+                    if rewrite:
+                        self.refuse(
+                            preferences.read,
+                            self.path,
+                            WORKSPACE,
+                            message=preferences.UNSAFE_STORAGE,
+                        )
+                    else:
+                        self.assertEqual(
+                            preferences.read(self.path, WORKSPACE), expected
+                        )
+                self.assertEqual((path_stats, fd_stats), (4, 4))
+                self.assertEqual(rewritten, rewrite)
+                self.assertFalse(self.lock.exists())
 
     def test_registry_snapshot_retry_never_accepts_changed_id_corruption_links_or_mode(
         self,
