@@ -24,6 +24,7 @@
   let navigation = 0;
   let sawFrameLoad = false;
   let membershipKnown = false;
+  let workspace = null;
 
   function row(value) {
     if (!value || typeof value.id !== "string" || !idPattern.test(value.id) || typeof value.title !== "string" ||
@@ -37,7 +38,7 @@
       activeRoot: value.activeRoot ?? null };
   }
   function selection() {
-    if (!selected || awaitingLoad) return null;
+    if (!selected || awaitingLoad || workspace?.manager()) return null;
     try {
       const url = new URL(frame.contentWindow.location.href);
       if (url.origin !== window.location.origin || url.pathname !== selected.route) return null;
@@ -58,15 +59,22 @@
     const activeId = membershipKnown && current && members.some(item => item.id === current.activeRoot) ?
       current.activeRoot : awaitingLoad ? selected?.id : current?.sessionID;
     tabs.replaceChildren();
-    for (const item of members) {
+    for (const item of workspace?.visibleRows() ?? members) {
       const button = document.createElement("button");
       button.type = "button";
-      button.setAttribute("role", "tab");
-      button.setAttribute("aria-controls", "native");
-      button.setAttribute("aria-selected", String(activeId === item.id));
+      if (workspace?.manager()) {
+        button.setAttribute("aria-label", "Open in native chat: " + (item.title || item.id));
+      } else {
+        button.setAttribute("role", "tab");
+        button.setAttribute("aria-controls", "native");
+        button.setAttribute("aria-selected", String(activeId === item.id));
+      }
       button.textContent = item.title || item.id;
       button.title = item.id;
-      button.addEventListener("click", () => select(item, "Explicit TUI-tab click"));
+      button.addEventListener("click", () => {
+        if (workspace) workspace.open(item);
+        else select(item, "Explicit TUI-tab click");
+      });
       tabs.append(button);
     }
     retained.replaceChildren();
@@ -124,7 +132,7 @@
     changed();
   }
   async function observeNativeRoute() {
-    if (awaitingLoad || frame.hidden || document.hidden) return;
+    if (awaitingLoad || frame.hidden || document.hidden || workspace?.manager()) return;
     let url;
     try { url = new URL(frame.contentWindow.location.href); }
     catch { unboundView(); return; }
@@ -206,6 +214,176 @@
       refresh.disabled = false;
     }
   }
+  function studioDividers(content) {
+    const minPane = 208; // Must agree with the wide Studio CSS tracks.
+    const minChat = 420;
+    const gutter = 12;
+    const defaults = { left: 248, right: 264 };
+    const requested = { ...defaults };
+    const widths = {};
+    const handles = {
+      left: document.getElementById("workspace-divider-left"),
+      right: document.getElementById("workspace-divider-right"),
+    };
+    const wide = window.matchMedia("(min-width: 66rem)");
+    const other = side => side === "left" ? "right" : "left";
+    const budget = () => Math.max(2 * minPane, content.clientWidth - minChat - 2 * gutter);
+    const clamp = (value, max) => Math.min(Math.max(value, minPane), max);
+    let priority = "left";
+    let drag = null;
+
+    function cancel() {
+      if (!drag) return;
+      const { handle, id } = drag;
+      drag = null;
+      delete root.dataset.resizing;
+      if (handle.hasPointerCapture(id)) handle.releasePointerCapture(id);
+    }
+    function fit() {
+      if (root.dataset.layout !== "studio" || !wide.matches) { cancel(); return; }
+      const available = budget();
+      const secondary = other(priority);
+      // The moved pane can borrow room from its neighbor, but not from chat's
+      // minimum width. Keep the other preference for when space comes back.
+      widths[priority] = clamp(requested[priority], available - minPane);
+      widths[secondary] = clamp(requested[secondary], available - widths[priority]);
+      for (const side of ["left", "right"]) {
+        root.style.setProperty("--workspace-" + side, widths[side] + "px");
+        handles[side].setAttribute("aria-valuemin", String(minPane));
+        handles[side].setAttribute("aria-valuemax", String(available - minPane));
+        handles[side].setAttribute("aria-valuenow", String(widths[side]));
+      }
+    }
+    function resize(side, value) {
+      requested[side] = clamp(value, budget() - minPane);
+      priority = side;
+      fit();
+    }
+    for (const side of ["left", "right"]) {
+      const handle = handles[side];
+      const direction = side === "left" ? 1 : -1;
+      handle.addEventListener("pointerdown", event => {
+        if (drag || event.button !== 0 || !event.isPrimary || !wide.matches) return;
+        handle.setPointerCapture(event.pointerId);
+        drag = { handle, id: event.pointerId, startX: event.clientX, startWidth: widths[side] };
+        root.dataset.resizing = side;
+        handle.focus();
+        event.preventDefault();
+      });
+      handle.addEventListener("pointermove", event => {
+        if (drag?.handle !== handle || drag.id !== event.pointerId) return;
+        resize(side, drag.startWidth + direction * (event.clientX - drag.startX));
+      });
+      for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+        handle.addEventListener(type, event => {
+          if (drag?.handle === handle && drag.id === event.pointerId) cancel();
+        });
+      }
+      handle.addEventListener("dblclick", () => resize(side, defaults[side]));
+      handle.addEventListener("keydown", event => {
+        const step = event.shiftKey ? 64 : 16;
+        let next;
+        if (event.key === "ArrowLeft") next = widths[side] - direction * step;
+        else if (event.key === "ArrowRight") next = widths[side] + direction * step;
+        else if (event.key === "Home") next = minPane;
+        else if (event.key === "End") next = budget() - minPane;
+        else if (event.key === "Enter") next = defaults[side];
+        else return;
+        event.preventDefault();
+        resize(side, next);
+      });
+    }
+    wide.addEventListener("change", fit);
+    window.addEventListener("resize", fit);
+    return { fit, cancel };
+  }
+  function workspaceLayout() {
+    const byId = id => document.getElementById("workspace-" + id);
+    const buttons = id => Array.from(byId(id).querySelectorAll("button"));
+    const views = buttons("layouts");
+    const sections = buttons("manager-nav");
+    const search = byId("search");
+    const library = byId("library");
+    const toggle = byId("sessions-toggle");
+    const dividers = studioDividers(byId("content"));
+    let view = "studio";
+    let lastChat = view;
+    let section = "status";
+    let focusList = false;
+    const manager = () => view === "manager";
+
+    function apply() {
+      root.dataset.layout = view;
+      for (const button of views) button.setAttribute("aria-pressed", String(button.dataset.view === view));
+      for (const button of sections) button.setAttribute("aria-pressed", String(button.dataset.section === section));
+      byId("manager-nav").hidden = !manager();
+      byId("chat").hidden = manager(); // Never move the frame or write its src here.
+      byId("overview").hidden = view === "focus" || (manager() && section !== "status");
+      const unavailable = manager() && section !== "status" && section !== "sessions";
+      byId("unavailable").hidden = !unavailable;
+      if (unavailable) byId("unavailable-title").textContent =
+        sections.find(button => button.dataset.section === section).textContent;
+      library.hidden = manager() ? section !== "sessions" : view === "focus" && !focusList;
+      tabs.setAttribute("role", manager() ? "group" : "tablist");
+      toggle.hidden = view !== "focus";
+      toggle.setAttribute("aria-expanded", String(focusList));
+      dividers.fit();
+    }
+    function show(next) {
+      if (view === next) return;
+      if (!manager()) lastChat = view;
+      dividers.cancel();
+      view = next;
+      focusList = false;
+      apply();
+      navigation += 1; // Invalidate outstanding native route checks as well.
+      render();
+      changed(); // Invalidate File reads even for a round trip to the same selection.
+      if (!manager()) void observeNativeRoute();
+    }
+    function toggleList(open) {
+      focusList = open;
+      apply();
+      (open ? search : toggle).focus();
+    }
+    for (const button of views) button.addEventListener("click", () => show(button.dataset.view));
+    for (const button of sections) button.addEventListener("click", () => {
+      section = button.dataset.section;
+      apply();
+    });
+    toggle.addEventListener("click", () => toggleList(!focusList));
+    library.addEventListener("keydown", event => {
+      if (view === "focus" && focusList && event.key === "Escape" && !event.defaultPrevented) {
+        event.preventDefault();
+        toggleList(false);
+      }
+    });
+    search.addEventListener("input", render);
+    // Initial links are only for no-JS fallback, not an alternate stale catalog.
+    document.getElementById("fallback-links").hidden = true;
+    apply();
+    return {
+      manager,
+      visibleRows() {
+        const query = search.value.slice(0, 128).trim().toLowerCase();
+        const visible = !membershipKnown ? [] : members.filter(item =>
+          !query || item.title.toLowerCase().includes(query) || item.id.toLowerCase().includes(query));
+        byId("search-status").textContent = !membershipKnown ? "Verified open TUI sessions unavailable." :
+          members.length === 0 ? "No verified open TUI sessions." :
+          visible.length === 0 ? "No open TUI sessions match this search." :
+          `${visible.length} of ${members.length} open TUI tabs.` + (manager() ? " Choose a tab to open native chat." : "");
+        return visible;
+      },
+      open(item) {
+        if (!membershipKnown || !members.includes(item)) return;
+        select(item, "Explicit TUI-tab click");
+        if (manager()) {
+          show(lastChat);
+          views.find(button => button.dataset.view === view).focus();
+        } else if (view === "focus") toggleList(false);
+      },
+    };
+  }
   try {
     const data = JSON.parse(root.dataset.bootstrap);
     if (typeof data.nativePrefix !== "string" ||
@@ -218,6 +396,7 @@
       selected = { ...row(data.selection), origin: data.selection.origin,
         member: members.some(item => item.id === data.selection.id) };
     }
+    if (root.dataset.layout === "studio") workspace = workspaceLayout();
     notice.textContent = data.selectionNotice;
     render();
     refresh.addEventListener("click", refreshTabs);

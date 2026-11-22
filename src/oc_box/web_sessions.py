@@ -29,6 +29,7 @@ SCRIPT = INDEX + ".js"
 STYLE = INDEX + ".css"
 CATALOG = INDEX + "/catalog"
 SELECTION = INDEX + "/selection"
+NATIVE_HOME = '<a href="/" target="_blank" rel="noopener noreferrer">Open native OpenCode Home</a>'
 
 
 def native_session_route(url, ident):
@@ -73,8 +74,7 @@ def open_sessions(box, data, connection):
 def home_navigation():
     """Explicit native UI navigation, never an inferred TUI/session target."""
     return (
-        '<p><a href="/" target="_blank" rel="noopener noreferrer">'
-        "Open native OpenCode Home</a> to explicitly create or open a browser "
+        "<p>" + NATIVE_HOME + " to explicitly create or open a browser "
         "session. Browser-only tabs remain native-client local; they do not "
         "populate this TUI list.</p>"
     )
@@ -298,7 +298,75 @@ def initial_state(gateway, sessions, status, requested=None, *, report=_UNREAD_R
     return {**state, "selection": selected, "selectionNotice": origin}
 
 
-def document(url, sessions, status, state=None, addon_scripts=()):
+def _workspace_layout_body(state, conversation, fallback, attachments):
+    """Presentation only; the existing bootstrap is the entire data source."""
+    return (
+        '<header id="workspace-toolbar"><h1>oc-box workspace</h1>'
+        '<nav id="workspace-layouts" aria-label="Workspace layout">'
+        '<button type="button" data-view="studio" aria-pressed="true">Studio</button>'
+        '<button type="button" data-view="dashboard" aria-pressed="false">Dashboard</button>'
+        '<button type="button" data-view="focus" aria-pressed="false">Chat focus</button>'
+        '<button type="button" data-view="manager" aria-pressed="false">Workspace manager</button>'
+        '</nav><button id="workspace-sessions-toggle" type="button" hidden '
+        'aria-expanded="false" aria-controls="workspace-library">Open TUI tabs</button>'
+        + NATIVE_HOME
+        + '</header><nav id="workspace-manager-nav" aria-label="Workspace manager sections" hidden>'
+        + "".join(
+            f'<button type="button" data-section="{ident}" '
+            f'aria-pressed="{str(ident == "status").lower()}">{label}</button>'
+            for ident, label in (
+                ("status", "Status"),
+                ("settings", "Settings"),
+                ("sessions", "Sessions"),
+                ("terminals", "Terminals"),
+                ("logs", "Logs"),
+                ("storage", "Storage"),
+                ("backup", "Backup / restore"),
+            )
+        )
+        + '</nav><div id="workspace-content">'
+        '<aside id="workspace-library" aria-labelledby="workspace-library-title">'
+        '<h2 id="workspace-library-title">Open TUI sessions</h2>'
+        "<p>Open TUI tabs, including idle sessions, in native tab order.</p>"
+        '<label for="workspace-search">Search by title or session ID</label>'
+        '<input type="search" id="workspace-search" maxlength="128" autocomplete="off">'
+        '<button type="button" id="refresh-tabs">Refresh TUI tabs</button>'
+        '<p id="workspace-search-status" role="status"></p>'
+        '<div id="session-tabs" role="tablist" aria-label="Open native TUI tabs"></div>'
+        + fallback
+        + '</aside><div id="workspace-divider-left" class="workspace-divider" tabindex="0" '
+        'role="separator" aria-orientation="vertical" aria-label="Session pane width" '
+        'aria-controls="workspace-library"></div>'
+        '<section id="workspace-chat" aria-label="Native conversation">'
+        '<div class="workspace-chat-tools"><p id="selection-status">'
+        + escape(state["selectionNotice"])
+        + '</p><div id="retained-selection"></div><details'
+        + ("" if attachments else " hidden")
+        + '><summary>Browser attachments</summary><div id="session-controls"></div>'
+        '<p id="addon-status" role="status"></p></details></div>'
+        + conversation
+        + '</section><div id="workspace-divider-right" class="workspace-divider" tabindex="0" '
+        'role="separator" aria-orientation="vertical" aria-label="Status pane width" '
+        'aria-controls="workspace-overview"></div>'
+        '<section id="workspace-overview" aria-labelledby="workspace-overview-title">'
+        '<h2 id="workspace-overview-title">Workspace status</h2><div class="workspace-cards">'
+        '<section><h3>Open TUI membership</h3><p id="catalog-status" role="status"></p></section>'
+        "<section><h3>Private workspace only</h3><p>This browser view shows verified open TUI tabs, "
+        "not session history, workspace health or host data. Native browser tabs stay independent.</p>"
+        '<p><a href="'
+        + INDEX
+        + '">Reload shell</a> (may interrupt a draft).</p></section></div></section>'
+        '<section id="workspace-unavailable" aria-labelledby="workspace-unavailable-title" hidden>'
+        '<h2 id="workspace-unavailable-title"></h2>'
+        "<p>This section is unavailable in the workspace browser manager. "
+        "This view has no access to host data or privileged operations.</p></section>"
+        "</div></main></body></html>"
+    )
+
+
+def document(
+    url, sessions, status, state=None, addon_scripts=(), *, workspace_layout=False
+):
     if (
         not isinstance(addon_scripts, tuple)
         or len(addon_scripts) > 1
@@ -332,7 +400,28 @@ def document(url, sessions, status, state=None, addon_scripts=()):
         else "Saved TUI tab membership is unavailable. No current session or "
         "historical session is guessed."
     )
-    return (
+    conversation = (
+        '<section id="no-selection"' + (" hidden" if selected else "") + ">"
+        "<p>Select a TUI tab, use --session ID, or open native Home. No conversation is guessed.</p>"
+        '</section><iframe id="native" name="oc-box-native-session" '
+        'title="Native OpenCode conversation" referrerpolicy="no-referrer"'
+        + (
+            ' src="' + escape(selected["route"], quote=True) + '"'
+            if selected
+            else " hidden"
+        )
+        + "></iframe>"
+    )
+    fallback = (
+        '<details id="fallback-links"><summary>Direct native conversation links (initial verified snapshot)</summary>'
+        + (
+            "<ol>" + "".join(items) + "</ol>"
+            if items
+            else "<p>No open session is listed.</p>"
+        )
+        + "</details>"
+    )
+    start = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
         '<title>oc-box — workspace sessions</title><link rel="stylesheet" href="'
@@ -344,9 +433,20 @@ def document(url, sessions, status, state=None, addon_scripts=()):
             '<script defer src="' + script + '"></script>' for script in addon_scripts
         )
         + "</head><body>"
-        '<main id="web-shell" data-bootstrap="'
+        '<main id="web-shell"'
+        + (' data-layout="studio"' if workspace_layout is True else "")
+        + ' data-bootstrap="'
         + escape(json.dumps(state, ensure_ascii=True), quote=True)
-        + '"><header><h1>'
+        + '">'
+    )
+    if workspace_layout is True:
+        return (
+            start
+            + _workspace_layout_body(state, conversation, fallback, bool(addon_scripts))
+        ).encode("utf-8", errors="replace")
+    return (
+        start
+        + "<header><h1>"
         + heading
         + "</h1><p>"
         + note
@@ -366,22 +466,9 @@ def document(url, sessions, status, state=None, addon_scripts=()):
         '<div id="session-tabs" role="tablist" aria-label="Open native TUI tabs"></div>'
         '<div id="retained-selection"></div><div id="session-controls"></div>'
         '<p id="addon-status" role="status"></p></header>'
-        '<section id="no-selection"' + (" hidden" if selected else "") + ">"
-        "<p>Select a TUI tab, use --session ID, or open native Home. No conversation is guessed.</p>"
-        '</section><iframe id="native" name="oc-box-native-session" '
-        'title="Native OpenCode conversation" referrerpolicy="no-referrer"'
-        + (
-            ' src="' + escape(selected["route"], quote=True) + '"'
-            if selected
-            else " hidden"
-        )
-        + '></iframe><details id="fallback-links"><summary>Direct native conversation links (initial verified snapshot)</summary>'
-        + (
-            "<ol>" + "".join(items) + "</ol>"
-            if items
-            else "<p>No open session is listed.</p>"
-        )
-        + "</details></main></body></html>"
+        + conversation
+        + fallback
+        + "</main></body></html>"
     ).encode("utf-8", errors="replace")
 
 
@@ -597,6 +684,7 @@ def respond(gateway, stream, child, request):
             status,
             state,
             addon_scripts=getattr(gateway, "shell_addon_scripts", ()),
+            workspace_layout=getattr(gateway, "workspace_layout", False),
         )
     except (
         gateway.box.BoxError,
