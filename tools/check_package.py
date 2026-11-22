@@ -493,7 +493,11 @@ def check(directory, *, with_vault=False, with_tui=False):
             "assert os.read(fd,64)==b'synthetic-package-check'; os.close(fd)",
         )
         assert "secrets" in overview
-        assert "--recipient" in run(cli, "backup", "--help")
+        backup_help = run(cli, "backup", "--help")
+        assert all(
+            flag in backup_help
+            for flag in ("--recipient", "--host", "--opencode-auth-export")
+        )
         assert "--no-open" in run(cli, "web", "--help")
         assert "--read-only" in run(cli, "tui", "--help")
         assert "--acknowledge-risk" in run(cli, "share", "--help")
@@ -501,8 +505,12 @@ def check(directory, *, with_vault=False, with_tui=False):
             python, "-c", "import sys,oc_box.tui; print(' '.join(sys.modules))"
         )
         assert "--maintenance" in run(cli, "terminal", "--help")
-        assert "--min-passphrase-length" in run(cli, "backup", "--help")
-        assert "--identity" in run(cli, "restore", "--help")
+        assert "--min-passphrase-length" in backup_help
+        restore_help = run(cli, "restore", "--help")
+        assert all(
+            flag in restore_help
+            for flag in ("--identity", "--host", "--include-opencode")
+        )
         assert "--identity" in run(cli, "backup-info", "--help")
         assert "init" in run(cli, "secrets", "--help")
         assert "--min-passphrase-length" in run(cli, "secrets", "--help")

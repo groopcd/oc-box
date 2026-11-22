@@ -57,7 +57,7 @@ _oc_box()
                         =|all|debug|info|warn|error) skip=1 ;;
                     esac
                     continue ;;
-                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--min-passphrase-length|--feature|--port|--session|--text|--level|--limit|--log-dir)
+                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--opencode-auth-export|--min-passphrase-length|--feature|--port|--session|--text|--level|--limit|--log-dir)
                     skip=1; continue ;;
                 --broker) broker=1; continue ;;
                 --host-drop|--host-clipboard|--host-clipboard-symlinks)
@@ -95,7 +95,7 @@ _oc_box()
         fi
         case $option in
             --project|--log-dir) _oc_box_paths -d; return 0 ;;
-            --output|--identity) _oc_box_paths -f; return 0 ;;
+            --output|--identity|--opencode-auth-export) _oc_box_paths -f; return 0 ;;
             --distro)
                 _oc_box_words 'tumbleweed leap ubuntu debian fedora arch alpine opensuse opensuse-tumbleweed opensuse-leap archlinux'; return 0 ;;
             --feature)
@@ -142,9 +142,9 @@ _oc_box()
         preferences) options="$help $selectors --host-drop --host-clipboard --host-clipboard-symlinks --json" ;;
         upgrade) options="$help --check --stable --devel --vault --tui --auto-update" ;;
         doctor) options="$help --json --feature" ;;
-        backup) options="$help $selectors --output --portable --recipient --min-passphrase-length" ;;
+        backup) options="$help $selectors --output --portable --host --opencode-auth-export --recipient --min-passphrase-length" ;;
         backup-info) options="$help --identity" ;;
-        restore) options="$help --project --identity" ;;
+        restore) options="$help --project --identity --host --include-opencode" ;;
         secrets)
             options=$help
             if [[ -z $action ]]; then

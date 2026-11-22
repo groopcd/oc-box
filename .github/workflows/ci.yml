@@ -86,6 +86,7 @@ jobs:
           python3 -B tests/smoke_web_attachments_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_ui_state_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_session_backups_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
+          python3 -B tests/smoke_host_backup_auth_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/@opencode/cli-linux-x64/bin/opencode"
           python3 -B tests/smoke_session_backup_transport_v2.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_sharing_host_helpers.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"
           python3 -B tests/smoke_host_plugins.py --opencode "$RUNNER_TEMP/opencode-v2/node_modules/.bin/opencode"

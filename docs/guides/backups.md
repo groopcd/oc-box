@@ -41,9 +41,9 @@ for separate vault/backup minimums and existing-password compatibility.
 
 ## Understand what is included
 
-The host-wide credential vault is **not included**; back up its encrypted file
-separately and retain its own passphrase. Outside env files are excluded too;
-files inside the project are ordinary project data.
+An ordinary workspace backup does **not** include the host-wide credential
+vault or host configuration. Add `--host` for a migration archive. Outside
+env files are still excluded; files inside the project are ordinary project data.
 
 Restore is non-overwriting and creates fresh workspace/container/volume IDs.
 It preserves conversation IDs, full live database/subagent history, source/Git
@@ -61,6 +61,39 @@ image; portable restores need system packages reinstalled.
 **Previously stored credentials/auth/history are included in private
 home/project/OS files: treat the encrypted backup and its key as sensitive.
 Deleting a backup does not revoke those credentials.**
+
+## Move a workspace and its host settings
+
+On `devel`, add `--host` to a full workspace backup. If you rely on saved
+OpenCode V2 provider or MCP logins, pipe in the native credential export:
+
+```sh
+set -o pipefail
+opencode auth export --standalone | oc-box backup --host --project ~/devel/demo \
+  --opencode-auth-export - --output /backup/demo-and-host.ocbox
+```
+
+On the new host, install oc-box, age, rootless Podman and the compatible native
+OpenCode version. Before the first OpenCode launch, restore to fresh paths:
+
+```sh
+oc-box restore /backup/demo-and-host.ocbox --host --include-opencode \
+  --project ~/devel/demo-restored
+```
+
+The archive restores oc-box settings, the encrypted vault, the supported
+OpenCode profile and the stopped workspace. `--include-opencode` asks for typed
+consent because restored config and plugins can execute code on later launches.
+Use the original vault passphrase when you resume. You can also use `backup
+--host --output FILE` and `restore FILE --host` without a workspace; add
+`--include-opencode` to that restore if you want the native profile.
+If an installer creates host preferences before migration, keep them aside
+rather than overwriting them, or use a clean XDG profile from the beginning.
+
+Restore never overwrites host files or an existing native credential database.
+External paths/dependencies, shell environment, hardware and installation
+state are not restored. See the [host migration reference](../cli.md#restore-host-settings-on-a-new-machine)
+for file bounds, unsupported files and partial-failure behavior.
 
 ## Check format limits and evidence
 

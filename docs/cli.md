@@ -33,9 +33,9 @@ oc-box upgrade --auto-update on|off
 oc-box secrets init|list|passwd
 oc-box secrets set|remove NAME
 oc-box credentials [--project PATH | --workspace ID] [CREDENTIAL-OPTIONS]
-oc-box backup [--project PATH | --workspace ID] --output FILE [--portable] [--recipient AGE_KEY ...]
+oc-box backup [--project PATH | --workspace ID] --output FILE [--portable] [--host] [--opencode-auth-export FILE] [--recipient AGE_KEY ...]
 oc-box backup-info FILE [--identity FILE ...]
-oc-box restore FILE --project NEW_PATH [--identity FILE ...]
+oc-box restore FILE [--project NEW_PATH] [--host [--include-opencode]] [--identity FILE ...]
 oc-box --about
 oc-box --version
 oc-box -h | --help
@@ -1962,11 +1962,11 @@ evidence; and a committed OCI image of the modified container OS. Mounted projec
 and home are backed up separately, not folded into the image. Portable mode
 omits that OS image; system packages/SDKs must be recreated after restore.
 Neither mode captures running processes, kernel state, devices, host drivers,
-the host-wide vault, host global DB/config, or arbitrary paths outside those
-components. Env files inside the selected project are project data and are
+the host global database, or arbitrary paths outside those components.
+Without `--host`, neither mode captures the host-wide vault or host config.
+Env files inside the selected project are project data and are
 included; host env files outside it are not read.
-Workspace credential modes/policies are retained, but the global host vault is
-excluded: protect its encrypted file and passphrase separately. A full workspace
+Workspace credential modes/policies are retained. A full workspace
 backup can include config/auth values already persisted inside the workspace,
 even though normal vault forwarding itself does not write them to config.
 
@@ -2007,6 +2007,43 @@ ciphertext, final output, and a temporary committed image. Failure leaves no
 final partial backup; the source remains stopped, not reset/deleted. The
 temporary capture image is removed by its unique tag; shared base images remain.
 
+### Include host settings for migration
+
+On `devel`, `backup --host --output FILE` creates a host-only encrypted
+archive, without a workspace or Podman. Add `--project PATH` or `--workspace ID`
+to include these settings in a full workspace backup; `--portable` selects
+a workspace plus host settings without the container OS image.
+
+The host component includes exact file bytes for oc-box's host `config.json`,
+the existing encrypted vault, the native OpenCode user configuration tree, and
+native legacy `auth.json` and `mcp-auth.json` when present. It uses the current
+XDG configuration and data roots. Keep host settings and credentials idle
+while capturing them; the files are not snapshotted as one transaction.
+Files outside those roots, symlinks, special
+files, nested mounts, runtime state and the native host database are not
+captured. `.git`, `.cache` and `node_modules` directories in the profile are
+skipped; other unsupported entries are refused instead of silently omitted.
+Limits are 128 files, 64 directories, 800 KiB for configuration and legacy auth
+combined, and 2 MiB for the encrypted vault.
+
+Add `--opencode-auth-export FILE` for native V2 provider and MCP login records.
+Supply the native `opencode auth export --standalone` output in a private
+regular file (0600), or pass `-` to read it directly from a pipe without a
+plaintext export file. This is explicit: the backup does not start OpenCode or
+open the native database itself. Only run the export with a trusted native
+configuration and keep other writers idle.
+
+```sh
+oc-box backup --host --output /backup/host.ocbox
+set -o pipefail
+opencode auth export --standalone | oc-box backup --host --project ~/devel/demo \
+  --opencode-auth-export - --output /backup/demo-and-host.ocbox
+```
+
+Treat this archive and its age identity/passphrase as sensitive. The vault
+remains separately encrypted with its original passphrase. This is neither a
+whole-machine backup nor a credential revocation mechanism.
+
 ### backup-info
 
 Decrypt/verify a backup's manifest and ciphertext checksums without starting
@@ -2017,6 +2054,8 @@ sizes/checksums, saved session IDs, settings, and documented limitations. Raw
 additional Podman option values are omitted to avoid printing saved secrets.
 It never prints archived file contents or the host vault and does not execute
 container image code. Metadata itself may contain private paths/session names.
+Host-only inspection reports the archive type and version, not filenames from
+the host profile, setting values, or credential records.
 
 ```sh
 oc-box backup-info /backup/demo.ocbox
@@ -2101,12 +2140,12 @@ but are never followed during extraction; check them before later host use.
 Restored project and staging roots are kept private (0700), even if the original
 root had broader permissions; permissions of ordinary files/subdirectories remain.
 
-The global host vault is not included or unlocked. Workspace credential
-modes/policies are retained, with any selections stored as names only. A restored
-default/global V2 workspace uses the **restoring host's** current vault, not the
-original host's vault or old host privileges. Provide matching host env/vault
-credentials for an explicit selected-mode policy before normal startup. Outside
-env files are excluded; back up the encrypted host vault separately.
+The workspace restore does not unlock a vault or by itself install archived
+host settings. Workspace credential modes/policies are retained, with selections
+stored as names only. A restored default/global V2 workspace uses the restoring
+host's current vault. Restore archived host settings explicitly as described
+below, or provide matching host env/vault values before normal startup.
+Outside env files are excluded.
 Copied auth/config and secrets stored in project/home/OS are part of
 the encrypted payload and remain present after restore. A failed operation
 cleans only its newly created project/volume/container/registry and preserves
@@ -2120,6 +2159,43 @@ Inspect the staging location, use plain `purge --workspace ID` for its managed
 resources (which skips history sync for incomplete restores), and retry to a new
 destination. Orphan staging directories may need manual host removal after
 inspection; the launcher never deletes a caller-supplied tree on marker alone.
+
+### Restore host settings on a new machine
+
+Install oc-box, age and the required OpenCode version on the destination host;
+install rootless Podman for a workspace restore. Stop OpenCode and other writers,
+and use fresh destination paths. Host restore never replaces an existing target,
+even if it is empty or appears identical. In particular, do not launch OpenCode
+on the destination before restoring a native profile and its fresh V2 store.
+
+```sh
+oc-box restore /backup/host.ocbox --host
+oc-box restore /backup/demo-and-host.ocbox --host --include-opencode \
+  --project ~/devel/demo-restored
+```
+
+`--host` restores oc-box settings and the encrypted vault, without unlocking
+it. `--include-opencode` additionally requires typed consent on the controlling
+terminal before restoring native files and any supplied native V2 export.
+Restored settings can enable forwarding, updates or system-journal mirroring.
+Restored OpenCode configuration and plugins can execute code or change
+permissions on the next launch. Only restore trusted archives. Native V2 import
+requires OpenCode 2.2.6, 2.3.0 or 2.3.1, a Linux `/dev/shm` tmpfs, no active
+managed OpenCode config, and a fresh credential destination. It verifies the
+imported records before publishing the new database and never merges with an
+existing database. Credential validity on a new host is not guaranteed.
+
+Host files are published without overwrite, privately, one file at a time.
+This requires a Linux filesystem supporting anonymous temporary files and
+no-overwrite links. Workspace and host publication are not one transaction: if
+host activation fails after the workspace restore, the restored workspace
+remains stopped and successful host changes are reported rather than rolled back.
+Host XDG location references, external plugin dependencies, shell environment
+files, hardware/device mappings and installer-specific state are not remapped
+or activated. A full archive with the host component preserves the supported
+settings without re-entering them, not every external dependency.
+Host registries, activity journals, dashboard favorites and per-workspace UI
+preferences are not activated from the archive.
 
 ## Options
 
@@ -2944,6 +3020,25 @@ private identity can decrypt it. Without this option age requests a backup
 passphrase interactively. Public recipients are not secret; private identities
 must be stored independently of the archive and project. Example:
 `oc-box backup --recipient age1PUBLIC_KEY --output /backup/demo.ocbox`.
+
+### --host
+
+For `backup`, include the [host migration component](#include-host-settings-for-migration).
+Without a workspace selector or `--portable`, back up only the host. For `restore`,
+explicitly install the archived oc-box host settings and encrypted vault; omit
+`--project` for a host-only restore from either type of host-containing archive.
+
+### --opencode-auth-export FILE
+
+For `backup --host`, include a native V2 credential export from a private file,
+or use `-` for a binary stdin stream. The export is encrypted separately and is
+never printed by `oc-box backup-info`.
+
+### --include-opencode
+
+For `restore --host`, additionally install the native OpenCode profile and saved
+credentials when present. Requires separate typed confirmation and fresh
+destination paths. It does not activate or start OpenCode.
 
 ### --identity FILE
 

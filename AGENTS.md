@@ -376,6 +376,15 @@ their checkout ownership distinct from unrelated source and flat installations.
 - `backups.py` / `backup_crypto.py` / `backup_archive.py`: host-only encrypted
   backup/restore feature; use established age streaming encryption, no plaintext
   archive staging, fresh restore IDs, and no archived privilege reactivation.
+- `host_backup_payload.py` / `host_backup_restore.py` / `host_backup_auth.py`:
+  explicit CLI host migration component. Preserve bounded exact file bytes,
+  read-only no-follow capture, the already-encrypted vault and independent
+  native OpenCode consent. No host configuration writes from workspace-only
+  restore. Never restore registry identities, an archived host database,
+  external paths or plaintext archive staging. V2 credentials come from an
+  explicit native export and are verified in an isolated tmpfs-backed native
+  store before publication to a reviewed, absent host database. No joins to the
+  live host service, silent overwrite or cross-filesystem transaction claims.
 - `install.py` (under the package): copies the launcher to `~/.local/share/oc-box` and creates
   `~/.local/bin/oc-box`.
 - `installation.py`: staged immutable installed copies and launcher activation.
@@ -806,7 +815,8 @@ changes, isolated from real workspace state. This fixture does not test restored
 real-project model inference.
 Restores retain original internal project paths via `container_project`; host
 destinations/physical identities and resource IDs are fresh, not DB path edits.
-Backups retain workspace credential modes/policies, but exclude the global host
-vault and outside env files. Restored default/global V2 uses the restoring host's
-vault, not old host privileges; persisted workspace config/auth may still contain
-secrets. Protect encrypted host vault data separately.
+Workspace-only backups retain credential modes/policies but exclude the global
+host vault and outside env files. Restored default/global V2 uses the restoring
+host's vault, not old host privileges; persisted workspace config/auth may
+still contain secrets. The explicit `--host` component can carry the encrypted
+vault unchanged, with the original passphrase still required after restore.

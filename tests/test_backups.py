@@ -220,13 +220,14 @@ class WorkspaceBackupTests(unittest.TestCase):
         self.created.append(json.loads(json.dumps(data)))
         data["ready"] = False
 
-    def backup(self, portable=False, *, interaction=None):
+    def backup(self, portable=False, *, interaction=None, host=False):
         args = argparse.Namespace(
             project=self.project,
             workspace=None,
             output=self.archive,
             portable=portable,
             recipient=[self.recipient],
+            host=host,
         )
         with (
             contextlib.redirect_stdout(io.StringIO()),
@@ -234,9 +235,9 @@ class WorkspaceBackupTests(unittest.TestCase):
         ):
             backups.make_backup(box, args, interaction=interaction)
 
-    def restore(self, destination):
+    def restore(self, destination, *, host=False):
         args = argparse.Namespace(
-            project=destination, file=self.archive, identity=[self.identity]
+            project=destination, file=self.archive, identity=[self.identity], host=host
         )
         with (
             contextlib.redirect_stdout(io.StringIO()),
@@ -246,6 +247,29 @@ class WorkspaceBackupTests(unittest.TestCase):
         path, data = box.find_workspace(destination)
         assert path is not None and data is not None
         return path, data
+
+    def test_combined_full_backup_restores_host_settings_and_stopped_workspace(self):
+        config = self.root / "config/oc-box/config.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        original = b'{ "pass_env": ["SYNTHETIC_ONLY"] }\n'
+        config.write_bytes(original)
+        self.backup(host=True)
+        self.assertEqual(config.read_bytes(), original)
+        with crypto.opened(self.archive, [self.identity]) as (manifest, _, _):
+            self.assertEqual(manifest["format_version"], 2)
+            self.assertEqual(manifest["kind"], "full")
+            self.assertIn("host.age", manifest["components"])
+        with patch.dict(
+            os.environ, {"XDG_CONFIG_HOME": str(self.root / "fresh-config")}
+        ):
+            _, restored = self.restore(self.root / "combined-restored", host=True)
+            self.assertEqual(
+                (self.root / "fresh-config/oc-box/config.json").read_bytes(), original
+            )
+            self.assertNotEqual(restored["id"], self.data["id"])
+            self.assertEqual(restored["container_project"], self.data["project"])
+            self.assertEqual(self.created[-1]["id"], restored["id"])
+        self.assertEqual(config.read_bytes(), original)
 
     def test_dashboard_progress_inspect_projection_and_cancelled_review_before_creation(
         self,
@@ -579,6 +603,23 @@ class WorkspaceBackupTests(unittest.TestCase):
                 self.assertRaisesRegex(crypto.BackupError, "outside trusted"),
             ):
                 self.restore(parent / "new-restore")
+        oc_box_config = self.root / "config/oc-box"
+        self.assertFalse(oc_box_config.exists())
+        with self.assertRaisesRegex(crypto.BackupError, "outside trusted"):
+            self.restore(oc_box_config)
+        self.assertFalse(oc_box_config.exists())
+        fallback = self.root / "other-home/.config"
+        fallback.mkdir(parents=True)
+        with patch.dict(
+            os.environ, {"HOME": str(fallback.parent), "XDG_CONFIG_HOME": ""}
+        ):
+            for name in ("opencode", "oc-box"):
+                with (
+                    self.subTest(fallback=name),
+                    self.assertRaisesRegex(crypto.BackupError, "outside trusted"),
+                ):
+                    self.restore(fallback / name)
+                self.assertFalse((fallback / name).exists())
         self.assertEqual(box.workspace_paths(), [self.path])
 
     def test_rollback_removes_restrictive_staging_without_following_symlinks(self):

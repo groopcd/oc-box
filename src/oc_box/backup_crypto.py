@@ -40,8 +40,12 @@ COMPONENTS = {
     "home.age",
     "registry.age",
     "image.age",
+    "host.age",
+    "host-auth.age",
 }
 MAX_SMALL = 4 * 1024 * 1024
+# One bounded host payload, with room for the outer age header and frame tags.
+MAX_HOST_CIPHERTEXT = MAX_SMALL + 64 * 1024
 MAX_BACKUP = 16 * 1024**4
 
 
@@ -633,9 +637,14 @@ def opened(archive_path, identities):
                             "Invalid backup envelope entry (duplicates, links, or unexpected names are not accepted)."
                         )
                     total += member.size
+                    small_limit = {
+                        "key.age": MAX_SMALL,
+                        "manifest.age": MAX_SMALL,
+                        "host.age": MAX_HOST_CIPHERTEXT,
+                        "host-auth.age": MAX_HOST_CIPHERTEXT,
+                    }.get(member.name)
                     if total > MAX_BACKUP or (
-                        member.name in ("key.age", "manifest.age")
-                        and member.size > MAX_SMALL
+                        small_limit is not None and member.size > small_limit
                     ):
                         raise BackupError("Backup envelope exceeds its format bounds.")
                     source = archive.extractfile(member)
@@ -648,10 +657,7 @@ def opened(archive_path, identities):
                     seen.add(member.name)
         except (tarfile.TarError, EOFError, ValueError) as exc:
             raise BackupError("Invalid or truncated backup envelope.") from exc
-        if (
-            not {"key.age", "manifest.age", "project.age", "home.age", "registry.age"}
-            <= seen
-        ):
+        if not {"key.age", "manifest.age"} <= seen:
             raise BackupError("Incomplete backup envelope.")
         private = load_key(directory / "key.age", identities)
         try:
@@ -662,13 +668,21 @@ def opened(archive_path, identities):
             not isinstance(manifest, dict)
             or manifest.get("format") != "oc-box-backup"
             or type(manifest.get("format_version")) is not int
-            or manifest["format_version"] != 1
-            or manifest.get("kind") not in ("full", "portable")
         ):
             raise BackupError("Unsupported backup format/version.")
-        expected = {"project.age", "home.age", "registry.age"} | (
-            {"image.age"} if manifest["kind"] == "full" else set()
-        )
+        version, kind = manifest["format_version"], manifest.get("kind")
+        if kind in ("full", "portable") and version in (1, 2):
+            expected = {"project.age", "home.age", "registry.age"}
+            if kind == "full":
+                expected.add("image.age")
+            if version == 2:
+                expected.add("host.age")
+        elif kind == "host" and version == 2:
+            expected = {"host.age"}
+        else:
+            raise BackupError("Unsupported backup format/version.")
+        if version == 2 and "host-auth.age" in seen:
+            expected.add("host-auth.age")
         if (
             not isinstance(manifest.get("components"), dict)
             or set(manifest["components"]) != expected

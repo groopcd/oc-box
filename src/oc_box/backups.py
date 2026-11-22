@@ -6,6 +6,7 @@ as informational requirements and are never automatically reactivated.
 """
 
 import argparse
+from contextlib import nullcontext
 import ctypes
 from datetime import datetime, timezone
 import json
@@ -32,6 +33,176 @@ else:
     from version_info import get_version_info
 
 BackupError = crypto.BackupError
+
+
+def host_payload():
+    if __package__:
+        from . import host_backup_payload
+    else:
+        import host_backup_payload
+    return host_backup_payload
+
+
+def host_restore():
+    if __package__:
+        from . import host_backup_restore
+    else:
+        import host_backup_restore
+    return host_backup_restore
+
+
+def host_auth():
+    if __package__:
+        from . import host_backup_auth
+    else:
+        import host_backup_auth
+    return host_backup_auth
+
+
+def _capture_host(args, output):
+    payload = host_payload()
+    roots = payload.destinations()
+    if any(output.is_relative_to(root) for root in roots.values()):
+        raise BackupError(
+            "Backup output must be outside the host configuration and vault directories."
+        )
+    native_export = getattr(args, "opencode_auth_export", None)
+    auth = None
+    if native_export == "-":
+        stream = getattr(sys.stdin, "buffer", None)
+        if stream is None:
+            raise BackupError(
+                "Native credential export requires a binary input stream."
+            )
+        auth = host_auth().read_native_export(stream=stream)
+    elif native_export is not None:
+        auth = host_auth().read_native_export(Path(native_export))
+    return payload.encode(payload.capture()), auth
+
+
+def _prepare_host_restore(snapshot, include_opencode, project=None, *, auth=None):
+    payload = host_payload()
+    destination = None
+    if project is not None:
+        project = Path(project).expanduser().absolute()
+        destination = project.parent.resolve() / project.name
+    plan = host_restore().preflight(
+        snapshot,
+        include_opencode=include_opencode,
+        workspace_destination=destination,
+        native_database=include_opencode and auth is not None and auth != b"[]",
+    )
+    binary = None
+    data_home = payload.destinations()[payload.OPENCODE_AUTH].parent
+    if include_opencode and auth is not None:
+        binary = shutil.which("opencode", path=crypto.environment().get("PATH"))
+        if not binary:
+            raise BackupError(
+                "Install a supported native OpenCode before restoring V2 credentials."
+            )
+        host_auth().check_native_destination(data_home)
+    if not include_opencode or (
+        auth is None
+        and not any(
+            scope in (payload.OPENCODE_CONFIG, payload.OPENCODE_AUTH)
+            for scope, _ in snapshot
+        )
+    ):
+        return plan, binary, data_home
+    # Do not let a pipe, archived file, or dashboard supply this consent.
+    try:
+        fd = os.open("/dev/tty", os.O_RDWR | os.O_CLOEXEC | os.O_NOCTTY)
+        with os.fdopen(fd, "r+b", buffering=0) as tty:
+            tty.write(
+                b"Native OpenCode restore installs backed-up config, plugins and saved "
+                b"credentials when present. The next OpenCode launch can execute restored "
+                b"code, use restored credentials and grant restored permissions. "
+                b"Continue only if you trust this backup. Type restore-opencode: "
+            )
+            if tty.readline(64).strip() != b"restore-opencode":
+                raise BackupError(
+                    "Native OpenCode restore was not confirmed; nothing was restored."
+                )
+    except OSError:
+        raise BackupError(
+            "Native OpenCode restore requires a controlling terminal for review."
+        ) from None
+    return plan, binary, data_home
+
+
+def _apply_host_restore(plan, include_opencode, *, prepared_auth=None):
+    result, database = prepared_auth if prepared_auth is not None else (None, None)
+    installed = host_restore().apply(
+        plan, include_opencode=include_opencode, native_database=database
+    )
+    if result is not None:
+        print(f"Native V2 credentials restored ({result.count} records).")
+    print(f"Host configuration restore complete ({installed} files installed).")
+    print("If a vault was restored, unlock it later with its original passphrase.")
+    if not include_opencode:
+        print("Native OpenCode settings and saved credentials were not restored.")
+
+
+def _publish_archive(staging, output, *, interaction=None):
+    fd, filename = tempfile.mkstemp(prefix=".oc-box-backup-", dir=output.parent)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            crypto.pack(staging, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if interaction is not None:
+            interaction.dispatched()
+        os.link(filename, output)
+        parent = os.open(output.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+        try:
+            os.fsync(parent)
+        finally:
+            os.close(parent)
+    finally:
+        os.unlink(filename)
+
+
+def _host_components(staging, recipient, host):
+    payload, auth = host
+    components = {}
+    for name, value in (("host.age", payload), ("host-auth.age", auth)):
+        if value is not None:
+            destination = staging / name
+            crypto.encrypt_bytes(value, recipient, destination)
+            components[name] = crypto.digest(destination)
+    return components
+
+
+def _make_host_only(box, args, minimum):
+    output = Path(args.output).expanduser().absolute()
+    if not output.parent.is_dir() or output.parent.is_symlink():
+        raise BackupError("Host backup requires an existing real output directory.")
+    output = output.parent.resolve() / output.name
+    if output.exists() or output.is_symlink():
+        raise BackupError("Backup output already exists; choose a new filename.")
+    payload = _capture_host(args, output)
+    with tempfile.TemporaryDirectory(
+        prefix="oc-box-host-backup-ciphertext-", dir=output.parent
+    ) as temporary:
+        staging = Path(temporary)
+        _, recipient = crypto.generate_key(
+            args.recipient or [], staging / "key.age", minimum=minimum
+        )
+        manifest = {
+            "format": "oc-box-backup",
+            "format_version": 2,
+            "kind": "host",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "oc_box": get_version_info(box.APP),
+            "components": _host_components(staging, recipient, payload),
+        }
+        crypto.encrypt_bytes(
+            json.dumps(manifest, sort_keys=True).encode(),
+            recipient,
+            staging / "manifest.age",
+        )
+        _publish_archive(staging, output)
+    print("Encrypted host configuration backup saved.")
 
 
 def command(box, *args, check=True, timeout=60):
@@ -205,6 +376,11 @@ def make_backup(box, args, *, interaction=None):
     minimum = crypto.passphrase_minimum(
         args.recipient or [], getattr(args, "min_passphrase_length", None)
     )
+    include_host = getattr(args, "host", False)
+    if getattr(args, "opencode_auth_export", None) is not None and not include_host:
+        raise BackupError("--opencode-auth-export requires --host.")
+    if include_host and not (args.project or args.workspace or args.portable):
+        return _make_host_only(box, args, minimum)
     path, data = box.find_workspace(args.project, args.workspace)
     if data is None:
         raise BackupError(
@@ -225,6 +401,7 @@ def make_backup(box, args, *, interaction=None):
             raise BackupError(
                 "Backup output must be outside the project and workspace registry."
             )
+    host = _capture_host(args, output) if include_host else None
     box.check_backend(env=crypto.environment(), feature="backup")
     crypto.tools()
     with box.workspace_lock(path):
@@ -283,7 +460,6 @@ def make_backup(box, args, *, interaction=None):
             )
         image_id = None
         image_tag = None
-        temporary_output = None
         try:
             with tempfile.TemporaryDirectory(
                 prefix="oc-box-backup-ciphertext-", dir=output.parent
@@ -333,9 +509,11 @@ def make_backup(box, args, *, interaction=None):
                             staging / "image.age",
                         )
                         parts["image.age"] = crypto.digest(staging / "image.age")
+                if host is not None:
+                    parts.update(_host_components(staging, recipient, host))
                 manifest = {
                     "format": "oc-box-backup",
-                    "format_version": 1,
+                    "format_version": 2 if include_host else 1,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "kind": "portable" if args.portable else "full",
                     "architecture": platform.machine(),
@@ -350,7 +528,11 @@ def make_backup(box, args, *, interaction=None):
                     "expanded_byte_limit": crypto.MAX_BACKUP,
                     "limitations": [
                         "not a running-process checkpoint",
-                        "host vault and env files outside project are excluded",
+                        (
+                            "host configuration requires explicit --host restoration; external environment files are excluded"
+                            if include_host
+                            else "host vault and env files outside project are excluded"
+                        ),
                         "devices and additional Podman settings require explicit reconfiguration",
                         "host project must remain idle; no recursive nested filesystem backup",
                         "no ACL/xattr/SELinux label restore",
@@ -361,29 +543,9 @@ def make_backup(box, args, *, interaction=None):
                     recipient,
                     staging / "manifest.age",
                 )
-                fd, filename = tempfile.mkstemp(
-                    prefix=".oc-box-backup-", dir=output.parent
-                )
-                temporary_output = Path(filename)
                 if interaction is not None:
                     interaction.stage("publishing")
-                with os.fdopen(fd, "wb") as stream:
-                    crypto.pack(staging, stream)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                # Atomic no-overwrite publication, not replace().
-                if interaction is not None:
-                    interaction.dispatched()
-                os.link(temporary_output, output)
-                temporary_output.unlink()
-                temporary_output = None
-                parent = os.open(
-                    output.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC
-                )
-                try:
-                    os.fsync(parent)
-                finally:
-                    os.close(parent)
+                _publish_archive(staging, output, interaction=interaction)
                 print(
                     f"Encrypted {'portable' if args.portable else 'full'} backup saved: {output}"
                 )
@@ -391,8 +553,6 @@ def make_backup(box, args, *, interaction=None):
                     "The source container remains stopped. Its files, sessions, and host vault were not altered."
                 )
         finally:
-            if temporary_output is not None:
-                temporary_output.unlink(missing_ok=True)
             if image_id is not None and re.fullmatch(
                 r"(?:sha256:)?[0-9a-f]{64}", image_id
             ):
@@ -537,6 +697,13 @@ def inspect_backup(box, args, *, interaction=None):
     if interaction is not None:
         interaction.stage("unlocking")
     with crypto.opened(args.file, args.identity or []) as (manifest, _, _):
+        if manifest["kind"] == "host":
+            if interaction is not None:
+                raise BackupError(
+                    "Use the host CLI to inspect a host configuration backup."
+                )
+            print(json.dumps({"format": "host", "format_version": 2}, indent=2))
+            return
         validate_manifest(box, manifest)
         if interaction is not None:
             interaction.inspection(dashboard_summary(manifest))
@@ -550,25 +717,90 @@ def inspect_backup(box, args, *, interaction=None):
 
 
 def restore_backup(box, args, *, interaction=None):
-    box.check_backend(env=crypto.environment(), feature="restore")
-    if args.project is None:
+    host = getattr(args, "host", False)
+    native = getattr(args, "include_opencode", False)
+    if native and not host:
+        raise BackupError("--include-opencode requires --host.")
+    if host and interaction is not None:
         raise BackupError(
-            "Restore requires --project PATH (a new, nonexistent host destination)."
+            "Host configuration restore requires the foreground host CLI."
         )
-    destination = Path(args.project).expanduser().absolute()
+    if not host and args.project is None:
+        raise BackupError("Restore requires --project PATH unless using --host.")
+    destination = (
+        _workspace_destination(box, args.project) if args.project is not None else None
+    )
+    if destination is not None:
+        box.check_backend(env=crypto.environment(), feature="restore")
+    if interaction is not None:
+        interaction.stage("unlocking")
+    with crypto.opened(args.file, args.identity or []) as opened:
+        manifest, encrypted, private = opened
+        kind = manifest["kind"]
+        if kind == "host" and (not host or args.project is not None):
+            raise BackupError(
+                "Restore a host-only archive with --host, without --project."
+            )
+        if host:
+            if "host.age" not in manifest["components"]:
+                raise BackupError("This archive contains no host configuration.")
+            snapshot = host_payload().decode(
+                crypto.decrypt_bytes(encrypted / "host.age", private)
+            )
+            auth = None
+            if native and "host-auth.age" in manifest["components"]:
+                auth = host_auth().validate_native_export(
+                    crypto.decrypt_bytes(encrypted / "host-auth.age", private)
+                )
+            plan, binary, data_home = _prepare_host_restore(
+                snapshot, native, destination, auth=auth
+            )
+            prepared_auth = (
+                host_auth().prepare_native_export(
+                    auth, binary=binary, data_home=data_home, confirmed=True
+                )
+                if binary is not None
+                else None
+            )
+        if destination is not None:
+            _restore_workspace(
+                box, destination, opened, interaction=interaction, host=host
+            )
+        if host:
+            try:
+                _apply_host_restore(plan, native, prepared_auth=prepared_auth)
+            except (BackupError, KeyboardInterrupt):
+                if args.project is not None:
+                    print(
+                        "The workspace was restored and remains stopped; host configuration restore did not finish.",
+                        file=sys.stderr,
+                    )
+                raise
+
+
+def _workspace_destination(box, project):
+    destination = Path(project).expanduser().absolute()
     if not destination.parent.is_dir() or destination.parent.is_symlink():
         raise BackupError("Restore parent must exist and not be a symlink.")
     destination = destination.parent.resolve() / destination.name
-    protected = (
+    default_config = Path.home() / ".config"
+    default_data = Path.home() / ".local/share"
+    # Protect both the launcher/native fallback and legacy readers that
+    # interpret an explicitly empty XDG value relative to their working dir.
+    config = {default_config, Path(os.environ.get("XDG_CONFIG_HOME", default_config))}
+    data = {default_data, Path(os.environ.get("XDG_DATA_HOME", default_data))}
+    protected = {
         box.state_root(),
         box.APP,
-        Path(os.environ.get("XDG_CONFIG_HOME", str(Path.home() / ".config")))
-        / "opencode",
-        Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))
-        / "opencode",
         box.vault.vault_path().parent,
-    )
-    if any(destination.is_relative_to(location.resolve()) for location in protected):
+        *(root / name for root in config for name in ("oc-box", "opencode")),
+        *(root / name for root in data for name in ("opencode", "oc-box/credentials")),
+    }
+    if any(
+        destination.is_relative_to(location.resolve())
+        or location.resolve().is_relative_to(destination)
+        for location in protected
+    ):
         raise BackupError(
             "Restore destination must be outside trusted launcher, registry, vault, and host OpenCode config/data directories."
         )
@@ -582,13 +814,11 @@ def restore_backup(box, args, *, interaction=None):
         )
     if not destination.name or destination.name in (".", ".."):
         raise BackupError("Invalid restore destination.")
-    if interaction is not None:
-        interaction.stage("unlocking")
-    with crypto.opened(args.file, args.identity or []) as (
-        manifest,
-        encrypted,
-        private,
-    ):
+    return destination
+
+
+def _restore_workspace(box, destination, opened, *, interaction=None, host=False):
+    with nullcontext(opened) as (manifest, encrypted, private):
         validate_manifest(box, manifest)
         if manifest["architecture"] != platform.machine():
             raise BackupError(
@@ -831,9 +1061,10 @@ def restore_backup(box, args, *, interaction=None):
                 )
             print(f"Restored stopped workspace {ident} at {destination}.")
             print(f"Resume with: oc-box --workspace {ident}")
-            print(
-                "The host vault was not restored/unlocked. Recreate required vault/env values before a selected-mode launch. Portable restores reinstall baseline/OS dependencies on their first normal start."
-            )
+            if not host:
+                print(
+                    "The host vault was not restored/unlocked. Recreate required vault/env values before a selected-mode launch. Portable restores reinstall baseline/OS dependencies on their first normal start."
+                )
         finally:
             if not success:
                 cleanup_ok = True
@@ -901,8 +1132,19 @@ def restore_backup(box, args, *, interaction=None):
 def parser_for(action):
     parser = argparse.ArgumentParser(prog="oc-box " + action)
     if action == "backup":
-        parser.add_argument("--project", type=Path)
-        parser.add_argument("--workspace")
+        selectors = parser.add_mutually_exclusive_group()
+        selectors.add_argument("--project", type=Path)
+        selectors.add_argument("--workspace")
+        parser.add_argument(
+            "--host",
+            action="store_true",
+            help="also back up host settings and vault; alone, back up only the host",
+        )
+        parser.add_argument(
+            "--opencode-auth-export",
+            metavar="FILE",
+            help="with --host, include a native V2 credential export from a private file or '-' for stdin",
+        )
         parser.add_argument("--output", type=Path, required=True)
         parser.add_argument(
             "--portable",
@@ -931,15 +1173,31 @@ def parser_for(action):
             parser.add_argument(
                 "--project",
                 type=Path,
-                required=True,
                 help="new, nonexistent host project destination",
+            )
+            parser.add_argument(
+                "--host",
+                action="store_true",
+                help="restore the host configuration component",
+            )
+            parser.add_argument(
+                "--include-opencode",
+                action="store_true",
+                help="also restore the native host OpenCode profile, after a separate review",
             )
     return parser
 
 
 def cli(box, arguments, *, interaction=None):
     action = arguments[0]
-    args = parser_for(action).parse_args(arguments[1:])
+    parser = parser_for(action)
+    args = parser.parse_args(arguments[1:])
+    if action == "restore" and not (args.project or args.host):
+        parser.error("restore requires --project or --host")
+    if interaction is not None and getattr(args, "host", False):
+        raise BackupError(
+            "Host configuration backup and restore require the foreground host CLI."
+        )
     if os.environ.get("OC_BOX_CONTAINER") == "1":
         raise BackupError(
             "Run backup/restore on the host; host Podman/registry must not be exposed inside a development container."

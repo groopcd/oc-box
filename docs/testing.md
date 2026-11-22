@@ -25,6 +25,7 @@ reports. Source/native identities below retain their original wording and scope.
 | Host files and dashboard | [Temporary host-file tools](#experimental-temporary-host-file-tools) · [Host-image attachments](#experimental-host-image-attachments) · [Native TUI host drops](#experimental-transparent-native-tui-host-drops) · [Workspace manager](#experimental-workspace-manager) |
 | Launcher help, output and activity journal | [Command help](#command-help) · [Quiet lifecycle and severity-based logs](#quiet-lifecycle-and-severity-based-logs) |
 | History and readiness | [V2 history synchronization](#v2-session-history-synchronization) · [Focused host runner](#focused-historyreadiness-host-runner) |
+| Backups | [Host configuration migration](#host-configuration-migration) |
 | Host-only fixture guidance | [Vault edges](#fresh-provider-free-vault-edges-host-only) · [Manual UI observation](#fresh-manual-ui-observation-host-only) · [Home-component ownership](#shared-home-component-ownership-fresh-host-only-image-free) |
 | CI and announcements | [Ubuntu CI bootstrap](#ubuntu-ci-package-bootstrap) · [Optional social announcements](#optional-social-release-announcements) |
 
@@ -2352,3 +2353,13 @@ use `uv run --no-project --with-editable . --with cryptography --with coverage`
 and `python -B -m coverage run --branch --source=src/oc_box,tools -m unittest`
 with `discover -s tests`; store coverage data outside the project/HOME. Coverage
 is a developer tool, not a runtime dependency or replacement for native tests.
+### Host configuration migration
+
+Use synthetic XDG config/data roots for `backup --host` and `restore --host`.
+Exercise a host-only real age round trip and a combined full workspace round
+trip at mocked Podman boundaries. Verify exact oc-box config and encrypted
+vault bytes, native profile opt-in, permission tightening, absence of
+plaintext in the outer archive and fixed partial-restore reporting. Cover
+malformed payloads, cross-scope paths, changed destinations and no overwrite.
+Native V2 credential verification must use disposable credentials and a fresh
+native store; an offline fixture does not establish host lifecycle acceptance.
