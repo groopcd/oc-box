@@ -308,13 +308,20 @@ fi
             with self.subTest(command=command):
                 self.assertEqual(self.complete(command, "--image-p"), [])
 
-    def test_host_open_is_offered_only_for_native_launches(self):
+    def test_preview_completion_separates_launch_and_saved_choices(self):
         for prefix in ((), ("start",), ("reset",)):
             self.assertEqual(self.complete(*prefix, "--host-fi"), ["--host-file-open"])
             self.assertEqual(
                 self.complete(*prefix, "--no-host-fi"), ["--no-host-file-open"]
             )
-        for command in ("web", "terminal", "tui", "preferences", "attach", "status"):
+            self.assertEqual(
+                self.complete(*prefix, "--no-image-p"), ["--no-image-preview"]
+            )
+        for flag in ("--host-file-open", "--image-preview"):
+            self.assertEqual(self.complete("preferences", flag, ""), ["on", "off"])
+        self.assertEqual(self.complete("preferences", "--no-host-fi"), [])
+        self.assertEqual(self.complete("preferences", "--no-image-p"), [])
+        for command in ("web", "terminal", "tui", "attach", "status"):
             with self.subTest(command=command):
                 self.assertEqual(self.complete(command, "--host-fi"), [])
                 self.assertEqual(self.complete(command, "--no-host-fi"), [])

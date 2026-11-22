@@ -17,7 +17,7 @@ oc\-box terminal [\-\-project PATH | \-\-workspace ID] [\-\-maintenance] [LIFECY
 oc\-box share PATH [\-\-project PATH | \-\-workspace ID] [\-\-acknowledge\-risk]
 oc\-box attach PATH \-\-session ID [\-\-project PATH | \-\-workspace ID] [\-\-text TEXT] [\-\-send] [\-\-acknowledge\-risk]
 oc\-box attach \-\-broker \-\-session ID [\-\-project PATH | \-\-workspace ID]
-oc\-box preferences [\-\-project PATH | \-\-workspace ID] [\-\-host\-drop on|off] [\-\-host\-clipboard on|off] [\-\-host\-clipboard\-symlinks on|off] [\-\-json | \-\-table]
+oc\-box preferences [\-\-project PATH | \-\-workspace ID] [\-\-host\-drop on|off] [\-\-host\-clipboard on|off] [\-\-host\-clipboard\-symlinks on|off] [\-\-host\-file\-open on|off] [\-\-image\-preview on|off] [\-\-json | \-\-table]
 oc\-box purge [\-\-project PATH | \-\-workspace ID] [\-\-delete\-sessions | \-\-all] [\-y]
 oc\-box list
 oc\-box distros
@@ -145,6 +145,8 @@ oc\-box preferences \-\-workspace WORKSPACE_ID \-\-host\-drop on
 oc\-box preferences \-\-project ~/devel/demo \-\-host\-clipboard on
 oc\-box preferences \-\-project ~/devel/demo \-\-host\-clipboard\-symlinks off
 oc\-box preferences \-\-project ~/devel/demo \-\-host\-clipboard off
+oc\-box preferences \-\-project ~/devel/demo \-\-host\-file\-open on
+oc\-box preferences \-\-project ~/devel/demo \-\-image\-preview on
 oc\-box preferences \-\-project ~/devel/demo \-\-json
 oc\-box preferences \-\-project ~/devel/demo \-\-table
 .fam T
@@ -152,9 +154,9 @@ oc\-box preferences \-\-project ~/devel/demo \-\-table
 .PP
 \fB\-\-project\fR and \fB\-\-workspace\fR are mutually exclusive. With no change option this is read\-only. The independent settings accept \fBon\fR/\fBoff\fR:
 .PP
-| Setting | Default when no choice is saved | | \-\-\- | \-\-\- | | \fB\-\-host\-drop\fR | \fBon\fR: pathname/file\-drop imports on supported clients | | \fB\-\-host\-clipboard\fR | \fBoff\fR: no clipboard shortcut | | \fB\-\-host\-clipboard\-symlinks\fR | \fBon\fR: follow ordinary links for clipboard file imports |
+| Setting | Default when no choice is saved | | \-\-\- | \-\-\- | | \fB\-\-host\-drop\fR | \fBon\fR: pathname/file\-drop imports on supported clients | | \fB\-\-host\-clipboard\fR | \fBoff\fR: no clipboard shortcut | | \fB\-\-host\-clipboard\-symlinks\fR | \fBon\fR: follow ordinary links for clipboard file imports | | \fB\-\-host\-file\-open\fR | Follow the verified installation policy for Ctrl\-click host opening | | \fB\-\-image\-preview\fR | \fBoff\fR: no launcher image\-preview override; keep native settings |
 .PP
-The symlink preference can be saved independently, even while clipboard importing is off; it takes effect on a later enabled client. The strict symlink choice remains saved when clipboard importing is later disabled, so re\-enabling does not silently restore link following. This command also works without a TTY. It does not discover desktop helpers or read the clipboard, even when saving an enable choice. JSON output includes the effective \fBhost_clipboard\fR and \fBhost_clipboard_symlinks\fR booleans; \fBsource\fR still indicates whether a preference file is saved or defaults are in use, not the origin of each individual field. Use \fB\-\-table\fR to see effective values and whether each preference is saved or default. The presentation does not save a preference by itself.
+The symlink preference can be saved independently, even while clipboard importing is off; it takes effect on a later enabled client. The strict symlink choice remains saved when clipboard importing is later disabled, so re\-enabling does not silently restore link following. This command also works without a TTY. It does not discover desktop helpers or read the clipboard, even when saving an enable choice. Host opening resolves the current launch flag first, then the saved workspace choice, then the installation policy. An image\-preview preference applies only on the next owning native V2 start/reset; additional clients inherit their running owner's setting, not a preference changed after that owner started. JSON output includes the effective \fBhost_clipboard\fR and \fBhost_clipboard_symlinks\fR booleans. It includes \fBhost_file_open\fR and \fBimage_preview\fR only when explicitly saved; absence means use their default rules. \fBsource\fR still describes the preference file, not each field. Use \fB\-\-table\fR to see the choices and which are saved, default, or inherited. These are requests for future clients, not a live availability check. The presentation does not save a preference by itself.
 .PP
 Corrupt, unsafe or mismatched preferences refuse rather than silently granting access. Changes apply to future clients only. Preferences survive ordinary stop/start and reset in a private host \fBui\-preferences.json\fR beside workspace metadata, with an independent lock so an active owning launcher need not exit. Only policy booleans are saved, never clipboard contents or a helper path. They are not native CLI settings, credential policy or archived authority: backup/restore into a fresh workspace does not reactivate these host preferences. The new workspace uses the defaults above until explicitly changed.
 .SS stop
@@ -1003,28 +1005,33 @@ V2\-only, for an **owning** start (the default command) or reset TUI launch. Set
 .PP
 The persistent container \fBcli.json\fR remains the base. Existing container\-local preferences and their original image values survive refreshes; a missing file is seeded from the validated host snapshot, without forced image values. JSONC comments, CRLF and trailing commas are retained in that base snapshot. The host file and host OpenCode configuration are never edited. Malformed/non\-object input or non\-object prompt/session sections are refused, not replaced. Symlinked paths, nonregular/hard\-linked CLI files, foreign\-owned config directories/files, and group/world\-writable directories/files are refused. Validation runs before initial workspace registration or reset resource removal. The validated CLI bytes stay in launcher memory through credential prompts and the owning launch/reset. That exact snapshot supplies any needed first\-use seed: edits to host \fBcli.json\fR while a credential prompt is waiting are not reread after reset has removed resources. They can apply to a later first\-use seed, not overwrite an already saved container preference file.
 .PP
-There is no saved workspace preference: repeat the flag on each owning TUI generation that needs the override. Additional full TUI clients inherit the owner's opt\-in but cannot supply this flag while that owner is running. Inline image values remain authoritative for that generation; a subsequent unflagged owner uses the saved base again. Saving unrelated native UI settings during the flagged generation does not persist the forced image values. API/history clients and session\-shell terminals receive no overlay. V1, web, terminal/maintenance, informational commands, history sync and other non\-owning commands reject the flag without changing configuration. No image override is stored in the workspace registry or copied back to the host.
+Use \fBoc\-box preferences \-\-image\-preview on|off\fR to retain the workspace choice for future owning native V2 start/reset launches. It is off when not saved. \fB\-\-image\-preview\fR and \fB\-\-no\-image\-preview\fR override the saved choice for one owning launch without changing it. Saving unrelated native UI settings during an enabled generation does not persist the forced image values. Additional full TUI clients inherit the actual running owner's override and cannot supply either flag while it is running. API/history clients and session\-shell terminals receive no overlay. Saved enables are not applied to V1. Web, terminal/maintenance, informational commands and history sync ignore the saved choice and reject the flags. Only the boolean request is saved in host workspace preferences; no CLI snapshot is kept there.
 .PP
 .nf
 .fam C
+oc\-box preferences \-\-project ~/devel/demo \-\-image\-preview on
 oc\-box \-\-project ~/devel/demo \-\-image\-preview
 oc\-box reset \-\-project ~/devel/demo \-\-image\-preview
 .fam T
 .fi
+.SS \-\-no\-image\-preview
+.PP
+Skip the launcher image\-preview override for this owning TUI start/reset, even when the workspace preference requests it. It does not force image previews off in native OpenCode's own \fBcli.json\fR or change the workspace preference.
 .SS \-\-host\-file\-open
 .PP
 Request Ctrl\-click host file opening for this native \fBstart\fR (including the implicit command) or \fBreset\fR TUI client. Applies to an owning client or an additional \fBstart\fR client; it does not change a running owner's settings. A positive request requires interactive native OpenCode 2.3.x under direct Konsole or Yakuake and is incompatible with custom Podman arguments. If actual mount or desktop admission later fails, host opening stays off.
 .SS \-\-no\-host\-file\-open
 .PP
-Disable Ctrl\-click host file opening for this native \fBstart\fR or \fBreset\fR TUI client, even if the installation default is on. Neither flag is saved or changes another client.
+Disable Ctrl\-click host file opening for this native \fBstart\fR or \fBreset\fR TUI client, even if the workspace preference or installation default is on. Neither flag is saved or changes another client.
 .SS Experimental Ctrl\-click host file opening
 .PP
-The current development\-channel GitHub bootstrap defaults this feature on only when it verifies a fresh installation. Existing installs, upgrades and older bootstrap scripts do not acquire a new default; later upgrades can retain a previously established default. Without verified install evidence, including ordinary PyPI \fBpipx\fR/\fBuv\fR/\fBpip\fR installs and source checkouts, the default is off. Automatic mode skips unsupported clients and does not opt a restored workspace in. Neither ordinary launch nor a host settings restore creates a fresh\-install default. The former environment switch is no longer used.
+With no saved workspace choice, the current development\-channel GitHub bootstrap defaults this feature on only when it verifies a fresh installation. Existing installs, upgrades and older bootstrap scripts do not acquire a new default; later upgrades can retain a previously established default. Without verified install evidence, including ordinary PyPI \fBpipx\fR/\fBuv\fR/\fBpip\fR installs and source checkouts, the default is off. Automatic mode skips unsupported clients and does not opt a restored workspace in. Neither ordinary launch nor a host settings restore creates a fresh\-install default. The former environment switch is no longer used.
 .PP
-Turn it on or off for one native TUI client:
+Set it for future native TUI clients, or override it for one client:
 .PP
 .nf
 .fam C
+oc\-box preferences \-\-project ~/devel/demo \-\-host\-file\-open on
 oc\-box start \-\-project ~/devel/demo \-\-host\-file\-open
 oc\-box start \-\-project ~/devel/demo \-\-no\-host\-file\-open
 .fam T

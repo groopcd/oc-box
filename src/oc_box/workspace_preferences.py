@@ -2,7 +2,8 @@
 
 The preference is a request for future TUI clients, not native-version/terminal
 compatibility or live activation. Absent preferences mean host_drop=True,
-host_clipboard=False and host_clipboard_symlinks=True.
+host_clipboard=False, host_clipboard_symlinks=True, host file opening follows
+the installation policy, and there is no launcher image-preview override.
 Reads never create directories, files or locks. Only an intentional setter
 writes, using a distinct per-workspace lock and an atomic private-file replace.
 
@@ -48,6 +49,8 @@ INVALID_WORKSPACE = (
 INVALID_DATA = "Workspace preferences are invalid or unsupported."
 INVALID_VALUE = "Host drop preference must be a boolean."
 INVALID_CLIPBOARD_VALUE = "Host clipboard preferences must be booleans."
+INVALID_HOST_FILE_OPEN = "Host file open preference must be a boolean."
+INVALID_IMAGE_PREVIEW = "Image preview preference must be a boolean."
 UNSAFE_STORAGE = "Workspace preference storage is unsafe or unavailable."
 BUSY = "Workspace preferences are busy; retry the command."
 SAVE_UNVERIFIED = "Workspace preference saving could not be verified; read preferences before retrying."
@@ -360,7 +363,12 @@ def _preferences(directory):
         or type(value.get("host_drop")) is not bool
         or any(
             name in value and type(value[name]) is not bool
-            for name in ("host_clipboard", "host_clipboard_symlinks")
+            for name in (
+                "host_clipboard",
+                "host_clipboard_symlinks",
+                "host_file_open",
+                "image_preview",
+            )
         )
     ):
         raise PreferenceError(INVALID_DATA)
@@ -541,19 +549,21 @@ def set_preferences(
     host_drop=None,
     host_clipboard=None,
     host_clipboard_symlinks=None,
+    host_file_open=None,
+    image_preview=None,
 ):
     """Atomically save explicit choices, preserving other fields under the lock."""
     updates = {}
-    for name, value in (
-        ("host_drop", host_drop),
-        ("host_clipboard", host_clipboard),
-        ("host_clipboard_symlinks", host_clipboard_symlinks),
+    for name, value, invalid in (
+        ("host_drop", host_drop, INVALID_VALUE),
+        ("host_clipboard", host_clipboard, INVALID_CLIPBOARD_VALUE),
+        ("host_clipboard_symlinks", host_clipboard_symlinks, INVALID_CLIPBOARD_VALUE),
+        ("host_file_open", host_file_open, INVALID_HOST_FILE_OPEN),
+        ("image_preview", image_preview, INVALID_IMAGE_PREVIEW),
     ):
         if value is not None:
             if type(value) is not bool:
-                raise PreferenceError(
-                    INVALID_VALUE if name == "host_drop" else INVALID_CLIPBOARD_VALUE
-                )
+                raise PreferenceError(invalid)
             updates[name] = value
     with _directory(workspace_path, workspace_id) as directory:
         # Refuse pre-existing unsafe/corrupt state before creating even the lock.
@@ -606,6 +616,18 @@ def parser():
         metavar="on|off",
         help="save whether future clipboard file imports follow symlinks (default: on)",
     )
+    result.add_argument(
+        "--host-file-open",
+        choices=("on", "off"),
+        metavar="on|off",
+        help="save the future-client Ctrl-click host opening preference (otherwise inherit the installation default)",
+    )
+    result.add_argument(
+        "--image-preview",
+        choices=("on", "off"),
+        metavar="on|off",
+        help="save the launcher image-preview override for future owning native V2 start/reset launches (default: off)",
+    )
     output = result.add_mutually_exclusive_group()
     output.add_argument(
         "--json", action="store_true", help="emit machine-readable preference status"
@@ -640,6 +662,18 @@ def _table(value, source, changed):
                 "enabled" if symlinks else "disabled",
                 "saved" if "host_clipboard_symlinks" in value else "default",
             ),
+            (
+                "Host file open",
+                ("enabled" if value["host_file_open"] else "disabled")
+                if "host_file_open" in value
+                else "inherit",
+                "saved" if "host_file_open" in value else "installation policy",
+            ),
+            (
+                "Image preview override",
+                "enabled" if value.get("image_preview", False) else "disabled",
+                "saved" if "image_preview" in value else "default",
+            ),
         ),
     )
     scope = {
@@ -672,7 +706,13 @@ def cli(box, args):
             raise PreferenceError(INVALID_WORKSPACE)
         updates = {
             name: getattr(args, name) == "on"
-            for name in ("host_drop", "host_clipboard", "host_clipboard_symlinks")
+            for name in (
+                "host_drop",
+                "host_clipboard",
+                "host_clipboard_symlinks",
+                "host_file_open",
+                "image_preview",
+            )
             if getattr(args, name) is not None
         }
         changed = bool(updates)
@@ -693,6 +733,13 @@ def cli(box, args):
             ),
             "source": source,
         }
+        # Absent fields inherit their default rules; don't materialize new
+        # fields in the established JSON shape for existing preferences.
+        projected.update(
+            (name, value[name])
+            for name in ("host_file_open", "image_preview")
+            if name in value
+        )
         if changed:
             projected.update(
                 applies_to_future_clients=True, current_clients_unchanged=True
@@ -705,6 +752,8 @@ def cli(box, args):
             ("host_drop", "host drop"),
             ("host_clipboard", "host clipboard"),
             ("host_clipboard_symlinks", "host clipboard symlink"),
+            ("host_file_open", "host file open"),
+            ("image_preview", "image preview override"),
         ):
             if name in updates:
                 print(
@@ -714,6 +763,10 @@ def cli(box, args):
                     + ("enabled." if updates[name] else "disabled.")
                 )
         print("Applies to future TUI clients; current clients keep their setting.")
+        if "image_preview" in updates:
+            print(
+                "The image preview override changes on the next owning native V2 launch."
+            )
     else:
         print(
             "Host drop preference: "
@@ -729,6 +782,7 @@ def cli(box, args):
                 "Host clipboard symlink",
                 DEFAULT_HOST_CLIPBOARD_SYMLINKS,
             ),
+            ("image_preview", "Image preview override", False),
         ):
             print(
                 label
@@ -738,4 +792,12 @@ def cli(box, args):
                 + ("saved" if name in value else "default")
                 + ")."
             )
+        if "host_file_open" in value:
+            print(
+                "Host file open preference: "
+                + ("enabled" if value["host_file_open"] else "disabled")
+                + " (saved)."
+            )
+        else:
+            print("Host file open preference: inherit (installation policy).")
     return 0

@@ -21,7 +21,10 @@ _COMMAND_GROUPS = (
             ("reset", "Rebuild the container OS, then launch OpenCode"),
             ("repair", "Repair the registered project directory identity"),
             ("purge", "Remove workspace resources"),
-            ("preferences", "View or set future native-client preferences"),
+            (
+                "preferences",
+                "View or save file-open, import, and image-preview preferences",
+            ),
         ),
     ),
     (

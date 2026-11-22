@@ -328,7 +328,9 @@ their checkout ownership distinct from unrelated source and flat installations.
   experimental host open, per native 2.3.x TUI CLI selection. Only verified
   fresh GitHub installations get an automatic default, never a markerless
   upgrade, wheel, source checkout or restored workspace. Keep the owner-bound
-  installation record out of archives. Require a fresh
+  installation record out of archives. A saved host-only workspace choice
+  takes precedence over that default, but not the current launch flag.
+  Saving or restoring data never changes a live client. Require a fresh
   matched Ctrl-click from host terminal input and native assistant link
   hit-testing. Child output must not independently grant file opens. Validate
   mount/descriptor boundaries, bound each read and transfer, and open only

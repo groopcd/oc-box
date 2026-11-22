@@ -58,7 +58,7 @@ File: oc-box.info,  Node: Synopsis,  Next: Description,  Prev: Name,  Up: Top
      oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
      oc-box attach PATH --session ID [--project PATH | --workspace ID] [--text TEXT] [--send] [--acknowledge-risk]
      oc-box attach --broker --session ID [--project PATH | --workspace ID]
-     oc-box preferences [--project PATH | --workspace ID] [--host-drop on|off] [--host-clipboard on|off] [--host-clipboard-symlinks on|off] [--json | --table]
+     oc-box preferences [--project PATH | --workspace ID] [--host-drop on|off] [--host-clipboard on|off] [--host-clipboard-symlinks on|off] [--host-file-open on|off] [--image-preview on|off] [--json | --table]
      oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
      oc-box list
      oc-box distros
@@ -384,6 +384,8 @@ refreshing native configuration or unlocking credentials:
      oc-box preferences --project ~/devel/demo --host-clipboard on
      oc-box preferences --project ~/devel/demo --host-clipboard-symlinks off
      oc-box preferences --project ~/devel/demo --host-clipboard off
+     oc-box preferences --project ~/devel/demo --host-file-open on
+     oc-box preferences --project ~/devel/demo --image-preview on
      oc-box preferences --project ~/devel/demo --json
      oc-box preferences --project ~/devel/demo --table
 
@@ -394,19 +396,28 @@ option this is read-only.  The independent settings accept ‘on’/‘off’:
 ‘--host-drop’ | ‘on’: pathname/file-drop imports on supported clients |
 | ‘--host-clipboard’ | ‘off’: no clipboard shortcut | |
 ‘--host-clipboard-symlinks’ | ‘on’: follow ordinary links for clipboard
-file imports |
+file imports | | ‘--host-file-open’ | Follow the verified installation
+policy for Ctrl-click host opening | | ‘--image-preview’ | ‘off’: no
+launcher image-preview override; keep native settings |
 
 The symlink preference can be saved independently, even while clipboard
 importing is off; it takes effect on a later enabled client.  The strict
 symlink choice remains saved when clipboard importing is later disabled,
 so re-enabling does not silently restore link following.  This command
 also works without a TTY. It does not discover desktop helpers or read
-the clipboard, even when saving an enable choice.  JSON output includes
-the effective ‘host_clipboard’ and ‘host_clipboard_symlinks’ booleans;
-‘source’ still indicates whether a preference file is saved or defaults
-are in use, not the origin of each individual field.  Use ‘--table’ to
-see effective values and whether each preference is saved or default.
-The presentation does not save a preference by itself.
+the clipboard, even when saving an enable choice.  Host opening resolves
+the current launch flag first, then the saved workspace choice, then the
+installation policy.  An image-preview preference applies only on the
+next owning native V2 start/reset; additional clients inherit their
+running owner's setting, not a preference changed after that owner
+started.  JSON output includes the effective ‘host_clipboard’ and
+‘host_clipboard_symlinks’ booleans.  It includes ‘host_file_open’ and
+‘image_preview’ only when explicitly saved; absence means use their
+default rules.  ‘source’ still describes the preference file, not each
+field.  Use ‘--table’ to see the choices and which are saved, default,
+or inherited.  These are requests for future clients, not a live
+availability check.  The presentation does not save a preference by
+itself.
 
 Corrupt, unsafe or mismatched preferences refuse rather than silently
 granting access.  Changes apply to future clients only.  Preferences
@@ -2994,23 +3005,32 @@ while a credential prompt is waiting are not reread after reset has
 removed resources.  They can apply to a later first-use seed, not
 overwrite an already saved container preference file.
 
-There is no saved workspace preference: repeat the flag on each owning
-TUI generation that needs the override.  Additional full TUI clients
-inherit the owner's opt-in but cannot supply this flag while that owner
-is running.  Inline image values remain authoritative for that
-generation; a subsequent unflagged owner uses the saved base again.
-Saving unrelated native UI settings during the flagged generation does
-not persist the forced image values.  API/history clients and
-session-shell terminals receive no overlay.  V1, web,
-terminal/maintenance, informational commands, history sync and other
-non-owning commands reject the flag without changing configuration.  No
-image override is stored in the workspace registry or copied back to the
-host.
+Use ‘oc-box preferences --image-preview on|off’ to retain the workspace
+choice for future owning native V2 start/reset launches.  It is off when
+not saved.  ‘--image-preview’ and ‘--no-image-preview’ override the
+saved choice for one owning launch without changing it.  Saving
+unrelated native UI settings during an enabled generation does not
+persist the forced image values.  Additional full TUI clients inherit
+the actual running owner's override and cannot supply either flag while
+it is running.  API/history clients and session-shell terminals receive
+no overlay.  Saved enables are not applied to V1.  Web,
+terminal/maintenance, informational commands and history sync ignore the
+saved choice and reject the flags.  Only the boolean request is saved in
+host workspace preferences; no CLI snapshot is kept there.
 
+     oc-box preferences --project ~/devel/demo --image-preview on
      oc-box --project ~/devel/demo --image-preview
      oc-box reset --project ~/devel/demo --image-preview
 
-5.42 -host-file-open
+5.42 -no-image-preview
+======================
+
+Skip the launcher image-preview override for this owning TUI
+start/reset, even when the workspace preference requests it.  It does
+not force image previews off in native OpenCode's own ‘cli.json’ or
+change the workspace preference.
+
+5.43 -host-file-open
 ====================
 
 Request Ctrl-click host file opening for this native ‘start’ (including
@@ -3021,28 +3041,30 @@ OpenCode 2.3.x under direct Konsole or Yakuake and is incompatible with
 custom Podman arguments.  If actual mount or desktop admission later
 fails, host opening stays off.
 
-5.43 -no-host-file-open
+5.44 -no-host-file-open
 =======================
 
 Disable Ctrl-click host file opening for this native ‘start’ or ‘reset’
-TUI client, even if the installation default is on.  Neither flag is
-saved or changes another client.
+TUI client, even if the workspace preference or installation default is
+on.  Neither flag is saved or changes another client.
 
-5.44 Experimental Ctrl-click host file opening
+5.45 Experimental Ctrl-click host file opening
 ==============================================
 
-The current development-channel GitHub bootstrap defaults this feature
-on only when it verifies a fresh installation.  Existing installs,
-upgrades and older bootstrap scripts do not acquire a new default; later
-upgrades can retain a previously established default.  Without verified
-install evidence, including ordinary PyPI ‘pipx’/‘uv’/‘pip’ installs and
-source checkouts, the default is off.  Automatic mode skips unsupported
-clients and does not opt a restored workspace in.  Neither ordinary
-launch nor a host settings restore creates a fresh-install default.  The
-former environment switch is no longer used.
+With no saved workspace choice, the current development-channel GitHub
+bootstrap defaults this feature on only when it verifies a fresh
+installation.  Existing installs, upgrades and older bootstrap scripts
+do not acquire a new default; later upgrades can retain a previously
+established default.  Without verified install evidence, including
+ordinary PyPI ‘pipx’/‘uv’/‘pip’ installs and source checkouts, the
+default is off.  Automatic mode skips unsupported clients and does not
+opt a restored workspace in.  Neither ordinary launch nor a host
+settings restore creates a fresh-install default.  The former
+environment switch is no longer used.
 
-Turn it on or off for one native TUI client:
+Set it for future native TUI clients, or override it for one client:
 
+     oc-box preferences --project ~/devel/demo --host-file-open on
      oc-box start --project ~/devel/demo --host-file-open
      oc-box start --project ~/devel/demo --no-host-file-open
 
@@ -3105,7 +3127,7 @@ terminal hyperlink handlers at their normal settings; this feature does
 not use them.  It is not available in web, V1, plain host OpenCode, or
 the maintenance/session terminals.
 
-5.45 -host-drop
+5.46 -host-drop
 ===============
 
 Experimental and **enabled by default per workspace** for supported
@@ -3213,7 +3235,7 @@ guarantee, nor a new live-host acceptance result.  See ‘SECURITY.md’ and
      oc-box --project ~/devel/demo --no-host-drop
      oc-box preferences --project ~/devel/demo --host-drop off
 
-5.46 -no-host-drop
+5.47 -no-host-drop
 ==================
 
 Save host importing disabled for future workspace TUI clients and open
@@ -3222,7 +3244,7 @@ neither flag live-toggles existing clients.  To change only the
 preference without opening a TUI, use ‘oc-box preferences --host-drop
 off’.
 
-5.47 -host-clipboard
+5.48 -host-clipboard
 ====================
 
 Experimental, **off by default, with a saved per-workspace host
@@ -3400,7 +3422,7 @@ See the short [host test guide](host-clipboard-testing.md).  Focused
 mocked tests are not acceptance of KDE/Wayland/X11 behavior or native
 image composition.
 
-5.48 -no-host-clipboard
+5.49 -no-host-clipboard
 =======================
 
 Save clipboard importing disabled for future workspace TUI clients and
@@ -3410,7 +3432,7 @@ changes the independent host-drop preference.  A saved strict symlink
 choice is retained.  To change only policy, use ‘oc-box preferences
 --host-clipboard off’.
 
-5.49 -host-clipboard-symlinks
+5.50 -host-clipboard-symlinks
 =============================
 
 Save ordinary symlink following for clipboard file imports for this and
@@ -3420,7 +3442,7 @@ preference: a saved enable is enough, or combine with
 ‘--host-clipboard’.  Accepted only on ‘start’ or ‘reset’, and mutually
 exclusive with ‘--no-host-clipboard-symlinks’.
 
-5.50 -no-host-clipboard-symlinks
+5.51 -no-host-clipboard-symlinks
 ================================
 
 Save strict no-symlink clipboard sources for this and future workspace
@@ -3439,7 +3461,7 @@ is off.
      oc-box --project ~/devel/demo
      oc-box preferences --project ~/devel/demo --host-clipboard-symlinks on
 
-5.51 -credential-mode env|selected|vault
+5.52 -credential-mode env|selected|vault
 ========================================
 
 With ‘credentials’, save an explicit forwarding mode for that workspace.
@@ -3455,7 +3477,7 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.52 -attachments
+5.53 -attachments
 =================
 
 Web only: explicitly select the visible, source-version-bounded browser
@@ -3463,7 +3485,7 @@ File-drop adapter described under ‘web’.  Keeps the native app and its
 draft/Send controls unchanged.  No automatic prompt admission or
 host-path/URL reading.
 
-5.53 -no-vault
+5.54 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -3482,7 +3504,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.54 -env-secret NAME
+5.55 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -3495,7 +3517,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.55 -vault-secret NAME
+5.56 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -3507,7 +3529,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.56 -clear-credentials
+5.57 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -3519,7 +3541,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.57 -output FILE
+5.58 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -3529,7 +3551,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.58 -portable
+5.59 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -3540,7 +3562,7 @@ packages and native-cache compatibility are the user's responsibility.
 Example: ‘oc-box backup --project ~/devel/demo --portable --output
 /backup/demo.ocbox’.
 
-5.59 -recipient AGE_KEY
+5.60 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -3551,7 +3573,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.60 -host
+5.61 -host
 ==========
 
 For ‘backup’, include the [host migration
@@ -3562,14 +3584,14 @@ vault; omit ‘--project’ for a host-only restore from either type of
 host-containing archive.  A host-only archive cannot be used with
 ‘--project’.
 
-5.61 -opencode-auth-export FILE
+5.62 -opencode-auth-export FILE
 ===============================
 
 For ‘backup --host’, include a native V2 credential export from a
 private file, or use ‘-’ for a binary stdin stream.  The export is
 encrypted separately and is never printed by ‘oc-box backup-info’.
 
-5.62 -include-opencode
+5.63 -include-opencode
 ======================
 
 For ‘restore --host’, additionally install the native OpenCode profile
@@ -3577,7 +3599,7 @@ and saved credentials when present.  Requires separate typed
 confirmation and fresh destination paths.  It does not activate or start
 OpenCode.
 
-5.63 -identity FILE
+5.64 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -3588,7 +3610,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.64 -cpus NUMBER
+5.65 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -3600,7 +3622,7 @@ missing container for a registered workspace.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.65 -memory SIZE
+5.66 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -3613,7 +3635,7 @@ a missing container for a registered workspace.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.66 -pids-limit NUMBER
+5.67 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -3622,7 +3644,7 @@ requires reset.  ‘sync’ can save a new value when recreating a missing
 container for a registered workspace.  Example: ‘oc-box reset --project
 ~/devel/demo --pids-limit 4096’.
 
-5.67 -device MAPPING
+5.68 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -3636,7 +3658,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.68 -podman-arg=-OPTION[=VALUE]
+5.69 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -3663,7 +3685,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.69 -clear-devices
+5.70 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -3674,7 +3696,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.70 -clear-podman-args
+5.71 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -3684,7 +3706,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.71 -delete-sessions
+5.72 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -3693,7 +3715,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.72 -all
+5.73 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -3701,7 +3723,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.73 -y, -yes
+5.74 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -5056,22 +5078,22 @@ Tag Table:
 Node: Top210
 Node: Name769
 Node: Synopsis930
-Node: Description5014
-Node: Commands10441
-Node: Options140244
-Node: Lifecycle and persistence200367
-Node: Distribution images202667
-Node: Sessions and recovery207744
-Node: Devices and host permissions214329
-Node: Resource reports216675
-Node: Configuration and environment218786
-Node: Files230167
-Node: Exit status241077
-Node: Examples242485
-Node: Troubleshooting244624
-Node: Installation and manuals256670
-Node: Authors and license266860
-Node: See also267467
+Node: Description5065
+Node: Commands10492
+Node: Options141056
+Node: Lifecycle and persistence201757
+Node: Distribution images204057
+Node: Sessions and recovery209134
+Node: Devices and host permissions215719
+Node: Resource reports218065
+Node: Configuration and environment220176
+Node: Files231557
+Node: Exit status242467
+Node: Examples243875
+Node: Troubleshooting246014
+Node: Installation and manuals258060
+Node: Authors and license268250
+Node: See also268857
 
 End Tag Table
 

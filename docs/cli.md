@@ -16,7 +16,7 @@ oc-box terminal [--project PATH | --workspace ID] [--maintenance] [LIFECYCLE-LOG
 oc-box share PATH [--project PATH | --workspace ID] [--acknowledge-risk]
 oc-box attach PATH --session ID [--project PATH | --workspace ID] [--text TEXT] [--send] [--acknowledge-risk]
 oc-box attach --broker --session ID [--project PATH | --workspace ID]
-oc-box preferences [--project PATH | --workspace ID] [--host-drop on|off] [--host-clipboard on|off] [--host-clipboard-symlinks on|off] [--json | --table]
+oc-box preferences [--project PATH | --workspace ID] [--host-drop on|off] [--host-clipboard on|off] [--host-clipboard-symlinks on|off] [--host-file-open on|off] [--image-preview on|off] [--json | --table]
 oc-box purge [--project PATH | --workspace ID] [--delete-sessions | --all] [-y]
 oc-box list
 oc-box distros
@@ -307,6 +307,8 @@ oc-box preferences --workspace WORKSPACE_ID --host-drop on
 oc-box preferences --project ~/devel/demo --host-clipboard on
 oc-box preferences --project ~/devel/demo --host-clipboard-symlinks off
 oc-box preferences --project ~/devel/demo --host-clipboard off
+oc-box preferences --project ~/devel/demo --host-file-open on
+oc-box preferences --project ~/devel/demo --image-preview on
 oc-box preferences --project ~/devel/demo --json
 oc-box preferences --project ~/devel/demo --table
 ```
@@ -319,18 +321,26 @@ is read-only. The independent settings accept `on`/`off`:
 | `--host-drop` | `on`: pathname/file-drop imports on supported clients |
 | `--host-clipboard` | `off`: no clipboard shortcut |
 | `--host-clipboard-symlinks` | `on`: follow ordinary links for clipboard file imports |
+| `--host-file-open` | Follow the verified installation policy for Ctrl-click host opening |
+| `--image-preview` | `off`: no launcher image-preview override; keep native settings |
 
 The symlink preference can be saved independently, even while clipboard
 importing is off; it takes effect on a later enabled client. The strict symlink
 choice remains saved when clipboard importing is later disabled, so re-enabling
 does not silently restore link following.
 This command also works without a TTY. It does not discover desktop helpers or
-read the clipboard, even when saving an enable choice.
+read the clipboard, even when saving an enable choice. Host opening resolves
+the current launch flag first, then the saved workspace choice, then the
+installation policy. An image-preview preference applies only on the next
+owning native V2 start/reset; additional clients inherit their running owner's
+setting, not a preference changed after that owner started.
 JSON output includes the effective `host_clipboard` and
-`host_clipboard_symlinks` booleans; `source` still indicates whether a preference
-file is saved or defaults are in use, not the origin of each individual field.
-Use `--table` to see effective values and whether each preference is saved or
-default. The presentation does not save a preference by itself.
+`host_clipboard_symlinks` booleans. It includes `host_file_open` and
+`image_preview` only when explicitly saved; absence means use their default
+rules. `source` still describes the preference file, not each field. Use
+`--table` to see the choices and which are saved, default, or inherited.
+These are requests for future clients, not a live availability check. The
+presentation does not save a preference by itself.
 
 Corrupt, unsafe or mismatched preferences refuse rather than silently granting
 access. Changes apply to future clients only. Preferences survive ordinary
@@ -2680,21 +2690,29 @@ edits to host `cli.json` while a credential prompt is waiting are not reread aft
 reset has removed resources. They can apply to a later first-use seed, not
 overwrite an already saved container preference file.
 
-There is no saved workspace preference: repeat the flag on each owning TUI
-generation that needs the override. Additional full TUI clients inherit the
-owner's opt-in but cannot supply this flag while that owner is running. Inline
-image values remain authoritative for that generation; a subsequent unflagged
-owner uses the saved base again. Saving unrelated native UI settings during the
-flagged generation does not persist the forced image values. API/history clients
-and session-shell terminals receive no overlay. V1, web, terminal/maintenance,
-informational commands, history sync and other non-owning commands reject the
-flag without changing configuration. No image override is stored in the workspace
-registry or copied back to the host.
+Use `oc-box preferences --image-preview on|off` to retain the workspace choice
+for future owning native V2 start/reset launches. It is off when not saved.
+`--image-preview` and `--no-image-preview` override the saved choice for one
+owning launch without changing it. Saving unrelated native UI settings during
+an enabled generation does not persist the forced image values. Additional
+full TUI clients inherit the actual running owner's override and cannot supply
+either flag while it is running. API/history clients and session-shell terminals
+receive no overlay. Saved enables are not applied to V1. Web,
+terminal/maintenance, informational commands and history sync ignore the
+saved choice and reject the flags. Only the boolean request is saved in host
+workspace preferences; no CLI snapshot is kept there.
 
 ```sh
+oc-box preferences --project ~/devel/demo --image-preview on
 oc-box --project ~/devel/demo --image-preview
 oc-box reset --project ~/devel/demo --image-preview
 ```
+
+### --no-image-preview
+
+Skip the launcher image-preview override for this owning TUI start/reset, even
+when the workspace preference requests it. It does not force image previews
+off in native OpenCode's own `cli.json` or change the workspace preference.
 
 ### --host-file-open
 
@@ -2708,12 +2726,13 @@ If actual mount or desktop admission later fails, host opening stays off.
 ### --no-host-file-open
 
 Disable Ctrl-click host file opening for this native `start` or `reset` TUI
-client, even if the installation default is on. Neither flag is saved or
-changes another client.
+client, even if the workspace preference or installation default is on. Neither
+flag is saved or changes another client.
 
 ### Experimental Ctrl-click host file opening
 
-The current development-channel GitHub bootstrap defaults this feature on
+With no saved workspace choice, the current development-channel GitHub
+bootstrap defaults this feature on
 only when it verifies a fresh installation. Existing installs, upgrades and
 older bootstrap scripts do not acquire a new default;
 later upgrades can retain a previously established default. Without verified
@@ -2723,9 +2742,10 @@ does not opt a restored workspace in. Neither ordinary launch nor a host
 settings restore creates a fresh-install default. The former environment
 switch is no longer used.
 
-Turn it on or off for one native TUI client:
+Set it for future native TUI clients, or override it for one client:
 
 ```sh
+oc-box preferences --project ~/devel/demo --host-file-open on
 oc-box start --project ~/devel/demo --host-file-open
 oc-box start --project ~/devel/demo --no-host-file-open
 ```

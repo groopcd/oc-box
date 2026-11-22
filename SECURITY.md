@@ -267,9 +267,12 @@ security certification.
 
 Only a verified fresh GitHub installation gets an automatic host-opening
 default. Existing installs and markerless package/source copies remain off
-unless the caller requests `--host-file-open`. The owner-bound installation
-record is not workspace, backup, or restore data. `--no-host-file-open` opts
-out for the current client; neither command-line option affects other clients.
+unless the caller requests `--host-file-open` or explicitly saves a workspace
+choice with `oc-box preferences --host-file-open on`. Such a choice applies
+to future clients only. The owner-bound installation record is not workspace,
+backup, or restore data; a saved workspace choice also cannot be restored as
+authority. `--no-host-file-open` opts out for the current client, and neither
+launch flag affects other clients.
 
 An eligible client still needs direct Konsole or Yakuake, native OpenCode
 2.3.x, verified project/home mounts, and a private staging directory. Seeing an

@@ -430,7 +430,18 @@ def validate_host_drop(version=None):
         raise BoxError(str(error)) from None
 
 
-def configure_host_drop(path, data, args, version):
+def workspace_ui_preferences(path, data):
+    if __package__:
+        from . import workspace_preferences
+    else:
+        import workspace_preferences
+    try:
+        return workspace_preferences.read(path, data["id"])
+    except workspace_preferences.PreferenceError as error:
+        raise BoxError(str(error)) from None
+
+
+def configure_host_drop(path, data, args, version, *, saved=None):
     """Resolve the separate host preference before unlock or lifecycle changes."""
     if getattr(args, "_host_drop_resolved", False):
         return
@@ -444,8 +455,12 @@ def configure_host_drop(path, data, args, version):
     try:
         # Validate even when overriding: corrupt policy is not permission to
         # replace an unverified workspace's preference file.
-        saved = workspace_preferences.enabled(path, data["id"])
-        wanted = saved if requested is None else requested
+        if saved is None:
+            saved = workspace_ui_preferences(path, data)
+        # Snapshot the independent host-opening choice at the same
+        # native-client boundary; a start/reset or attach never writes it.
+        args._saved_host_file_open = saved.get("host_file_open")
+        wanted = saved["host_drop"] if requested is None else requested
         enabled = False
         if wanted:
             try:
@@ -489,6 +504,9 @@ def effective_host_file_open(args, data):
     requested = getattr(args, "host_file_open", None)
     if requested is not None:
         return requested is True
+    saved = getattr(args, "_saved_host_file_open", None)
+    if saved is not None:
+        return saved is True
     if "restored_from" in data:
         return False
     if __package__:
@@ -498,6 +516,14 @@ def effective_host_file_open(args, data):
     return host_file_open_policy.enabled(
         PACKAGE, home=Path.home(), registry=state_root()
     )
+
+
+def effective_image_preview(args):
+    """Only a caller or a prevalidated owning-launch snapshot requests an override."""
+    requested = getattr(args, "image_preview", None)
+    if requested is not None:
+        return requested is True
+    return getattr(args, "_image_preview_enabled", False) is True
 
 
 def validate_host_file_open(args, version=None, data=None):
@@ -3426,7 +3452,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
     if getattr(args, "host_drop", None) is True:
         validate_host_drop(version)
     configure_host_clipboard(args, version)
-    if getattr(args, "image_preview", False):
+    if effective_image_preview(args):
         if args.command not in ("start", "reset"):
             raise BoxError(
                 "--image-preview applies only to an owning start/reset TUI launch."
@@ -3488,7 +3514,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                         "image_preview": True,
                         "image_preview_snapshot": image_preview_snapshot,
                     }
-                    if getattr(args, "image_preview", False)
+                    if effective_image_preview(args)
                     else {}
                 ),
             )
@@ -3515,8 +3541,8 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
                         data,
                         ui_bridge=native_tabs.supports_web_tabs(version),
                         **(
-                            {"image_preview": args.image_preview}
-                            if getattr(args, "image_preview", False)
+                            {"image_preview": True}
+                            if effective_image_preview(args)
                             else {}
                         ),
                     )
@@ -4220,10 +4246,20 @@ def parser():
         metavar="PROVIDER/MODEL",
         help="choose the native OpenCode model for the launch; use provider/model syntax",
     )
-    result.add_argument(
+    image_preview_choice = result.add_mutually_exclusive_group()
+    image_preview_choice.add_argument(
         "--image-preview",
-        action="store_true",
+        action="store_const",
+        const=True,
+        default=None,
         help="V2 owning start/reset TUI only: enable prompt/session image previews for this owner without changing saved CLI preferences",
+    )
+    image_preview_choice.add_argument(
+        "--no-image-preview",
+        dest="image_preview",
+        action="store_const",
+        const=False,
+        help="owning start/reset TUI only: skip the launcher preview override for this launch",
     )
     file_open_choice = result.add_mutually_exclusive_group()
     file_open_choice.add_argument(
@@ -4724,7 +4760,7 @@ def _main_command(args, argv):
         raise BoxError(_WEB_ORDER_ERROR)
     if args.maintenance and args.command != "terminal":
         raise BoxError("--maintenance applies only to terminal.")
-    if args.image_preview and (
+    if args.image_preview is not None and (
         args.command not in ("start", "reset")
         or args.status
         or args.about
@@ -4732,7 +4768,7 @@ def _main_command(args, argv):
         or args.json
     ):
         raise BoxError(
-            "--image-preview applies only to an owning start/reset TUI launch."
+            "--image-preview and --no-image-preview apply only to an owning start/reset TUI launch."
         )
     if getattr(args, "host_file_open", None) is not None and (
         args.command not in ("start", "reset")
@@ -5221,7 +5257,7 @@ def _main_command(args, argv):
                     args.clear_devices,
                     args.clear_podman_args,
                     args.no_vault,
-                    args.image_preview,
+                    args.image_preview is not None,
                 )
             ):
                 raise BoxError(
@@ -5297,7 +5333,22 @@ def _main_command(args, argv):
         args._opencode_release = version
         configure_host_clipboard(args, version)
     if args.command in ("start", "reset"):
-        configure_host_drop(path, data, args, getattr(args, "_opencode_release", None))
+        saved = workspace_ui_preferences(path, data)
+        if args.image_preview is None and saved.get("image_preview") is True:
+            # Saved policy applies only to a new owner. V1 keeps ordinary
+            # behavior; invalid V2 CLI settings fail before any preference
+            # writes, credential unlock or reset.
+            version = getattr(args, "_opencode_release", None)
+            if version is None:
+                with loading_stage("Checking OpenCode version", stage="version"):
+                    version = detect_opencode_release()
+                args._opencode_release = version
+            if opencode_compat.major(version) == 2:
+                image_preview_snapshot = validate_image_preview(version)
+                args._image_preview_enabled = True
+        configure_host_drop(
+            path, data, args, getattr(args, "_opencode_release", None), saved=saved
+        )
         configure_host_clipboard_preferences(
             path, data, args, getattr(args, "_opencode_release", None)
         )
@@ -5379,7 +5430,7 @@ def _main_command(args, argv):
                 args,
                 **(
                     {"image_preview_snapshot": image_preview_snapshot}
-                    if args.image_preview
+                    if effective_image_preview(args)
                     else {}
                 ),
             )
