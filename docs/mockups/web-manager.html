@@ -44,6 +44,22 @@
     .project .eyebrow { display:block; font-weight:400 }
     .top-end { margin-left:auto; display:flex; align-items:center; gap:12px }
     .demo { color:var(--gold); background:#292214; border-color:#504126 }
+    .login-stage { min-height:calc(100dvh - 70px); display:grid; place-items:center; padding:28px 14px;
+      background:radial-gradient(ellipse at 50% 35%,#142535 0,transparent 56%),var(--bg) }
+    body[data-login] > :is(.review,.shell,.tui-mode),body[data-login] #preview-password { display:none }
+    .login-card { width:min(100%,430px); padding:clamp(18px,4vw,29px); border:1px solid #315367; border-radius:13px;
+      background:var(--panel); box-shadow:0 25px 70px #0007 }
+    .login-card h1 { font-size:25px; letter-spacing:-.04em; margin:4px 0 }
+    .login-card .icon-box { display:grid; place-items:center; width:38px; height:38px; margin-bottom:15px;
+      color:var(--accent); background:var(--select); border:1px solid #315367; border-radius:8px }
+    .login-card .login-form { display:grid; gap:10px; margin-top:16px }
+    .login-card .send { margin:0; padding:9px 13px }
+    .login-card .eyebrow { color:var(--accent) }
+    .login-footer { display:grid; gap:8px; margin-top:18px; padding-top:13px; border-top:1px solid var(--line) }
+    .login-error { min-height:1.5em; color:#ffb1b1; font-size:12px }
+    .login-secret { display:flex; align-items:center; gap:8px; min-width:0 }
+    .login-secret input { flex:1 1 auto }
+    #preview-password { white-space:normal }
     .review { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:10px 22px;
       background:#0f1b28; border-bottom:1px solid var(--line) }
     .review p { color:var(--muted); font-size:13px }
@@ -259,6 +275,7 @@
       .project { padding-left:10px }
       .top-end { gap:5px }
       .top-end .connection { display:none }
+      #preview-password { font-size:11px; padding:4px 6px }
       .review { align-items:flex-start; flex-direction:column; gap:7px; padding:8px 12px }
       .review .picker { max-width:100% }
       .shell { display:block }
@@ -293,6 +310,7 @@
     <div class="project"><span class="eyebrow">Workspace</span> orbit-web</div>
     <div class="top-end">
       <span class="tag connection"><span class="dot"></span> Private workspace</span>
+      <button type="button" class="action" id="preview-password">Preview sign-in</button>
       <span class="tag demo">Synthetic demo</span>
     </div>
   </header>
@@ -637,6 +655,31 @@
     </section>
   </main>
 
+  <main class="login-stage" id="login-stage" aria-labelledby="login-title" hidden>
+    <section class="login-card">
+      <span class="icon-box"><svg class="icon" aria-hidden="true"><use href="#i-box"/></svg></span>
+      <p class="eyebrow">oc-box / Web sign-in</p>
+      <h1 id="login-title">Sign in to orbit-web</h1>
+      <p class="muted">Use the dedicated web password for this workspace.</p>
+      <form id="login-form" class="login-form" autocomplete="off">
+        <p class="muted">Web user: <strong class="mono">workspace-demo</strong></p>
+        <div class="manager-field">
+          <label for="login-password">Web password</label>
+          <div class="login-secret">
+            <input type="password" id="login-password" required autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="128" aria-describedby="login-help login-error">
+            <button type="button" class="action" id="login-show" aria-controls="login-password" aria-pressed="false">Show</button>
+          </div>
+        </div>
+        <p class="login-error" id="login-error" role="status"></p>
+        <button type="submit" class="send">Sign in</button>
+      </form>
+      <div class="login-footer">
+        <p class="muted" id="login-help"><span class="tag demo">Demo only</span> Use <code>oc-box-demo</code>. Do not enter a real password or vault passphrase.</p>
+        <div><button type="button" class="text-action" id="login-skip">Back to one-use link preview</button></div>
+      </div>
+    </section>
+  </main>
+
   <script>
     const byId = (id) => document.getElementById(id);
     const all = (selector) => [...document.querySelectorAll(selector)];
@@ -730,6 +773,7 @@
     let activeSettings = { ...settingsDefaults }, storageSelection = null;
     const sampleStorageSizes = new Map();
     const shell = byId("workspace-shell"), tui = byId("tui-mode");
+    const loginStage = byId("login-stage"), loginPassword = byId("login-password"), loginShow = byId("login-show");
     const terminalCard = byId("terminal-card");
     const terminalElement = (id) => terminalCard.querySelector(`#${id}`);
     const terminalScreen = terminalElement("terminal-screen");
@@ -751,6 +795,27 @@
     const layout = () => document.documentElement.dataset.layout;
     const overlayMode = () => overlay.matches || layout() === "focus";
     const dividerWidth = 10;
+
+    function resetLoginField() {
+      loginPassword.value = "";
+      loginPassword.type = "password";
+      loginPassword.removeAttribute("aria-invalid");
+      loginShow.textContent = "Show";
+      loginShow.setAttribute("aria-pressed", "false");
+      byId("login-error").textContent = "";
+    }
+
+    function showLogin(open) {
+      if (open) {
+        byId("session-review").close();
+        if (terminalWindow) dockTerminal(terminalWindow, { close:true });
+      }
+      resetLoginField();
+      document.body.toggleAttribute("data-login", open);
+      loginStage.hidden = !open;
+      if (open) loginPassword.focus();
+      else byId("preview-password").focus();
+    }
     const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
 
     function endDrag() {
@@ -1661,6 +1726,7 @@
       }
     });
     document.addEventListener("keydown", (event) => {
+      if (!loginStage.hidden) return;
       if (layout() === "tui") {
         if (managerView === "settings" && event.key === "Escape") byId("settings-revert").click();
         if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing &&
@@ -1725,6 +1791,27 @@
     byId("settings-monitor-status").textContent = "Auto · 1s · simulation";
     setLayout(location.hash.slice(1));
     selectSession(selected);
+    byId("preview-password").addEventListener("click", () => showLogin(true));
+    byId("login-skip").addEventListener("click", () => showLogin(false));
+    loginShow.addEventListener("click", () => {
+      const show = loginPassword.type === "password";
+      loginPassword.type = show ? "text" : "password";
+      loginShow.textContent = show ? "Hide" : "Show";
+      loginShow.setAttribute("aria-pressed", show);
+      loginPassword.focus();
+    });
+    byId("login-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const accepted = loginPassword.value === "oc-box-demo";
+      resetLoginField();
+      if (accepted) showLogin(false);
+      else {
+        byId("login-error").textContent = "Incorrect demo password. Use oc-box-demo.";
+        loginPassword.setAttribute("aria-invalid", "true");
+        loginPassword.focus();
+      }
+    });
+    if (new URLSearchParams(location.search).get("auth") === "password") showLogin(true);
   </script>
 </body>
 </html>
