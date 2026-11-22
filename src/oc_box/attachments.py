@@ -488,15 +488,35 @@ def parser():
     result = argparse.ArgumentParser(
         prog="oc-box attach",
         description="Attach one host image, or run a host-approved image broker, in an existing V2 session.",
+        epilog=(
+            "Run on the host with an existing private workspace using OpenCode 2.2.6, 2.2.7 or 2.3.0. "
+            "Use PATH for one image. Direct attachment queues input, not a draft: a running session may consume it without --send. "
+            "Use --broker for independent per-image approval on the host terminal; "
+            "it forbids PATH, --text, --send and --acknowledge-risk."
+        ),
     )
     result.add_argument(
-        "path", nargs="?", type=Path, help="single host image to snapshot"
+        "path",
+        nargs="?",
+        type=Path,
+        metavar="PATH",
+        help="host image to snapshot; omit when using --broker",
     )
     selectors = result.add_mutually_exclusive_group()
-    selectors.add_argument("--project", type=Path)
-    selectors.add_argument("--workspace")
+    selectors.add_argument(
+        "--project",
+        type=Path,
+        metavar="PATH",
+        help="registered project with a running private service (default: current directory)",
+    )
+    selectors.add_argument(
+        "--workspace", metavar="ID", help="registered ID of the running workspace"
+    )
     result.add_argument(
-        "--session", required=True, help="explicit native target session ID"
+        "--session",
+        required=True,
+        metavar="ID",
+        help="explicit native target session ID",
     )
     result.add_argument(
         "--broker",

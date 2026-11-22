@@ -428,6 +428,7 @@ def check(directory, *, with_vault=False, with_tui=False):
         for option in (
             "--level",
             "--verbose",
+            "--table",
             "--limit",
             "--follow",
             "--json",
@@ -466,6 +467,7 @@ def check(directory, *, with_vault=False, with_tui=False):
         assert "WORKSPACE ID" in run(cli, "list")
         assert "tumbleweed" in run(cli, "distros")
         assert json.loads(run(cli, "--status", "--json"))["workspaces"] == []
+        assert "No oc-box workspaces registered." in run(cli, "status", "--table")
         # Ownership detection is offline. Explicit upgrade delegates to the
         # verified package manager; artifact checks must not query or mutate it.
         assert "Python-package managed" in run(

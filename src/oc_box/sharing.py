@@ -575,11 +575,19 @@ def parser():
     result = argparse.ArgumentParser(
         prog="oc-box share",
         description="Temporarily expose a live host file/folder through read-only OpenCode tools. Keep this command open; Ctrl-C ends sharing. No filesystem mount or saved configuration.",
+        epilog="Run on the host. Requires an existing running OpenCode 2.x workspace and explicit disclosure consent. Ending sharing does not recall data already disclosed.",
     )
     result.add_argument("path", type=Path, help="specific host file or folder to share")
     selectors = result.add_mutually_exclusive_group()
-    selectors.add_argument("--project", type=Path)
-    selectors.add_argument("--workspace")
+    selectors.add_argument(
+        "--project",
+        type=Path,
+        metavar="PATH",
+        help="registered project with a running private service (default: current directory)",
+    )
+    selectors.add_argument(
+        "--workspace", metavar="ID", help="registered ID of the running workspace"
+    )
     result.add_argument(
         "--acknowledge-risk",
         action="store_true",

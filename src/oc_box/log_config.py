@@ -293,7 +293,8 @@ def add_verbosity(parser, *, help_text):
         const="all",
         type=_verbosity,
         metavar="LEVEL",
-        help=help_text + "; all (default if omitted), debug, info, warn, or error",
+        help=help_text
+        + "; bare --verbose means all; levels: all, debug, info, warn, error",
     )
 
 

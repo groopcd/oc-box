@@ -176,6 +176,21 @@ fi
         self.assertEqual(self.complete("completion", "ba"), ["bash"])
         self.assertEqual(self.complete("completion", "bash", "ba"), [])
 
+    def test_table_completion_is_scoped_to_public_reports(self):
+        for command in (
+            "status",
+            "--status",
+            "logs",
+            "doctor",
+            "preferences",
+            "backup-info",
+        ):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--ta"), ["--table"])
+        for command in ("start", "reset", "terminal", "web", "backup", "restore"):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--ta"), [])
+
     def test_explicit_launcher_commands_complete_their_scoped_help_options(self):
         parser = box.parser()
         for command in (

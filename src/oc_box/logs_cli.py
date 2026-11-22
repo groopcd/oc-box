@@ -11,9 +11,10 @@ from contextlib import ExitStack
 from pathlib import Path
 
 if __package__:
-    from . import activity_log, log_config
+    from . import activity_log, cli_table, log_config
 else:
     import activity_log
+    import cli_table
     import log_config
 
 
@@ -40,12 +41,19 @@ def parser():
     result = argparse.ArgumentParser(
         prog="oc-box logs",
         description="Read the private host activity journal (not native or container logs).",
-        epilog="Follow may miss records that rotate out between polls or are indistinguishable from old records after rotation.",
+        epilog=(
+            "Use 'oc-box logs --path [--log-dir PATH]' to show just the private log location. "
+            "Follow may miss records that rotate out between polls or are indistinguishable from old records after rotation."
+        ),
         allow_abbrev=False,
     )
     selectors = result.add_mutually_exclusive_group()
-    selectors.add_argument("--project", help="registered project directory")
-    selectors.add_argument("--workspace", help="registered workspace ID")
+    selectors.add_argument(
+        "--project", metavar="PATH", help="filter by a registered project directory"
+    )
+    selectors.add_argument(
+        "--workspace", metavar="ID", help="filter by a registered workspace ID"
+    )
     level = result.add_mutually_exclusive_group()
     level.add_argument(
         "--level",
@@ -59,19 +67,28 @@ def parser():
     result.add_argument(
         "--limit",
         type=_limit,
-        help=f"maximum initial records (default: {_DEFAULT_LIMIT}, or {_MAX_LIMIT} with --verbose=all)",
+        metavar="N",
+        help=f"maximum initial records, 1..{_MAX_LIMIT} (default: {_DEFAULT_LIMIT}, or {_MAX_LIMIT} with --verbose=all)",
     )
     result.add_argument(
         "--follow", action="store_true", help="keep printing new retained records"
     )
-    result.add_argument(
-        "--json", action="store_true", help="emit one JSON object per line"
+    formats = result.add_mutually_exclusive_group()
+    formats.add_argument(
+        "--json",
+        action="store_true",
+        help="emit one JSON object per line; nothing if no records match",
+    )
+    formats.add_argument(
+        "--table",
+        action="store_true",
+        help="show matching activity in a human-readable table; also works with --follow",
     )
     source = result.add_mutually_exclusive_group()
     source.add_argument(
         "--journald",
         action="store_true",
-        help="read this user's oc-box entries from the local system journal",
+        help="read this user's mirrored oc-box entries from the local system journal; no private fallback",
     )
     source.add_argument(
         "--path",
@@ -243,8 +260,27 @@ def _new_records(previous, current):
     return current[matched:]
 
 
-def _emit(records, *, json_lines):
+def _emit(records, *, json_lines, table=False, heading=True):
     if not records:
+        return
+    if table:
+        rows = (
+            (
+                entry["timestamp"],
+                activity_log.event_level(entry).upper(),
+                activity_log.format_event(entry),
+            )
+            for entry in records
+        )
+        print(
+            cli_table.render(
+                ("TIMESTAMP", "LEVEL", "ACTIVITY"),
+                rows,
+                widths=(24, 5),
+                heading=heading,
+            ),
+            flush=True,
+        )
         return
     for record in records:
         level = activity_log.event_level(record)
@@ -319,6 +355,7 @@ def cli(box, arguments):
                     or args.workspace is not None
                     or args.follow
                     or args.json
+                    or args.table
                     or args.verbose is not None
                 ):
                     raise box.BoxError(
@@ -340,7 +377,8 @@ def cli(box, arguments):
             }
             limit = _MAX_LIMIT if args.follow else initial_limit
             previous = _read_events(box, root, limit=limit, **selectors)
-            _emit(previous[-initial_limit:], json_lines=args.json)
+            _emit(previous[-initial_limit:], json_lines=args.json, table=args.table)
+            heading = not previous
             while args.follow:
                 time.sleep(_POLL_SECONDS)
                 current = _read_events(box, root, limit=limit, **selectors)
@@ -349,7 +387,8 @@ def cli(box, arguments):
                     continue
                 new = _new_records(previous, current)
                 if new:
-                    _emit(new, json_lines=args.json)
+                    _emit(new, json_lines=args.json, table=args.table, heading=heading)
+                    heading = False
                     previous = current
             return 0
     except KeyboardInterrupt:

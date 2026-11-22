@@ -651,14 +651,23 @@ class WorkspaceBackupTests(unittest.TestCase):
     def test_backup_info_omits_raw_extra_option_values_and_never_uses_podman(self):
         self.backup(portable=True)
         self.operations.clear()
-        output = io.StringIO()
-        with contextlib.redirect_stdout(output):
-            backups.inspect_backup(
-                box, argparse.Namespace(file=self.archive, identity=[self.identity])
-            )
-        info = json.loads(output.getvalue())
-        self.assertEqual(info["kind"], "portable")
-        self.assertNotIn("synthetic-saved-value", output.getvalue())
+        for options in ({}, {"table": True}):
+            with self.subTest(options=options):
+                output = io.StringIO()
+                with contextlib.redirect_stdout(output):
+                    backups.inspect_backup(
+                        box,
+                        argparse.Namespace(
+                            file=self.archive, identity=[self.identity], **options
+                        ),
+                    )
+                text = output.getvalue()
+                if options:
+                    self.assertIn("portable", text)
+                    self.assertIn("--env=[value omitted]", text)
+                else:
+                    self.assertEqual(json.loads(text)["kind"], "portable")
+                self.assertNotIn("synthetic-saved-value", text)
         self.assertEqual(self.operations, [])
 
     def test_existing_destination_or_backup_file_is_never_overwritten(self):

@@ -135,15 +135,15 @@ _oc_box()
         attach)
             options="$help $selectors --session --broker"
             (( broker )) || options+=' --text --send --acknowledge-risk' ;;
-        status) options="$help $selectors --json" ;;
-        logs) options="$help $selectors --level --verbose --limit --follow --json --journald --log-dir --path" ;;
+        status) options="$help $selectors --json --table" ;;
+        logs) options="$help $selectors --level --verbose --limit --follow --json --table --journald --log-dir --path" ;;
         purge) options="$help $selectors --delete-sessions --all -y --yes" ;;
         credentials) options="$help $selectors --credential-mode --env-secret --vault-secret --clear-credentials" ;;
-        preferences) options="$help $selectors --host-drop --host-clipboard --host-clipboard-symlinks --json" ;;
+        preferences) options="$help $selectors --host-drop --host-clipboard --host-clipboard-symlinks --json --table" ;;
         upgrade) options="$help --check --stable --devel --vault --tui --auto-update" ;;
-        doctor) options="$help --json --feature" ;;
+        doctor) options="$help --json --table --feature" ;;
         backup) options="$help $selectors --output --portable --host --opencode-auth-export --recipient --min-passphrase-length" ;;
-        backup-info) options="$help --identity" ;;
+        backup-info) options="$help --identity --json --table" ;;
         restore) options="$help --project --identity --host --include-opencode" ;;
         secrets)
             options=$help
@@ -156,7 +156,7 @@ _oc_box()
             options=$help
             (( positional == 0 )) && options+=' bash' ;;
         list|distros) options=$help ;;
-        *) options="$commands $help $selectors $launch $launch_logs --status --about --version --json --check --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --maintenance" ;;
+        *) options="$commands $help $selectors $launch $launch_logs --status --about --version --json --table --check --stable --devel --vault --tui --auto-update --credential-mode --env-secret --vault-secret --clear-credentials --delete-sessions --all -y --yes --maintenance" ;;
     esac
     if (( ! ended )); then
         _oc_box_words "$options"

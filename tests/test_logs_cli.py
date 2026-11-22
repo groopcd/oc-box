@@ -101,6 +101,7 @@ class LogsCliTests(unittest.TestCase):
                 ("--workspace", _ID),
                 ("--follow",),
                 ("--json",),
+                ("--table",),
                 ("--verbose",),
             ):
                 with (
@@ -183,6 +184,7 @@ class LogsCliTests(unittest.TestCase):
                 ("--level", "warning"),
                 ("--verbose=PRIVATE_SENTINEL",),
                 ("--verbose=all", "--level", "debug"),
+                ("--table", "--json"),
                 ("--log-dir",),
                 ("--log-dir", ""),
                 ("--log-dir", "/"),
@@ -548,6 +550,27 @@ class LogsCliTests(unittest.TestCase):
         self.assertEqual(
             self.run_cli("--path"), (0, str(self.root / "log/activity.jsonl") + "\n")
         )
+
+    def test_table_follow_prints_its_heading_once_on_first_match(self):
+        first, second = (_event(number, level="warn") for number in (1, 2))
+        with (
+            patch.object(
+                logs_cli.activity_log,
+                "read_events",
+                side_effect=[[], [first], [first, second]],
+            ),
+            patch.object(
+                logs_cli.time, "sleep", side_effect=[None, None, KeyboardInterrupt]
+            ),
+        ):
+            code, output = self.run_cli("--table", "--follow", "--level", "warn")
+        self.assertEqual(code, 130)
+        self.assertEqual(output.count("TIMESTAMP"), 1)
+        self.assertEqual(
+            [line.split()[-1] for line in output.splitlines()[1:]],
+            ["duration_ms=1", "duration_ms=2"],
+        )
+        self.assertFalse(self.root.exists())
 
     def test_private_follow_ignores_gap_and_resumes_without_replay(self):
         log = self.root / "log"

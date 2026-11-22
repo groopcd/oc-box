@@ -867,22 +867,28 @@ def inspect_backup(box, args, *, interaction=None):
     if interaction is not None:
         interaction.stage("unlocking")
     with _opened_archive(args) as (manifest, _, _):
-        if manifest["kind"] == "host":
-            if interaction is not None:
-                interaction.inspection(dashboard_summary(manifest))
-            else:
-                print(json.dumps({"format": "host", "format_version": 2}, indent=2))
-            return
-        validate_manifest(box, manifest)
+        host_only = manifest["kind"] == "host"
+        if not host_only:
+            validate_manifest(box, manifest)
         if interaction is not None:
             interaction.inspection(dashboard_summary(manifest))
             return
-        summary = json.loads(json.dumps(manifest))
-        summary["configuration"]["podman_args"] = [
-            option.split("=", 1)[0] + "=[value omitted]"
-            for option in manifest["configuration"]["podman_args"]
-        ]
-        print(json.dumps(summary, indent=2))
+        if host_only:
+            summary = {"format": "host", "format_version": 2}
+        else:
+            summary = json.loads(json.dumps(manifest))
+            summary["configuration"]["podman_args"] = [
+                option.split("=", 1)[0] + "=[value omitted]"
+                for option in manifest["configuration"]["podman_args"]
+            ]
+        if getattr(args, "table", False):
+            if __package__:
+                from .cli_table import fields
+            else:
+                from cli_table import fields
+            print(fields(summary))
+        else:
+            print(json.dumps(summary, indent=2))
 
 
 def restore_backup(box, args, *, interaction=None):
@@ -1411,60 +1417,113 @@ def _restore_workspace(
 
 
 def parser_for(action):
-    parser = argparse.ArgumentParser(prog="oc-box " + action)
+    descriptions = {
+        "backup": (
+            "Create an encrypted archive of a registered workspace, host settings, "
+            "or both. A workspace backup stops its container if needed and leaves it "
+            "stopped; keep host editors and other writers idle during capture."
+        ),
+        "backup-info": (
+            "Verify an encrypted backup's manifest and ciphertext checksums and "
+            "report metadata without extracting payloads or using Podman. Host-only "
+            "archives show only their type and format version."
+        ),
+        "restore": (
+            "Restore an encrypted archive's workspace, host settings, or both, "
+            "without overwriting existing destinations. A restored workspace "
+            "is left stopped."
+        ),
+    }
+    requirements = (
+        "Run as a regular Linux host user with age, age-keygen, and memfd support."
+    )
+    if action != "backup-info":
+        requirements += " Workspace operations also require rootless Podman."
+    parser = argparse.ArgumentParser(
+        prog="oc-box " + action, description=descriptions[action], epilog=requirements
+    )
     if action == "backup":
         selectors = parser.add_mutually_exclusive_group()
-        selectors.add_argument("--project", type=Path)
-        selectors.add_argument("--workspace")
+        selectors.add_argument(
+            "--project",
+            type=Path,
+            metavar="PATH",
+            help="select a registered project path (defaults to the current directory for workspace backups)",
+        )
+        selectors.add_argument(
+            "--workspace", metavar="ID", help="select a registered workspace by ID"
+        )
         parser.add_argument(
             "--host",
             action="store_true",
-            help="also back up host settings and vault; alone, back up only the host",
+            help="include host oc-box/OpenCode settings, legacy OpenCode credentials and the encrypted vault; without a workspace selector or --portable, back up only the host",
         )
         parser.add_argument(
             "--opencode-auth-export",
             metavar="FILE",
-            help="with --host, include a native V2 credential export from a private file or '-' for stdin",
+            help="with --host, include a native OpenCode V2 credential export from a private file outside archived directories, or '-' for stdin",
         )
-        parser.add_argument("--output", type=Path, required=True)
+        parser.add_argument(
+            "--output",
+            type=Path,
+            required=True,
+            metavar="FILE",
+            help="write a new encrypted archive in an existing directory outside captured data; never overwrite",
+        )
         parser.add_argument(
             "--portable",
             action="store_true",
-            help="omit container OS; recreate it on first restore launch",
+            help="skip the container OS image (included by default in workspace backups); recreate it on first launch after restore",
         )
         parser.add_argument(
             "--recipient",
             action="append",
-            help="native age public recipient; repeatable; otherwise prompt for a backup passphrase",
+            metavar="AGE_KEY",
+            help="encrypt for a native age X25519 public recipient (repeatable); otherwise prompt for a new backup passphrase on the controlling terminal",
         )
         parser.add_argument(
             "--min-passphrase-length",
             type=int,
-            help="minimum characters for a new backup passphrase, 8..1024; overrides host config; incompatible with --recipient",
+            metavar="N",
+            help="minimum characters for a new backup passphrase (8..1024; default: host config or 8); incompatible with --recipient",
         )
     else:
-        parser.add_argument("file", type=Path)
+        parser.add_argument(
+            "file", type=Path, metavar="FILE", help="encrypted backup archive"
+        )
         parser.add_argument(
             "--identity",
             type=Path,
             action="append",
-            help="native age identity file; otherwise age prompts for the backup passphrase",
+            metavar="FILE",
+            help="private native age X25519 identity file (repeatable); otherwise age prompts for the backup passphrase on the controlling terminal",
         )
-        if action == "restore":
+        if action == "backup-info":
+            output = parser.add_mutually_exclusive_group()
+            output.add_argument(
+                "--table",
+                action="store_true",
+                help="show a human-readable metadata table",
+            )
+            output.add_argument(
+                "--json", action="store_true", help="show JSON metadata (default)"
+            )
+        else:
             parser.add_argument(
                 "--project",
                 type=Path,
-                help="new, nonexistent host project destination",
+                metavar="PATH",
+                help="restore the workspace to a nonexistent host project path with an existing parent; required unless using --host",
             )
             parser.add_argument(
                 "--host",
                 action="store_true",
-                help="restore the host configuration component",
+                help="restore oc-box host settings and the encrypted vault if present; omit --project to restore only the host component",
             )
             parser.add_argument(
                 "--include-opencode",
                 action="store_true",
-                help="also restore the native host OpenCode profile, after a separate review",
+                help="with --host, also restore native OpenCode settings and saved credentials when present, after separate typed confirmation on the controlling terminal",
             )
     return parser
 

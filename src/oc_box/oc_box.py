@@ -4077,6 +4077,7 @@ def parser():
             "preferences",
         ),
         default=cli_help.DEFAULT_COMMAND,
+        help="operation to run; omitting it starts or resumes OpenCode",
     )
     result.add_argument(
         "--project",
@@ -4098,10 +4099,16 @@ def parser():
     info.add_argument(
         "--version", action="store_true", help="show the commit-derived oc-box version"
     )
-    result.add_argument(
+    formats = result.add_mutually_exclusive_group()
+    formats.add_argument(
         "--json",
         action="store_true",
         help="emit the workspace status report as JSON",
+    )
+    formats.add_argument(
+        "--table",
+        action="store_true",
+        help="show workspace status as human-readable field/value tables",
     )
     result.add_argument(
         "--check",
@@ -4114,14 +4121,14 @@ def parser():
         dest="update_channel",
         action="store_const",
         const="stable",
-        help="with upgrade, select and remember the stable release channel",
+        help="select the stable release channel for upgrade; remember it after a successful selection",
     )
     channel.add_argument(
         "--devel",
         dest="update_channel",
         action="store_const",
         const="devel",
-        help="with upgrade, select and remember the development release channel",
+        help="select the development release channel for upgrade; remember it after a successful selection",
     )
     result.add_argument(
         "--vault",
@@ -4143,12 +4150,12 @@ def parser():
     result.add_argument(
         "--auto-update",
         choices=("on", "off"),
-        help="with upgrade, enable/disable automatic GitHub updates before normal launches",
+        help="with upgrade, toggle automatic updates for a GitHub installation (not a Python package)",
     )
     result.add_argument(
         "--workspace",
         metavar="ID",
-        help="select a registered workspace by ID",
+        help="select a registered workspace by ID; takes precedence over --project",
     )
     result.add_argument(
         "--distro",
@@ -4163,14 +4170,18 @@ def parser():
     group.add_argument(
         "--resume",
         action="store_true",
-        help="explicitly resume the recorded conversation",
+        help="require an existing workspace and try its remembered conversation",
     )
     group.add_argument(
         "--import-session",
         metavar="SESSION_ID",
         help="copy a host conversation from this project into the container and resume it",
     )
-    result.add_argument("--model", help="OpenCode provider/model")
+    result.add_argument(
+        "--model",
+        metavar="PROVIDER/MODEL",
+        help="choose the native OpenCode model for the launch; use provider/model syntax",
+    )
     result.add_argument(
         "--image-preview",
         action="store_true",
@@ -4253,7 +4264,10 @@ def parser():
     result.add_argument("--cpus", help="CPU limit (new workspace default: 4)")
     result.add_argument("--memory", help="memory limit (new workspace default: 8g)")
     result.add_argument(
-        "--pids-limit", type=int, help="process limit (new workspace default: 2048)"
+        "--pids-limit",
+        type=int,
+        metavar="N",
+        help="process limit, at least 32 (new workspace default: 2048)",
     )
     result.add_argument(
         "--device",
@@ -4296,9 +4310,9 @@ def parser():
 
 def report_status(args):
     if __package__:
-        from .status_report import collect_reports, print_report
+        from .status_report import collect_reports, print_report, print_tabular_report
     else:
-        from status_report import collect_reports, print_report
+        from status_report import collect_reports, print_report, print_tabular_report
 
     if args.workspace or args.project is not None:
         path, data = find_workspace(args.project, args.workspace)
@@ -4324,6 +4338,8 @@ def report_status(args):
         )
     if args.json:
         print(json.dumps(report, indent=2))
+    elif getattr(args, "table", False):
+        print_tabular_report(report)
     else:
         print_report(report)
     return 0
@@ -4333,15 +4349,28 @@ def secrets_parser():
     parser = argparse.ArgumentParser(
         prog="oc-box secrets",
         description="Manage the optional host encrypted vault; values/passphrases use hidden controlling-terminal prompts, never argv/env/stdin.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Actions:\n"
+            "  init     Create a new encrypted vault; never replace an existing one.\n"
+            "  set      Add or replace the named secret using a masked prompt.\n"
+            "  list     Unlock the vault and show credential names only.\n"
+            "  remove   Remove the named secret from the vault.\n"
+            "  passwd   Unlock the vault and re-encrypt it with a new passphrase."
+        ),
     )
-    parser.add_argument("action", choices=("init", "set", "list", "remove", "passwd"))
+    parser.add_argument(
+        "action",
+        choices=("init", "set", "list", "remove", "passwd"),
+        help="vault operation; see action details below",
+    )
     parser.add_argument(
         "name", nargs="?", help="credential environment name for set/remove"
     )
     parser.add_argument(
         "--min-passphrase-length",
         type=int,
-        help="minimum characters for a new vault passphrase, 8..1024; init/passwd only; overrides host config",
+        help="minimum characters for a new vault passphrase, 8..1024; init/passwd only (default: 8 unless configured)",
     )
     return parser
 
@@ -4418,9 +4447,12 @@ def credentials_command(args):
 def completion_parser():
     result = argparse.ArgumentParser(
         prog="oc-box completion",
-        description="Print shell completion for local activation or installation.",
+        description="Write the Bash completion script to stdout without editing shell startup files.",
+        epilog="To enable it in the current Bash session: source <(oc-box completion bash)",
     )
-    result.add_argument("shell", choices=("bash",))
+    result.add_argument(
+        "shell", choices=("bash",), help="shell to generate completion for (Bash)"
+    )
     return result
 
 
@@ -4449,8 +4481,24 @@ def _logging_options_requested(args):
 
 def _informational_request(args):
     return any(
-        getattr(args, name, False) for name in ("status", "version", "about", "json")
+        getattr(args, name, False)
+        for name in ("status", "version", "about", "json", "table")
     )
+
+
+_STATUS_TABLE_ERROR = (
+    "Use --table with status, logs, doctor, preferences, or backup-info."
+)
+_TABLE_COMMANDS = frozenset({"status", "logs", "doctor", "preferences", "backup-info"})
+
+
+def _validate_table_options(args):
+    if getattr(args, "table", False) and (
+        args.about
+        or args.version
+        or (args.command != "status" and not (args.command == "start" and args.status))
+    ):
+        raise BoxError(_STATUS_TABLE_ERROR)
 
 
 def _validate_logging_options(args):
@@ -4580,6 +4628,7 @@ def main(argv=None):
 
 
 def _main_command(args, argv):
+    _validate_table_options(args)
     lifecycle_output.bind_command(args.command)
     if args.command == "logs":
         raise BoxError("Use 'oc-box logs' first, followed by its filters; see --help.")
@@ -4654,7 +4703,7 @@ def _main_command(args, argv):
         raise BoxError("Use 'oc-box completion bash' with no workspace options.")
     if args.command == "doctor":
         raise BoxError(
-            "Use 'oc-box doctor' first, followed by --json/--feature; see its --help."
+            "Use 'oc-box doctor' first, followed by --json, --table or --feature; see its --help."
         )
     if args.command in ("backup", "backup-info", "restore"):
         raise BoxError(
@@ -4855,7 +4904,7 @@ def _main_command(args, argv):
             or args.clear_podman_args
         ):
             raise BoxError(
-                "Status accepts only --project, --workspace, and --json selectors."
+                "Status accepts only --project, --workspace, --json or --table."
             )
         return report_status(args)
     args.project = args.project or Path.cwd()
@@ -4874,11 +4923,13 @@ def _main_command(args, argv):
         or args.clear_podman_args
     ):
         raise BoxError(
-            f"{args.command.capitalize()} accepts only --project or --workspace selectors."
+            f"Unsupported option for '{args.command}'; see 'oc-box {args.command} --help'."
         )
     if args.command == "terminal":
         if args.all or args.delete_sessions or args.yes:
-            raise BoxError("Terminal accepts only --project or --workspace selectors.")
+            raise BoxError(
+                "Purge options do not apply to terminal; see 'oc-box terminal --help'."
+            )
         if not sys.stdin.isatty() or not sys.stdout.isatty():
             raise BoxError(
                 "'oc-box terminal' requires an interactive host terminal (TTY); redirected or piped input/output is not accepted."
@@ -5291,7 +5342,14 @@ def entrypoint():
             and _has_launcher_logging_flag(arguments[1:])
         ):
             raise BoxError(_LOGGING_SCOPE_ERROR)
-        elif command == "tui" and not informational:
+        elif command not in _TABLE_COMMANDS and not informational:
+            for argument in arguments[1:]:
+                if argument == "--":
+                    break
+                flag = argument.partition("=")[0]
+                if flag.startswith("--ta") and "--table".startswith(flag):
+                    raise BoxError(_STATUS_TABLE_ERROR)
+        if command == "tui" and not informational:
             if __package__:
                 from .tui import parser as dashboard_parser
             else:
@@ -5301,6 +5359,7 @@ def entrypoint():
             informational = dashboard_parser().parse_args(arguments[1:]).demo
         if launch_options is not None:
             _validate_logging_options(launch_options)
+            _validate_table_options(launch_options)
             # Argparse accepts abbreviations such as --statu. The parsed
             # request, not the spelling in argv, determines read-only behavior.
             informational = informational or _informational_request(launch_options)
