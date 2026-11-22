@@ -42,7 +42,7 @@ _COMMAND_GROUPS = (
         (
             ("list", "List registered workspaces"),
             ("status", "Report workspace resources and sessions"),
-            ("logs", "Read the launcher activity journal"),
+            ("logs", "Read launcher activity or follow environment preparation"),
             ("distros", "List supported container distributions"),
             ("doctor", "Check prerequisites and show installation guidance"),
         ),

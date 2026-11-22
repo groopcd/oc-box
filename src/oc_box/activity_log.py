@@ -23,6 +23,15 @@ if __package__:
 else:
     from log_config import load
 
+PREPARATION_TASKS = {
+    "container-image": "Creating container and pulling its image if needed",
+    "baseline-packages": "Installing container baseline packages",
+    "baseline-tools": "Setting up container runtime tools",
+    "native-cli-install": "Installing the matching OpenCode CLI",
+    "plugin-dependencies": "Installing OpenCode plugin dependencies",
+}
+PREPARATION_EVENTS = frozenset({"preparation.started", "preparation.finished"})
+
 EVENTS = frozenset(
     {
         "command.started",
@@ -36,6 +45,7 @@ EVENTS = frozenset(
         "session.favorited",
         "lifecycle.stage",
         "lifecycle.notice",
+        *PREPARATION_EVENTS,
         "history.wait",
         "history.pass",
         "history.recovery",
@@ -92,6 +102,7 @@ STAGES = frozenset(
         "background-query",
         "poll-delay",
         "shutdown",
+        *PREPARATION_TASKS,
     }
 )
 REASONS = frozenset(
@@ -387,6 +398,11 @@ def _sanitize(record):
         return None
     if "duration_ms" in record and not _integer(record["duration_ms"], 0, 2**53 - 1):
         return None
+    if record["event"] in PREPARATION_EVENTS and (
+        record.get("stage") not in PREPARATION_TASKS
+        or record.get("command") not in ("start", "reset", "sync", "web")
+    ):
+        return None
     cleaned = dict(record)
     if "metrics" in record:
         metrics = record["metrics"]
@@ -428,7 +444,12 @@ def event_level(record) -> str:
         "unavailable",
     ):
         return "error"
-    if event in ("lifecycle.stage", "history.wait", "history.pass"):
+    if event in (
+        "lifecycle.stage",
+        "history.wait",
+        "history.pass",
+        *PREPARATION_EVENTS,
+    ):
         return "debug"
     if event == "lifecycle.notice":
         return "warn"
@@ -948,11 +969,17 @@ def record_event(
 
 
 def read_events(
-    root=None, *, limit=1000, level=None, workspace=None, strict_snapshot=False
+    root=None,
+    *,
+    limit=1000,
+    level=None,
+    workspace=None,
+    strict_snapshot=False,
+    preparation_only=False,
 ) -> list[dict]:
     """Return the latest valid records oldest-first, without creating anything.
 
-    Match at least ``level`` and exactly ``workspace`` before applying ``limit``.
+    Apply severity, workspace and optional preparation filters before ``limit``.
     Malformed/oversized records are ignored. Normally unsafe files are skipped;
     ``strict_snapshot`` instead returns an empty list on any unsafe, unreadable,
     oversized or missing file, except for an absent oldest prefix of rotations.
@@ -967,6 +994,7 @@ def read_events(
         level=level,
         workspace=workspace,
         strict_snapshot=strict_snapshot,
+        preparation_only=preparation_only,
     )
 
 
@@ -983,7 +1011,14 @@ def read_snapshot(root=None, *, limit=1000) -> tuple[Path | None, list[dict]]:
 
 
 def _read_events(
-    root, *, limit, level=None, workspace=None, strict_snapshot=False, policy=None
+    root,
+    *,
+    limit,
+    level=None,
+    workspace=None,
+    strict_snapshot=False,
+    preparation_only=False,
+    policy=None,
 ):
     if (
         type(limit) is not int
@@ -1035,6 +1070,10 @@ def _read_events(
                             and (
                                 minimum is None
                                 or LEVELS.index(event_level(record)) >= minimum
+                            )
+                            and (
+                                not preparation_only
+                                or record["event"] in PREPARATION_EVENTS
                             )
                         ):
                             file_records.append(record)

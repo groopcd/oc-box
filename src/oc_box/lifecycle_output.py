@@ -5,7 +5,9 @@ output, take ownership of the terminal, or change lifecycle outcomes.
 """
 
 import re
+import shlex
 import sys
+import time
 from collections import deque
 from contextlib import contextmanager, suppress
 from contextvars import ContextVar
@@ -66,6 +68,85 @@ def _activity_log():
     else:
         import activity_log
     return activity_log
+
+
+def _preparation_hint():
+    if __package__:
+        from .log_config import overridden_directory
+    else:
+        from log_config import overridden_directory
+
+    directory = overridden_directory()
+    if directory is None:
+        return "oc-box logs --tail"
+    path = str(directory)
+    if not path.isprintable():
+        return "oc-box logs --tail with the same --log-dir"
+    return "oc-box logs --tail --log-dir " + shlex.quote(path)
+
+
+def preparing_environment():
+    return command_name() in ("start", "reset", "sync", "web")
+
+
+def live_preparation_output():
+    """Bare --verbose / --verbose=all restores live output for selected tools."""
+    current = _CURRENT.get()
+    return not preparing_environment() or current.console_level == "all"
+
+
+def preparation_label(task):
+    return _activity_log().PREPARATION_TASKS[task]
+
+
+@contextmanager
+def preparation(task):
+    """Publish fixed metadata at subprocess boundaries, never child output."""
+    current = _CURRENT.get()
+    report = {"outcome": "failure"}
+    if not preparing_environment():
+        yield report
+        return
+    activity = _activity_log()
+    label = preparation_label(task)
+    started = time.monotonic()
+    fields = {
+        "root": current.root,
+        "command": current.command,
+        "workspace": current.workspace,
+        "stage": task,
+    }
+
+    def append(event, **details):
+        # A best-effort log append must not mask a failure or an interrupt
+        # from the operation itself; always let unrelated BaseExceptions pass.
+        try:
+            return activity.record_event(event, **fields, **details)
+        except Exception:  # noqa: BLE001 - diagnostic only
+            return False
+
+    recorded = append("preparation.started", level="debug")
+    if not live_preparation_output():
+        if recorded:
+            hint = "details: " + _preparation_hint()
+        else:
+            hint = "log unavailable; use --verbose for live output"
+        with suppress(OSError, ValueError):
+            print(f"oc-box: {label} ({hint})", file=sys.stderr, flush=True)
+    try:
+        yield report
+    except KeyboardInterrupt:
+        report["outcome"] = "cancelled"
+        raise
+    finally:
+        append(
+            "preparation.finished",
+            **report,
+            level={"success": "debug", "cancelled": "warn"}.get(
+                report["outcome"], "error"
+            ),
+            duration_ms=int((time.monotonic() - started) * 1000),
+        )
 
 
 def console_event(event, **fields):

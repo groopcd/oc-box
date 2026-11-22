@@ -216,7 +216,7 @@ class ConfigCacheTests(unittest.TestCase):
 
 
 class StartupOutputTests(unittest.TestCase):
-    def test_scoped_runtime_keeps_plugin_warning_and_installer_streams(self):
+    def test_scoped_runtime_keeps_plugin_warning_and_marks_installer_calls(self):
         for config_message, install in (
             (b"Reusing container plugin dependencies.\n", False),
             (b"Plugin dependencies will be resolved by OpenCode if needed.\n", True),
@@ -275,16 +275,19 @@ class StartupOutputTests(unittest.TestCase):
                 ]
                 self.assertEqual(len(calls), int(install))
                 if install:
-                    self.assertEqual(calls[0].kwargs, {"timeout": 600})
-                self.assertEqual(
-                    out.getvalue(),
-                    "oc-box: new configuration warning\n"
-                    if config_message.startswith(b"new")
-                    else "",
-                )
+                    self.assertEqual(
+                        calls[0].kwargs,
+                        {"timeout": 600, "preparation": "plugin-dependencies"},
+                    )
+                self.assertEqual(out.getvalue(), "")
                 self.assertEqual(
                     errors.getvalue(),
-                    "oc-box: OpenCode 2.x plugin unavailable: example\n",
+                    (
+                        "oc-box: Configuration copy returned an unrecognized status; checking plugin dependencies.\n"
+                        if config_message.startswith(b"new")
+                        else ""
+                    )
+                    + "oc-box: OpenCode 2.x plugin unavailable: example\n",
                 )
 
     def test_cold_bootstrap_changes_only_its_routine_completion_banner(self):
@@ -329,6 +332,7 @@ class StartupOutputTests(unittest.TestCase):
                         "-c",
                         box.DISTROS[data["distro"]][1],
                         timeout=1800,
+                        preparation="baseline-packages",
                     ),
                 )
                 self.assertEqual(
@@ -336,7 +340,10 @@ class StartupOutputTests(unittest.TestCase):
                     ("exec", "-i", data["container"], "python3", "-")
                     + (() if verbose else ("--quiet-ready",)),
                 )
-                self.assertEqual(bootstrap.kwargs.keys(), {"input", "timeout"})
+                self.assertEqual(
+                    bootstrap.kwargs.keys(), {"input", "timeout", "preparation"}
+                )
+                self.assertEqual(bootstrap.kwargs["preparation"], "baseline-tools")
                 self.assertEqual(bootstrap.kwargs["timeout"], 600)
                 self.assertTrue(data["ready"])
 

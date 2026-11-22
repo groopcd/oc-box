@@ -832,7 +832,7 @@ def check_private_output():
         raise BoxError(private_memory.error_message()) from exc
 
 
-def run(argv, *, capture=False, check=True, private=False, **kwargs):
+def run(argv, *, capture=False, check=True, private=False, preparation=None, **kwargs):
     remaining = history_recovery.remaining()
     if remaining is not None:
         requested = kwargs.get("timeout")
@@ -844,6 +844,13 @@ def run(argv, *, capture=False, check=True, private=False, **kwargs):
             **kwargs.get("env", os.environ),
             "PWD": str(Path(kwargs["cwd"]).resolve()),
         }
+    tracked_preparation = (
+        preparation is not None
+        and not capture
+        and not private
+        and lifecycle_output.preparing_environment()
+        and history_recovery.FENCE.get() is None
+    )
     try:
         command = [str(x) for x in argv]
         invoke = (
@@ -865,16 +872,50 @@ def run(argv, *, capture=False, check=True, private=False, **kwargs):
                 errors.seek(0)
                 result.stdout = output.read().decode("utf-8")
                 result.stderr = errors.read().decode("utf-8", errors="replace")
+        elif tracked_preparation:
+            # The selected setup tools already ran noninteractively. Don't
+            # route raw output or interactive/native subprocesses to disk.
+            live = lifecycle_output.live_preparation_output()
+            if not live:
+                kwargs.update(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                if "input" not in kwargs and "stdin" not in kwargs:
+                    kwargs["stdin"] = subprocess.DEVNULL
+            with (
+                lifecycle_output.preparation(preparation) as details,
+                _startup_tool_output() if live else contextlib.nullcontext(),
+            ):
+                try:
+                    result = invoke(command, text=True, **kwargs)
+                except subprocess.TimeoutExpired:
+                    details["reason"] = "timeout"
+                    raise
+                except OSError:
+                    details["reason"] = "io"
+                    raise
+                details.update(
+                    outcome="failure" if result.returncode else "success",
+                    exit_code=result.returncode
+                    if -255 <= result.returncode <= 255
+                    else None,
+                )
         else:
             result = invoke(command, text=True, **kwargs)
     except FileNotFoundError as exc:
         raise BoxError(f"Executable not found: {argv[0]}") from exc
     except subprocess.TimeoutExpired as exc:
+        if tracked_preparation:
+            task = lifecycle_output.preparation_label(preparation)
+            raise BoxError(f"{task} timed out. See 'oc-box logs --tail'.") from exc
         raise BoxError(
             f"{argv[0]} exceeded its {exc.timeout}s timeout; operation stopped."
         ) from exc
     history_recovery.remaining()
     if check and result.returncode:
+        if tracked_preparation:
+            task = lifecycle_output.preparation_label(preparation)
+            raise BoxError(
+                f"{task} failed (exit {result.returncode}). See 'oc-box logs --tail'."
+            )
         detail = (
             (result.stderr or result.stdout or "").strip()
             if capture and not private
@@ -1351,17 +1392,11 @@ def container_project(data):
 
 def create_container(path, data, *, environment=None):
     def create_podman(*args, **kwargs):
-        # A cold image pull can write directly to the host terminal.
-        with (
-            _startup_tool_output()
-            if not kwargs.get("capture")
-            else contextlib.nullcontext()
-        ):
-            return podman(
-                *args,
-                **kwargs,
-                **({"env": environment} if environment is not None else {}),
-            )
+        return podman(
+            *args,
+            **kwargs,
+            **({"env": environment} if environment is not None else {}),
+        )
 
     project = validate_project(data["project"])
     if not workspace_identity.same_project(data, project):
@@ -1436,6 +1471,7 @@ def create_container(path, data, *, environment=None):
         data["image"],
         "-c",
         "exec sleep infinity",
+        preparation="container-image",
     )
     data["ready"] = False
     atomic_json(path, data)
@@ -1479,27 +1515,30 @@ def start_container(path, data):
                 if quiet
                 else contextlib.nullcontext()
             ):
-                # Package managers and Podman keep their original stdout/stderr;
-                # their hooks may emit warnings on either stream.
-                with _startup_tool_output():
-                    podman(
-                        "exec",
-                        data["container"],
-                        "/bin/sh",
-                        "-c",
-                        DISTROS[data["distro"]][1],
-                        timeout=1800,
-                    )
-                    podman(
-                        "exec",
-                        "-i",
-                        data["container"],
-                        "python3",
-                        "-",
-                        *(["--quiet-ready"] if quiet else []),
-                        input=(PACKAGE / "bootstrap.py").read_text(),
-                        timeout=600,
-                    )
+                podman(
+                    "exec",
+                    data["container"],
+                    "/bin/sh",
+                    "-c",
+                    DISTROS[data["distro"]][1],
+                    timeout=1800,
+                    preparation="baseline-packages",
+                )
+                podman(
+                    "exec",
+                    "-i",
+                    data["container"],
+                    "python3",
+                    "-",
+                    *(
+                        ["--quiet-ready"]
+                        if quiet and not lifecycle_output.live_preparation_output()
+                        else []
+                    ),
+                    input=(PACKAGE / "bootstrap.py").read_text(),
+                    timeout=600,
+                    preparation="baseline-tools",
+                )
         except BaseException:
             podman("stop", "--time", "5", data["container"], capture=True, check=False)
             raise
@@ -2295,24 +2334,24 @@ def ensure_opencode_version(data, version):
         timeout=30,
     )
     if current.returncode or opencode_compat.version(current.stdout) != version:
-        with _startup_tool_output():
-            run(
-                exec_command(
-                    data,
-                    [
-                        "npm",
-                        "install",
-                        "--global",
-                        "--force",  # V1 and V2 packages own the same CLI symlink.
-                        "--prefix",
-                        "/opt/oc-box/runtime",
-                        "--no-audit",
-                        "--no-fund",
-                        f"{'@opencode/cli' if opencode_compat.major(version) == 2 else 'opencode-ai'}@{version}",
-                    ],
-                ),
-                timeout=600,
-            )
+        run(
+            exec_command(
+                data,
+                [
+                    "npm",
+                    "install",
+                    "--global",
+                    "--force",  # V1 and V2 packages own the same CLI symlink.
+                    "--prefix",
+                    "/opt/oc-box/runtime",
+                    "--no-audit",
+                    "--no-fund",
+                    f"{'@opencode/cli' if opencode_compat.major(version) == 2 else 'opencode-ai'}@{version}",
+                ],
+            ),
+            timeout=600,
+            preparation="native-cli-install",
+        )
         installed = run(
             exec_command(data, [CONTAINER_OPENCODE, "--version"]),
             capture=True,
@@ -2380,27 +2419,28 @@ def prepare_runtime(
         raise BoxError("Copying configuration into the container timed out.") from exc
     if proc.returncode:
         raise BoxError(
-            "Cannot copy OpenCode config into container: "
-            + credentials.redact(proc.stderr.decode(errors="replace"))
+            f"Cannot copy OpenCode config into container (exit {proc.returncode})."
         )
     message = proc.stdout.decode(errors="replace").strip()
     reused = message == "Reusing container plugin dependencies."
-    if proc.stdout and (
-        not lifecycle_output.concise()
-        or (
-            not reused
-            and message != "Plugin dependencies will be resolved by OpenCode if needed."
-        )
-    ):
-        print("oc-box: " + message, flush=True)
+    if message:
+        if (
+            reused
+            or message == "Plugin dependencies will be resolved by OpenCode if needed."
+        ):
+            if not lifecycle_output.concise():
+                print("oc-box: " + message, flush=True)
+        else:
+            print(
+                "oc-box: Configuration copy returned an unrecognized status; checking plugin dependencies.",
+                file=sys.stderr,
+                flush=True,
+            )
     if v2 and not reused:
         # V2 can supply its SDK to local plugins, but unlike V1 it does not
         # automatically install a copied config directory's custom manifest.
-        with (
-            loading_stage(
-                "Installing OpenCode 2.x plugin dependencies", stage="dependencies"
-            ),
-            _startup_tool_output(),
+        with loading_stage(
+            "Installing OpenCode 2.x plugin dependencies", stage="dependencies"
         ):
             run(
                 exec_command(
@@ -2415,6 +2455,7 @@ def prepare_runtime(
                     ],
                 ),
                 timeout=600,
+                preparation="plugin-dependencies",
             )
     auth = (
         Path(os.environ.get("XDG_DATA_HOME", str(Path.home() / ".local/share")))

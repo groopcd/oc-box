@@ -186,7 +186,10 @@ fi
             "backup-info",
         ):
             with self.subTest(command=command):
-                self.assertEqual(self.complete(command, "--ta"), ["--table"])
+                self.assertEqual(
+                    self.complete(command, "--ta"),
+                    ["--tail", "--table"] if command == "logs" else ["--table"],
+                )
         for command in ("start", "reset", "terminal", "web", "backup", "restore"):
             with self.subTest(command=command):
                 self.assertEqual(self.complete(command, "--ta"), [])

@@ -58,8 +58,7 @@ def parser():
     level.add_argument(
         "--level",
         choices=activity_log.LEVELS,
-        default="info",
-        help="minimum severity (default: %(default)s)",
+        help="minimum severity (default: info, or all levels with --tail)",
     )
     log_config.add_verbosity(
         level, help_text="show validated activity at this level or higher"
@@ -72,6 +71,11 @@ def parser():
     )
     result.add_argument(
         "--follow", action="store_true", help="keep printing new retained records"
+    )
+    result.add_argument(
+        "--tail",
+        action="store_true",
+        help="show recent environment preparation tasks and results (use --follow to watch live)",
     )
     formats = result.add_mutually_exclusive_group()
     formats.add_argument(
@@ -260,15 +264,32 @@ def _new_records(previous, current):
     return current[matched:]
 
 
-def _emit(records, *, json_lines, table=False, heading=True):
+def _preparation_text(record):
+    task = activity_log.PREPARATION_TASKS[record["stage"]]
+    state = record.get("outcome", "started")
+    code = record.get("exit_code")
+    elapsed = record.get("duration_ms")
+    duration = f" ({elapsed / 1000:.1f}s)" if elapsed is not None else ""
+    detail = (
+        " (timed out)"
+        if record.get("reason") == "timeout"
+        else f" (exit {code})"
+        if code
+        else ""
+    )
+    return f"{record['command']}: {task} — {state}{detail}{duration}"
+
+
+def _emit(records, *, json_lines, table=False, heading=True, preparation_only=False):
     if not records:
         return
+    format_record = _preparation_text if preparation_only else activity_log.format_event
     if table:
         rows = (
             (
                 entry["timestamp"],
                 activity_log.event_level(entry).upper(),
-                activity_log.format_event(entry),
+                format_record(entry),
             )
             for entry in records
         )
@@ -287,10 +308,10 @@ def _emit(records, *, json_lines, table=False, heading=True):
         if json_lines:
             entry = {**record, "level": level}
             print(json.dumps(entry, separators=(",", ":"), ensure_ascii=True))
+        elif preparation_only:
+            print(f"{record['timestamp']} {format_record(record)}")
         else:
-            print(
-                f"{record['timestamp']} {level.upper():5} {activity_log.format_event(record)}"
-            )
+            print(f"{record['timestamp']} {level.upper():5} {format_record(record)}")
     sys.stdout.flush()
 
 
@@ -308,11 +329,15 @@ def _silence_broken_pipe():
         pass
 
 
-def _read_events(box, root, *, journald, follow, limit, level, workspace):
+def _read_events(
+    box, root, *, journald, follow, limit, level, workspace, preparation_only=False
+):
     if not journald:
         options = {"limit": limit, "level": level, "workspace": workspace}
         if follow:
             options["strict_snapshot"] = True
+        if preparation_only:
+            options["preparation_only"] = True
         return activity_log.read_events(root, **options)
     if __package__:
         from . import journal_output
@@ -342,6 +367,8 @@ def cli(box, arguments):
             args = options.parse_args(arguments)
             if args.journald and args.log_dir is not None:
                 options.error("--log-dir cannot be combined with --journald")
+            if args.tail and (args.journald or args.path):
+                options.error("--tail cannot be combined with --journald or --path")
         except SystemExit as error:
             if error.code == 0:
                 sys.stdout.flush()
@@ -375,9 +402,19 @@ def cli(box, arguments):
                 "journald": args.journald,
                 "follow": args.follow,
             }
+            if args.tail:
+                # Preparation start/success records are debug. In this
+                # focused view they're visible unless an explicit filter
+                # excludes them.
+                selectors["preparation_only"] = True
+            elif selectors["level"] is None and not all_levels:
+                selectors["level"] = "info"
             limit = _MAX_LIMIT if args.follow else initial_limit
             previous = _read_events(box, root, limit=limit, **selectors)
-            _emit(previous[-initial_limit:], json_lines=args.json, table=args.table)
+            display = dict(
+                json_lines=args.json, table=args.table, preparation_only=args.tail
+            )
+            _emit(previous[-initial_limit:], **display)
             heading = not previous
             while args.follow:
                 time.sleep(_POLL_SECONDS)
@@ -387,7 +424,7 @@ def cli(box, arguments):
                     continue
                 new = _new_records(previous, current)
                 if new:
-                    _emit(new, json_lines=args.json, table=args.table, heading=heading)
+                    _emit(new, heading=heading, **display)
                     heading = False
                     previous = current
             return 0

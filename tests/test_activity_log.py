@@ -113,7 +113,11 @@ class ActivityLogTests(ActivityJournalFixture):
 
     def test_all_fixed_events_commands_and_outcomes_are_supported(self):
         for event in journal.EVENTS:
-            self.assertTrue(journal.record_event(event, root=self.root))
+            fields = {}
+            if event.startswith("preparation."):
+                self.assertFalse(journal.record_event(event, root=self.root))
+                fields = {"command": "start", "stage": "baseline-packages"}
+            self.assertTrue(journal.record_event(event, root=self.root, **fields))
         for command in journal.COMMANDS:
             self.assertTrue(
                 journal.record_event("command.started", command=command, root=self.root)
