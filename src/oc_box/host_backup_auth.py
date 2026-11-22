@@ -31,7 +31,7 @@ else:
 MAX_EXPORT = 2 * 1024 * 1024
 MAX_CREDENTIALS = 512
 MAX_DATABASE = 16 * 1024 * 1024
-_MAX_TABLES = 128
+_MAX_SCHEMA_OBJECTS = 256
 _DATABASE = "opencode.db"
 _LEGACY_NEIGHBORS = frozenset(("auth.json", "mcp-auth.json"))
 _SHM = Path("/dev/shm")
@@ -498,7 +498,7 @@ def _sidecars(db):
     )
 
 
-def _fresh_database(db, stage, credentials=0):
+def _fresh_database(db, stage, credentials=0, *, expected_schema=None, read=False):
     """Read only a quiescent scratch database; reject any saved work."""
     if _sidecars(db) or db.parent.resolve(strict=True) != db.parent:
         _fail("native-operation")
@@ -523,16 +523,28 @@ def _fresh_database(db, stage, credentials=0):
                 lambda: int(time.monotonic() >= deadline), 1000
             )
             database.execute("PRAGMA trusted_schema=OFF")
-            tables = database.execute(
-                "SELECT name, sql FROM sqlite_schema WHERE type = 'table' LIMIT ?",
-                (_MAX_TABLES + 1,),
-            ).fetchall()
-            if not tables or len(tables) > _MAX_TABLES:
+            schema = tuple(
+                database.execute(
+                    "SELECT type, name, tbl_name, sql FROM sqlite_schema "
+                    "ORDER BY type, name LIMIT ?",
+                    (_MAX_SCHEMA_OBJECTS + 1,),
+                )
+            )
+            if (
+                not schema
+                or len(schema) > _MAX_SCHEMA_OBJECTS
+                or (expected_schema is not None and schema != expected_schema)
+            ):
                 _fail("native-operation")
             seen_credentials = 0
-            for name, definition in tables:
+            for kind, name, _, definition in schema:
+                # The verified native scratch store only needs ordinary tables
+                # and indexes, not triggers, views or virtual tables.
+                if kind == "index":
+                    continue
                 if (
-                    not isinstance(name, str)
+                    kind != "table"
+                    or not isinstance(name, str)
                     or not _TABLE_NAME.fullmatch(name)
                     or not isinstance(definition, str)
                     or not definition.upper().startswith("CREATE TABLE ")
@@ -563,7 +575,7 @@ def _fresh_database(db, stage, credentials=0):
                     _fail("native-operation")
             if seen_credentials != credentials:
                 _fail("native-operation")
-        result = source.read(MAX_DATABASE + 1) if credentials else None
+        result = source.read(MAX_DATABASE + 1) if read else None
         if (
             (
                 result is not None
@@ -578,7 +590,7 @@ def _fresh_database(db, stage, credentials=0):
             or _sidecars(db)
         ):
             _fail("native-operation")
-        return result
+        return schema, result
 
 
 def _stage_database(stage, binary, rows, canonical, version):
@@ -592,10 +604,15 @@ def _stage_database(stage, binary, rows, canonical, version):
     if native.call("debug", "paths", "db", limit=4096) != os.fsencode(db) + b"\n":
         _fail("native-version")
     try:
+        if db.parent.resolve() != db.parent or os.path.lexists(db) or _sidecars(db):
+            _fail("native-operation")
         if _decoded(native.call("auth", "export", "--standalone"))[0]:
             _fail("native-operation")
-        _fresh_database(db, stage)
+        schema, _ = _fresh_database(db, stage)
         native.call("auth", "import", "--standalone", payload=canonical, limit=1024)
+        # A later standalone command can start a scheduler again. Recheck
+        # emptiness and the fresh schema before asking native to re-export.
+        _fresh_database(db, stage, len(rows), expected_schema=schema)
         verified = _decoded(native.call("auth", "export", "--standalone"))[0]
         key = lambda row: row["id"]
         if validate_native_export(
@@ -604,7 +621,10 @@ def _stage_database(stage, binary, rows, canonical, version):
             json.dumps(sorted(verified, key=key), ensure_ascii=False).encode()
         ):
             _fail("native-operation")
-        return detected, _fresh_database(db, stage, len(rows))
+        _, contents = _fresh_database(
+            db, stage, len(rows), expected_schema=schema, read=True
+        )
+        return detected, contents
     except NativeAuthError as error:
         if error.reason == "invalid-export":
             _fail("native-operation")
