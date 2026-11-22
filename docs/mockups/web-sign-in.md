@@ -65,12 +65,13 @@ accept operator-supplied TLS files before adding automated provisioning.
   package installs, certificate issuance, or workspace startup.
 - **`oc-box web tls setup localhost`** runs the helper preflight before any
   setup action. Only an explicitly approved setup can issue a certificate or
-  change trust stores. A future host-TUI **Check HTTPS** button should use
-  the same read-only checks.
+  change trust stores.
 
-A future host-side **Set up localhost HTTPS** button could invoke the same
-guided operation after explicit approval. It should not be a pre-login web
-endpoint. The current Textual TUI remains unchanged.
+These options belong to `oc-box web` and its feature-scoped host diagnostics.
+Do not add web settings or setup controls to the local Textual TUI. The browser
+preview can explain the setup choices and show the host commands, but a
+pre-login page must not be able to issue certificates, modify trust, or run a
+host setup command.
 
 ## Credential boundary
 
