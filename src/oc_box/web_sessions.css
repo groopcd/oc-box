@@ -68,6 +68,8 @@ header p { margin: .35rem 0; }
   overflow: auto;
 }
 #workspace-library label { display: block; }
+.workspace-session-sources { display: flex; flex-wrap: wrap; gap: .35rem; margin-block: .55rem; }
+#workspace-library .workspace-session-sources button[aria-pressed="true"] { color: HighlightText; background: Highlight; }
 #workspace-search { box-sizing: border-box; width: 100%; margin: .25rem 0 .4rem; font: inherit; }
 #workspace-library #session-tabs { flex-direction: column; overflow: visible; }
 #workspace-library #session-tabs button {

@@ -29,6 +29,7 @@ SCRIPT = INDEX + ".js"
 STYLE = INDEX + ".css"
 CATALOG = INDEX + "/catalog"
 SELECTION = INDEX + "/selection"
+HISTORY = INDEX + "/history"
 NATIVE_HOME = '<a href="/" target="_blank" rel="noopener noreferrer">Open native OpenCode Home</a>'
 
 
@@ -328,7 +329,10 @@ def _workspace_layout_body(state, conversation, fallback, attachments):
         '<aside id="workspace-library" aria-labelledby="workspace-library-title">'
         '<h2 id="workspace-library-title">Open TUI sessions</h2>'
         "<p>Open TUI tabs, including idle sessions, in native tab order.</p>"
-        '<label for="workspace-search">Search by title or session ID</label>'
+        '<div class="workspace-session-sources" role="group" aria-label="Session source">'
+        '<button type="button" id="workspace-open-tabs" aria-pressed="true">Open TUI tabs</button>'
+        '<button type="button" id="workspace-history-tabs" aria-pressed="false">Workspace history</button>'
+        '</div><label for="workspace-search">Search by title or session ID</label>'
         '<input type="search" id="workspace-search" maxlength="128" autocomplete="off">'
         '<button type="button" id="refresh-tabs">Refresh TUI tabs</button>'
         '<p id="workspace-search-status" role="status"></p>'
@@ -352,7 +356,8 @@ def _workspace_layout_body(state, conversation, fallback, attachments):
         '<h2 id="workspace-overview-title">Workspace status</h2><div class="workspace-cards">'
         '<section><h3>Open TUI membership</h3><p id="catalog-status" role="status"></p></section>'
         "<section><h3>Private workspace only</h3><p>This browser view shows verified open TUI tabs, "
-        "not session history, workspace health or host data. Native browser tabs stay independent.</p>"
+        "and on-demand history for the workspace project. It does not report host data or "
+        "workspace health. Native browser tabs stay independent.</p>"
         '<p><a href="'
         + INDEX
         + '">Reload shell</a> (may interrupt a draft).</p></section></div></section>'
@@ -558,7 +563,7 @@ def respond(gateway, stream, child, request):
     if len(first) != 3:
         return False
     if first[1].split(b"?", 1)[0] not in tuple(
-        path.encode() for path in (INDEX, SCRIPT, STYLE, CATALOG, SELECTION)
+        path.encode() for path in (INDEX, SCRIPT, STYLE, CATALOG, SELECTION, HISTORY)
     ):
         return False
     target = urlsplit(first[1].decode("ascii"))
@@ -626,6 +631,32 @@ def respond(gateway, stream, child, request):
                 "200 OK",
                 (Path(__file__).parent / name).read_bytes(),
                 content_type,
+            )
+            return True
+        if target.path == HISTORY:
+            if query or getattr(gateway, "workspace_layout", False) is not True:
+                _reply(stream, "404 Not Found", b"Workspace history is unavailable.")
+                return True
+            if __package__:
+                from . import web_history
+            else:
+                import web_history
+            try:
+                rows = web_history.catalog(
+                    gateway.box, gateway.data, gateway.connection
+                )
+            except web_history.CatalogError:
+                _reply(
+                    stream,
+                    "503 Service Unavailable",
+                    b"Workspace history could not be verified.",
+                )
+                return True
+            _reply(
+                stream,
+                "200 OK",
+                json.dumps(rows, ensure_ascii=True).encode(),
+                "application/json",
             )
             return True
         report = selection_report(gateway)

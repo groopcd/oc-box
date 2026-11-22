@@ -427,10 +427,11 @@ class PakeFlowTests(unittest.TestCase):
             ("challenge_ttl", float("inf")),
             ("challenge_ttl", float("nan")),
             ("challenge_ttl", 61),
-            ("backend", None),
         ):
             with self.subTest(key=key, value=value), self.assertRaises(ValueError):
                 self.flow(**{key: value})
+        with self.assertRaises(TypeError):
+            self.flow(backend=None)
         for size in (True, 0, -1, "2", pake.MAX_MESSAGE_BYTES + 1):
             with self.subTest(size=size), self.assertRaises(ValueError):
                 replace(SIZES, ke1=size)

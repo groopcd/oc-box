@@ -54,6 +54,15 @@ COMMON = {
     "fuse-overlayfs": "fuse-overlayfs",
     "makeinfo": "texinfo",
 }
+_TLS_NSS_PACKAGES = {
+    "tumbleweed": "mozilla-nss-tools",
+    "leap": "mozilla-nss-tools",
+    "ubuntu": "libnss3-tools",
+    "debian": "libnss3-tools",
+    "fedora": "nss-tools",
+    "arch": "nss",
+    "alpine": "nss-tools",
+}
 PACKAGES = {
     "tumbleweed": {
         "python": "python3",
@@ -162,6 +171,10 @@ FEATURES = {
     "overlay": ("Optional FUSE overlay storage driver", ("fuse-overlayfs",)),
     "manuals": ("Read installed man/Info manuals", ("man", "info")),
     "docs-build": ("Contributor manual regeneration", ("python", "makeinfo")),
+    "web-tls-local": (
+        "Optional localhost HTTPS setup helpers (not required for supplied TLS files)",
+        ("linux", "mkcert", "certutil"),
+    ),
 }
 PRIVATE_PATHS = {
     "catatonit": ("/usr/libexec/podman/catatonit", "/usr/lib/podman/catatonit"),
@@ -195,7 +208,12 @@ def host_distro(path=Path("/etc/os-release")):
 
 
 def package_names(distro, keys):
-    mapping = {**COMMON, **PACKAGES[distro]}
+    mapping = {
+        **COMMON,
+        "certutil": _TLS_NSS_PACKAGES[distro],
+        "mkcert": "mkcert",
+        **PACKAGES[distro],
+    }
     return sorted({mapping[key] for key in keys if key in mapping})
 
 
@@ -269,6 +287,18 @@ def probe(key):
             )
         except (ImportError, ValueError, RuntimeError, VaultError):
             return False, "Install the vault extra in this oc-box installation"
+    if key in ("mkcert", "certutil"):
+        if os.environ.get("OC_BOX_CONTAINER") == "1":
+            return False, "Check localhost HTTPS helpers on the browser host"
+        if __package__:
+            from .web_tls import find_helper
+        else:
+            from web_tls import find_helper
+        available = find_helper(key) is not None
+        return (
+            available,
+            f"{key} {'available' if available else 'unavailable'} in system paths; browser trust is not verified",
+        )
     if key == "ca-certificates":
         import ssl
 
@@ -335,6 +365,11 @@ def extra_guidance(keys):
         )
     if "memfd" in keys:
         lines.append(private_memory.error_message())
+    if "mkcert" in keys:
+        lines.append(
+            "mkcert is optional. See https://github.com/FiloSottile/mkcert for "
+            "supported installation methods if your OS repository does not ship it."
+        )
     return lines
 
 
@@ -367,6 +402,7 @@ def require(feature):
 
 def report(selected=None):
     distro = host_distro()
+    in_container = os.environ.get("OC_BOX_CONTAINER") == "1"
     cache = {}
     features = []
     for name in selected or FEATURES:
@@ -378,6 +414,14 @@ def report(selected=None):
             available, detail = cache[key]
             results.append({"id": key, "available": available, "detail": detail})
         missing = [item["id"] for item in results if not item["available"]]
+        guidance = extra_guidance(missing)
+        packages = package_names(distro, missing) if distro else []
+        commands = install_commands(distro, missing)
+        if name == "web-tls-local" and in_container:
+            guidance = [
+                "Run this feature check on the browser host, not in a workspace container."
+            ]
+            packages, commands = [], []
         features.append(
             {
                 "id": name,
@@ -385,16 +429,14 @@ def report(selected=None):
                 "available": not missing,
                 "dependencies": results,
                 "missing": missing,
-                "packages": package_names(distro, missing) if distro else [],
-                "install_commands": install_commands(distro, missing),
-                "guidance": extra_guidance(missing),
+                "packages": packages,
+                "install_commands": commands,
+                "guidance": guidance,
             }
         )
     return {
         "schema_version": 1,
-        "scope": "current-container"
-        if os.environ.get("OC_BOX_CONTAINER") == "1"
-        else "host",
+        "scope": "current-container" if in_container else "host",
         "distro": distro,
         "features": features,
         "notes": [

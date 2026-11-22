@@ -195,7 +195,7 @@ function boot() {
   resize(1200, true);
   const generations = [];
   window.addEventListener("oc-box:selection-changed", event => generations.push(event.detail?.sessionID ?? null));
-  const network = { calls: [], catalog: bootstrap, selected: bravo, pending: null };
+  const network = { calls: [], catalog: bootstrap, selected: bravo, pending: null, history: null };
   const fetch = async (url, options) => {
     network.calls.push(url);
     assert.equal(options.method, undefined);
@@ -204,16 +204,48 @@ function boot() {
     if (network.pending) await network.pending;
     if (url === "/auth/oc-box-sessions/catalog")
       return { ok: !!network.catalog, json: async () => network.catalog };
+    if (url === "/auth/oc-box-sessions/history")
+      return { ok: !!network.history, json: async () => network.history };
     assert.equal(url, "/auth/oc-box-sessions/selection?session=ses_bravo");
     return { ok: !!network.selected, json: async () => network.selected };
   };
-  vm.runInNewContext(source, { document, window, URL, fetch, CustomEvent: class {
+  vm.runInNewContext(source, { document, window, URL, fetch, AbortController, CustomEvent: class {
     constructor(type, options) { Object.assign(this, { type, ...options }); }
   } });
   return { get, root, frame, window, switchView, showSection, resize, generations, network,
     shell: window.ocBoxWebShell, tick: () => observe() };
 }
 const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
+
+{
+  const f = boot();
+  const { get, frame } = f;
+  f.network.history = [{
+    id: "ses_bravo", title: "An archived child", isChild: true,
+    time: { created: 1, updated: 2, archived: 2 },
+  }];
+  assert.deepEqual(f.network.calls, []);
+  get("workspace-history-tabs").click();
+  await settle();
+  assert.deepEqual(f.network.calls, ["/auth/oc-box-sessions/history"]);
+  assert.match(get("workspace-search-status").textContent, /not TUI membership/i);
+  const historyRow = get("session-tabs").children[0];
+  assert.equal(historyRow.textContent, "An archived child · Child · Archived");
+  assert.equal(frame.srcWrites, 0);
+  let release;
+  f.network.pending = new Promise(resolve => { release = resolve; });
+  historyRow.click();
+  get("workspace-open-tabs").click();
+  release();
+  await settle();
+  assert.equal(frame.srcWrites, 0); // A changed source invalidates the in-flight selection.
+  get("workspace-history-tabs").click();
+  get("session-tabs").children[0].click();
+  await settle();
+  assert.equal(frame.srcWrites, 1);
+  assert.equal(frame.getAttribute("src"), bravo.route);
+  assert.equal(f.network.calls[1], "/auth/oc-box-sessions/selection?session=ses_bravo");
+}
 
 {
   const f = boot();

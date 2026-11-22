@@ -13,17 +13,16 @@ does not protect against rollback, same-user memory access, or memory copies.
 """
 
 import base64
-from contextlib import contextmanager
-from dataclasses import dataclass, field
 import fcntl
 import json
 import os
-from pathlib import Path
 import re
 import secrets
 import stat
 import time
-
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from pathlib import Path
 
 MAX_ACCOUNTS = 128
 MAX_WORKSPACES = 32

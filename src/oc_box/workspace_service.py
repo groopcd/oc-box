@@ -1478,12 +1478,14 @@ class Gateway:
         attachments=False,
         shell_addon_scripts=None,
         selection_snapshot_reader=None,
+        workspace_layout=False,
     ):
         self.box, self.data, self.connection, self.port = box, data, connection, port
         self.attachments = attachments
         if shell_addon_scripts is not None:
             self.shell_addon_scripts = shell_addon_scripts
         self.selection_snapshot_reader = selection_snapshot_reader
+        self.workspace_layout = workspace_layout
         self.closed = threading.Event()
         self.children = set()
         self.lock = threading.Lock()
@@ -1637,6 +1639,8 @@ def web_session(box, data, connection, args):
     else:
         import ui_state
     options = {"selection_snapshot_reader": ui_state.read_snapshot}
+    if getattr(args, "workspace_layout", False):
+        options["workspace_layout"] = True
     if getattr(args, "attachments", False):
         if __package__:
             from . import web_attachments
@@ -1739,7 +1743,10 @@ def web_parser():
     result = argparse.ArgumentParser(
         prog="oc-box web",
         description="Open the native web UI on the private V2 workspace service; attach to a running session or own a new foreground lease.",
-        epilog="Run on the host with OpenCode 2.x. Keep the command open while using the browser relay.",
+        epilog=(
+            "Run on the host with OpenCode 2.x. Keep the command open while using "
+            "the browser relay. For host-only TLS preparation, see 'oc-box web tls --help'."
+        ),
     )
     group = result.add_mutually_exclusive_group()
     group.add_argument(
@@ -1769,6 +1776,11 @@ def web_parser():
         "--attachments",
         action="store_true",
         help="opt in to the visible browser File-drop adapter (native 2.2.6/2.3.0 only; no automatic Send)",
+    )
+    result.add_argument(
+        "--workspace-layout",
+        action="store_true",
+        help="opt in to the experimental browser workspace layouts",
     )
     result.add_argument(
         "--no-vault",

@@ -1,6 +1,17 @@
 # Common web shell v1
 
 **Version scope:** “v1” names this web-shell contract, not OpenCode 1.x.
+
+The experimental `oc-box web --workspace-layout` presentation is opt-in and
+does not change the native guest pairing boundary. Studio, Dashboard, Chat
+focus and the metadata-only workspace manager share the existing native iframe
+and the same membership/selection routes. An explicit Workspace history request
+uses a separate bounded private catalog for the registered in-container project
+directory. It does not assert TUI membership or read host archives. Incomplete
+or unverifiable results are unavailable; opening a row verifies the selected
+native identity. The manager exposes no host data or privileged actions.
+Unsupported sections report that they are unavailable rather than displaying
+synthetic values.
 Mirroring is eligible on canonical stable OpenCode **`2.x.y`** releases such as
 `2.3.2`, with no leading zeroes or version suffixes. Eligibility is not a claim
 that every release has been tested or that its contracts cannot change.

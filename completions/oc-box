@@ -57,7 +57,7 @@ _oc_box()
                         =|all|debug|info|warn|error) skip=1 ;;
                     esac
                     continue ;;
-                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--opencode-auth-export|--min-passphrase-length|--feature|--port|--session|--text|--level|--limit|--log-dir)
+                --project|--workspace|--distro|--auto-update|--import-session|--model|--credential-mode|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--output|--recipient|--identity|--opencode-auth-export|--min-passphrase-length|--feature|--port|--session|--text|--level|--limit|--log-dir|--origin|--cert|--key)
                     skip=1; continue ;;
                 --broker) broker=1; continue ;;
                 --host-drop|--host-clipboard|--host-clipboard-symlinks|--host-file-open|--image-preview)
@@ -95,11 +95,11 @@ _oc_box()
         fi
         case $option in
             --project|--log-dir) _oc_box_paths -d; return 0 ;;
-            --output|--identity|--opencode-auth-export) _oc_box_paths -f; return 0 ;;
+            --output|--identity|--opencode-auth-export|--cert|--key) _oc_box_paths -f; return 0 ;;
             --distro)
                 _oc_box_words 'tumbleweed leap ubuntu debian fedora arch alpine opensuse opensuse-tumbleweed opensuse-leap archlinux'; return 0 ;;
             --feature)
-                _oc_box_words 'launch private-output maintenance history backup backup-info restore vault github-upgrade bootstrap storage overlay manuals docs-build'; return 0 ;;
+                _oc_box_words 'launch private-output maintenance history backup backup-info restore vault github-upgrade bootstrap storage overlay manuals docs-build web-tls-local'; return 0 ;;
             --auto-update) _oc_box_words 'on off'; return 0 ;;
             --level)
                 if [[ $command == logs ]]; then
@@ -117,7 +117,7 @@ _oc_box()
                     _oc_box_words 'on off'; return 0
                 fi ;;
             --credential-mode) _oc_box_words 'env selected vault'; return 0 ;;
-            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port|--session|--text|--limit)
+            --workspace|--import-session|--model|--env-secret|--vault-secret|--cpus|--memory|--pids-limit|--device|--podman-arg|--recipient|--min-passphrase-length|--port|--session|--text|--limit|--origin)
                 return 0 ;;
         esac
     fi
@@ -129,7 +129,17 @@ _oc_box()
         stop) options="$help $selectors $launch_logs" ;;
         repair) options="$help $selectors" ;;
         terminal) options="$help $selectors $launch_logs --maintenance" ;;
-        web) options="$help $selectors $launch_logs --session --port --no-open --no-vault --attachments" ;;
+        web)
+            if [[ ${COMP_WORDS[1]} == web && ${COMP_WORDS[2]} == tls ]] && (( COMP_CWORD > 2 )); then
+                case ${COMP_WORDS[3]} in
+                    check) options="$help localhost supplied --origin --cert --key --json" ;;
+                    setup) options="$help localhost --install-trust" ;;
+                    *) options="$help check setup" ;;
+                esac
+            else
+                options="$help $selectors $launch_logs --session --port --no-open --no-vault --attachments --workspace-layout"
+                (( COMP_CWORD == 2 )) && options+=' tls'
+            fi ;;
         tui) options="$help $selectors --read-only --demo" ;;
         share) options="$help $selectors --acknowledge-risk" ;;
         attach)

@@ -114,7 +114,7 @@ def rendered_session(page, gateway, ident, title):
     )
 
 
-def workspace_views(page, gateway, first, second):
+def workspace_views(page, gateway, first, history):
     root = page.locator("#web-shell")
     layouts = page.get_by_role("navigation", name="Workspace layout", exact=True)
     frame = page.locator("#native")
@@ -166,7 +166,7 @@ def workspace_views(page, gateway, first, second):
 
         select("Chat focus", "focus")
         expect(frame).to_be_visible()
-        toggle = page.get_by_role("button", name="Open TUI tabs", exact=True)
+        toggle = page.locator("#workspace-sessions-toggle")
         toggle.click()
         expect(toggle).to_have_attribute("aria-expanded", "true")
         search = page.get_by_role("searchbox", name="Search by title or session ID")
@@ -192,6 +192,16 @@ def workspace_views(page, gateway, first, second):
         select("Workspace manager", "manager")
         sections.get_by_role("button", name="Sessions", exact=True).click()
         preserved()
+        page.get_by_role("button", name="Workspace history", exact=True).click()
+        expect(page.locator("#workspace-search-status")).to_contain_text(
+            "workspace history rows"
+        )
+        expect(
+            page.get_by_role(
+                "button", name="Open in native chat: Synthetic History-only"
+            )
+        ).to_be_visible()
+        preserved()
     finally:
         mark.evaluate("mark => mark.stop()")
         mark.dispose()
@@ -200,10 +210,10 @@ def workspace_views(page, gateway, first, second):
     # the existing iframe to a new native session, returning to the chat view.
     mounted = frame.element_handle()
     page.get_by_role(
-        "button", name="Open in native chat: Synthetic Bravo", exact=True
+        "button", name="Open in native chat: Synthetic History-only", exact=True
     ).click()
     expect(root).to_have_attribute("data-layout", "studio")
-    rendered_session(page, gateway, second, "Synthetic Bravo")
+    rendered_session(page, gateway, history, "Synthetic History-only")
     require(
         mounted.evaluate("node => node === document.querySelector('#native')"),
         "Explicit selection replaced the iframe.",
@@ -291,6 +301,9 @@ def exercise(binary, browser, root):
             )
             first = seed(native, "ses_browser_alpha", project, title="Synthetic Alpha")
             second = seed(native, "ses_browser_bravo", project, title="Synthetic Bravo")
+            history = seed(
+                native, "ses_browser_history", project, title="Synthetic History-only"
+            )
             members = (first, second)
             for expected in ((first,), members):
                 client = Client(binary, env, project, native.endpoint, expected[-1])
@@ -303,7 +316,9 @@ def exercise(binary, browser, root):
                 finally:
                     client.close()
             before_tabs = snapshot()
-            before_exports = {ident: exported(native, ident) for ident in members}
+            before_exports = {
+                ident: exported(native, ident) for ident in (*members, history)
+            }
             connection = {
                 **native.endpoint,
                 "workspace": data["id"],
@@ -335,7 +350,7 @@ def exercise(binary, browser, root):
                     browser_page(browser) as page,
                 ):
                     pair(browser, page, native, gateway)
-                    workspace_views(page, gateway, first, second)
+                    workspace_views(page, gateway, first, history)
 
             require(
                 snapshot() == before_tabs,
@@ -343,10 +358,10 @@ def exercise(binary, browser, root):
             )
             require(
                 {info["id"] for info in bridge.service_session_catalog(native)}
-                == set(members)
+                == {*members, history}
                 and all(
                     exported(native, ident) == before_exports[ident]
-                    for ident in members
+                    for ident in before_exports
                 ),
                 "Browser interaction created or changed native history.",
             )

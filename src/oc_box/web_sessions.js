@@ -13,6 +13,7 @@
   const refresh = document.getElementById("refresh-tabs");
   const endpoint = "/auth/oc-box-sessions/catalog";
   const verifyEndpoint = "/auth/oc-box-sessions/selection";
+  const historyEndpoint = "/auth/oc-box-sessions/history";
   const idPattern = /^ses[A-Za-z0-9_-]{1,125}$/;
   let members = [];
   let selected = null;
@@ -69,8 +70,10 @@
         button.setAttribute("aria-controls", "native");
         button.setAttribute("aria-selected", String(activeId === item.id));
       }
-      button.textContent = item.title || item.id;
+      button.textContent = (item.title || item.id) + (workspace?.source() === "history" ?
+        (item.child ? " · Child" : "") + (item.archived ? " · Archived" : "") : "");
       button.title = item.id;
+      if (workspace) button.dataset.sessionSource = workspace.source();
       button.addEventListener("click", () => {
         if (workspace) workspace.open(item);
         else select(item, "Explicit TUI-tab click");
@@ -211,7 +214,7 @@
       status.textContent = "TUI membership could not be refreshed. Conversation retained; retry or open native Home.";
     } finally {
       busy = false;
-      refresh.disabled = false;
+      refresh.disabled = workspace?.isHistoryLoading() ?? false;
     }
   }
   function studioDividers(content) {
@@ -305,13 +308,67 @@
     const search = byId("search");
     const library = byId("library");
     const toggle = byId("sessions-toggle");
+    const openTabs = byId("open-tabs"), historyTabs = byId("history-tabs");
     const dividers = studioDividers(byId("content"));
     let view = "studio";
     let lastChat = view;
     let section = "status";
     let focusList = false;
+    let source = "tabs", historyState = "idle", historyRows = [];
+    let historyController, verifyingHistory = false;
     const manager = () => view === "manager";
 
+    async function loadHistory() {
+      historyController?.abort();
+      const controller = new AbortController();
+      historyController = controller;
+      historyState = "loading";
+      historyRows = [];
+      if (source === "history") refresh.disabled = true;
+      if (source === "history") render();
+      try {
+        const response = await fetch(historyEndpoint, {
+          credentials: "same-origin", headers: { Accept: "application/json" },
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error("history");
+        const values = await response.json();
+        if (!Array.isArray(values) || values.length > 1000) throw new Error("history");
+        const received = values.map(value => {
+          if (!value || typeof value.id !== "string" || !idPattern.test(value.id) ||
+              typeof value.title !== "string" || typeof value.isChild !== "boolean" ||
+              !value.time || typeof value.time !== "object") throw new Error("history");
+          return { ...row({ id:value.id, title:value.title, route:nativePrefix + value.id }),
+            archived:value.time.archived !== undefined, child:value.isChild };
+        });
+        if (new Set(received.map(item => item.id)).size !== received.length) throw new Error("history");
+        if (historyController !== controller) return;
+        historyRows = received;
+        historyState = "valid";
+      } catch {
+        if (historyController !== controller) return;
+        historyState = "unavailable";
+      } finally {
+        if (historyController === controller) {
+          historyController = null;
+          if (source === "history") {
+            refresh.disabled = false;
+            render();
+          }
+        }
+      }
+    }
+    function setSource(value) {
+      if (source !== value) navigation += 1; // An away/back source change invalidates pending opens.
+      source = value;
+      openTabs.setAttribute("aria-pressed", String(value === "tabs"));
+      historyTabs.setAttribute("aria-pressed", String(value === "history"));
+      tabs.setAttribute("aria-label", value === "history" ? "Workspace history" : "Open native TUI tabs");
+      refresh.textContent = value === "history" ? "Refresh workspace history" : "Refresh TUI tabs";
+      refresh.disabled = value === "history" ? historyState === "loading" : busy;
+      render();
+      if (value === "history" && historyState === "idle") void loadHistory();
+    }
     function apply() {
       root.dataset.layout = view;
       for (const button of views) button.setAttribute("aria-pressed", String(button.dataset.view === view));
@@ -352,6 +409,8 @@
       apply();
     });
     toggle.addEventListener("click", () => toggleList(!focusList));
+    openTabs.addEventListener("click", () => setSource("tabs"));
+    historyTabs.addEventListener("click", () => setSource("history"));
     library.addEventListener("keydown", event => {
       if (view === "focus" && focusList && event.key === "Escape" && !event.defaultPrevented) {
         event.preventDefault();
@@ -364,19 +423,60 @@
     apply();
     return {
       manager,
+      source: () => source,
+      isHistoryLoading: () => source === "history" && historyState === "loading",
+      refresh: () => source === "history" ? loadHistory() : refreshTabs(),
+      cancel() {
+        if (historyController) {
+          historyController.abort();
+          historyController = null;
+          historyState = "idle";
+          refresh.disabled = false;
+          if (source === "history") render();
+        }
+      },
       visibleRows() {
         const query = search.value.slice(0, 128).trim().toLowerCase();
-        const visible = !membershipKnown ? [] : members.filter(item =>
+        const history = source === "history";
+        const list = history ? historyRows : membershipKnown ? members : [];
+        const visible = list.filter(item =>
           !query || item.title.toLowerCase().includes(query) || item.id.toLowerCase().includes(query));
-        byId("search-status").textContent = !membershipKnown ? "Verified open TUI sessions unavailable." :
+        byId("search-status").textContent = history ?
+          historyState === "loading" ? "Loading workspace history…" :
+          historyState !== "valid" ? "Workspace history unavailable. Refresh to retry." :
+          list.length === 0 ? "No sessions in this workspace project." :
+          `${visible.length} of ${list.length} workspace history rows. Not TUI membership.` :
+          !membershipKnown ? "Verified open TUI sessions unavailable." :
           members.length === 0 ? "No verified open TUI sessions." :
           visible.length === 0 ? "No open TUI sessions match this search." :
           `${visible.length} of ${members.length} open TUI tabs.` + (manager() ? " Choose a tab to open native chat." : "");
         return visible;
       },
-      open(item) {
-        if (!membershipKnown || !members.includes(item)) return;
-        select(item, "Explicit TUI-tab click");
+      async open(item) {
+        if (source === "history") {
+          if (verifyingHistory || historyState !== "valid" || !historyRows.includes(item)) return;
+          verifyingHistory = true;
+          const before = navigation;
+          const snapshot = historyRows;
+          try {
+            const response = await fetch(verifyEndpoint + "?session=" + encodeURIComponent(item.id), {
+              credentials:"same-origin", headers:{ Accept:"application/json" },
+            });
+            if (!response.ok) throw new Error("selection");
+            const checked = row(await response.json());
+            if (checked.id !== item.id || checked.route !== item.route) throw new Error("selection");
+            if (before !== navigation || source !== "history" || snapshot !== historyRows) return;
+            select(checked, "Explicit workspace history selection");
+          } catch {
+            if (before === navigation && source === "history" && snapshot === historyRows) {
+              byId("search-status").textContent = "Workspace history selection could not be verified. Refresh to retry.";
+            }
+            return;
+          } finally { verifyingHistory = false; }
+        } else {
+          if (!membershipKnown || !members.includes(item)) return;
+          select(item, "Explicit TUI-tab click");
+        }
         if (manager()) {
           show(lastChat);
           views.find(button => button.dataset.view === view).focus();
@@ -399,7 +499,7 @@
     if (root.dataset.layout === "studio") workspace = workspaceLayout();
     notice.textContent = data.selectionNotice;
     render();
-    refresh.addEventListener("click", refreshTabs);
+    refresh.addEventListener("click", () => workspace ? workspace.refresh() : refreshTabs());
     frame.addEventListener("load", () => { sawFrameLoad = true; frameReady(); });
     window.addEventListener("load", () => { if (!sawFrameLoad) frameReady(); }, { once: true });
     window.ocBoxWebShell = Object.freeze({
@@ -411,7 +511,11 @@
       if (timer === null) timer = window.setInterval(() => { void observeNativeRoute(); }, 1000);
     };
     startObserver();
-    window.addEventListener("pagehide", () => { window.clearInterval(timer); timer = null; });
+    window.addEventListener("pagehide", () => {
+      window.clearInterval(timer);
+      timer = null;
+      workspace?.cancel();
+    });
     window.addEventListener("pageshow", () => { startObserver(); void observeNativeRoute(); });
   } catch {
     status.textContent = "The shell could not initialize. Use explicit fallback links or native Home.";

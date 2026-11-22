@@ -179,7 +179,7 @@ class PakeFlow:
         if not callable(getattr(backend, "start", None)) or not callable(
             getattr(backend, "finish", None)
         ):
-            raise ValueError("Expected a web PAKE server adapter.")
+            raise TypeError("Expected a web PAKE server adapter.")
         self._registrations = _registrations(store, binding.workspace_id)
         self._setup = store.setup
         self._binding = binding
@@ -265,7 +265,7 @@ class PakeFlow:
                     registration=registration,
                     ke1=request,
                 )
-            except Exception:
+            except Exception:  # noqa: BLE001 - an adapter error is a uniform sign-in refusal.
                 return None
             if type(result) is not tuple or len(result) != 2:
                 return None
@@ -327,7 +327,7 @@ class PakeFlow:
                 return None
             try:
                 verified = self._backend.finish(state=entry.state, ke3=proof)
-            except Exception:
+            except Exception:  # noqa: BLE001 - do not expose verifier-specific errors.
                 return None
             if verified is not True or entry.principal is None:
                 return None

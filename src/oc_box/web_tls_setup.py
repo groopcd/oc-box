@@ -10,9 +10,9 @@ import ssl
 import stat
 import subprocess
 import tempfile
+from collections.abc import Callable
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Callable
 
 if __package__:
     from .web_tls import _snapshot, find_helper, validate

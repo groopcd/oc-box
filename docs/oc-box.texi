@@ -59,7 +59,10 @@ oc-box list
 oc-box distros
 oc-box doctor [--json | --table] [--feature FEATURE]...
 oc-box completion bash
-oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [LIFECYCLE-LOG-OPTIONS]
+oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [--workspace-layout] [LIFECYCLE-LOG-OPTIONS]
+oc-box web tls check localhost [--json]
+oc-box web tls check supplied --origin HTTPS_ORIGIN --cert PEM --key PEM [--json]
+oc-box web tls setup localhost [--install-trust]
 oc-box --status [--project PATH | --workspace ID] [--json | --table]
 oc-box status [--project PATH | --workspace ID] [--json | --table]
 oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--follow] [--json | --table]
@@ -136,6 +139,7 @@ oc-box doctor --feature private-output
 oc-box doctor --feature backup --feature vault
 oc-box doctor --feature backup-info --json
 oc-box doctor --feature backup-info --table
+oc-box doctor --feature web-tls-local
 @end example
 
 Feature selectors: @code{launch}, @code{private-output}, @code{maintenance}, @code{history}, @code{backup}, @code{backup-info}, @code{restore}, @code{vault}, @code{github-upgrade}, @code{bootstrap}, @code{storage}, @code{overlay}, @code{manuals}, and @code{docs-build}. Without selectors all are reported, but exit status checks only core @code{launch} prerequisites. With selectors, exit 0 means every selected feature's prerequisites are present; exit 1 means at least one is missing or incompatible. JSON schema version 1 includes scope, detected distro, feature availability, dependency details, missing providers, package names, installation commands, and notes. Missing optional features never disable unrelated commands. @code{--table} shows feature readiness, missing prerequisites and package guidance in columns, without changing the checks or exit status. Feature commands check their prerequisites before secret prompts or destructive workspace changes and include OS-specific fixes.
@@ -296,10 +300,25 @@ oc-box --project ~/devel/demo
 # While it runs, use another host terminal:
 oc-box web --project ~/devel/demo
 oc-box web --project ~/devel/demo --session SESSION_ID
+oc-box web --project ~/devel/demo --workspace-layout
 oc-box terminal --project ~/devel/demo
 @end example
 
 The browser uses upstream's short-lived one-use pairing link and opens an authenticated common web shell at @code{/auth/oc-box-sessions}. This first-party @code{/auth/} path bypasses native's service-worker navigation fallback without changing or disabling that worker. Mirrored TUI tabs are eligible on any canonical stable native @code{2.x.y} release, including @code{2.3.2}; prereleases and noncanonical versions are not eligible. The release number permits a check, not a guarantee: the native reporting APIs and private saved-tab layout can change within 2.x, and not every release has been tested.
+
+@code{--workspace-layout} opts into the experimental browser workspace shell around the same native iframe. Studio, Dashboard and Chat focus change the layout, not the selected conversation. The separate no-chat manager distinguishes verified open tabs from on-demand, read-only history for the registered workspace project. It makes other views unavailable rather than granting host catalogs, logs, workspace/backup operations, or a host terminal. The local Textual manager and the default browser view remain unchanged.
+
+The host-only TLS preparation commands do not open a listener or launch a workspace. They prepare and check files for future named HTTPS sign-in; normal @code{oc-box web} still uses its existing one-use HTTP link on @code{127.0.0.1}.
+
+@example
+oc-box doctor --feature web-tls-local
+oc-box web tls setup localhost
+oc-box web tls check localhost
+oc-box web tls check supplied --origin https://workspace.example.com \
+  --cert /secure/web/server.pem --key /secure/web/server-key.pem
+@end example
+
+The optional mkcert setup creates local files without changing browser trust by default. @code{--install-trust} explicitly requests browser NSS trust installation after confirmation on the controlling host terminal. No package or system-wide trust installation is automatic. TLS files are separate from workspace state; keep the CA private key private. The supplied-file check accepts PEM files for private-CA or publicly trusted certificates. It checks local certificate usability, validity dates, subject alternative names and private key match; it neither contacts a CA nor proves browser trust. The supplied-file check does not require mkcert. Use the name or IP covered by the certificate, not the listener bind address.
 
 The index lists all verified open native TUI tabs in this private service, including idle sessions, in native order in one outer tabstrip. Click a tab to show that conversation in the single unmodified native app iframe and update the selected highlight/URL. Refresh TUI tabs updates membership without reloading the iframe or discarding a loaded draft. A selected conversation closed in the TUI stays visible as a browser selection outside the TUI-open count. Native browser tabs and controls inside the iframe remain client-local and are **not** automatically seeded or synchronized with TUI tabs. Already-open archived sessions, moved/worktree locations and saved child IDs are not silently filtered: each listed ID must belong to a fresh native TUI report, or the verified saved-membership fallback, and pass an identity-matching GET from this same private service. Unopened history and missing/deleted IDs are not listed. Native normally groups child navigation under its root tab; the index does not invent a family tab. Global TUI tab scope does not combine private workspace services or host history. For restored workspaces, the saved scope uses the retained internal launch path; sessions within that scope may legitimately have other directories. Without a usable fresh report, the shell may use the known private @code{tabs.json} layout for saved membership only, never current focus. It checks the pinned state and verifies each displayed ID through the same private service. An empty saved scope stays empty. Missing or incompatible state keeps the existing unavailable/retry behavior; the shell does not search for other state paths, invent tabs or list historical sessions. The chooser always offers **Open native OpenCode Home**, including when there are no TUI tabs, saved membership is missing, or an authenticated index query fails. This explicit link opens the unmodified native Home at @code{/}, where you can create or open a browser session without first running a TUI. It does not choose historical sessions, add fake TUI rows, or create a session by itself. Browser-only tabs remain native-client local and do not populate this TUI membership list. @code{--session ID} explicitly selects an existing ID in this same private DB, even when it is not a TUI-open member, and does not add a fake open tab or create a session. It wins initial selection. Without it, a URL-selected ID is verified; otherwise a fresh report from the container-native TUI supplies the exact current conversation and ordered open roots. A routed child stays the exact iframe conversation while its separately verified root is highlighted in the tabstrip. Native read-only child views remain read-only: return to an editable root conversation to compose or add attachments; oc-box does not add a child composer.
 

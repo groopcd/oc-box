@@ -7,18 +7,17 @@ queried: no browser path, descendants, moved locations, or host inventory.
 """
 
 import base64
-from http.client import HTTPConnection
 import json
 import os
-from pathlib import Path, PurePosixPath
 import re
 import select
 import signal
 import subprocess
 import sys
 import time
+from http.client import HTTPConnection
+from pathlib import Path, PurePosixPath
 from urllib.parse import quote, urlencode
-
 
 PAGE_SIZE = 50
 MAX_ROWS = 1000
@@ -368,7 +367,7 @@ def catalog(box, data, connection):
 if __name__ == "__main__":
     try:
         _worker(*sys.argv[1:])
-    except Exception:
+    except Exception:  # noqa: BLE001 - subprocess failure crosses the private pipe only as exit status.
         # Native errors and Python exceptions can refer to private data. Only
         # success writes stdout; the host observes a nonzero exit otherwise.
         sys.exit(1)

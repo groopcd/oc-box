@@ -150,7 +150,7 @@ class BrowserAdmission:
         for connection in pending:
             try:
                 connection._cancel()
-            except Exception:
+            except Exception:  # noqa: BLE001 - an external cancellation callback cannot restore admission.
                 # Do not skip peers, retain raw errors, or undo revocation.
                 with self._lock:
                     self._cancellation_failed = True

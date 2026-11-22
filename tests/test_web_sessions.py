@@ -695,6 +695,44 @@ class WebSessionsTests(unittest.TestCase):
                 self.assertIn(b"Open native OpenCode Home", page)
                 self.assertNotIn(b'href="/server/', page)
 
+    def test_history_requires_native_auth_and_trusted_layout_before_querying(self):
+        from oc_box import web_history
+
+        gateway = service.Gateway(box, self.data, self.connection)
+        gateway.url = "http://127.0.0.1:23456"
+        row = {
+            "id": "ses_history",
+            "title": "Synthetic <title>",
+            "time": {"created": 1, "updated": 3, "archived": 3},
+            "isChild": True,
+        }
+        for enabled, authorized, suffix, expected in (
+            (True, False, "", "401 Unauthorized"),
+            (False, True, "", "404 Not Found"),
+            (True, True, "?session=ses_one", "404 Not Found"),
+            (True, True, "", "200 OK"),
+        ):
+            with self.subTest(enabled=enabled, authorized=authorized, suffix=suffix):
+                gateway.workspace_layout = enabled
+                request = (
+                    f"GET {web.HISTORY}{suffix} HTTP/1.1\r\nHost: 127.0.0.1:23456\r\n\r\n"
+                ).encode()
+                with (
+                    patch.object(web, "_authenticated", return_value=authorized),
+                    patch.object(web, "reported_open_sessions") as open_tabs,
+                    patch.object(web_history, "catalog", return_value=[row]) as catalog,
+                ):
+                    stream = Mock()
+                    self.assertTrue(web.respond(gateway, stream, None, request))
+                head, body = stream.sendall.call_args.args[0].split(b"\r\n\r\n", 1)
+                self.assertIn(expected.encode(), head)
+                open_tabs.assert_not_called()
+                if expected == "200 OK":
+                    self.assertEqual(json.loads(body), [row])
+                    catalog.assert_called_once_with(box, self.data, self.connection)
+                else:
+                    catalog.assert_not_called()
+
     def test_attachment_slot_preserves_all_four_members_single_frame_and_home(self):
         sessions, status = self.collect(native_tabs.Snapshot("valid", self.members))
         gateway = service.Gateway(

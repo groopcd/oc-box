@@ -22,7 +22,10 @@ oc-box list
 oc-box distros
 oc-box doctor [--json | --table] [--feature FEATURE]...
 oc-box completion bash
-oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [LIFECYCLE-LOG-OPTIONS]
+oc-box web [--project PATH | --workspace ID] [--session ID] [--port N] [--no-open] [--no-vault] [--attachments] [--workspace-layout] [LIFECYCLE-LOG-OPTIONS]
+oc-box web tls check localhost [--json]
+oc-box web tls check supplied --origin HTTPS_ORIGIN --cert PEM --key PEM [--json]
+oc-box web tls setup localhost [--install-trust]
 oc-box --status [--project PATH | --workspace ID] [--json | --table]
 oc-box status [--project PATH | --workspace ID] [--json | --table]
 oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--follow] [--json | --table]
@@ -180,6 +183,7 @@ oc-box doctor --feature private-output
 oc-box doctor --feature backup --feature vault
 oc-box doctor --feature backup-info --json
 oc-box doctor --feature backup-info --table
+oc-box doctor --feature web-tls-local
 ```
 
 Feature selectors: `launch`, `private-output`, `maintenance`, `history`, `backup`, `backup-info`, `restore`,
@@ -619,6 +623,7 @@ oc-box --project ~/devel/demo
 # While it runs, use another host terminal:
 oc-box web --project ~/devel/demo
 oc-box web --project ~/devel/demo --session SESSION_ID
+oc-box web --project ~/devel/demo --workspace-layout
 oc-box terminal --project ~/devel/demo
 ```
 
@@ -630,6 +635,37 @@ canonical stable native `2.x.y` release, including `2.3.2`; prereleases and
 noncanonical versions are not eligible. The release number permits a check,
 not a guarantee: the native reporting APIs and private saved-tab layout can
 change within 2.x, and not every release has been tested.
+
+`--workspace-layout` opts into the experimental browser workspace shell around
+the same native iframe. Studio, Dashboard and Chat focus change the layout,
+not the selected conversation. The separate no-chat manager distinguishes
+verified open tabs from on-demand, read-only history for the registered
+workspace project. It makes other views unavailable rather than granting host
+catalogs, logs, workspace/backup operations, or a host terminal. The local Textual manager and the default browser view
+remain unchanged.
+
+The host-only TLS preparation commands do not open a listener or launch a workspace.
+They prepare and check files for future named HTTPS sign-in; normal `oc-box web`
+still uses its existing one-use HTTP link on `127.0.0.1`.
+
+```sh
+oc-box doctor --feature web-tls-local
+oc-box web tls setup localhost
+oc-box web tls check localhost
+oc-box web tls check supplied --origin https://workspace.example.com \
+  --cert /secure/web/server.pem --key /secure/web/server-key.pem
+```
+
+The optional mkcert setup creates local files without changing browser trust by
+default. `--install-trust` explicitly requests browser NSS trust installation
+after confirmation on the controlling host terminal. No package or system-wide
+trust installation is automatic. TLS files are separate from workspace state;
+keep the CA private key private. The supplied-file check accepts PEM files for
+private-CA or publicly trusted certificates. It checks local certificate
+usability, validity dates, subject alternative names and private key match;
+it neither contacts a CA nor proves browser trust. The supplied-file check does
+not require mkcert. Use the name or IP covered by the certificate, not the
+listener bind address.
 
 The index lists all verified open native TUI tabs in this private service,
 including idle sessions, in native order in one outer tabstrip. Click a tab to
