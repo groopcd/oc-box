@@ -191,9 +191,10 @@
     .manager-split details { margin-top:11px }
     .manager-panel .action:disabled,.manager-split .action:disabled { opacity:.55; cursor:not-allowed; background:none }
     .manager-table .child-name { padding-inline-start:24px }
-    .terminal-card[data-floating] { position:fixed; z-index:4; right:16px; bottom:16px;
-      width:min(960px,calc(100vw - 32px)); max-height:calc(100dvh - 32px); overflow:auto;
-      box-shadow:0 15px 55px #000a; border-color:#42637b }
+    .terminal-window { padding:12px }
+    .terminal-window-title { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:10px }
+    .terminal-window-title h1 { font-size:18px }
+    .terminal-window .terminal-screen { height:max(130px,calc(100dvh - 270px)); max-height:max(130px,calc(100dvh - 210px)) }
     .terminal-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px }
     .terminal-grid { display:flex; flex-wrap:wrap; gap:10px 18px; margin-top:11px }
     .terminal-grid label { display:flex; flex-wrap:wrap; align-items:center; gap:6px; color:var(--muted) }
@@ -204,6 +205,7 @@
       border-radius:6px; color:var(--muted); font:13px/1.6 var(--mono) }
     .terminal-screen:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
     .terminal-card[data-attached] .terminal-screen { color:var(--text) }
+    .terminal-window-notice { margin-top:10px }
     .backup-section { margin-top:13px; padding-top:11px; border-top:1px solid var(--line) }
     .backup-switches { display:grid; gap:3px; margin:10px 0 }
     .backup-switches .manager-check { min-height:27px; align-items:start }
@@ -422,7 +424,7 @@
         <div class="toolbar">
           <label class="manager-field">Session<select id="terminal-session"><option value="sync">Improve history sync</option><option value="tabs">Polish session tabs</option></select></label>
           <button type="button" class="action" id="terminal-attach" aria-controls="terminal-screen"></button>
-          <button type="button" class="action push" id="terminal-float" aria-pressed="false">Float panel</button>
+          <button type="button" class="action push" id="terminal-popout" aria-describedby="terminal-window-notice">Open in new window</button>
         </div>
         <pre class="terminal-screen" id="terminal-screen" aria-label="Simulated terminal viewport" tabindex="0"></pre>
         <div class="terminal-grid">
@@ -434,7 +436,15 @@
         <p class="muted"><small>Drag the bottom-right corner or use the size controls. Ctrl+] detaches the sample session; it doesn’t end it. This preview never opens a shell or forwards input.</small></p>
       </div>
       </div>
-      <p id="terminal-floating-note" class="muted" hidden>The terminal panel is floating over the manager. Use <strong>Dock panel</strong> to put it back here.</p>
+      <div id="terminal-window-panel" class="card manager-panel" hidden>
+        <h3>Terminal in a separate window</h3>
+        <p class="muted">The terminal window has the attach, detach and size controls.</p>
+        <div class="toolbar">
+          <button type="button" class="action" id="terminal-focus-window">Focus terminal window</button>
+          <button type="button" class="action" id="terminal-return-window">Return to manager</button>
+        </div>
+      </div>
+      <p class="terminal-window-notice muted" id="terminal-window-notice" role="status"></p>
     </section>
     <section role="tabpanel" id="manager-logs" aria-labelledby="tab-logs" tabindex="0" hidden>
       <div class="view-head"><div><h2>Logs</h2><p class="muted">Filter retained activity by severity or message.</p></div><span class="tag">Private activity · Demo</span></div>
@@ -513,7 +523,6 @@
         <div class="card"><h3>Plan preview</h3><p id="manager-backup-summary" class="muted" aria-live="polite"></p><ul id="backup-plan" class="review-plan"></ul><p><button type="button" class="action" disabled>No live operation</button></p></div>
       </div>
     </section>
-    <div id="floating-terminal"></div>
   </main>
 
   <script>
@@ -586,14 +595,16 @@
     let selected = sessions[0], scope = "all", panel = "status", created = 0, inspectorReturn, activeDrag;
     let panePriority = "left", managerView = "status", managerWorkspace = workspaceRows[0];
     const shell = byId("workspace-shell"), tui = byId("tui-mode");
-    const terminalCard = byId("terminal-card"), terminalScreen = byId("terminal-screen");
-    const terminalSizes = { width:byId("terminal-width"), height:byId("terminal-height") };
+    const terminalCard = byId("terminal-card");
+    const terminalElement = (id) => terminalCard.querySelector(`#${id}`);
+    const terminalScreen = terminalElement("terminal-screen");
+    const terminalSizes = { width:terminalElement("terminal-width"), height:terminalElement("terminal-height") };
     const sampleTerminals = {
       sync: "$ git status --short\n M src/history_reader.py\n$ pytest tests/test_history.py -q\n8 passed\n$ ",
       tabs: "$ git status --short\n M src/web_sessions.js\n$ pytest tests/test_web_sessions.py -q\n6 passed\n$ ",
     };
     const seenTerminals = new Set();
-    let terminalAttached = false, inspectedArchive = null;
+    let terminalAttached = false, terminalWindow = null, dockedTerminalSize = null, inspectedArchive = null;
     const draft = byId("draft"), library = byId("library"), inspector = byId("inspector");
     const narrow = matchMedia("(max-width: 680px)"), overlay = matchMedia("(max-width: 1000px)");
     const background = all(".top, .review, .library, .splitter, .shell > main");
@@ -687,6 +698,7 @@
     }
 
     function showTuiView(name, focus = false) {
+      checkTerminalWindow();
       managerView = name;
       for (const tab of managerTabs) {
         const current = tab.dataset.tuiView === name;
@@ -756,9 +768,9 @@
     }
 
     function renderTerminal() {
-      const selector = byId("terminal-session"), id = selector.value, retained = seenTerminals.has(id);
-      byId("terminal-state").textContent = terminalAttached ? "Attached · Simulation" : retained ? "Detached · Session retained" : "Not attached";
-      byId("terminal-attach").textContent = terminalAttached ? "Detach session" : retained ? "Reattach session" : "Attach session";
+      const selector = terminalElement("terminal-session"), id = selector.value, retained = seenTerminals.has(id);
+      terminalElement("terminal-state").textContent = terminalAttached ? "Attached · Simulation" : retained ? "Detached · Session retained" : "Not attached";
+      terminalElement("terminal-attach").textContent = terminalAttached ? "Detach session" : retained ? "Reattach session" : "Attach session";
       selector.disabled = terminalAttached;
       terminalCard.toggleAttribute("data-attached", terminalAttached);
       terminalScreen.textContent = terminalAttached ?
@@ -769,21 +781,96 @@
 
     function toggleTerminalAttachment() {
       terminalAttached = !terminalAttached;
-      if (terminalAttached) seenTerminals.add(byId("terminal-session").value);
+      if (terminalAttached) seenTerminals.add(terminalElement("terminal-session").value);
       renderTerminal();
     }
 
     function syncTerminalSize() {
       if (!terminalScreen.getClientRects().length) return;
       const available = Math.max(1, terminalCard.clientWidth - 28);
-      const maxHeight = Math.max(130, Math.floor(window.innerHeight * .65));
+      const view = terminalScreen.ownerDocument.defaultView;
+      const maxHeight = view === window ? Math.max(130, Math.floor(view.innerHeight * .65)) : Math.max(130, view.innerHeight - 210);
       const { width, height } = terminalScreen.getBoundingClientRect();
       terminalSizes.width.min = Math.min(180, available);
       terminalSizes.width.max = available;
       terminalSizes.height.max = maxHeight;
       terminalSizes.width.value = Math.round(width);
       terminalSizes.height.value = Math.round(height);
-      byId("terminal-size").value = `${Math.round(width)} × ${Math.round(height)} px`;
+      terminalElement("terminal-size").value = `${Math.round(width)} × ${Math.round(height)} px`;
+    }
+
+    function dockTerminal(popup, { close = false, focus = false } = {}) {
+      if (popup !== terminalWindow) return;
+      terminalWindow = null;
+      byId("terminal-dock").append(terminalCard);
+      terminalScreen.style.width = dockedTerminalSize.width;
+      terminalScreen.style.height = dockedTerminalSize.height;
+      dockedTerminalSize = null;
+      terminalElement("terminal-popout").textContent = "Open in new window";
+      terminalElement("terminal-popout").setAttribute("aria-describedby", "terminal-window-notice");
+      byId("terminal-window-panel").hidden = true;
+      byId("terminal-window-notice").textContent = "Terminal returned to the manager.";
+      if (close && !popup.closed) popup.close();
+      if (focus && layout() === "tui") {
+        showTuiView("terminals");
+        window.focus();
+        terminalElement("terminal-popout").focus();
+      }
+      syncTerminalSize();
+    }
+
+    function openTerminalWindow() {
+      const notice = byId("terminal-window-notice");
+      const popup = window.open("about:blank", "_blank", "popup=yes,width=950,height=690,resizable=yes,scrollbars=yes");
+      if (!popup || popup.closed) {
+        notice.textContent = "The browser blocked the terminal window. Allow pop-ups or keep using the docked terminal.";
+        return;
+      }
+      try {
+        const doc = popup.document;
+        doc.documentElement.lang = "en";
+        doc.title = "oc-box · Session terminal";
+        const viewport = doc.createElement("meta");
+        viewport.name = "viewport";
+        viewport.content = "width=device-width, initial-scale=1";
+        const scheme = doc.createElement("meta");
+        scheme.name = "color-scheme";
+        scheme.content = "dark";
+        doc.head.append(viewport, scheme, document.querySelector("style").cloneNode(true));
+        doc.body.className = "terminal-window";
+        const header = doc.createElement("header");
+        header.className = "terminal-window-title";
+        const title = doc.createElement("h1");
+        title.textContent = "oc-box · Session terminal";
+        const badge = doc.createElement("span");
+        badge.className = "tag demo";
+        badge.textContent = "Synthetic demo";
+        header.append(title, badge);
+        doc.body.replaceChildren(header);
+        popup.opener = null;
+        dockedTerminalSize = { width:terminalScreen.style.width, height:terminalScreen.style.height };
+        terminalWindow = popup;
+        popup.addEventListener("pagehide", () => dockTerminal(popup));
+        popup.addEventListener("resize", syncTerminalSize);
+        doc.body.append(terminalCard);
+        terminalScreen.style.removeProperty("width");
+        terminalScreen.style.removeProperty("height");
+        terminalElement("terminal-popout").textContent = "Return to manager";
+        terminalElement("terminal-popout").removeAttribute("aria-describedby");
+        byId("terminal-window-panel").hidden = false;
+        notice.textContent = "";
+        popup.focus();
+        terminalElement("terminal-attach").focus();
+        syncTerminalSize();
+      } catch {
+        if (terminalWindow === popup) dockTerminal(popup, { close:true });
+        else popup.close();
+        notice.textContent = "The terminal window could not be opened. The docked terminal is still available.";
+      }
+    }
+
+    function checkTerminalWindow() {
+      if (terminalWindow?.closed) dockTerminal(terminalWindow);
     }
 
     function renderManagerBackups() {
@@ -1048,24 +1135,34 @@
     for (const id of ["manager-session-source","manager-session-search","manager-include-archives"]) byId(id).addEventListener("input", renderManagerSessions);
     for (const id of ["manager-log-search","manager-log-severity"]) byId(id).addEventListener("input", renderManagerLogs);
     byId("manager-storage-scope").addEventListener("change", renderManagerStorage);
-    byId("terminal-attach").addEventListener("click", toggleTerminalAttachment);
-    byId("terminal-session").addEventListener("change", renderTerminal);
-    byId("terminal-float").addEventListener("click", (event) => {
-      const floating = !terminalCard.hasAttribute("data-floating");
-      if (!floating) showTuiView("terminals");
-      terminalCard.toggleAttribute("data-floating", floating);
-      byId(floating ? "floating-terminal" : "terminal-dock").append(terminalCard);
-      byId("terminal-floating-note").hidden = !floating;
-      event.target.textContent = floating ? "Dock panel" : "Float panel";
-      event.target.setAttribute("aria-pressed", floating);
-      event.target.focus();
-      syncTerminalSize();
+    terminalElement("terminal-attach").addEventListener("click", toggleTerminalAttachment);
+    terminalElement("terminal-session").addEventListener("change", renderTerminal);
+    terminalElement("terminal-popout").addEventListener("click", () => {
+      if (terminalWindow) dockTerminal(terminalWindow, { close:true, focus:true });
+      else openTerminalWindow();
+    });
+    byId("terminal-focus-window").addEventListener("click", () => {
+      checkTerminalWindow();
+      terminalWindow?.focus();
+    });
+    byId("terminal-return-window").addEventListener("click", () => {
+      if (terminalWindow) dockTerminal(terminalWindow, { close:true, focus:true });
+    });
+    terminalCard.addEventListener("keydown", (event) => {
+      if (terminalAttached && event.ctrlKey && !event.altKey && !event.metaKey && event.code === "BracketRight") {
+        toggleTerminalAttachment();
+        event.preventDefault();
+      }
+    });
+    window.addEventListener("focus", checkTerminalWindow);
+    window.addEventListener("pagehide", () => {
+      if (terminalWindow) dockTerminal(terminalWindow, { close:true });
     });
     for (const [axis, slider] of Object.entries(terminalSizes)) slider.addEventListener("input", () => {
       terminalScreen.style[axis] = `${slider.value}px`;
       syncTerminalSize();
     });
-    byId("terminal-reset").addEventListener("click", () => {
+    terminalElement("terminal-reset").addEventListener("click", () => {
       terminalScreen.style.removeProperty("width");
       terminalScreen.style.removeProperty("height");
       syncTerminalSize();
@@ -1110,10 +1207,6 @@
     });
     document.addEventListener("keydown", (event) => {
       if (layout() === "tui") {
-        if (event.target.closest("#terminal-card") && terminalAttached && event.ctrlKey && !event.altKey && !event.metaKey && event.code === "BracketRight") {
-          toggleTerminalAttachment();
-          event.preventDefault();
-        }
         if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing &&
             event.target.closest("[role=tablist]") && /^[1-7]$/.test(event.key)) {
           showTuiView(managerTabs[Number(event.key) - 1].dataset.tuiView, true);

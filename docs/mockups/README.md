@@ -16,9 +16,11 @@ companion files, dependencies, network requests or live service connections.
   Settings, Sessions, Terminals, Logs, Storage and Backup/restore. It has a
   single top tab bar and no chat pane or terminal-style navigation sidebar.
   Use the tabs, or focus the tab bar and use arrow keys or 1–7.
-  - **Terminals:** Resize with the corner or the width and height controls,
-    float the panel over other manager views, or dock it again. Attach,
-    detach (`Ctrl+]` while focused) and reattach to two simulated sessions.
+  - **Terminals:** Resize with the corner or the width and height controls, or
+    open the terminal in a separate browser window. Attach, detach (`Ctrl+]`
+    while focused), and reattach in either context. Returning to the manager
+    or closing the pop-out keeps the simulated session state. If the browser
+    blocks the pop-up, the docked controls remain available.
   - **Backup/restore:** Includes full/portable workspaces, host settings and
     encrypted vault, a separate native OpenCode export/restore choice, session
     trees, and Advanced age recipient/identity controls. Inspect a sample
