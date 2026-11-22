@@ -153,7 +153,11 @@ header p { margin: .35rem 0; }
   }
   [data-layout="studio"] #workspace-library { max-height: none; }
   [data-layout="studio"] #workspace-overview { overflow: auto; }
-  [data-layout="studio"] .workspace-divider {
+  [data-layout="dashboard"] #workspace-content {
+    grid-template-columns: var(--workspace-left) 12px minmax(420px, 1fr);
+    grid-template-areas: "overview overview overview" "library left-divider chat";
+  }
+  [data-layout="studio"] .workspace-divider, [data-layout="dashboard"] #workspace-divider-left {
     display: grid;
     place-items: center;
     background: var(--workspace-edge);

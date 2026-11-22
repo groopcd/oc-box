@@ -410,5 +410,10 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   resize(650, false);
   assert.equal(right.hasPointerCapture(3), false);
   assert.equal(root.dataset.resizing, undefined);
+  resize(1360, true);
+  switchView("dashboard");
+  left.emit("keydown", { key: "End" });
+  assert.equal(widths()[0], 928); // Dashboard has one gutter and no right pane.
+  assert.equal(left.getAttribute("aria-valuemax"), "928");
 }
-console.log("PASS workspace layout: trusted opt-in, native frame and draft retained, honest searchable manager, selection invalidation and bounded Studio dividers.");
+console.log("PASS workspace layout: trusted opt-in, native frame and draft retained, honest searchable manager, selection invalidation and bounded Studio/Dashboard dividers.");

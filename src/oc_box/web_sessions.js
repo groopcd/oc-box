@@ -246,7 +246,16 @@
       if (handle.hasPointerCapture(id)) handle.releasePointerCapture(id);
     }
     function fit() {
-      if (root.dataset.layout !== "studio" || !wide.matches) { cancel(); return; }
+      if (!["studio", "dashboard"].includes(root.dataset.layout) || !wide.matches) { cancel(); return; }
+      if (root.dataset.layout === "dashboard") {
+        const maximum = Math.max(minPane, content.clientWidth - minChat - gutter);
+        widths.left = clamp(requested.left, maximum);
+        root.style.setProperty("--workspace-left", widths.left + "px");
+        handles.left.setAttribute("aria-valuemin", String(minPane));
+        handles.left.setAttribute("aria-valuemax", String(maximum));
+        handles.left.setAttribute("aria-valuenow", String(widths.left));
+        return;
+      }
       const available = budget();
       const secondary = other(priority);
       // The moved pane can borrow room from its neighbor, but not from chat's
@@ -261,7 +270,9 @@
       }
     }
     function resize(side, value) {
-      requested[side] = clamp(value, budget() - minPane);
+      const limit = root.dataset.layout === "dashboard" ?
+        Math.max(minPane, content.clientWidth - minChat - gutter) : budget() - minPane;
+      requested[side] = clamp(value, limit);
       priority = side;
       fit();
     }
@@ -292,7 +303,7 @@
         if (event.key === "ArrowLeft") next = widths[side] - direction * step;
         else if (event.key === "ArrowRight") next = widths[side] + direction * step;
         else if (event.key === "Home") next = minPane;
-        else if (event.key === "End") next = budget() - minPane;
+        else if (event.key === "End") next = Number(handle.getAttribute("aria-valuemax"));
         else if (event.key === "Enter") next = defaults[side];
         else return;
         event.preventDefault();
