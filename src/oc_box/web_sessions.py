@@ -634,7 +634,7 @@ def respond(gateway, stream, child, request):
             )
             return True
         if target.path == HISTORY:
-            if query or getattr(gateway, "workspace_layout", False) is not True:
+            if getattr(gateway, "workspace_layout", False) is not True:
                 _reply(stream, "404 Not Found", b"Workspace history is unavailable.")
                 return True
             if __package__:
@@ -642,8 +642,15 @@ def respond(gateway, stream, child, request):
             else:
                 import web_history
             try:
-                rows = web_history.catalog(
-                    gateway.box, gateway.data, gateway.connection
+                result = (
+                    web_history.catalog(gateway.box, gateway.data, gateway.connection)
+                    if not query
+                    else web_history.selection(
+                        gateway.box,
+                        gateway.data,
+                        gateway.connection,
+                        query["session"][0],
+                    )
                 )
             except web_history.CatalogError:
                 _reply(
@@ -655,7 +662,7 @@ def respond(gateway, stream, child, request):
             _reply(
                 stream,
                 "200 OK",
-                json.dumps(rows, ensure_ascii=True).encode(),
+                json.dumps(result, ensure_ascii=True).encode(),
                 "application/json",
             )
             return True

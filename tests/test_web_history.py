@@ -61,6 +61,21 @@ class HistoryTestCase(unittest.TestCase):
 
 
 class CatalogTest(HistoryTestCase):
+    def test_selected_history_id_rechecks_exact_directory_and_native_identity(self):
+        fetch = Mock(return_value=encoded({"data": native("ses_root")}))
+        result = history._selected_row(fetch, DIRECTORY, "ses_root")
+        self.assertEqual(result["id"], "ses_root")
+        fetch.assert_called_once_with("/api/session/ses_root", history.MAX_PAGE_BYTES)
+        for row in (
+            native("ses_root", directory=Path(DIRECTORY).with_name("moved").as_posix()),
+            native("ses_different"),
+        ):
+            with self.subTest(row=row["id"]):
+                fetch.return_value = encoded({"data": row})
+                self.assert_refused(
+                    lambda: history._selected_row(fetch, DIRECTORY, "ses_root")
+                )
+
     def test_cursor_walk_preserves_exact_directory_and_projects_only_display_fields(
         self,
     ):

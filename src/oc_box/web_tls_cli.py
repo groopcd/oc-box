@@ -7,8 +7,10 @@ from pathlib import Path
 
 if __package__:
     from . import web_tls
+    from .paths import web_tls_home
 else:
     import web_tls
+    from paths import web_tls_home
 
 LOCAL_ORIGINS = ("https://localhost", "https://127.0.0.1")
 CERT_NAME = "server.pem"
@@ -16,10 +18,52 @@ KEY_NAME = "server-key.pem"
 
 
 def local_directory():
-    root = Path(os.environ.get("XDG_DATA_HOME", ""))
-    if not root.is_absolute():
-        root = Path.home() / ".local/share"
-    return root / "oc-box" / "web-tls" / "localhost"
+    return web_tls_home() / "localhost"
+
+
+def _ensure_not_registered_project(box, directory):
+    """Refuse generation into a known project, including earlier registrations."""
+    try:
+        target = directory.resolve()
+        for path in box.workspace_paths():
+            record = box.read_json(path)
+            project = Path(record["project"])
+            if not project.is_absolute():
+                raise ValueError
+            project = project.resolve()
+            if target.is_relative_to(project) or project.is_relative_to(target):
+                raise box.BoxError(
+                    "A registered project overlaps the private web TLS directory."
+                )
+            if not record.get("podman_args"):
+                continue
+            # Custom create flags can add arbitrary mounts. Inspect the
+            # registered container instead of guessing from Podman syntax.
+            container = box.inspect_owned(record)
+            if container is None:
+                continue
+            mounts = container.get("Mounts")
+            if not isinstance(mounts, list):
+                raise TypeError
+            for mount in mounts:
+                if not isinstance(mount, dict) or not isinstance(
+                    mount.get("Type"), str
+                ):
+                    raise TypeError
+                if mount["Type"] != "bind":
+                    continue
+                source = Path(mount["Source"])
+                if not source.is_absolute():
+                    raise ValueError
+                source = source.resolve()
+                if target.is_relative_to(source) or source.is_relative_to(target):
+                    raise box.BoxError(
+                        "A registered workspace bind overlaps the private web TLS directory."
+                    )
+    except (OSError, RuntimeError, ValueError, TypeError, KeyError):
+        raise box.BoxError(
+            "Cannot verify registered projects for safe TLS setup."
+        ) from None
 
 
 def parser():
@@ -143,8 +187,10 @@ def cli(box, argv):
         from . import web_tls_setup
     else:
         import web_tls_setup
+    directory = local_directory()
+    _ensure_not_registered_project(box, directory.parent)
     web_tls_setup.setup(
-        local_directory(),
+        directory,
         install_trust=args.install_trust,
         approve=_approve_browser_trust,
     )

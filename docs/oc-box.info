@@ -765,8 +765,12 @@ on ‘127.0.0.1’.
 The optional mkcert setup creates local files without changing browser
 trust by default.  ‘--install-trust’ explicitly requests browser NSS
 trust installation after confirmation on the controlling host terminal.
-No package or system-wide trust installation is automatic.  TLS files
-are separate from workspace state; keep the CA private key private.  The
+No package or system-wide trust installation is automatic.  Managed TLS
+files are stored under ‘~/.local/share/oc-box/web-tls’, outside
+workspace state; keep the CA private key private.  Setup refuses
+overlapping registered projects and custom binds found in registered
+containers.  Do not expose this directory through operator-supplied
+Podman mounts, alternate registries or external tools.  The
 supplied-file check accepts PEM files for private-CA or publicly trusted
 certificates.  It checks local certificate usability, validity dates,
 subject alternative names and private key match; it neither contacts a
@@ -5128,20 +5132,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description5272
 Node: Commands10699
-Node: Options143118
-Node: Lifecycle and persistence204300
-Node: Distribution images206600
-Node: Sessions and recovery211677
-Node: Devices and host permissions218262
-Node: Resource reports220608
-Node: Configuration and environment222719
-Node: Files234100
-Node: Exit status245010
-Node: Examples246418
-Node: Troubleshooting248557
-Node: Installation and manuals260603
-Node: Authors and license270793
-Node: See also271400
+Node: Options143377
+Node: Lifecycle and persistence204559
+Node: Distribution images206859
+Node: Sessions and recovery211936
+Node: Devices and host permissions218521
+Node: Resource reports220867
+Node: Configuration and environment222978
+Node: Files234359
+Node: Exit status245269
+Node: Examples246677
+Node: Troubleshooting248816
+Node: Installation and manuals260862
+Node: Authors and license271052
+Node: See also271659
 
 End Tag Table
 

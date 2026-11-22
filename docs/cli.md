@@ -659,8 +659,12 @@ oc-box web tls check supplied --origin https://workspace.example.com \
 The optional mkcert setup creates local files without changing browser trust by
 default. `--install-trust` explicitly requests browser NSS trust installation
 after confirmation on the controlling host terminal. No package or system-wide
-trust installation is automatic. TLS files are separate from workspace state;
-keep the CA private key private. The supplied-file check accepts PEM files for
+trust installation is automatic. Managed TLS files are stored under
+`~/.local/share/oc-box/web-tls`, outside workspace state; keep the CA private
+key private. Setup refuses overlapping registered projects and custom binds
+found in registered containers. Do not expose this directory through
+operator-supplied Podman mounts, alternate registries or external tools.
+The supplied-file check accepts PEM files for
 private-CA or publicly trusted certificates. It checks local certificate
 usability, validity dates, subject alternative names and private key match;
 it neither contacts a CA nor proves browser trust. The supplied-file check does

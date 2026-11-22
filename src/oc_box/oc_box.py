@@ -996,6 +996,13 @@ def validate_project(path):
         raise BoxError(
             "Choose a dedicated project directory, not /, /home, your home, or oc-box state."
         )
+    if __package__:
+        from .paths import web_tls_home
+    else:
+        from paths import web_tls_home
+    web_tls = web_tls_home().resolve()
+    if web_tls.is_relative_to(project) or project.is_relative_to(web_tls):
+        raise BoxError("Project would expose private host web TLS files.")
     for private in (
         state_root(),
         APP,

@@ -21,3 +21,8 @@ def runtime_root(root):
     if (package / "oc_box.py").is_file():
         return package
     return root
+
+
+def web_tls_home():
+    """Fixed host-only TLS root; XDG overrides cannot place CA keys in a project."""
+    return Path.home() / ".local/share/oc-box/web-tls"

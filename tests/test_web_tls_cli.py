@@ -19,7 +19,7 @@ class WebTLSCLITests(unittest.TestCase):
     def test_local_check_reports_helper_and_certificate_status_independently(self):
         with (
             tempfile.TemporaryDirectory() as temporary,
-            patch.dict(os.environ, {"XDG_DATA_HOME": temporary}, clear=True),
+            patch.dict(os.environ, {"HOME": temporary}, clear=True),
             patch.object(web_tls, "find_helper", return_value=None),
             patch.object(web_tls, "validate") as validate,
             patch.object(oc_box, "detect_opencode_release") as native,
@@ -28,7 +28,7 @@ class WebTLSCLITests(unittest.TestCase):
             self.assertEqual(
                 oc_box.main(["web", "tls", "check", "localhost", "--json"]), 0
             )
-            directory = Path(temporary) / "oc-box/web-tls/localhost"
+            directory = Path(temporary) / ".local/share/oc-box/web-tls/localhost"
             self.assertEqual(
                 [call.args for call in validate.call_args_list],
                 [
@@ -154,8 +154,8 @@ class WebTLSCLITests(unittest.TestCase):
         self.assertEqual(feature["install_commands"], [])
         self.assertIn("browser host", feature["guidance"][0])
 
-    def test_empty_and_relative_xdg_paths_do_not_generate_into_working_directory(self):
-        for value in ("", "relative/example"):
+    def test_xdg_paths_cannot_relocate_the_private_tls_directory(self):
+        for value in ("", "relative/example", "/example/project"):
             with (
                 self.subTest(value=value),
                 patch.dict(os.environ, {"XDG_DATA_HOME": value}, clear=True),
@@ -165,6 +165,44 @@ class WebTLSCLITests(unittest.TestCase):
                     web_tls_cli.local_directory(),
                     Path("/example/host/.local/share/oc-box/web-tls/localhost"),
                 )
+
+    def test_setup_refuses_workspace_projects_and_existing_custom_binds(self):
+        tls = Path("/example/home/.local/share/oc-box/web-tls")
+        for record, container, message in (
+            ({"project": str(tls.parent)}, None, "registered project overlaps"),
+            (
+                {"project": "/example/project", "podman_args": ["--volume=fixture"]},
+                {"Mounts": [{"Type": "bind", "Source": str(tls.parent)}]},
+                "registered workspace bind overlaps",
+            ),
+        ):
+            with (
+                self.subTest(message=message),
+                patch.object(
+                    oc_box, "workspace_paths", return_value=[Path("/example/registry")]
+                ),
+                patch.object(oc_box, "read_json", return_value=record),
+                patch.object(oc_box, "inspect_owned", return_value=container),
+                self.assertRaisesRegex(oc_box.BoxError, message),
+            ):
+                web_tls_cli._ensure_not_registered_project(oc_box, tls)
+
+    def test_live_workspace_mount_and_export_policy_reserves_tls_files(self):
+        from oc_box import sharing
+
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            root = home / ".local/share/oc-box/web-tls"
+            nested = root / "example"
+            nested.mkdir(parents=True)
+            with patch.object(Path, "home", return_value=home):
+                for project in (root.parent, root, nested):
+                    with (
+                        self.subTest(project=project),
+                        self.assertRaisesRegex(oc_box.BoxError, "private host web TLS"),
+                    ):
+                        oc_box.validate_project(project)
+                self.assertIn(root, sharing.protected_paths(oc_box))
 
     def test_nss_confirm_uses_controlling_tty_and_requires_exact_phrase(self):
         snippet = (

@@ -117,11 +117,16 @@ def _open_path(root, path, *, resolve):
 
 
 def protected_paths(box):
+    if __package__:
+        from .paths import web_tls_home
+    else:
+        from paths import web_tls_home
     home = Path.home()
     return (
         box.state_root(),
         box.APP,
         box.vault.vault_path().parent,
+        web_tls_home(),
         home / ".ssh",
         home / ".gnupg",
         home / ".config/opencode",

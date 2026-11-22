@@ -206,6 +206,8 @@ function boot() {
       return { ok: !!network.catalog, json: async () => network.catalog };
     if (url === "/auth/oc-box-sessions/history")
       return { ok: !!network.history, json: async () => network.history };
+    if (url === "/auth/oc-box-sessions/history?session=ses_bravo")
+      return { ok: !!network.history?.[0], json: async () => network.history[0] };
     assert.equal(url, "/auth/oc-box-sessions/selection?session=ses_bravo");
     return { ok: !!network.selected, json: async () => network.selected };
   };
@@ -240,11 +242,21 @@ const settle = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(
   await settle();
   assert.equal(frame.srcWrites, 0); // A changed source invalidates the in-flight selection.
   get("workspace-history-tabs").click();
+  f.switchView("manager");
+  f.showSection("sessions");
+  f.network.pending = new Promise(resolve => { release = resolve; });
+  get("session-tabs").children[0].click();
+  f.showSection("status");
+  release();
+  await settle();
+  assert.equal(frame.srcWrites, 0);
+  assert.equal(f.root.dataset.layout, "manager");
+  f.showSection("sessions");
   get("session-tabs").children[0].click();
   await settle();
   assert.equal(frame.srcWrites, 1);
   assert.equal(frame.getAttribute("src"), bravo.route);
-  assert.equal(f.network.calls[1], "/auth/oc-box-sessions/selection?session=ses_bravo");
+  assert.equal(f.network.calls[1], "/auth/oc-box-sessions/history?session=ses_bravo");
 }
 
 {

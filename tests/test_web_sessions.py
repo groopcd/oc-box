@@ -709,7 +709,7 @@ class WebSessionsTests(unittest.TestCase):
         for enabled, authorized, suffix, expected in (
             (True, False, "", "401 Unauthorized"),
             (False, True, "", "404 Not Found"),
-            (True, True, "?session=ses_one", "404 Not Found"),
+            (True, True, "?session=ses_history", "200 OK"),
             (True, True, "", "200 OK"),
         ):
             with self.subTest(enabled=enabled, authorized=authorized, suffix=suffix):
@@ -721,6 +721,7 @@ class WebSessionsTests(unittest.TestCase):
                     patch.object(web, "_authenticated", return_value=authorized),
                     patch.object(web, "reported_open_sessions") as open_tabs,
                     patch.object(web_history, "catalog", return_value=[row]) as catalog,
+                    patch.object(web_history, "selection", return_value=row) as select,
                 ):
                     stream = Mock()
                     self.assertTrue(web.respond(gateway, stream, None, request))
@@ -728,10 +729,19 @@ class WebSessionsTests(unittest.TestCase):
                 self.assertIn(expected.encode(), head)
                 open_tabs.assert_not_called()
                 if expected == "200 OK":
-                    self.assertEqual(json.loads(body), [row])
-                    catalog.assert_called_once_with(box, self.data, self.connection)
+                    if suffix:
+                        self.assertEqual(json.loads(body), row)
+                        select.assert_called_once_with(
+                            box, self.data, self.connection, "ses_history"
+                        )
+                        catalog.assert_not_called()
+                    else:
+                        self.assertEqual(json.loads(body), [row])
+                        catalog.assert_called_once_with(box, self.data, self.connection)
+                        select.assert_not_called()
                 else:
                     catalog.assert_not_called()
+                    select.assert_not_called()
 
     def test_attachment_slot_preserves_all_four_members_single_frame_and_home(self):
         sessions, status = self.collect(native_tabs.Snapshot("valid", self.members))

@@ -136,6 +136,24 @@ def _cursor(value):
     return value
 
 
+def _scoped_row(raw, directory, *, expected=None, hidden=()):
+    row = _display_fields(raw, hidden)
+    location, project, ident = raw.get("location"), raw.get("projectID"), row["id"]
+    if (
+        not isinstance(location, dict)
+        or location.get("directory") != directory
+        or not isinstance(project, str)
+        or not 0 < len(project) <= 256
+        or (expected is not None and ident != expected)
+        or (
+            "parentID" in raw and (not _id(raw["parentID"]) or raw["parentID"] == ident)
+        )
+    ):
+        _refuse()
+    # A child can refer to a moved parent; never disclose that ID.
+    return {**row, "isChild": "parentID" in raw}
+
+
 def _inventory(fetch, directory, *, hidden=()):
     """Read a whole cursor walk or refuse. Native offers no snapshot transaction."""
     query = [
@@ -167,28 +185,12 @@ def _inventory(fetch, directory, *, hidden=()):
         ):
             _refuse()
         for raw in items:
-            row = _display_fields(raw, hidden)
-            location, project, ident = (
-                raw.get("location"),
-                raw.get("projectID"),
-                row["id"],
-            )
-            if (
-                not isinstance(location, dict)
-                or location.get("directory") != directory
-                or not isinstance(project, str)
-                or not 0 < len(project) <= 256
-                or ident in seen
-                or (
-                    "parentID" in raw
-                    and (not _id(raw["parentID"]) or raw["parentID"] == ident)
-                )
-            ):
+            row = _scoped_row(raw, directory, hidden=hidden)
+            ident = row["id"]
+            if ident in seen:
                 _refuse()
             seen.add(ident)
-            # A child can refer to a moved parent. Never disclose that ID or
-            # imply that the parent is also within the requested directory.
-            rows.append({**row, "isChild": "parentID" in raw})
+            rows.append(row)
         _cursor(pagination.get("previous"))
         cursor = _cursor(pagination["next"])
         if cursor is None:
@@ -237,7 +239,19 @@ def _request(port, authorization, path, budget):
         connection.close()
 
 
-def _worker(url, directory):
+def _selected_row(fetch, directory, ident, *, hidden=()):
+    if not _id(ident):
+        _refuse()
+    payload = _json(fetch("/api/session/" + ident, MAX_PAGE_BYTES))
+    return _scoped_row(
+        payload.get("data") if isinstance(payload, dict) else None,
+        directory,
+        expected=ident,
+        hidden=hidden,
+    )
+
+
+def _worker(url, directory, selected=None):
     # Hard whole-operation budget, including trickled HTTP headers and pipe I/O.
     signal.signal(signal.SIGALRM, signal.SIG_DFL)
     signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
@@ -250,10 +264,15 @@ def _worker(url, directory):
         _refuse()
     token = base64.b64encode(("opencode:" + password).encode("ascii")).decode("ascii")
     authorization = "Basic " + token
-    rows = _inventory(
-        lambda path, budget: _request(port, authorization, path, budget),
-        directory,
-        hidden=(password, token),
+
+    def fetch(path, budget):
+        return _request(port, authorization, path, budget)
+
+    hidden = (password, token)
+    rows = (
+        _inventory(fetch, directory, hidden=hidden)
+        if selected is None
+        else [_selected_row(fetch, directory, selected, hidden=hidden)]
     )
     output = json.dumps(rows, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     if len(output) > MAX_OUTPUT_BYTES:
@@ -315,7 +334,7 @@ def _display_catalog(payload):
     return rows
 
 
-def catalog(box, data, connection):
+def _project_rows(box, data, connection, selected=None):
     """Return ordered id/title/time/isChild rows through an existing private lease.
 
     A limit or partial result raises CatalogError, not an empty catalog.
@@ -347,6 +366,7 @@ def catalog(box, data, connection):
                 Path(__file__).read_text(encoding="utf-8"),
                 url,
                 directory,
+                *([selected] if selected is not None else []),
             ],
         )
         return _display_catalog(_read_bridge(command))
@@ -362,6 +382,20 @@ def catalog(box, data, connection):
         subprocess.SubprocessError,
     ):
         _refuse()
+
+
+def catalog(box, data, connection):
+    return _project_rows(box, data, connection)
+
+
+def selection(box, data, connection, ident):
+    """Recheck one result in the exact project directory before navigation."""
+    if not _id(ident):
+        _refuse()
+    rows = _project_rows(box, data, connection, ident)
+    if len(rows) != 1 or rows[0]["id"] != ident:
+        _refuse()
+    return rows[0]
 
 
 if __name__ == "__main__":

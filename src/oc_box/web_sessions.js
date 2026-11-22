@@ -174,7 +174,10 @@
         notice.textContent = "Native iframe selection could not be verified; no active TUI tab is asserted.";
       }
     }
-    finally { busy = false; }
+    finally {
+      busy = false;
+      if (workspace) refresh.disabled = workspace.isHistoryLoading();
+    }
   }
   function frameReady() {
     awaitingLoad = false;
@@ -399,12 +402,14 @@
       if (!manager()) void observeNativeRoute();
     }
     function toggleList(open) {
+      if (focusList !== open) navigation += 1;
       focusList = open;
       apply();
       (open ? search : toggle).focus();
     }
     for (const button of views) button.addEventListener("click", () => show(button.dataset.view));
     for (const button of sections) button.addEventListener("click", () => {
+      if (section !== button.dataset.section) navigation += 1;
       section = button.dataset.section;
       apply();
     });
@@ -459,12 +464,13 @@
           const before = navigation;
           const snapshot = historyRows;
           try {
-            const response = await fetch(verifyEndpoint + "?session=" + encodeURIComponent(item.id), {
+            const response = await fetch(historyEndpoint + "?session=" + encodeURIComponent(item.id), {
               credentials:"same-origin", headers:{ Accept:"application/json" },
             });
             if (!response.ok) throw new Error("selection");
-            const checked = row(await response.json());
-            if (checked.id !== item.id || checked.route !== item.route) throw new Error("selection");
+            const result = await response.json();
+            if (!result || result.id !== item.id) throw new Error("selection");
+            const checked = row({ ...result, route:nativePrefix + result.id });
             if (before !== navigation || source !== "history" || snapshot !== historyRows) return;
             select(checked, "Explicit workspace history selection");
           } catch {
