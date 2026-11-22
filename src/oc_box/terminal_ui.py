@@ -105,6 +105,7 @@ def run_tui(
     process = None
     old_terminal = None
     preview_failures = set()
+    preview_framing_failed = False
     worker = pending_open = None
     handlers = {}
     try:
@@ -260,17 +261,9 @@ def run_tui(
             banner(clear=True)
         return process.wait()
     except relay_errors:
-        print(
-            "oc-box: Host file transfer framing failed; no pending artifact was opened.",
-            file=sys.stderr,
-        )
+        preview_framing_failed = True
         return 1
     finally:
-        if worker is not None:
-            worker.shutdown(wait=True, cancel_futures=True)
-            if pending_open is not None and not pending_open.cancelled():
-                if (error := pending_open.exception()) is not None:
-                    preview_failures.add(safe_open_failure(error))
         if old_terminal is not None:
             termios.tcsetattr(input_fd, termios.TCSADRAIN, old_terminal)
         for sig, previous in handlers.items():
@@ -290,6 +283,19 @@ def run_tui(
                 write_all(output_fd, file_drops.stop())
             except OSError:
                 pass
+        if preview_framing_failed:
+            print(
+                "oc-box: Host file transfer framing failed. No further opens "
+                "will be accepted; an already submitted open can still finish.",
+                file=sys.stderr,
+            )
+        if worker is not None:
+            # A running worker can be inside an engine query or desktop
+            # dispatch. Restore the TTY and reap its foreground client first.
+            worker.shutdown(wait=True, cancel_futures=True)
+            if pending_open is not None and not pending_open.cancelled():
+                if (error := pending_open.exception()) is not None:
+                    preview_failures.add(safe_open_failure(error))
         if preview_failures:
             print(
                 "oc-box: A host file open was refused or did not complete "

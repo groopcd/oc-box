@@ -7,6 +7,7 @@ import select
 import subprocess
 import sys
 import tempfile
+import termios
 import time
 import unittest
 
@@ -56,6 +57,27 @@ while True:
     if grants.search(content):
         content = b''
 """
+
+SLOW_DRIVER = DRIVER.replace(
+    '    assert kind == "md"\n',
+    """    import time
+    print("OPENER-STARTED", flush=True)
+    release = Path(sys.argv[2]).with_name("release")
+    deadline = time.monotonic() + 8
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert release.exists(), "test did not release opener"
+    assert kind == "md"
+""",
+)
+FAILING_NATIVE = NATIVE.replace(
+    "    if b'Q' in content:\n",
+    """    if b'FAIL-FRAME' in content:
+        os.write(1, b'\\x1b]778;oc-box-open:v1:' + b'x' * 8192)
+        content = b''
+    if b'Q' in content:
+""",
+)
 
 
 class TerminalArtifactTests(unittest.TestCase):
@@ -111,3 +133,56 @@ class TerminalArtifactTests(unittest.TestCase):
                     child.kill()
                     child.wait(timeout=4)
                 os.close(master)
+
+    def test_bad_frame_restores_terminal_while_submitted_open_is_still_running(self):
+        with tempfile.TemporaryDirectory(prefix="oc-box-host-open-teardown-") as root:
+            marker = Path(root) / "opened"
+            release = marker.with_name("release")
+            master, slave = pty.openpty()
+            child = None
+            visible = bytearray()
+
+            def await_visible(text):
+                deadline = time.monotonic() + 4
+                while text not in visible and time.monotonic() < deadline:
+                    if select.select([master], [], [], 0.1)[0]:
+                        visible.extend(os.read(master, 4096))
+                self.assertIn(text, visible)
+
+            try:
+                before = termios.tcgetattr(slave)
+                child = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-B",
+                        "-c",
+                        SLOW_DRIVER,
+                        FAILING_NATIVE,
+                        str(marker),
+                    ],
+                    stdin=slave,
+                    stdout=slave,
+                    stderr=slave,
+                    env={"PYTHONPATH": str(SOURCE), "PATH": "/usr/bin:/bin"},
+                )
+                await_visible(b"READY")
+                self.assertNotEqual(termios.tcgetattr(slave), before)
+                os.write(master, b"\x1b[<16;6;8M\x1b[<16;6;8m")
+                await_visible(b"OPENER-STARTED")
+
+                os.write(master, b"FAIL-FRAME")
+                await_visible(b"an already submitted open can still finish")
+                self.assertEqual(termios.tcgetattr(slave), before)
+                self.assertIsNone(child.poll())
+                self.assertFalse(marker.exists())
+
+                release.touch()
+                self.assertEqual(child.wait(timeout=5), 1)
+                self.assertEqual(marker.read_bytes(), b"actual artifact")
+            finally:
+                if child is not None and child.poll() is None:
+                    release.touch()
+                    child.kill()
+                    child.wait(timeout=4)
+                os.close(master)
+                os.close(slave)
