@@ -132,6 +132,12 @@ jobs:
           python3 -B tests/smoke_history_subagent_recovery_v2.py
           --opencode "$RUNNER_TEMP/opencode-v23/node_modules/.bin/opencode"
           --foreground --producer-close abrupt
+      - name: Native host-file click and input recovery smoke
+        run: |
+          python3 -m venv "$RUNNER_TEMP/host-file-open-tests"
+          "$RUNNER_TEMP/host-file-open-tests/bin/python" -m pip install 'pyte>=0.8.2,<0.9'
+          "$RUNNER_TEMP/host-file-open-tests/bin/python" -B tests/smoke_file_preview_v2.py \
+            --opencode "$RUNNER_TEMP/opencode-v23/node_modules/.bin/opencode"
 
   opencode-v2-current-web-tabs:
     runs-on: ubuntu-latest

@@ -2631,6 +2631,69 @@ oc-box --project ~/devel/demo --image-preview
 oc-box reset --project ~/devel/demo --image-preview
 ```
 
+### Experimental Ctrl-click host file opening
+
+This is an unreleased development feature. Opt in for one native TUI client
+running OpenCode 2.3.x:
+
+```sh
+OC_BOX_EXPERIMENTAL_FILE_OPEN=1 oc-box --project ~/devel/demo
+```
+
+**Ctrl-left-click** a file link in an assistant reply to open a private local
+snapshot in the host's associated application. It must be an actual link, for example
+`[Notes](/tmp/notes.md)`; unlinked paths and paths shown as inline code are not
+clickable. Absolute paths and local `file://` URIs resolve inside the container.
+Relative paths resolve against the active session's directory, not the host
+shell's directory. Hold Ctrl until after releasing the mouse button. Each
+successful click reads a fresh file; there is no panel or confirmation step.
+
+- PNG: opens a normalized static image, retaining the resolution and alpha but
+  not embedded metadata. Input is limited to 4 MiB and 4,194,304 pixels
+  (up to 4,096 per side). The normalized image must also fit within 5 MiB.
+  Animation and interlacing are refused.
+- TXT and Markdown: opens the UTF-8 snapshot, up to 256 KiB, in the host's
+  associated application. Markdown is not sanitized like HTML; a Markdown
+  viewer can render active content or fetch resources. Use a plain-text
+  editor for untrusted drafts.
+- HTML: opens a safe static copy of the article structure and text in the
+  browser. Scripts, styles, links and remote resources do not carry over.
+  This is not a test of the original page's appearance or behavior.
+
+Other formats, special files, filesystem links, unsafe paths, changing files
+and unexpected mounts are refused. Custom Podman arguments disable the
+experiment. Use direct Konsole or Yakuake with mouse reporting enabled.
+Kitty is not supported by this experiment: its optional terminal remote control
+can inject raw input. The host must have trusted `/usr/bin/xdg-open` and
+`/usr/bin/xdg-mime` and a private `XDG_RUNTIME_DIR`. Incomplete mount inspection
+disables host opening. The check covers the current local Podman store and
+registered projects; it is not a census of other engines or atomic with
+container starts. If a stopped container references a missing mount source,
+oc-box checks the path and its nearest existing parent for overlap. Missing
+active sources, dangling links, and inaccessible sources still block host
+opening. Do not mount workspace data onto the host runtime or staging
+directory; this check does not prove isolation for arbitrary host bind layouts.
+
+The host relay grants at most one bounded transfer per observed Ctrl-click.
+OpenCode chooses the link target; opt in only for a workspace whose programs
+you trust to honor that click. A rendered link or container output alone does
+not mint a grant. No new listener or share is created, no file is written
+back, and no clipboard or model access is granted. The host copy survives the
+asynchronous viewer handoff. The launcher keeps up to 128 copies and 64 MiB
+in total. It clears copies older than 24 hours on a later open rather than
+evicting recent copies to make space. The desktop runtime-directory policy can
+remove them sooner. Copies rejected before calling the opener
+are removed immediately. Older experimental staging directories are not
+adopted or cleaned by the new launcher.
+
+The switch is not saved and does not change host OpenCode or terminal settings.
+If the existing owner was started before upgrading oc-box, exit it normally and
+start it again so the container gets the updated plugin. This is a private
+native renderer integration that may stop working after a 2.3.x update or in
+terminals that do not pass Ctrl-click to OpenCode. Leave terminal hyperlink
+handlers at their normal settings; this feature does not use them. It is not available in web,
+V1, plain host OpenCode, or the maintenance/session terminals.
+
 ### --host-drop
 
 Experimental and **enabled by default per workspace** for supported native
@@ -2836,14 +2899,20 @@ reads or pathname imports. Only an exact, valid paste end lets interception
 resume for later input. A recognized paste or ASCII CSI sequence with certain
 embedded control bytes also passes unchanged without granting an import. The
 relay resumes only after an unambiguous closing delimiter or final byte, and
-a later Ctrl+Y press is required for a clipboard read. An unfinished terminal
+a later Ctrl+Y press is required for a clipboard read. Repeated top-level
+Escapes can also recover after a complete recognized key or terminal report.
+Recognized control strings and canonical pastes reached this way stay opaque
+until their own end. None of those recovery bytes grant a clipboard read,
+file import, or host open. An overlapping OSC introducer in Kitty's reserved
+file-drop mode still stops interception to protect OSC 72 packets. An unfinished terminal
 reply or paste never grants a read. Ambiguous
 encoding, possible nested frames and other untrusted boundaries still stop
 interception for that client.
 On exit, `input-framing-recovered` reports that interception resumed;
 `input-framing` or `input-incomplete` means it did not recover from a framing
 problem. If needed, open a fresh native TUI client; the relay does not restart
-OpenCode or the workspace.
+OpenCode or the workspace. A framing refusal also names the parser category
+without reporting raw input.
 
 After an unexpected clipboard-read error, one later qualifying Ctrl+Y key
 event may try again only if desktop helper reaping was verified. There is no

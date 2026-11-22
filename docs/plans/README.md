@@ -8,6 +8,8 @@ updates are distinct; read its source and scope qualifications.
 
 - [Exit-time history synchronization timeout](exit-sync-activity-timeout.md):
   investigation, recovery design and follow-up observations.
+- [Host-owned terminal input](trusted-terminal-input.md): possible clipboard
+  and click authorization outside a raw PTY input stream.
 
 For current commands, use the [CLI reference](../cli.md). For acceptance
 status and publication requirements, use [Testing](../testing.md) and the

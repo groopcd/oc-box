@@ -5,7 +5,7 @@ recursive-include docs *.md *.1 *.texi *.info
 recursive-include docs/assets *.png
 include docs/assets/tui/manifest.json
 include completions/oc-box
-recursive-include src *.py *.js *.css
+recursive-include src *.py *.js *.css *.tsx
 recursive-include tests *.py *.mjs
 include tools/host_sandbox.js
 recursive-include tools/native_plugins *.js

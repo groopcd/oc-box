@@ -314,7 +314,7 @@ class PasteInputTests(FramingCase):
             "encoded_c1_end": START + b"path\xc2\x9b201~",
             "zero_prefixed_start": b"\x1b[0200~path" + END,
             "zero_prefixed_end": b"\x1b[0201~",
-            "escape_escape": b"\x1b" + START + b"path" + END,
+            "escape_escape_nested_paste": b"\x1b" + paste(START + b"nested" + END),
             "control_in_csi": b"\x1b[2\x0300~path" + END,
             "unicode_in_csi": b"\x1b[2\xc3\x9b00~path" + END,
             "malformed_intermediate": b"\x1b[2 0~",
@@ -342,6 +342,140 @@ class PasteInputTests(FramingCase):
                         clipboard_reads=1,
                         reserve_osc72=reserve,
                     )
+
+    def test_escape_before_a_recognized_report_recovers_without_authorizing_it(self):
+        for report in (
+            b"\x1b[I",
+            b"\x1b[O",
+            b"\x1b[121;5u",
+            b"\x1b[27;5;121~",
+            b"\x1b[<16;6;8M",
+            b"\x1b[<16;6;8m",
+        ):
+            for reserve in (False, True):
+                with self.subTest(report=report, reserve=reserve):
+                    frame = b"\x1b" + report
+                    self.assert_input(
+                        frame + b"\x19",
+                        frame + paste(REPLACEMENT),
+                        recovered=True,
+                        clipboard_reads=1,
+                        reserve_osc72=reserve,
+                    )
+
+    def test_double_escape_does_not_rearm_for_unknown_or_malformed_mouse(self):
+        for report in (
+            b"\x1b[<16;0001;8M",
+            b"\x1b[<16;6;8z",
+            b"\x1b[M123",
+            b"\x1b[<16;6;" + b"8" * 20 + b"M",
+            b"\x1b[121;\x195u",
+            b"\x1bO\x19",
+            b"\x1bN\x19",
+            b"\x1bY!\x19",
+            b"\x1b[0200~" + b"\x19" + END,
+            b"\x1b[200;1~" + b"\x19" + END,
+            b"\x1b[201~",
+            b"\x1b[" + b"1" * 50 + b"u",
+        ):
+            with self.subTest(report=report):
+                content = b"\x1b" + report + b"\x19"
+                self.assert_input(content, content, disabled=True, clipboard_reads=0)
+
+    def test_second_escape_is_delivered_without_waiting_when_osc72_is_not_reserved(
+        self,
+    ):
+        for reserve, expected in ((False, b"\x1b\x1b"), (True, b"\x1b")):
+            with self.subTest(reserve=reserve):
+                parser = PasteInput(
+                    lambda _: self.fail("unexpected paste"),
+                    on_clipboard=lambda: self.fail("unexpected clipboard read"),
+                    reserve_osc72=reserve,
+                )
+                self.assertEqual(parser.feed(b"\x1b"), b"")
+                self.assertEqual(parser.feed(b"\x1b"), expected)
+                self.assertFalse(parser.recovered_framing)
+                self.assertFalse(parser.disabled)
+                self.assertEqual(parser.finish(), b"\x1b" if reserve else b"")
+
+    def test_runs_of_escape_recover_at_complete_native_input_boundaries(self):
+        shortcut = b"\x19"
+        for count in (2, 3, 5):
+            for tail in (
+                b"[I",
+                b"[A",
+                b"[1;5A",
+                b"[5~",
+                b"[13;2:1u",
+                b"[121:89;5:3u",
+                b"[<16;6;8M",
+                b"OP",
+                b"y",
+                b"[200~opaque\x19" + END,
+                b"Popaque\x19\x1b\\",
+            ):
+                for reserve in (False, True):
+                    with self.subTest(count=count, tail=tail, reserve=reserve):
+                        frame = b"\x1b" * count + tail
+                        self.assert_input(
+                            frame + shortcut,
+                            frame + paste(REPLACEMENT),
+                            clipboard_reads=1,
+                            recovered=True,
+                            reserve_osc72=reserve,
+                        )
+
+    def test_escape_overlap_control_strings_do_not_authorize_interior_input(self):
+        frame = b"\x1b\x1b]72;opaque\x19" + START
+        self.assert_input(frame, frame, clipboard_reads=0)
+        self.assert_input(
+            frame + b"\a\x19",
+            frame + b"\a" + paste(REPLACEMENT),
+            clipboard_reads=1,
+            recovered=True,
+        )
+
+    def test_partial_escape_overlap_paste_remains_opaque_until_its_own_end(self):
+        frame = b"\x1b" + START + b"opaque\x19"
+        self.assert_input(frame, frame, clipboard_reads=0)
+        nested = frame + paste(b"nested") + END + b"\x19"
+        self.assert_input(nested, nested, disabled=True, clipboard_reads=0)
+
+    def test_reserved_kitty_packet_is_never_exposed_after_double_escape_refusal(self):
+        for prefix in (
+            b"\x1b",
+            b"\x1b\x1b",
+            b"\x1b\x1b[<16;6;",
+            b"\x1b\x1b[<16;6;\xc3",
+        ):
+            with self.subTest(prefix=prefix):
+                content = prefix + osc72() + b"\x19"
+                self.assert_input(
+                    content,
+                    prefix + b"\x19",
+                    disabled=True,
+                    clipboard_reads=0,
+                    reserve_osc72=True,
+                )
+
+    def test_escape_recovery_mouse_report_is_not_delivered_to_click_observer(self):
+        press, release = b"\x1b[<16;6;8M", b"\x1b[<16;6;8m"
+        for escapes in (1, 2, 4):
+            stream = press + b"\x1b" * escapes + release + press + release
+            for name, chunks in fragmentations(stream):
+                with self.subTest(escapes=escapes, fragmentation=name):
+                    observed = []
+                    parser = PasteInput(
+                        lambda _: None,
+                        on_host_mouse=lambda report: observed.append(report) or report,
+                        on_mouse_boundary=lambda: observed.append(b"boundary"),
+                    )
+                    self.assertEqual(
+                        b"".join(parser.feed(chunk) for chunk in chunks), stream
+                    )
+                    self.assertEqual(observed, [press, b"boundary", press, release])
+                    self.assertTrue(parser.recovered_framing)
+                    self.assertFalse(parser.disabled)
 
     def test_opaque_frame_never_recovers_from_possible_nested_or_unfinished_payload(
         self,

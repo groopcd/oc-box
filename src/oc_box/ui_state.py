@@ -32,6 +32,9 @@ RESOURCES = (
     "ui_state_tui.js",
     "ui_state_rpc.js",
     "ui_state_memory.js",
+    "file_preview_tui.tsx",
+    "file_preview_io.py",
+    "file_preview_png.py",
 )
 
 

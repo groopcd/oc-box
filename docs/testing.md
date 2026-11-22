@@ -231,6 +231,28 @@ remaining ambiguous frames still fail closed. The fixed exit notice
 `input-framing-recovered` contains no frame data. These are offline checks, not
 a reproduction or validation of the reported Yakuake failure.
 
+The expanded relay recovery retains those regressions and adds runs of Escape,
+recognized mouse/focus/key reports, and opaque paste or control-string ends.
+It forwards recovery input without minting a clipboard or click action, and a
+later independent gesture can operate in the same client. Keep OSC 72
+reservation, ordinary Ctrl+V, callback refusal and cross-fragment tests. A
+synthetic PTY acknowledgment checks that no host-open grant is sent before a
+fresh click. `tests/smoke_file_preview_v2.py` additionally exercises native
+hit-testing, repeated Escape followed by a fresh click, fresh file snapshots,
+and unchanged web-link handling; `--private-mounts` adds the confined reader
+with synthetic mount boundaries. Neither mode launches a real desktop viewer.
+
+The owner reported opening a container Markdown draft in host Kate and
+receiving changed content on a second click on experimental `3164f45`.
+On `80f3e2b` they repeated Markdown, PNG, Ctrl+Y and a subsequent click twice
+in the same Yakuake client, before reporting an Escape framing failure during
+the HTML test. On `6f3e75a` they reported the workflow working repeatedly
+after several Escapes and arrow keys. This is scoped operator evidence, not an
+independently attested integrated-source pass. The final report did not
+enumerate separate HTML sanitizer assertions, all formats, all terminals, or
+the broader clipboard/drop and lifecycle checks. Preserve the earlier failure
+reports; do not treat the later result as publication acceptance.
+
 The owner's earlier "it worked" report covers the PNG workflow on native 2.3.2.
 On diagnostic revision `af73035d848daa93ca832351564ba9635082568c`, the owner
 reported `source-guard` for the original copied PDF, then a `[PDF 1]` attachment

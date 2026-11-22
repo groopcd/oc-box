@@ -2,6 +2,7 @@
 
 import codecs
 import errno
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 import os
 import pty
@@ -75,6 +76,8 @@ def run_tui(
     refresh=1.0,
     show_loading=True,
     file_drops=None,
+    preview_relay=None,
+    preview_open=None,
 ):
     """Preserve terminal queries/input/resize; stop drawing at first UI text.
 
@@ -87,9 +90,22 @@ def run_tui(
     interactive = os.isatty(input_fd) and os.isatty(output_fd)
     if file_drops is not None and not interactive:
         raise ValueError("Host file drops require interactive terminal input/output.")
+    if preview_relay is not None and (not interactive or not callable(preview_open)):
+        raise ValueError("Host preview opening requires an interactive terminal.")
+    relay_errors = ()
+    if preview_relay is not None:
+        if __package__:
+            from .file_preview_host import RelayError, safe_open_failure
+            from .host_drop_input import PasteInput
+        else:
+            from file_preview_host import RelayError, safe_open_failure
+            from host_drop_input import PasteInput
+        relay_errors = (RelayError,)
     master = slave = None
     process = None
     old_terminal = None
+    preview_failures = set()
+    worker = pending_open = None
     handlers = {}
     try:
         if interactive:
@@ -156,6 +172,18 @@ def run_tui(
             )
             banner_drawn = not clear
 
+        if preview_relay is not None:
+            preview_input = (
+                file_drops.input
+                if file_drops is not None
+                else PasteInput(lambda _: None)
+            )
+
+            preview_input.set_host_mouse(preview_relay.mouse, preview_relay.break_press)
+            worker = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="oc-box-host-open"
+            )
+
         while True:
             now = time.monotonic()
             if file_drops is not None:
@@ -167,6 +195,8 @@ def run_tui(
                 next_update = now + refresh
             readers = [master] + ([input_fd] if stdin_open else [])
             ready, _, _ = select.select(readers, [], [], refresh)
+            if preview_relay is not None:
+                preview_relay.check()
             if master in ready:
                 try:
                     output = os.read(master, 65536)
@@ -175,11 +205,17 @@ def run_tui(
                         raise
                     output = b""
                 if not output:
+                    if preview_relay is not None:
+                        trailing = preview_relay.finish_output()
+                        if trailing:
+                            write_all(output_fd, trailing)
                     if file_drops is not None:
                         trailing = file_drops.finish_output()
                         if trailing:
                             write_all(output_fd, trailing)
                     break
+                if preview_relay is not None:
+                    output = preview_relay.output_bytes(output)
                 if file_drops is not None:
                     output = file_drops.output_bytes(output)
                 if loading and detector.feed(output):
@@ -192,19 +228,49 @@ def run_tui(
                 if content:
                     if file_drops is not None:
                         content = file_drops.input_bytes(content)
+                    elif preview_relay is not None:
+                        content = preview_input.feed(content)
                     write_all(master, content)
                 else:
                     if file_drops is not None:
                         trailing = file_drops.finish_input()
                         if trailing:
                             write_all(master, trailing)
+                    elif preview_relay is not None:
+                        write_all(master, preview_input.finish())
                     stdin_open = False
+            if preview_relay is not None:
+                # A concurrently ready fresh click can supersede an old
+                # arrival before handing it off to the opener worker.
+                candidate = preview_relay.take()
+                if pending_open is not None and pending_open.done():
+                    if (error := pending_open.exception()) is not None:
+                        preview_failures.add(safe_open_failure(error))
+                    pending_open = None
+                if (
+                    candidate is not None
+                    and pending_open is None
+                    and stdin_open
+                    and process.poll() is None
+                ):
+                    pending_open = worker.submit(preview_open, *candidate)
             if process.poll() is not None and not ready:
                 break
         if banner_drawn and detector.safe_to_draw():
             banner(clear=True)
         return process.wait()
+    except relay_errors:
+        print(
+            "oc-box: Host file transfer framing failed; no pending artifact was opened.",
+            file=sys.stderr,
+        )
+        return 1
     finally:
+        if worker is not None:
+            worker.shutdown(wait=True, cancel_futures=True)
+            if pending_open is not None and not pending_open.cancelled():
+                if (error := pending_open.exception()) is not None:
+                    preview_failures.add(safe_open_failure(error))
         if old_terminal is not None:
             termios.tcsetattr(input_fd, termios.TCSADRAIN, old_terminal)
         for sig, previous in handlers.items():
@@ -224,3 +290,9 @@ def run_tui(
                 write_all(output_fd, file_drops.stop())
             except OSError:
                 pass
+        if preview_failures:
+            print(
+                "oc-box: A host file open was refused or did not complete "
+                f"({', '.join(sorted(preview_failures))}).",
+                file=sys.stderr,
+            )

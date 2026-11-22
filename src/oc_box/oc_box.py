@@ -400,10 +400,22 @@ def run_tui(command, *, file_drops=None):
     else:
         from terminal_ui import run_tui as relay
 
+    preview_options = {}
+    preview_open = getattr(command, "preview_host_open", None)
+    if callable(preview_open):
+        if __package__:
+            from . import file_preview_host
+        else:
+            import file_preview_host
+        preview_options = {
+            "preview_relay": file_preview_host.Relay(),
+            "preview_open": preview_open,
+        }
     return relay(
         command,
         env=getattr(command, "environment", None),
         **({"file_drops": file_drops} if file_drops is not None else {}),
+        **preview_options,
     )
 
 
@@ -3772,6 +3784,7 @@ def launch_client(path, data, args, version, exported, owner=None):
                     command,
                     interactive=True,
                     ui_owner=True,
+                    file_preview=True,
                 )
                 if owner
                 else exec_command(data, command, interactive=True),
@@ -5105,6 +5118,7 @@ def _main_command(args, argv):
                         ),
                     ],
                     interactive=True,
+                    file_preview=True,
                 )
                 return run_native_tui(
                     data,

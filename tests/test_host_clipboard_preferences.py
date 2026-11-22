@@ -337,7 +337,8 @@ class HostClipboardPreferenceTests(unittest.TestCase):
             host_clipboard_symlinks=False,
         )
         self.assertEqual(
-            client.call_args.kwargs, {"interactive": True, "ui_owner": True}
+            client.call_args.kwargs,
+            {"interactive": True, "ui_owner": True, "file_preview": True},
         )
         owner.publish.assert_called_once_with("ses_existing")
         owner.wait_clients.assert_called_once_with()

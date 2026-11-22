@@ -324,6 +324,14 @@ their checkout ownership distinct from unrelated source and flat installations.
   an exact patch allowlist; retain private-client, transfer and terminal contract
   refusals. No public API proves future composer attachment behavior. Do not
   reuse this eligibility policy as a shortcut for unrelated compatibility guards.
+- `file_preview*.py` / `file_preview_tui.tsx` / `file_open_formats.py`:
+  experimental host open, per native 2.3.x TUI opt-in. Require a fresh
+  matched Ctrl-click from host terminal input and native assistant link
+  hit-testing. Child output must not independently grant file opens. Validate
+  mount/descriptor boundaries, bound each read and transfer, and open only
+  verified private PNG/text/Markdown/static HTML copies. Avoid clipboard
+  coupling, active HTML, arbitrary protocol dispatch, and mainline patches.
+  Native PTY evidence is not physical Yakuake/Podman acceptance.
 - `ui_state.py` / `ui_state_*.js`: public-SDK container TUI/server/RPC reports,
   installed only during normal eligible V2 owning preparation, never on attach.
   Canonical stable native `2.x.y` is eligible, not proof of SDK compatibility.

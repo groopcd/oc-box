@@ -68,7 +68,8 @@ class PackagingTests(unittest.TestCase):
                 path.relative_to(APP).as_posix()
                 for directory in ("src", "tests", "tools", "docs")
                 for path in (APP / directory).rglob("*")
-                if path.suffix in (".py", ".js", ".mjs", ".md", ".1", ".texi", ".info")
+                if path.suffix
+                in (".py", ".js", ".tsx", ".mjs", ".md", ".1", ".texi", ".info")
             ),
         }
         cases = (
@@ -98,6 +99,12 @@ class PackagingTests(unittest.TestCase):
                     "ui_state_rpc.js",
                     "ui_state_server.js",
                     "ui_state_tui.js",
+                    "file_preview.py",
+                    "file_preview_io.py",
+                    "file_preview_tui.tsx",
+                    "file_preview_png.py",
+                    "file_preview_host.py",
+                    "file_open_formats.py",
                     "sharing.py",
                     "attachments.py",
                     "attachment_io.py",
@@ -169,6 +176,19 @@ class PackagingTests(unittest.TestCase):
                     "src/oc_box/ui_state_rpc.js",
                     "src/oc_box/ui_state_server.js",
                     "src/oc_box/ui_state_tui.js",
+                    "src/oc_box/file_preview.py",
+                    "src/oc_box/file_preview_io.py",
+                    "src/oc_box/file_preview_tui.tsx",
+                    "src/oc_box/file_preview_png.py",
+                    "src/oc_box/file_preview_host.py",
+                    "src/oc_box/file_open_formats.py",
+                    "tests/test_file_preview.py",
+                    "tests/test_file_preview_io.py",
+                    "tests/test_file_preview_png.py",
+                    "tests/test_file_preview_host.py",
+                    "tests/test_file_open_formats.py",
+                    "tests/test_file_open_relay.py",
+                    "tests/smoke_file_preview_v2.py",
                     "tests/test_ui_state.py",
                     "tests/ui_state_fixture.mjs",
                     "tests/smoke_ui_state_v2.py",

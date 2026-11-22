@@ -487,6 +487,7 @@ def client_command(
     interactive=False,
     force_tty=False,
     ui_owner=False,
+    file_preview=False,
 ):
     """No host pass_env, auth refresh, profiles, or vault unlock on attach."""
     image_preview = connection.get("image_preview", False)
@@ -521,6 +522,7 @@ def client_command(
         "XDG_CACHE_HOME": data["home"] + "/.cache",
         "OPENCODE_DB": "oc-box-v2.db",
     }
+    preview_host_open = None
     if (
         interactive
         and len(arguments) >= 2
@@ -544,6 +546,67 @@ def client_command(
                 binding["ownerClient"] if ui_owner else secrets.token_hex(16)
             )
             names["OC_BOX_UI_STATE_GENERATION"] = binding["generation"]
+        if file_preview:
+            if __package__:
+                from . import file_preview as preview
+            else:
+                import file_preview as preview
+            verified = preview.client_binding(box, data, connection)
+            if verified is not None:
+                # Use the inspected immutable container ID, not a mutable name.
+                container, mounts = verified
+                reason = "not-interactive"
+                if sys.stdin.isatty() and sys.stdout.isatty():
+                    if __package__:
+                        from . import file_preview_host, host_drop
+                    else:
+                        import file_preview_host
+                        import host_drop
+                    try:
+                        profile = host_drop.preflight(data["opencode_version"])
+                    except host_drop.DropError:
+                        reason = "terminal-profile-unverified"
+                    else:
+                        # Kitty's optional TTY remote control lets child
+                        # output inject bytes resembling a real mouse report.
+                        reason = (
+                            file_preview_host.readiness_reason()
+                            if profile == "konsole"
+                            else "terminal-profile-unsupported"
+                        )
+                    if reason is None:
+                        refusals = []
+                        sources = preview.host_export_mounts(
+                            box, data, container, refusals=refusals
+                        )
+                        reason = (
+                            (refusals[0] if refusals else "mount-inventory-unverified")
+                            if sources is None
+                            else file_preview_host.readiness_reason(host_mounts=sources)
+                        )
+                        if reason is None:
+                            command[-1] = container
+                            names[preview.ROOTS] = json.dumps(mounts)
+
+                            def preview_host_open(kind, candidate):
+                                sources = preview.host_export_mounts(
+                                    box, data, container
+                                )
+                                if sources is None:
+                                    raise file_preview_host.PreviewError(
+                                        "host-mounts-unverified",
+                                        reason="mount-recheck-unverified",
+                                    )
+                                file_preview_host.open_artifact(
+                                    kind, candidate, host_mounts=sources
+                                )
+
+                if preview_host_open is None:
+                    print(
+                        f"oc-box: Experimental host opening is off ({reason}).",
+                        flush=True,
+                    )
+
     if (
         image_preview
         and interactive
@@ -567,7 +630,10 @@ def client_command(
     )
     bridge = "import os,sys,json; env=json.loads(sys.argv[1]); env['OPENCODE_PASSWORD']=os.environ['OPENCODE_PASSWORD']; os.execvpe(sys.argv[2],sys.argv[2:],env)"
     command.extend(["python3", "-I", "-S", "-c", bridge, json.dumps(names), *arguments])
-    return box.ContainerCommand(command, env)
+    result = box.ContainerCommand(command, env)
+    if preview_host_open is not None:
+        result.preview_host_open = preview_host_open
+    return result
 
 
 def tab_inventory(box, data, connection, *, timeout=4):

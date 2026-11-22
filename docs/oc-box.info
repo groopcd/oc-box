@@ -2943,7 +2943,74 @@ host.
      oc-box --project ~/devel/demo --image-preview
      oc-box reset --project ~/devel/demo --image-preview
 
-5.41 -host-drop
+5.41 Experimental Ctrl-click host file opening
+==============================================
+
+This is an unreleased development feature.  Opt in for one native TUI
+client running OpenCode 2.3.x:
+
+     OC_BOX_EXPERIMENTAL_FILE_OPEN=1 oc-box --project ~/devel/demo
+
+**Ctrl-left-click** a file link in an assistant reply to open a private
+local snapshot in the host's associated application.  It must be an
+actual link, for example ‘[Notes](/tmp/notes.md)’; unlinked paths and
+paths shown as inline code are not clickable.  Absolute paths and local
+‘file://’ URIs resolve inside the container.  Relative paths resolve
+against the active session's directory, not the host shell's directory.
+Hold Ctrl until after releasing the mouse button.  Each successful click
+reads a fresh file; there is no panel or confirmation step.
+
+- PNG: opens a normalized static image, retaining the resolution and
+alpha but not embedded metadata.  Input is limited to 4 MiB and
+4,194,304 pixels (up to 4,096 per side).  The normalized image must also
+fit within 5 MiB. Animation and interlacing are refused.  - TXT and
+Markdown: opens the UTF-8 snapshot, up to 256 KiB, in the host's
+associated application.  Markdown is not sanitized like HTML; a Markdown
+viewer can render active content or fetch resources.  Use a plain-text
+editor for untrusted drafts.  - HTML: opens a safe static copy of the
+article structure and text in the browser.  Scripts, styles, links and
+remote resources do not carry over.  This is not a test of the original
+page's appearance or behavior.
+
+Other formats, special files, filesystem links, unsafe paths, changing
+files and unexpected mounts are refused.  Custom Podman arguments
+disable the experiment.  Use direct Konsole or Yakuake with mouse
+reporting enabled.  Kitty is not supported by this experiment: its
+optional terminal remote control can inject raw input.  The host must
+have trusted ‘/usr/bin/xdg-open’ and ‘/usr/bin/xdg-mime’ and a private
+‘XDG_RUNTIME_DIR’.  Incomplete mount inspection disables host opening.
+The check covers the current local Podman store and registered projects;
+it is not a census of other engines or atomic with container starts.  If
+a stopped container references a missing mount source, oc-box checks the
+path and its nearest existing parent for overlap.  Missing active
+sources, dangling links, and inaccessible sources still block host
+opening.  Do not mount workspace data onto the host runtime or staging
+directory; this check does not prove isolation for arbitrary host bind
+layouts.
+
+The host relay grants at most one bounded transfer per observed
+Ctrl-click.  OpenCode chooses the link target; opt in only for a
+workspace whose programs you trust to honor that click.  A rendered link
+or container output alone does not mint a grant.  No new listener or
+share is created, no file is written back, and no clipboard or model
+access is granted.  The host copy survives the asynchronous viewer
+handoff.  The launcher keeps up to 128 copies and 64 MiB in total.  It
+clears copies older than 24 hours on a later open rather than evicting
+recent copies to make space.  The desktop runtime-directory policy can
+remove them sooner.  Copies rejected before calling the opener are
+removed immediately.  Older experimental staging directories are not
+adopted or cleaned by the new launcher.
+
+The switch is not saved and does not change host OpenCode or terminal
+settings.  If the existing owner was started before upgrading oc-box,
+exit it normally and start it again so the container gets the updated
+plugin.  This is a private native renderer integration that may stop
+working after a 2.3.x update or in terminals that do not pass Ctrl-click
+to OpenCode.  Leave terminal hyperlink handlers at their normal
+settings; this feature does not use them.  It is not available in web,
+V1, plain host OpenCode, or the maintenance/session terminals.
+
+5.42 -host-drop
 ===============
 
 Experimental and **enabled by default per workspace** for supported
@@ -3051,7 +3118,7 @@ guarantee, nor a new live-host acceptance result.  See ‘SECURITY.md’ and
      oc-box --project ~/devel/demo --no-host-drop
      oc-box preferences --project ~/devel/demo --host-drop off
 
-5.42 -no-host-drop
+5.43 -no-host-drop
 ==================
 
 Save host importing disabled for future workspace TUI clients and open
@@ -3060,7 +3127,7 @@ neither flag live-toggles existing clients.  To change only the
 preference without opening a TUI, use ‘oc-box preferences --host-drop
 off’.
 
-5.43 -host-clipboard
+5.44 -host-clipboard
 ====================
 
 Experimental, **off by default, with a saved per-workspace host
@@ -3176,13 +3243,20 @@ lets interception resume for later input.  A recognized paste or ASCII
 CSI sequence with certain embedded control bytes also passes unchanged
 without granting an import.  The relay resumes only after an unambiguous
 closing delimiter or final byte, and a later Ctrl+Y press is required
-for a clipboard read.  An unfinished terminal reply or paste never
-grants a read.  Ambiguous encoding, possible nested frames and other
-untrusted boundaries still stop interception for that client.  On exit,
-‘input-framing-recovered’ reports that interception resumed;
-‘input-framing’ or ‘input-incomplete’ means it did not recover from a
-framing problem.  If needed, open a fresh native TUI client; the relay
-does not restart OpenCode or the workspace.
+for a clipboard read.  Repeated top-level Escapes can also recover after
+a complete recognized key or terminal report.  Recognized control
+strings and canonical pastes reached this way stay opaque until their
+own end.  None of those recovery bytes grant a clipboard read, file
+import, or host open.  An overlapping OSC introducer in Kitty's reserved
+file-drop mode still stops interception to protect OSC 72 packets.  An
+unfinished terminal reply or paste never grants a read.  Ambiguous
+encoding, possible nested frames and other untrusted boundaries still
+stop interception for that client.  On exit, ‘input-framing-recovered’
+reports that interception resumed; ‘input-framing’ or ‘input-incomplete’
+means it did not recover from a framing problem.  If needed, open a
+fresh native TUI client; the relay does not restart OpenCode or the
+workspace.  A framing refusal also names the parser category without
+reporting raw input.
 
 After an unexpected clipboard-read error, one later qualifying Ctrl+Y
 key event may try again only if desktop helper reaping was verified.
@@ -3231,7 +3305,7 @@ See the short [host test guide](host-clipboard-testing.md).  Focused
 mocked tests are not acceptance of KDE/Wayland/X11 behavior or native
 image composition.
 
-5.44 -no-host-clipboard
+5.45 -no-host-clipboard
 =======================
 
 Save clipboard importing disabled for future workspace TUI clients and
@@ -3241,7 +3315,7 @@ changes the independent host-drop preference.  A saved strict symlink
 choice is retained.  To change only policy, use ‘oc-box preferences
 --host-clipboard off’.
 
-5.45 -host-clipboard-symlinks
+5.46 -host-clipboard-symlinks
 =============================
 
 Save ordinary symlink following for clipboard file imports for this and
@@ -3251,7 +3325,7 @@ preference: a saved enable is enough, or combine with
 ‘--host-clipboard’.  Accepted only on ‘start’ or ‘reset’, and mutually
 exclusive with ‘--no-host-clipboard-symlinks’.
 
-5.46 -no-host-clipboard-symlinks
+5.47 -no-host-clipboard-symlinks
 ================================
 
 Save strict no-symlink clipboard sources for this and future workspace
@@ -3270,7 +3344,7 @@ is off.
      oc-box --project ~/devel/demo
      oc-box preferences --project ~/devel/demo --host-clipboard-symlinks on
 
-5.47 -credential-mode env|selected|vault
+5.48 -credential-mode env|selected|vault
 ========================================
 
 With ‘credentials’, save an explicit forwarding mode for that workspace.
@@ -3286,7 +3360,7 @@ next owner, not to an active client.  To replace an existing selection:
 
      oc-box credentials --project ~/devel/demo --credential-mode vault --clear-credentials
 
-5.48 -attachments
+5.49 -attachments
 =================
 
 Web only: explicitly select the visible, source-version-bounded browser
@@ -3294,7 +3368,7 @@ File-drop adapter described under ‘web’.  Keeps the native app and its
 draft/Send controls unchanged.  No automatic prompt admission or
 host-path/URL reading.
 
-5.49 -no-vault
+5.50 -no-vault
 ==============
 
 V2-only, for one **owning** start (including ‘--import-session’), reset,
@@ -3313,7 +3387,7 @@ processes.
      oc-box reset --project ~/devel/demo --no-vault
      oc-box web --project ~/devel/demo --no-vault --no-open
 
-5.50 -env-secret NAME
+5.51 -env-secret NAME
 =====================
 
 With ‘credentials’, append an uppercase environment credential name to
@@ -3326,7 +3400,7 @@ per-name selections are refused in vault mode; choose an explicit
 env/selected mode to use them.  Example: ‘oc-box credentials
 --credential-mode selected --env-secret PERSONAL_GITHUB_TOKEN’.
 
-5.51 -vault-secret NAME
+5.52 -vault-secret NAME
 =======================
 
 With ‘credentials’, select an existing encrypted vault entry name to
@@ -3338,7 +3412,7 @@ selected with -env-secret.  Example: ‘oc-box credentials
 --credential-mode selected --vault-secret BRAVE_API_KEY’.  Vault mode
 instead uses every current entry and refuses nonempty per-name lists.
 
-5.52 -clear-credentials
+5.53 -clear-credentials
 =======================
 
 With ‘credentials’, clear both saved env-name and vault-name lists
@@ -3350,7 +3424,7 @@ workflow without deleting encrypted vault entries.  Use
 ‘--credential-mode vault --clear-credentials’ to replace selections with
 dynamic global V2 use.  Clearing alone does not change the mode.
 
-5.53 -output FILE
+5.54 -output FILE
 =================
 
 Backup-only.  Required new encrypted backup output pathname.  Its parent
@@ -3360,7 +3434,7 @@ destination created during capture.  Example: ‘oc-box backup --project
 ~/devel/demo --output /backup/demo.ocbox’.  The archive suffix is
 conventional; the versioned format is checked on restore.
 
-5.54 -portable
+5.55 -portable
 ==============
 
 Backup-only.  Omit the container OS image while retaining project,
@@ -3370,7 +3444,7 @@ OS/baseline tools; custom system packages and native-cache compatibility
 are the user's responsibility.  Example: ‘oc-box backup --project
 ~/devel/demo --portable --output /backup/demo.ocbox’.
 
-5.55 -recipient AGE_KEY
+5.56 -recipient AGE_KEY
 =======================
 
 Backup-only, repeatable (up to 16).  Encrypt the backup key envelope to
@@ -3381,7 +3455,7 @@ recipients are not secret; private identities must be stored
 independently of the archive and project.  Example: ‘oc-box backup
 --recipient age1PUBLIC_KEY --output /backup/demo.ocbox’.
 
-5.56 -host
+5.57 -host
 ==========
 
 For ‘backup’, include the [host migration
@@ -3391,14 +3465,14 @@ explicitly install the archived oc-box host settings and encrypted
 vault; omit ‘--project’ for a host-only restore from either type of
 host-containing archive.
 
-5.57 -opencode-auth-export FILE
+5.58 -opencode-auth-export FILE
 ===============================
 
 For ‘backup --host’, include a native V2 credential export from a
 private file, or use ‘-’ for a binary stdin stream.  The export is
 encrypted separately and is never printed by ‘oc-box backup-info’.
 
-5.58 -include-opencode
+5.59 -include-opencode
 ======================
 
 For ‘restore --host’, additionally install the native OpenCode profile
@@ -3406,7 +3480,7 @@ and saved credentials when present.  Requires separate typed
 confirmation and fresh destination paths.  It does not activate or start
 OpenCode.
 
-5.59 -identity FILE
+5.60 -identity FILE
 ===================
 
 Restore/backup-info only, repeatable.  Read a native age X25519 private
@@ -3417,7 +3491,7 @@ backups instead use age's terminal prompt.  No identity text or
 passphrase is accepted through argv/environment.  Example: ‘oc-box
 backup-info /backup/demo.ocbox --identity ~/.config/backup-age-key.txt’.
 
-5.60 -cpus NUMBER
+5.61 -cpus NUMBER
 =================
 
 Set the CPU quota in core units; fractions such as ‘2.5’ are accepted by
@@ -3428,7 +3502,7 @@ quota where supported.
 
      oc-box reset --project ~/devel/demo --cpus 8
 
-5.61 -memory SIZE
+5.62 -memory SIZE
 =================
 
 Set the memory limit using Podman size syntax, such as ‘512m’, ‘8g’, or
@@ -3440,7 +3514,7 @@ project/volume disk quota.
 
      oc-box reset --project ~/devel/demo --memory 16g
 
-5.62 -pids-limit NUMBER
+5.63 -pids-limit NUMBER
 =======================
 
 Set the container's process limit; default ‘2048’.  oc-box requires at
@@ -3448,7 +3522,7 @@ least ‘32’.  Set at creation or reset; changing an existing container
 requires reset.  Example: ‘oc-box reset --project ~/devel/demo
 --pids-limit 4096’.
 
-5.63 -device MAPPING
+5.64 -device MAPPING
 ====================
 
 Add a persistent Podman mapping, repeatable.  Supports
@@ -3462,7 +3536,7 @@ install an NPU/GPU SDK.
      oc-box reset --project ~/devel/demo --device /dev/accel/accel0
      oc-box --project ~/devel/gpu --device /dev/dri/renderD128:rw
 
-5.64 -podman-arg=-OPTION[=VALUE]
+5.65 -podman-arg=-OPTION[=VALUE]
 ================================
 
 Append one literal long-option token to the Podman create command before
@@ -3489,7 +3563,7 @@ options extend the default boundary as requested by the host operator.
 Podman and the host's rootless permissions determine which settings are
 available.
 
-5.65 -clear-devices
+5.66 -clear-devices
 ===================
 
 Clear all saved ‘--device’ mappings before adding any new ones on this
@@ -3500,7 +3574,7 @@ for that list.
      oc-box reset --project ~/devel/demo --clear-devices
      oc-box reset --project ~/devel/demo --clear-devices --device /dev/accel/accel1
 
-5.66 -clear-podman-args
+5.67 -clear-podman-args
 =======================
 
 Clear saved additional Podman options before appending replacements.
@@ -3510,7 +3584,7 @@ device list unchanged.
      oc-box reset --project ~/devel/demo --clear-podman-args \
        --podman-arg=--shm-size=2g
 
-5.67 -delete-sessions
+5.68 -delete-sessions
 =====================
 
 Purge-only.  Delete recorded host archive session copies as well as
@@ -3519,7 +3593,7 @@ never deletes an original host source conversation merely because that
 conversation was imported into this workspace.  Example: ‘oc-box purge
 --workspace WORKSPACE_ID --delete-sessions’.
 
-5.68 -all
+5.69 -all
 =========
 
 Purge-only.  Remove environment resources, recorded host session
@@ -3527,7 +3601,7 @@ archives, metadata, and the entire original project directory, including
 untracked files.  The directory identity and marker must still match.
 Example: ‘oc-box purge --project ~/devel/disposable --all’.
 
-5.69 -y, -yes
+5.70 -y, -yes
 =============
 
 Skip purge's ID-prefix confirmation.  Purge-only; it does not answer
@@ -4884,19 +4958,19 @@ Node: Synopsis930
 Node: Description3917
 Node: Commands9344
 Node: Options137262
-Node: Lifecycle and persistence189854
-Node: Distribution images192154
-Node: Sessions and recovery197118
-Node: Devices and host permissions203703
-Node: Resource reports206049
-Node: Configuration and environment208160
-Node: Files219541
-Node: Exit status230451
-Node: Examples231859
-Node: Troubleshooting233998
-Node: Installation and manuals246044
-Node: Authors and license256234
-Node: See also256841
+Node: Lifecycle and persistence194232
+Node: Distribution images196532
+Node: Sessions and recovery201496
+Node: Devices and host permissions208081
+Node: Resource reports210427
+Node: Configuration and environment212538
+Node: Files223919
+Node: Exit status234829
+Node: Examples236237
+Node: Troubleshooting238376
+Node: Installation and manuals250422
+Node: Authors and license260612
+Node: See also261219
 
 End Tag Table
 
