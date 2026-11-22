@@ -226,6 +226,21 @@
     .log-search-head { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:14px }
     .log-search-head .search { flex:1 1 260px; margin:0; padding:9px 11px; background:var(--bg) }
     .log-search-head .search input { min-height:23px }
+    .global-log-search { margin:-8px 0 16px }
+    .log-raw { overflow:auto; white-space:pre; padding:12px; border:1px solid var(--line); border-radius:6px; background:var(--bg) }
+    .session-source-bar .manager-field { flex:1 1 240px }
+    .session-catalog-search { margin:12px 0 0 }
+    .session-catalog-scroll { max-height:48dvh; }
+    .session-catalog-scroll thead { position:sticky; top:0; background:#111e2b }
+    .session-actions { margin-top:12px; padding-top:11px; border-top:1px solid var(--line); overflow-wrap:anywhere }
+    .session-actions p { margin-top:3px }
+    .session-actions .toolbar { align-items:center }
+    .action.danger { color:#ffb1b1; border-color:#64404a }
+    .session-review { color:var(--text); background:var(--panel); border:1px solid var(--line);
+      border-radius:10px; width:min(540px,calc(100% - 24px)); max-height:85dvh; padding:16px; overflow:auto }
+    .session-review::backdrop { background:#050a11bd }
+    .session-review p,.session-review label { margin-top:10px }
+    .session-review input { padding:7px; border:1px solid var(--line); border-radius:6px; background:var(--bg) }
     .backup-section { margin-top:13px; padding-top:11px; border-top:1px solid var(--line) }
     .backup-switches { display:grid; gap:3px; margin:10px 0 }
     .backup-switches .manager-check { min-height:27px; align-items:start }
@@ -372,7 +387,11 @@
         <h1 id="tui-title">Workspace manager</h1>
         <p class="muted">The same seven sections as the TUI, adapted for the browser.</p>
       </div>
-      <span class="tag demo">Synthetic data · No live operations</span>
+      <div class="toolbar">
+        <label class="manager-field">Workspace context<select id="manager-workspace-context"></select></label>
+        <button type="button" class="action" id="manager-refresh-view">Refresh</button>
+        <span class="tag demo push">Synthetic data · No live operations</span>
+      </div>
     </header>
     <div class="tui-tabs" role="tablist" aria-label="Workspace manager sections">
       <button type="button" role="tab" id="tab-status" data-tui-view="status" aria-controls="manager-status"><b>1</b> Status</button>
@@ -382,6 +401,13 @@
       <button type="button" role="tab" id="tab-logs" data-tui-view="logs" aria-controls="manager-logs"><b>5</b> Logs</button>
       <button type="button" role="tab" id="tab-storage" data-tui-view="storage" aria-controls="manager-storage"><b>6</b> Storage</button>
       <button type="button" role="tab" id="tab-backups" data-tui-view="backups" aria-controls="manager-backups"><b>7</b> Backup/restore</button>
+    </div>
+    <p class="muted" id="manager-refresh-notice" role="status"></p>
+    <div class="log-search-head global-log-search">
+      <label class="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input type="search" id="manager-log-search" aria-label="Search logs" placeholder="Search retained logs…" autocomplete="off"></label>
+      <button type="button" class="action" id="manager-log-clear" disabled>Clear search</button>
+      <span class="tag" id="manager-log-count" aria-live="polite"></span>
+      <button type="button" class="action" id="manager-open-logs">Logs</button>
     </div>
     <section role="tabpanel" id="manager-status" aria-labelledby="tab-status" tabindex="0">
       <div class="view-head">
@@ -405,37 +431,82 @@
       </div>
       <div class="manager-grid">
         <div class="card"><h3>Monitoring</h3><div class="manager-fields">
-          <label class="manager-check"><input type="checkbox" checked> Automatic refresh</label>
-          <label class="manager-field">Refresh interval (seconds)<input type="number" value="1" min="1" max="60"></label>
+          <label class="manager-check"><input type="checkbox" id="manager-auto-refresh" checked> Automatic refresh</label>
+          <label class="manager-field">Refresh interval (seconds)<input type="number" id="manager-refresh-seconds" value="1" min="1" max="60" step="1"></label>
         </div></div>
         <div class="card"><h3>Display</h3><div class="manager-fields">
           <label class="manager-field">Density<select id="manager-density"><option>Comfortable</option><option>Compact</option></select></label>
-          <label class="manager-check"><input type="checkbox"> Expand workspace details</label>
+          <label class="manager-check"><input type="checkbox" id="manager-expand-details"> Expand workspace details</label>
         </div></div>
         <div class="card"><h3>Sessions</h3><div class="manager-fields">
-          <label class="manager-field">Browse scope<select id="settings-scope"><option value="workspace">Selected workspace</option><option value="host">Host · all projects</option></select></label>
+          <label class="manager-field">Browse scope<select id="settings-scope"><option value="workspace">Selected workspace</option><option value="host" selected>Host · all projects</option><option value="host-project">Host · selected project</option></select></label>
+          <label class="manager-field">Session filter<input type="search" id="settings-session-filter" placeholder="Title, ID or directory"></label>
           <p class="muted">Changing scope does not connect to a service.</p>
         </div></div>
         <div class="card"><h3>Logs</h3><div class="manager-fields">
           <label class="manager-field">Minimum severity<select id="settings-severity"><option value="all">All severities</option><option value="info">Info and above</option><option value="warning">Warning and above</option></select></label>
-          <label class="manager-check"><input type="checkbox"> Follow retained activity</label>
+          <label class="manager-field">Visible source<select id="settings-log-source"><option value="all">All sources</option><option value="oc-box">Private activity</option><option value="podman">Sample Podman output</option><option value="mirror">System journal mirror</option></select></label>
+          <label class="manager-field">Log search<input type="search" id="settings-log-search" placeholder="Literal keyword"></label>
+          <label class="manager-check"><input type="checkbox" id="settings-log-follow" checked> Follow retained activity</label>
         </div></div>
-        <div class="card"><h3>Host logging</h3><p class="muted">Private activity log · system journal mirror off.</p><p><span class="tag">Host settings not connected</span></p></div>
+        <div class="card"><h3>Host logging</h3><div class="manager-fields">
+          <label class="manager-field">Private log directory<input type="text" value="Default · private state directory" disabled></label>
+          <label class="manager-check"><input type="checkbox" disabled> Mirror to journald</label>
+          <button type="button" class="action" disabled>Save Host Logging</button>
+          <small class="muted">Separate host setting; not connected in this preview.</small>
+        </div></div>
+        <div class="card"><h3>Resources</h3><p class="muted">Observed values are shown in Status. No CPU, memory, or storage limit editing.</p></div>
+        <div class="card"><h3>Safety and terminals</h3><p class="muted">Synthetic mode. Live terminal control would require explicit attachment. No setting here grants host access.</p></div>
         <div class="card"><h3>Clipboard</h3><p class="muted">Host clipboard and terminal copy preferences stay in the terminal manager.</p><p><span class="tag">Not connected</span></p></div>
+      </div>
+      <div class="toolbar">
+        <button type="button" class="action" id="settings-apply">Apply</button>
+        <button type="button" class="action" id="settings-defaults">Reset to defaults</button>
+        <button type="button" class="action" id="settings-revert">Revert</button>
+        <span class="tag" id="settings-monitor-status"></span>
+        <p id="settings-notice" class="muted" role="status"></p>
       </div>
     </section>
     <section role="tabpanel" id="manager-sessions" aria-labelledby="tab-sessions" tabindex="0" hidden>
       <div class="view-head"><div><h2>Sessions</h2><p class="muted">Browse session metadata, including children and archives. There’s no conversation pane in this view.</p></div><span class="tag">Example catalog</span></div>
       <div class="card manager-panel">
-        <div class="toolbar">
-          <label class="manager-field">Source<select id="manager-session-source"><option value="workspace">Selected workspace</option><option value="host">Host · all projects</option></select></label>
-          <label class="manager-field">Search titles<input type="search" id="manager-session-search" placeholder="Filter sessions"></label>
-          <label class="manager-check"><input type="checkbox" id="manager-include-archives" checked> Include archived</label>
-          <span class="tag push" id="manager-session-count" aria-live="polite"></span>
+        <div class="toolbar session-source-bar">
+          <label class="manager-field">Source<select id="manager-session-source"><option value="workspace">Selected workspace</option><option value="host">Host · all projects</option><option value="host-project">Host · selected project</option></select></label>
+          <button type="button" class="action" id="manager-session-connect">Connect / refresh</button>
+          <button type="button" class="action" id="manager-session-disconnect" disabled>Disconnect</button>
         </div>
-        <div class="table-scroll" id="manager-session-list"></div>
+        <div class="log-search-head session-catalog-search">
+          <label class="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input type="search" id="manager-session-search" aria-label="Search sessions" placeholder="Search title, ID or native directory…" autocomplete="off"></label>
+          <button type="button" class="action" id="manager-session-clear" disabled>Clear search</button>
+          <label class="manager-check"><input type="checkbox" id="manager-include-archives" checked> Include archived</label>
+          <span class="tag" id="manager-session-count" aria-live="polite"></span>
+        </div>
+        <div class="table-scroll session-catalog-scroll" id="manager-session-list"></div>
+        <div class="session-actions">
+          <p id="manager-session-detail" class="muted">Select a session after connecting to a sample source.</p>
+          <div class="toolbar">
+            <button type="button" class="action" id="manager-session-favorite">Favorite</button>
+            <button type="button" class="action" id="manager-session-archive">Archive / restore</button>
+            <button type="button" class="action danger" id="manager-session-delete">Delete…</button>
+          </div>
+          <p id="manager-session-notice" class="muted" role="status"></p>
+        </div>
       </div>
     </section>
+      <dialog class="session-review" id="session-review" aria-labelledby="session-review-title">
+        <h2 id="session-review-title">Review simulated deletion</h2>
+        <p id="session-review-source" class="muted"></p>
+        <ul id="session-review-list" class="review-plan"></ul>
+        <p class="muted" id="session-review-note"></p>
+        <div id="session-review-phrase">
+          <label class="manager-field" for="session-review-confirm">Type DELETE to confirm</label>
+          <input id="session-review-confirm" autocomplete="off" aria-describedby="session-review-source">
+        </div>
+        <div class="toolbar">
+          <button type="button" class="action" id="session-review-cancel" autofocus>Cancel</button>
+          <button type="button" class="action danger" id="session-review-delete" disabled>Delete sample session</button>
+        </div>
+      </dialog>
     <section role="tabpanel" id="manager-terminals" aria-labelledby="tab-terminals" tabindex="0" hidden>
       <div class="view-head"><div><h2>Terminals</h2><p class="muted">A dedicated view for existing native session terminals.</p></div><span class="tag demo">Simulated connection</span></div>
       <div id="terminal-dock">
@@ -471,27 +542,43 @@
     <section role="tabpanel" id="manager-logs" aria-labelledby="tab-logs" tabindex="0" hidden>
       <div class="view-head"><div><h2>Logs</h2><p class="muted">Filter retained activity by severity or message.</p></div><span class="tag">Private activity · Demo</span></div>
       <div class="card manager-panel">
-        <div class="log-search-head">
-          <label class="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input type="search" id="manager-log-search" aria-label="Search logs" placeholder="Search logs…" autocomplete="off"></label>
-          <button type="button" class="action" id="manager-log-clear" disabled>Clear search</button>
-          <span class="tag" id="manager-log-count" aria-live="polite"></span>
+        <div class="toolbar">
+          <label class="manager-field">Source<select id="manager-log-source"><option value="all">All sources</option><option value="oc-box">Private activity</option><option value="podman">Sample Podman output</option><option value="mirror">System journal mirror</option></select></label>
+          <label class="manager-field">Severity<select id="manager-log-severity"><option value="all">All severities</option><option value="info">Info and above</option><option value="warning">Warning and above</option></select></label>
+          <label class="manager-check"><input type="checkbox" id="manager-log-follow" checked> Follow</label>
         </div>
         <div class="toolbar">
-          <label class="manager-field">Severity<select id="manager-log-severity"><option value="all">All severities</option><option value="info">Info and above</option><option value="warning">Warning and above</option></select></label>
-          <button type="button" class="action" disabled>Load external source</button>
+          <button type="button" class="action" id="manager-log-raw" aria-pressed="false">RAW</button>
+          <button type="button" class="action" id="manager-log-columns" aria-expanded="false" aria-controls="manager-log-column-options">Columns…</button>
+          <button type="button" class="action" id="manager-log-details" disabled>Details…</button>
+          <button type="button" class="action" id="manager-log-podman">Load sample Podman…</button>
+          <button type="button" class="action" id="manager-log-mirror">Load sample mirror</button>
+        </div>
+        <div id="manager-log-column-options" class="toolbar" hidden>
+          <label class="manager-check"><input class="manager-log-column" type="checkbox" value="0" checked> Time</label>
+          <label class="manager-check"><input class="manager-log-column" type="checkbox" value="1" checked> Source</label>
+          <label class="manager-check"><input class="manager-log-column" type="checkbox" value="2" checked> Severity</label>
         </div>
         <div class="table-scroll" id="manager-log-list"></div>
+        <pre class="log-raw" id="manager-log-raw-output" tabindex="0" hidden></pre>
+        <p class="muted" id="manager-log-info" role="status"></p>
       </div>
     </section>
     <section role="tabpanel" id="manager-storage" aria-labelledby="tab-storage" tabindex="0" hidden>
       <div class="view-head"><div><h2>Storage</h2><p class="muted">Inspect storage by scope. Unknown sizes are shown separately from measured sizes.</p></div><span class="tag">Example inventory</span></div>
       <div class="card manager-panel"><h3>Storage inventory</h3>
         <div class="toolbar">
-          <label class="manager-field">Scope<select id="manager-storage-scope"><option value="all">All workspaces</option><option value="selected">Selected workspace</option><option value="host">Host</option></select></label>
-          <button type="button" class="action" disabled>Scan sizes</button>
+          <label class="manager-field">Scope<select id="manager-storage-scope"><option value="all">All registered workspaces</option><option value="selected">Selected workspace</option><option value="host">Host OpenCode · individual sessions</option></select></label>
+          <button type="button" class="action" id="manager-storage-refresh">Refresh list</button>
+          <button type="button" class="action" id="manager-storage-scan">Scan sample sizes</button>
         </div>
         <div class="table-scroll" id="manager-storage-list"></div>
-        <p class="muted">Backup and removal actions require a separate review; neither runs in this preview.</p>
+        <p class="muted" id="manager-storage-detail"></p>
+        <div class="toolbar">
+          <button type="button" class="action danger" id="manager-storage-remove">Review workspace storage removal…</button>
+          <button type="button" class="action danger" id="manager-storage-delete" hidden>Review selected session deletion…</button>
+        </div>
+        <p class="muted" id="manager-storage-notice" role="status"></p>
       </div>
     </section>
     <section role="tabpanel" id="manager-backups" aria-labelledby="tab-backups" tabindex="0" hidden>
@@ -611,6 +698,17 @@
     const workspaceCatalog = sessions.map((s) => [s.title, s.parent ? "Child" : "Root", s.group === "archive" ? "Archived" : s.group === "open" ? (s.parent ? "Child of open tab" : "Open TUI tab") : "History"]);
     const otherCatalogs = { "atlas-api":[["Review API response shapes","Root","History"]] };
     const hostCatalog = [["Review dashboard navigation","Root","History"],["Verify metadata filters","Child","History"],["Old staging notes","Root","Archived"]];
+    const sampleCatalogs = new Map(
+      Object.entries({ host:hostCatalog, "orbit-web":workspaceCatalog, ...otherCatalogs }).map(([store, rows]) => [
+        store, rows.map(([title, kind, state], index) => ({
+          id:`ses_demo_${store.replaceAll("-","_")}_${String(index + 1).padStart(3,"0")}`,
+          title, kind, state, archived:state === "Archived", favorite:false,
+          project:store === "host" ? (index < 2 ? "orbit-web" : "atlas-api") : store,
+          directory:store === "host" ? (index < 2 ? "/example/projects/orbit-web" : "/example/projects/atlas-api") : `/workspace/${store}`,
+          parent:kind === "Child" ? 0 : null, index,
+        })),
+      ])
+    );
     const retainedEvents = [
       ["14:26","info","Session opened"], ["14:18","info","History sync finished"],
       ["14:02","info","Web client attached"], ["13:51","warning","Storage size unavailable"],
@@ -619,6 +717,18 @@
     const drafts = new Map(), messages = new Map();
     let selected = sessions[0], scope = "all", panel = "status", created = 0, inspectorReturn, activeDrag;
     let panePriority = "left", managerView = "status", managerWorkspace = workspaceRows[0];
+    let managerSessionConnection = null, managerSelectedSession = null, pendingSessionDeletion = null;
+    const sampleLogSources = {
+      podman:[["13:48","podman","info","Example container health check completed"]],
+      mirror:[["14:18","mirror","info","Example mirrored history sync finished"]],
+    };
+    const loadedLogSources = new Set();
+    let logRaw = false, selectedLog = null, visibleLogs = [], logSort = { index:0, descending:true };
+    const settingsDefaults = { "manager-auto-refresh":true, "manager-refresh-seconds":"1", "manager-density":"Comfortable",
+      "manager-expand-details":false, "settings-scope":"host", "settings-session-filter":"",
+      "settings-severity":"all", "settings-log-source":"all", "settings-log-search":"", "settings-log-follow":true };
+    let activeSettings = { ...settingsDefaults }, storageSelection = null;
+    const sampleStorageSizes = new Map();
     const shell = byId("workspace-shell"), tui = byId("tui-mode");
     const terminalCard = byId("terminal-card");
     const terminalElement = (id) => terminalCard.querySelector(`#${id}`);
@@ -724,6 +834,7 @@
 
     function showTuiView(name, focus = false) {
       checkTerminalWindow();
+      if (name !== "sessions") byId("session-review").close();
       managerView = name;
       for (const tab of managerTabs) {
         const current = tab.dataset.tuiView === name;
@@ -759,38 +870,170 @@
         ${current.cpu ? resourceMeter("CPU usage · quota scale", current.cpu, current.quota) +
           resourceMeter("Memory usage · limit scale", current.ram, current.memory) : '<p class="muted">Stopped · No live readings</p>'}
         <p class="muted">Private home: ${current.home ?? "not scanned"}</p>
-        <details><summary>Workspace details</summary><p class="muted">Example project · Native sessions not connected</p></details>`;
+        <details${activeSettings["manager-expand-details"] ? " open" : ""}><summary>Workspace details</summary>
+        <p class="muted">Workspace ID: ws_demo_${current.name.replaceAll("-","_")}</p>
+        <p class="muted">Project mount: /workspace/${current.name} · read/write</p>
+        <p class="muted">Session source: ${managerSessionConnection?.store === current.name ? "sample workspace connection" : "not connected to this workspace"}</p></details>`;
+    }
+
+    function managerSessionSource() {
+      const scope = byId("manager-session-source").value;
+      const store = scope === "workspace" ? managerWorkspace.name : "host";
+      const project = scope === "host-project" ? managerWorkspace.name : null;
+      const label = project ? `Host · ${project}` : scope === "host" ? "Host · all projects" : `Workspace · ${store}`;
+      return { store, project, label };
+    }
+
+    function setManagerSessionConnection(connected) {
+      byId("session-review").close();
+      managerSessionConnection = connected ? managerSessionSource() : null;
+      managerSelectedSession = null;
+      byId("manager-session-notice").textContent = "";
+      renderManagerSessions();
+      renderManagerStatus();
+      renderManagerStorage();
+    }
+
+    function managerSessionRows() {
+      if (!managerSessionConnection) return [];
+      const { store, project } = managerSessionConnection;
+      return (sampleCatalogs.get(store) ?? []).filter((row) => !project || row.project === project);
     }
 
     function renderManagerSessions() {
-      const host = byId("manager-session-source").value === "host";
-      const query = byId("manager-session-search").value.trim().toLowerCase();
+      const field = byId("manager-session-search");
+      const query = field.value.trim().toLowerCase();
       const archive = byId("manager-include-archives").checked;
-      const catalog = host ? hostCatalog : managerWorkspace.name === "orbit-web" ? workspaceCatalog : otherCatalogs[managerWorkspace.name] ?? [];
-      const matches = catalog.filter(([title,, state]) =>
-        title.toLowerCase().includes(query) && (archive || state !== "Archived"));
-      byId("manager-session-count").textContent = `${matches.length} ${matches.length === 1 ? "session" : "sessions"}`;
-      byId("manager-session-list").innerHTML = table(["Title","Kind","State"], matches.map(([title, kind, state]) => ({
-        cells:[kind === "Child" ? `<span class="child-name">${title}</span>` : title, kind, state],
-      })), "No matching sessions.");
+      const matches = managerSessionRows().filter((row) =>
+        [row.title, row.id, row.directory].some((item) => item.toLowerCase().includes(query)) && (archive || !row.archived));
+      if (!matches.includes(managerSelectedSession)) managerSelectedSession = null;
+      byId("manager-session-count").textContent = managerSessionConnection ?
+        `${matches.length} ${matches.length === 1 ? "session" : "sessions"} · ${managerSessionConnection.label}` : "Not connected";
+      byId("manager-session-disconnect").disabled = !managerSessionConnection;
+      byId("manager-session-clear").disabled = !field.value;
+      byId("manager-session-list").innerHTML = table(["Favorite","Title","ID","Kind","Native directory","State"], matches.map((row) => ({
+        current:row === managerSelectedSession,
+        cells:[row.favorite ? "★" : "—",
+          `<button type="button" class="text-action${row.kind === "Child" ? " child-name" : ""}" data-session-id="${row.id}" aria-pressed="${row === managerSelectedSession}">${row.title}</button>`,
+          `<code>${row.id}</code>`, row.kind, `<code>${row.directory}</code>`,
+          row.archived ? "Archived" : row.state === "Archived" ? "History" : row.state],
+      })), managerSessionConnection ? "No matching sessions." : "Connect to a sample source to browse its session metadata.");
+      const row = managerSelectedSession;
+      byId("manager-session-detail").textContent = row ? `${managerSessionConnection.label} · ${row.id} · ${row.directory}` :
+        "Select a row to preview actions for that session.";
+      byId("manager-session-favorite").setAttribute("aria-pressed", !!row?.favorite);
+      byId("manager-session-archive").textContent = row ? (row.archived ? "Restore from archive" : "Archive session") : "Archive / restore";
+      for (const id of ["manager-session-favorite","manager-session-archive","manager-session-delete"]) byId(id).disabled = !row;
+    }
+
+    function reviewManagerSessionAction(action) {
+      const selected = managerSelectedSession;
+      if (!selected || !managerSessionConnection) return;
+      const { store, label } = managerSessionConnection;
+      const affected = [selected];
+      for (let i = 0; action === "delete" && i < affected.length; i++) {
+        affected.push(...sampleCatalogs.get(store).filter((row) => row.parent === affected[i].index));
+      }
+      pendingSessionDeletion = { store, affected, action };
+      const deletion = action === "delete";
+      byId("session-review-title").textContent = deletion ? "Review simulated deletion" : selected.archived ? "Restore sample session from archive?" : "Archive sample session?";
+      byId("session-review-note").textContent = deletion ?
+        "Only the listed fixture rows are removed. Real deletion also checks ownership and activity, and refuses cascades over 50 sessions." :
+        "Changes only the selected sample session. It does not archive its children, close a shell, or change an independent host copy.";
+      byId("session-review-phrase").hidden = !deletion;
+      byId("session-review-source").textContent = `Source: ${label}. Includes ${affected.length} sample ${affected.length === 1 ? "session" : "sessions"}.`;
+      byId("session-review-list").replaceChildren(...affected.map((row) => Object.assign(document.createElement("li"), {
+        textContent:`${row.title} · ${row.id} · ${row.directory}`,
+      })));
+      byId("session-review-confirm").value = "";
+      byId("session-review-delete").textContent = deletion ? "Delete sample session" : selected.archived ? "Restore sample session" : "Archive sample session";
+      byId("session-review-delete").classList.toggle("danger", deletion);
+      byId("session-review-delete").disabled = deletion;
+      byId("session-review").showModal();
     }
 
     function renderManagerLogs() {
       const query = byId("manager-log-search").value.trim().toLowerCase();
       byId("manager-log-clear").disabled = !byId("manager-log-search").value;
       const severity = byId("manager-log-severity").value;
+      const source = byId("manager-log-source").value;
       const order = { debug:0, info:1, warning:2 };
-      const matches = retainedEvents.filter((row) =>
-        row.join(" ").toLowerCase().includes(query) && order[row[1]] >= (order[severity] ?? 0));
-      byId("manager-log-count").textContent = `${matches.length} ${matches.length === 1 ? "match" : "matches"}`;
-      byId("manager-log-list").innerHTML = table(["Time","Severity","Event"], matches.map((cells) => ({ cells })), "No matching events.");
+      const rows = retainedEvents.map(([time, level, message]) => [time,"oc-box",level,message]);
+      for (const name of loadedLogSources) rows.push(...sampleLogSources[name]);
+      visibleLogs = rows.filter((row) => (source === "all" ? row[1] !== "mirror" : row[1] === source) &&
+        row.join(" ").toLowerCase().includes(query) && order[row[2]] >= (order[severity] ?? 0));
+      selectedLog = null;
+      byId("manager-log-details").disabled = true;
+      const noun = query ? (visibleLogs.length === 1 ? "match" : "matches") : (visibleLogs.length === 1 ? "entry" : "entries");
+      byId("manager-log-count").textContent = `${visibleLogs.length} log ${noun}`;
+      const cols = all(".manager-log-column:checked").map((input) => Number(input.value));
+      const headers = ["Time","Source","Severity"];
+      byId("manager-log-list").hidden = logRaw;
+      const sorted = visibleLogs.map((row, index) => ({ row, index })).sort((a, b) => {
+        const i = logSort.index;
+        const comparison = i === 2 ? order[a.row[i]] - order[b.row[i]] : a.row[i].localeCompare(b.row[i]);
+        return logSort.descending ? -comparison : comparison;
+      });
+      const sortButton = (name, index) => `<button type="button" class="text-action" data-log-sort="${index}">${name}${logSort.index === index ? (logSort.descending ? " ↓" : " ↑") : ""}</button>`;
+      byId("manager-log-list").innerHTML = table([...cols.map((i) => sortButton(headers[i],i)),sortButton("Event",3)], sorted.map(({ row, index }) => ({
+        cells:[...cols.map((n) => row[n]),`<button type="button" class="text-action" data-log-row="${index}">${row[3]}</button>`],
+      })), "No matching events.");
+      const raw = byId("manager-log-raw-output");
+      raw.hidden = !logRaw;
+      raw.textContent = visibleLogs.length ? visibleLogs.map((row) => row.join(" · ")).join("\n") : "No matching events.";
     }
 
     function renderManagerStorage() {
       const mode = byId("manager-storage-scope").value;
-      const rows = mode === "host" ? [["Host home file system","124 GiB used / 512 GiB capacity"]] :
-        (mode === "all" ? workspaceRows : [managerWorkspace]).map((w) => [w.name, w.home ?? "Not scanned"]);
-      byId("manager-storage-list").innerHTML = table(["Scope","Size"], rows.map((cells) => ({ cells })));
+      const host = mode === "host";
+      const current = mode === "all" ? storageSelection ?? managerWorkspace : managerWorkspace;
+      const rows = host ? [] : (mode === "all" ? workspaceRows : [managerWorkspace]);
+      const size = (w) => sampleStorageSizes.get(w.name) ?? w.home ?? "Not scanned";
+      byId("manager-storage-list").innerHTML = table(["Workspace","OS","Private home"], rows.map((w) => ({
+        current:w === current,
+        cells:[`<button type="button" class="text-action" data-storage-target="${w.name}" aria-pressed="${w === current}">${w.name}</button>`,w.os,size(w)],
+      })), "Use Sessions to connect to the host and select one session tree. No whole-database operations.");
+      byId("manager-storage-detail").textContent = host ?
+        (managerSessionConnection?.store === "host" && managerSelectedSession ? `Selected host session: ${managerSelectedSession.title}` : "") :
+        `Selected target: ${current.name} · ws_demo_${current.name.replaceAll("-","_")} · ${size(current)} private home. Estimates are not exclusive disk usage.`;
+      byId("manager-storage-scan").hidden = host;
+      byId("manager-storage-remove").hidden = host;
+      byId("manager-storage-delete").hidden = !host;
+      byId("manager-storage-delete").disabled = managerSessionConnection?.store !== "host" || !managerSelectedSession;
+    }
+
+    function fillSettings(vals) {
+      for (const [id, value] of Object.entries(vals)) {
+        const field = byId(id);
+        if (typeof value === "boolean") field.checked = value;
+        else field.value = value;
+      }
+    }
+
+    function applySettings() {
+      const draft = Object.fromEntries(Object.entries(settingsDefaults).map(([id, value]) => {
+        const field = byId(id);
+        return [id, typeof value === "boolean" ? field.checked : field.value];
+      }));
+      const seconds = Number(draft["manager-refresh-seconds"]);
+      if (!Number.isInteger(seconds) || seconds < 1 || seconds > 60) {
+        byId("settings-notice").textContent = "Enter a whole number from 1 to 60 seconds. Nothing was applied.";
+        return;
+      }
+      activeSettings = draft;
+      tui.toggleAttribute("data-compact", draft["manager-density"] === "Compact");
+      byId("manager-workspace").querySelector("details").open = draft["manager-expand-details"];
+      if (byId("manager-session-source").value !== draft["settings-scope"]) {
+        byId("manager-session-source").value = draft["settings-scope"];
+        setManagerSessionConnection(false);
+      }
+      for (const [control, key] of [["manager-session-search","settings-session-filter"],["manager-log-source","settings-log-source"],
+        ["manager-log-severity","settings-severity"],["manager-log-search","settings-log-search"]]) byId(control).value = draft[key];
+      byId("manager-log-follow").checked = draft["settings-log-follow"];
+      byId("settings-monitor-status").textContent = `${draft["manager-auto-refresh"] ? "Auto" : "Paused"} · ${seconds}s · simulation`;
+      renderManagerSessions();
+      renderManagerLogs();
+      byId("settings-notice").textContent = "Applied for this page only. No live polling or host changes.";
     }
 
     function renderTerminal() {
@@ -996,6 +1239,7 @@
       document.documentElement.dataset.layout = name;
       shell.hidden = name === "tui";
       tui.hidden = !shell.hidden;
+      if (tui.hidden) byId("session-review").close();
       if (!tui.hidden) showTuiView(managerView);
       byId("layout-note").replaceChildren(Object.assign(document.createElement("strong"), { textContent: layouts[name][0] + ". " }), layouts[name][1]);
       for (const button of all("[data-layout-option]")) button.setAttribute("aria-pressed", button.dataset.layoutOption === name);
@@ -1159,28 +1403,140 @@
         showTuiView(managerTabs[target[event.key]].dataset.tuiView, true);
       });
     });
-    byId("manager-workspaces").addEventListener("click", (event) => {
-      const name = event.target.closest("[data-inspect]")?.dataset.inspect;
+    function selectManagerWorkspace(name) {
       const workspace = workspaceRows.find((row) => row.name === name);
-      if (!workspace) return;
+      if (!workspace) return false;
       managerWorkspace = workspace;
+      byId("manager-workspace-context").value = name;
       renderManagerStatus();
-      renderManagerSessions();
+      if (byId("manager-session-source").value !== "host") setManagerSessionConnection(false);
       renderManagerStorage();
       renderManagerBackups();
-      byId("manager-workspaces").querySelector("[aria-pressed=true]").focus();
+      return true;
+    }
+    byId("manager-workspaces").addEventListener("click", (event) => {
+      if (selectManagerWorkspace(event.target.closest("[data-inspect]")?.dataset.inspect)) {
+        byId("manager-workspaces").querySelector("[aria-pressed=true]").focus();
+      }
     });
-    byId("manager-density").addEventListener("change", (event) => tui.toggleAttribute("data-compact", event.target.value === "Compact"));
-    byId("settings-scope").addEventListener("change", (event) => {
-      byId("manager-session-source").value = event.target.value;
+    byId("manager-workspace-context").addEventListener("change", (event) => selectManagerWorkspace(event.target.value));
+    byId("manager-refresh-view").addEventListener("click", () => {
+      const refresh = { status:renderManagerStatus, sessions:renderManagerSessions, logs:renderManagerLogs, storage:renderManagerStorage };
+      refresh[managerView]?.();
+      byId("manager-refresh-notice").textContent = "Preview refreshed. No connection or host read was started.";
+    });
+    byId("settings-apply").addEventListener("click", applySettings);
+    byId("settings-defaults").addEventListener("click", () => {
+      fillSettings(settingsDefaults);
+      byId("settings-notice").textContent = "Defaults staged. Apply to use them.";
+    });
+    byId("settings-revert").addEventListener("click", () => {
+      fillSettings(activeSettings);
+      byId("settings-notice").textContent = "Draft reverted.";
+    });
+    byId("manager-session-source").addEventListener("change", () => setManagerSessionConnection(false));
+    byId("manager-session-connect").addEventListener("click", () => setManagerSessionConnection(true));
+    byId("manager-session-disconnect").addEventListener("click", () => setManagerSessionConnection(false));
+    for (const id of ["manager-session-search","manager-include-archives"]) byId(id).addEventListener("input", renderManagerSessions);
+    byId("manager-session-clear").addEventListener("click", () => {
+      byId("manager-session-search").value = "";
       renderManagerSessions();
+      byId("manager-session-search").focus();
     });
-    byId("settings-severity").addEventListener("change", (event) => {
-      byId("manager-log-severity").value = event.target.value;
+    byId("manager-session-list").addEventListener("click", (event) => {
+      const id = event.target.closest("[data-session-id]")?.dataset.sessionId;
+      const row = managerSessionRows().find((entry) => entry.id === id);
+      if (!row) return;
+      managerSelectedSession = row;
+      byId("manager-session-notice").textContent = "";
+      renderManagerSessions();
+      renderManagerStorage();
+      byId("manager-session-list").querySelector("[aria-pressed=true]").focus({ preventScroll:true });
+    });
+    byId("manager-session-favorite").addEventListener("click", () => {
+      if (!managerSelectedSession) return;
+      managerSelectedSession.favorite = !managerSelectedSession.favorite;
+      renderManagerSessions();
+      byId("manager-session-notice").textContent = managerSelectedSession.favorite ? "Sample favorite added." : "Sample favorite removed.";
+    });
+    byId("manager-session-archive").addEventListener("click", () => reviewManagerSessionAction("archive"));
+    byId("manager-session-delete").addEventListener("click", () => reviewManagerSessionAction("delete"));
+    byId("session-review-confirm").addEventListener("input", (event) => {
+      byId("session-review-delete").disabled = event.target.value !== "DELETE";
+    });
+    byId("session-review-cancel").addEventListener("click", () => byId("session-review").close());
+    byId("session-review").addEventListener("close", () => { pendingSessionDeletion = null; });
+    byId("session-review-delete").addEventListener("click", () => {
+      if (!pendingSessionDeletion) return;
+      const { store, affected, action } = pendingSessionDeletion;
+      if (action === "delete" && byId("session-review-confirm").value !== "DELETE") return;
+      if (store !== managerSessionConnection?.store) return;
+      const selectedRow = affected[0];
+      let notice;
+      if (action === "delete") {
+        sampleCatalogs.set(store, sampleCatalogs.get(store).filter((row) => !affected.includes(row)));
+        managerSelectedSession = null;
+        notice = `Removed ${affected.length} sample ${affected.length === 1 ? "session" : "sessions"} from this catalog.`;
+      } else {
+        selectedRow.archived = !selectedRow.archived;
+        notice = selectedRow.archived ? "Sample session archived." : "Sample session restored from archive.";
+      }
+      pendingSessionDeletion = null;
+      byId("session-review").close();
+      renderManagerSessions();
+      renderManagerStorage();
+      byId("manager-session-notice").textContent = notice;
+      byId("manager-storage-notice").textContent = notice;
+      if (managerView === "sessions" && action === "delete") byId("manager-session-connect").focus();
+    });
+    for (const id of ["manager-log-search","manager-log-severity"]) byId(id).addEventListener("input", renderManagerLogs);
+    byId("manager-open-logs").addEventListener("click", () => {
+      showTuiView("logs");
+      byId("manager-log-search").focus();
+    });
+    byId("manager-log-source").addEventListener("change", () => {
+      byId("manager-log-info").textContent = "";
       renderManagerLogs();
     });
-    for (const id of ["manager-session-source","manager-session-search","manager-include-archives"]) byId(id).addEventListener("input", renderManagerSessions);
-    for (const id of ["manager-log-search","manager-log-severity"]) byId(id).addEventListener("input", renderManagerLogs);
+    byId("manager-log-follow").addEventListener("change", (event) => {
+      byId("manager-log-info").textContent = event.target.checked ? "Follow enabled for this preview. No background reads." : "Follow paused. Retained entries remain searchable.";
+    });
+    byId("manager-log-raw").addEventListener("click", (event) => {
+      logRaw = !logRaw;
+      event.currentTarget.setAttribute("aria-pressed", logRaw);
+      renderManagerLogs();
+    });
+    byId("manager-log-columns").addEventListener("click", (event) => {
+      const options = byId("manager-log-column-options");
+      options.hidden = !options.hidden;
+      event.currentTarget.setAttribute("aria-expanded", !options.hidden);
+    });
+    for (const control of all(".manager-log-column")) control.addEventListener("change", renderManagerLogs);
+    for (const name of ["podman","mirror"]) byId(`manager-log-${name}`).addEventListener("click", () => {
+      loadedLogSources.add(name);
+      byId("manager-log-source").value = name;
+      renderManagerLogs();
+      byId("manager-log-info").textContent = "Loaded synthetic entries only; no external source was read.";
+    });
+    byId("manager-log-list").addEventListener("click", (event) => {
+      const sorter = event.target.closest("[data-log-sort]");
+      if (sorter) {
+        const index = Number(sorter.dataset.logSort);
+        logSort = { index, descending:logSort.index === index && !logSort.descending };
+        renderManagerLogs();
+        byId("manager-log-list").querySelector(`[data-log-sort="${index}"]`).focus();
+        return;
+      }
+      const button = event.target.closest("[data-log-row]");
+      if (!button) return;
+      for (const old of byId("manager-log-list").querySelectorAll(".is-selected")) old.classList.remove("is-selected");
+      button.closest("tr").classList.add("is-selected");
+      selectedLog = visibleLogs[Number(button.dataset.logRow)];
+      byId("manager-log-details").disabled = !selectedLog;
+    });
+    byId("manager-log-details").addEventListener("click", () => {
+      if (selectedLog) byId("manager-log-info").textContent = selectedLog.join(" · ");
+    });
     byId("manager-log-clear").addEventListener("click", () => {
       const input = byId("manager-log-search");
       input.value = "";
@@ -1188,6 +1544,31 @@
       input.focus();
     });
     byId("manager-storage-scope").addEventListener("change", renderManagerStorage);
+    byId("manager-storage-list").addEventListener("click", (event) => {
+      const name = event.target.closest("[data-storage-target]")?.dataset.storageTarget;
+      const target = workspaceRows.find((row) => row.name === name);
+      if (!target || byId("manager-storage-scope").value !== "all") return;
+      storageSelection = target;
+      renderManagerStorage();
+      byId("manager-storage-list").querySelector("[aria-pressed=true]").focus();
+    });
+    byId("manager-storage-refresh").addEventListener("click", () => {
+      renderManagerStorage();
+      byId("manager-storage-notice").textContent = "Sample list refreshed. No host files were read.";
+    });
+    const storageTarget = () => byId("manager-storage-scope").value === "all" ? storageSelection ?? managerWorkspace : managerWorkspace;
+    byId("manager-storage-scan").addEventListener("click", () => {
+      const target = storageTarget();
+      sampleStorageSizes.set(target.name, target.home ?? "1.4 GiB · sample estimate");
+      renderManagerStorage();
+      byId("manager-storage-notice").textContent = `Shown an example estimate for ${target.name}. No scan was run.`;
+    });
+    byId("manager-storage-remove").addEventListener("click", () => {
+      const target = storageTarget();
+      byId("manager-storage-notice").textContent =
+        `Removal review only: ${target.name} (${`ws_demo_${target.name.replaceAll("-","_")}`}). A live removal preserves project files, host history and recovery provenance, and requires the owner and clients to exit.`;
+    });
+    byId("manager-storage-delete").addEventListener("click", () => reviewManagerSessionAction("delete"));
     terminalElement("terminal-attach").addEventListener("click", toggleTerminalAttachment);
     terminalElement("terminal-session").addEventListener("change", renderTerminal);
     terminalElement("terminal-popout").addEventListener("click", () => {
@@ -1281,6 +1662,7 @@
     });
     document.addEventListener("keydown", (event) => {
       if (layout() === "tui") {
+        if (managerView === "settings" && event.key === "Escape") byId("settings-revert").click();
         if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing &&
             event.target.closest("[role=tablist]") && /^[1-7]$/.test(event.key)) {
           showTuiView(managerTabs[Number(event.key) - 1].dataset.tuiView, true);
@@ -1331,13 +1713,16 @@
     ].map(([title,value,note,amount]) => `<div class="card manager-stat"><h3 class="eyebrow">${title}</h3><p class="large">${value}</p>
       <small class="muted">${note}</small>${amount === null ? "" : `<div class="metric"><progress aria-label="${title} used" max="100" value="${amount}"></progress></div>`}</div>`).join("");
     byId("manager-activity").innerHTML = table(["Time","Severity","Event"], retainedEvents.slice(0,3).map((cells) => ({ cells })));
+    byId("manager-workspace-context").replaceChildren(...workspaceRows.map((w) => new Option(w.name, w.name)));
     renderManagerStatus();
+    byId("manager-session-source").value = settingsDefaults["settings-scope"];
     renderManagerSessions();
     renderManagerLogs();
     renderManagerStorage();
     byId("backup-workspace").replaceChildren(...workspaceRows.map((w) => new Option(w.name, w.name)));
     renderManagerBackups();
     renderTerminal();
+    byId("settings-monitor-status").textContent = "Auto · 1s · simulation";
     setLayout(location.hash.slice(1));
     selectSession(selected);
   </script>

@@ -16,6 +16,9 @@ companion files, dependencies, network requests or live service connections.
   Settings, Sessions, Terminals, Logs, Storage and Backup/restore. It has a
   single top tab bar and no chat pane or terminal-style navigation sidebar.
   Use the tabs, or focus the tab bar and use arrow keys or 1–7.
+  - **Sessions:** Connect to a sample source, search by title, ID or
+    directory, and select a row to preview Favorite, Archive/restore and
+    reviewed deletion. Changes apply to that fixture catalog only.
   - **Logs:** Use the dedicated Search logs bar and the severity filter. Clear
     search independently of severity.
   - **Terminals:** In the manager, drag the corner grip or focus it and use
@@ -35,3 +38,6 @@ A live browser manager would need separate authorization for host operations.
 A workspace OpenCode pairing does not grant access to host catalogs,
 terminals, configuration, or backups. This prototype does not implement or
 validate that live integration.
+
+See the [Textual parity checklist](manager-parity.md) for what is represented
+and what still needs design, implementation or validation.
