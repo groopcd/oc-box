@@ -718,7 +718,14 @@
     <div id="tls-local">
       <p><code>oc-box web tls setup localhost</code> <small class="muted">(proposed)</small></p>
       <p class="muted">Use an existing trusted certificate or create one with mkcert. Stay loopback-only. Any trust-store change must be approved on the host.</p>
-      <div class="toolbar"><button type="button" class="action" id="tls-local-setup">Set up localhost HTTPS</button></div>
+      <div class="toolbar">
+        <button type="button" class="action" id="tls-local-check">Check localhost HTTPS</button>
+        <button type="button" class="action" id="tls-local-setup">Set up localhost HTTPS</button>
+      </div>
+      <div id="tls-local-check-result" hidden>
+        <p><code>oc-box doctor --feature web-tls-local</code><br><code>oc-box web tls check localhost</code> <small class="muted">(proposed)</small></p>
+        <p class="muted" role="status">Example only: mkcert found · certificate not configured · browser trust unverified. This check installs nothing.</p>
+      </div>
       <div id="tls-local-review" hidden>
         <p class="muted">Review which trust store would change, then verify the result in your browser. Nothing is installed by this demo.</p>
         <div class="toolbar"><button type="button" class="action" id="tls-local-confirm">Simulate approval</button></div>
@@ -1878,6 +1885,9 @@
     byId("tls-local-setup").addEventListener("click", () => {
       byId("tls-local-review").hidden = false;
       byId("tls-local-confirm").focus();
+    });
+    byId("tls-local-check").addEventListener("click", () => {
+      byId("tls-local-check-result").hidden = false;
     });
     byId("tls-local-confirm").addEventListener("click", () => {
       byId("tls-local-status").textContent = "Approval previewed. The live setup would still need browser verification.";

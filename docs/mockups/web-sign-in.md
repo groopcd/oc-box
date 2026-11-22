@@ -37,6 +37,25 @@ verify the origin and keep the upstream path private; the wire protection and
 password-hiding requirements still apply. The first implementation should
 accept operator-supplied TLS files before adding automated provisioning.
 
+### Read-only checks
+
+- **`oc-box doctor --feature web-tls-local`** (proposed): report whether the
+  host has the optional mkcert helper and any trust tools it needs on that
+  platform (for example, `certutil` for NSS stores on Linux). A missing helper
+  blocks the mkcert setup route, not ordinary guest web, supplied certificates,
+  or launching with an already valid local certificate. Do not turn mkcert
+  into a mandatory dependency in a default doctor run.
+- **`oc-box web tls check localhost`** (proposed): on-demand, read-only check
+  of the active localhost TLS configuration. Report missing or unreadable
+  files, certificate validity, name coverage, and certificate/key match
+  separately from helper availability. Report browser trust as unverified
+  unless checked in the actual browser profile. No trust-store changes,
+  package installs, certificate issuance, or workspace startup.
+- **`oc-box web tls setup localhost`** runs the helper preflight before any
+  setup action. Only an explicitly approved setup can issue a certificate or
+  change trust stores. A future host-TUI **Check HTTPS** button should use
+  the same read-only checks.
+
 A future host-side **Set up localhost HTTPS** button could invoke the same
 guided operation after explicit approval. It should not be a pre-login web
 endpoint. The current Textual TUI remains unchanged.
