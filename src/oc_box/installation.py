@@ -4,16 +4,18 @@ import fcntl
 import json
 import os
 from pathlib import Path
-import shlex
 import shutil
+import stat
 import subprocess
 import tempfile
 import venv
 
 if __package__:
+    from . import host_file_open_policy
     from .paths import runtime_root, source_root
     from .version_info import get_version_info
 else:
+    import host_file_open_policy
     from paths import runtime_root, source_root
     from version_info import get_version_info
 
@@ -44,6 +46,7 @@ RUNTIME_FILES = (
     "file_preview_png.py",
     "file_preview_host.py",
     "file_open_formats.py",
+    "host_file_open_policy.py",
     "session_terminal.py",
     "sharing.py",
     "attachments.py",
@@ -132,7 +135,7 @@ def source_file(source, name):
     return (runtime_root(source) if name in RUNTIME_FILES else source) / name
 
 
-def atomic_file(path, content, mode=0o644):
+def atomic_file(path, content, mode=0o644, *, replace=True):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=".oc-box-", dir=path.parent)
     try:
@@ -141,7 +144,10 @@ def atomic_file(path, content, mode=0o644):
             stream.flush()
             os.fsync(stream.fileno())
         os.chmod(temporary, mode)
-        os.replace(temporary, path)
+        if replace:
+            os.replace(temporary, path)
+        else:
+            os.link(temporary, path, follow_symlinks=False)
     finally:
         Path(temporary).unlink(missing_ok=True)
 
@@ -229,14 +235,21 @@ def optional_tui_runtime(release):
             )
 
 
-def install(source, home=None, *, with_vault=False, with_tui=False):
+def _lock_file(path, flags):
+    return os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+
+
+def install(
+    source, home=None, *, with_vault=False, with_tui=False, verified_release=False
+):
+    """Activate a release; only the verified bootstrap can enroll a new install."""
     source = source_root(source)
     if (source / "distribution.json").is_file():
         raise ValueError(
             "This copy is managed by a Python package installer; use pipx/uv/pip to upgrade, not install.py. The GitHub installer remains available separately."
         )
     home = Path.home() if home is None else Path(home)
-    target = home / ".local/share/oc-box"
+    target = home / host_file_open_policy.INSTALL_PATH
     # Validate all inputs before changing an existing installation.
     inputs = [
         *(source_file(source, name) for name in PROGRAM_FILES),
@@ -247,31 +260,57 @@ def install(source, home=None, *, with_vault=False, with_tui=False):
         if not path.is_file() or path.is_symlink():
             raise ValueError(f"Missing or nonregular installation file: {path.name}")
     build = get_version_info(source)
-    target.mkdir(parents=True, exist_ok=True)
+    fresh = (
+        host_file_open_policy.fresh_locations(home)
+        if verified_release and shutil.which("oc-box") is None
+        else None
+    )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        # mkdir is the election point: a concurrent installer/updater or an
+        # already existing empty root disqualifies this installer from marking.
+        target.mkdir()
+    except FileExistsError:
+        fresh = None
     if target.is_symlink():
         raise ValueError("The oc-box installation root must not be a symlink.")
-    releases = target / "releases"
-    releases.mkdir(exist_ok=True)
-    if releases.is_symlink():
-        raise ValueError("The oc-box releases directory must not be a symlink.")
-    for name in (*PROGRAM_FILES, "build-info.json", "current"):
-        destination = target / name
-        if destination.is_dir() and not destination.is_symlink():
-            raise ValueError(f"Unexpected directory in installation: {name}")
-    if (target / "completions").exists() and not (target / "completions").is_symlink():
-        raise ValueError(
-            "Unexpected completion directory in installation; inspect it before reinstalling."
-        )
-    if (
-        (target / "docs").is_dir()
-        and not (target / "docs").is_symlink()
-        and (target / "legacy-docs").exists()
-    ):
-        raise ValueError(
-            "Both legacy manual directories exist; inspect the installation."
-        )
-    with (target / ".install.lock").open("a+") as lock:
+    root_identity = (
+        host_file_open_policy.new_root_identity(fresh) if fresh is not None else None
+    )
+    file_open_enabled = False
+    with open(
+        target / host_file_open_policy.INSTALL_LOCK, "a+", opener=_lock_file
+    ) as lock:
+        lock_fd = lock.fileno()
+        if not stat.S_ISREG(os.fstat(lock_fd).st_mode):
+            raise ValueError("The oc-box installation lock must be a regular file.")
         fcntl.flock(lock, fcntl.LOCK_EX)
+        if fresh is not None and not host_file_open_policy.still_fresh(
+            fresh, root_identity, lock_fd, initial=True
+        ):
+            fresh = None
+        releases = target / "releases"
+        releases.mkdir(exist_ok=True)
+        if releases.is_symlink():
+            raise ValueError("The oc-box releases directory must not be a symlink.")
+        for name in (*PROGRAM_FILES, "build-info.json", "current"):
+            destination = target / name
+            if destination.is_dir() and not destination.is_symlink():
+                raise ValueError(f"Unexpected directory in installation: {name}")
+        if (target / "completions").exists() and not (
+            target / "completions"
+        ).is_symlink():
+            raise ValueError(
+                "Unexpected completion directory in installation; inspect it before reinstalling."
+            )
+        if (
+            (target / "docs").is_dir()
+            and not (target / "docs").is_symlink()
+            and (target / "legacy-docs").exists()
+        ):
+            raise ValueError(
+                "Both legacy manual directories exist; inspect the installation."
+            )
         release = Path(
             tempfile.mkdtemp(
                 prefix=(build.get("commit") or "local")[:12] + "-", dir=releases
@@ -311,6 +350,10 @@ def install(source, home=None, *, with_vault=False, with_tui=False):
                         "Optional TUI installation timed out; existing installation retained."
                     ) from exc
                 atomic_file(release / "tui-support.json", b'{"optional_tui": true}\n')
+            if fresh is not None and not host_file_open_policy.still_fresh(
+                fresh, root_identity, lock_fd
+            ):
+                fresh = None
             # Readers/install-info are optional: ship prebuilt manuals.
             man = home / ".local/share/man/man1/oc-box.1"
             info = home / ".local/share/info/oc-box.info"
@@ -318,14 +361,10 @@ def install(source, home=None, *, with_vault=False, with_tui=False):
             atomic_file(info, (release / "docs/oc-box.info").read_bytes())
             completion = home / ".local/share/bash-completion/completions/oc-box"
             atomic_file(completion, (release / COMPLETION_FILE).read_bytes())
-            binary = home / ".local/bin/oc-box"
+            binary = home / host_file_open_policy.LAUNCHER
             # A running launcher keeps this exact immutable release path. It
             # never lazy-loads modules from a half-updated or newer directory.
-            wrapper = (
-                "#!/bin/sh\nexec python3 "
-                + shlex.quote(str(release / "oc_box.py"))
-                + ' "$@"\n'
-            )
+            wrapper = host_file_open_policy.launcher_bytes(release)
             link = target / ".current-next"
             link.unlink(missing_ok=True)
             link.symlink_to(release.relative_to(target), target_is_directory=True)
@@ -355,7 +394,25 @@ def install(source, home=None, *, with_vault=False, with_tui=False):
                     target_is_directory=name in ("docs", "completions"),
                 )
                 os.replace(temporary, destination)
-            atomic_file(binary, wrapper.encode(), 0o755)
+            if fresh is not None and not host_file_open_policy.still_fresh(
+                fresh, root_identity, lock_fd, auxiliary=False
+            ):
+                fresh = None
+            if fresh is not None:
+                # Do not qualify if a launcher appeared between the last check
+                # and activation (for example from another package manager).
+                try:
+                    atomic_file(binary, wrapper, 0o755, replace=False)
+                except OSError:
+                    # Preserve normal activation when the filesystem cannot
+                    # perform a no-replacement write. The default stays off.
+                    fresh = None
+            if fresh is None:
+                atomic_file(binary, wrapper, 0o755)
+            else:
+                file_open_enabled = host_file_open_policy.record_fresh(
+                    fresh, root_identity, lock_fd, release
+                )
         finally:
             if not activated:
                 shutil.rmtree(release)
@@ -383,6 +440,11 @@ def install(source, home=None, *, with_vault=False, with_tui=False):
                 + "'."
             )
     print(f"Installed {binary} ({build['version']})")
+    if file_open_enabled:
+        print(
+            "Ctrl-click host file opening is on for supported native TUIs. "
+            "Use --no-host-file-open to disable it for a client."
+        )
     print(f"Installed manual pages: {man} and {info}")
     print(f"Installed Bash completion: {completion}")
     print("Enable in this Bash shell: source <(oc-box completion bash)")

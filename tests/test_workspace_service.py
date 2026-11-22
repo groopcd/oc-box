@@ -1442,6 +1442,43 @@ class WorkspaceServiceTests(unittest.TestCase):
         self.assertIn("ses_shared", tui.call_args.args[0])
         prepare.assert_not_called()
 
+    def test_additional_native_clients_choose_host_open_independently_of_owner(self):
+        self.data["opencode_version"] = "2.3.2"
+        self.connection["version"] = "2.3.2"
+        box.atomic_json(self.path, self.data)
+        before = self.path.read_bytes()
+        with (
+            box.workspace_lock(self.path),
+            patch.object(box, "check_backend"),
+            patch.object(service, "controller_running", return_value=True),
+            patch.object(
+                service, "attach", return_value=contextlib.nullcontext(self.connection)
+            ),
+            patch.object(service, "client_command", return_value=[]) as command,
+            patch.object(box, "run_native_tui", return_value=0),
+            patch.object(box, "detect_opencode_release") as native,
+            patch.object(box, "prepare_runtime") as prepare,
+            patch.object(vault, "hidden") as prompt,
+            patch.object(box.sys.stdin, "isatty", return_value=True),
+            patch.object(box.sys.stdout, "isatty", return_value=True),
+            patch("oc_box.host_drop.preflight", return_value="konsole"),
+            patch("oc_box.host_file_open_policy.enabled", return_value=True),
+        ):
+            for options, wanted in (
+                (["--no-host-file-open"], False),
+                (["--host-file-open"], True),
+                ([], True),
+            ):
+                with self.subTest(options=options):
+                    self.assertEqual(
+                        box.main(["--workspace", self.data["id"], *options]), 0
+                    )
+                    self.assertIs(command.call_args.kwargs["file_preview"], wanted)
+        native.assert_not_called()
+        prepare.assert_not_called()
+        prompt.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), before)
+
     def test_invalid_web_options_or_v1_fail_before_startup_and_credentials(self):
         with (
             patch.object(box, "detect_opencode_release", return_value="1.19.5"),

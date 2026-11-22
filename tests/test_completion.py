@@ -308,6 +308,17 @@ fi
             with self.subTest(command=command):
                 self.assertEqual(self.complete(command, "--image-p"), [])
 
+    def test_host_open_is_offered_only_for_native_launches(self):
+        for prefix in ((), ("start",), ("reset",)):
+            self.assertEqual(self.complete(*prefix, "--host-fi"), ["--host-file-open"])
+            self.assertEqual(
+                self.complete(*prefix, "--no-host-fi"), ["--no-host-file-open"]
+            )
+        for command in ("web", "terminal", "tui", "preferences", "attach", "status"):
+            with self.subTest(command=command):
+                self.assertEqual(self.complete(command, "--host-fi"), [])
+                self.assertEqual(self.complete(command, "--no-host-fi"), [])
+
     def test_host_drop_is_offered_only_for_start_and_reset_tui_clients(self):
         self.assertEqual(self.complete("--host-d"), ["--host-drop"])
         self.assertEqual(self.complete("--no-host-d"), ["--no-host-drop"])

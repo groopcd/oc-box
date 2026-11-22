@@ -325,7 +325,10 @@ their checkout ownership distinct from unrelated source and flat installations.
   refusals. No public API proves future composer attachment behavior. Do not
   reuse this eligibility policy as a shortcut for unrelated compatibility guards.
 - `file_preview*.py` / `file_preview_tui.tsx` / `file_open_formats.py`:
-  experimental host open, per native 2.3.x TUI opt-in. Require a fresh
+  experimental host open, per native 2.3.x TUI CLI selection. Only verified
+  fresh GitHub installations get an automatic default, never a markerless
+  upgrade, wheel, source checkout or restored workspace. Keep the owner-bound
+  installation record out of archives. Require a fresh
   matched Ctrl-click from host terminal input and native assistant link
   hit-testing. Child output must not independently grant file opens. Validate
   mount/descriptor boundaries, bound each read and transfer, and open only

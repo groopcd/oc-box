@@ -263,6 +263,22 @@ See the separate [required checks](docs/testing.md#experimental-transparent-nati
 unit/native fixtures are not new desktop/rootless-Podman acceptance or a blanket
 security certification.
 
+## Native TUI Ctrl-click host opening
+
+Only a verified fresh GitHub installation gets an automatic host-opening
+default. Existing installs and markerless package/source copies remain off
+unless the caller requests `--host-file-open`. The owner-bound installation
+record is not workspace, backup, or restore data. `--no-host-file-open` opts
+out for the current client; neither command-line option affects other clients.
+
+An eligible client still needs direct Konsole or Yakuake, native OpenCode
+2.3.x, verified project/home mounts, and a private staging directory. Seeing an
+assistant link or starting a client with host opening enabled does not authorize
+a transfer. The host relay requires a fresh matched Ctrl-click and bounds the
+one-use transfer. The result is a private copy, not a share or a write-back.
+Use this feature only with a workspace you trust to honor the click. See the
+[format, mount and lifetime limits](docs/cli.md#experimental-ctrl-click-host-file-opening).
+
 ## Opt-in native TUI host clipboard
 
 `--host-clipboard` separately enables a host clipboard reader for this and future

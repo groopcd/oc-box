@@ -83,7 +83,13 @@ _OPTION_GROUPS = {
     "sync-resources": ("Container resource limits", _RESOURCE_KEYS),
     "native": (
         "Native terminal UI",
-        ("image_preview", "host_drop", "host_clipboard", "host_clipboard_symlinks"),
+        (
+            "image_preview",
+            "host_file_open",
+            "host_drop",
+            "host_clipboard",
+            "host_clipboard_symlinks",
+        ),
     ),
     "vault": ("Credential delivery", ("no_vault",)),
     "logging": (

@@ -439,6 +439,14 @@ def check(directory, *, with_vault=False, with_tui=False):
             assert option in log_help, option
         begin_help = run(cli, "start", "--help")
         assert "--image-preview" in begin_help and "--delete-sessions" not in begin_help
+        assert "--host-file-open" in begin_help and "--no-host-file-open" in begin_help
+        run(
+            python,
+            "-I",
+            "-c",
+            "from oc_box import oc_box as box; "
+            "assert not box.effective_host_file_open(box.parser().parse_args([]), {})",
+        )
         for option in (
             "--journald",
             "--no-journald",

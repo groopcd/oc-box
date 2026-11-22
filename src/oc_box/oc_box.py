@@ -484,6 +484,43 @@ def effective_host_drop(args):
     return bool(getattr(args, "_host_drop_enabled", getattr(args, "host_drop", False)))
 
 
+def effective_host_file_open(args, data):
+    """The owning launcher and attached native clients resolve this separately."""
+    requested = getattr(args, "host_file_open", None)
+    if requested is not None:
+        return requested is True
+    if "restored_from" in data:
+        return False
+    if __package__:
+        from . import host_file_open_policy
+    else:
+        import host_file_open_policy
+    return host_file_open_policy.enabled(
+        PACKAGE, home=Path.home(), registry=state_root()
+    )
+
+
+def validate_host_file_open(args, version=None, data=None):
+    if getattr(args, "host_file_open", None) is not True:
+        return
+    if __package__:
+        from . import file_preview
+    else:
+        import file_preview
+    reason = file_preview.client_incompatibility(version)
+    if reason is not None:
+        raise BoxError(
+            "--host-file-open requires an interactive native OpenCode 2.3.x "
+            f"TUI in direct Konsole or Yakuake ({reason})."
+        )
+    if getattr(args, "podman_arg", None) or (
+        data
+        and data.get("podman_args")
+        and not getattr(args, "clear_podman_args", False)
+    ):
+        raise BoxError("--host-file-open cannot be used with custom Podman arguments.")
+
+
 def configure_host_clipboard(args, version=None):
     """Discover the host helper before unlock/reset, never read its clipboard."""
     if not effective_host_clipboard(args):
@@ -3385,6 +3422,7 @@ def launch_environment(path, data, args, *, image_preview_snapshot=None):
     if version is None:
         with loading_stage("Checking OpenCode version", stage="version"):
             version = detect_opencode_release()
+    validate_host_file_open(args, version, data)
     if getattr(args, "host_drop", None) is True:
         validate_host_drop(version)
     configure_host_clipboard(args, version)
@@ -3784,7 +3822,7 @@ def launch_client(path, data, args, version, exported, owner=None):
                     command,
                     interactive=True,
                     ui_owner=True,
-                    file_preview=True,
+                    file_preview=effective_host_file_open(args, data),
                 )
                 if owner
                 else exec_command(data, command, interactive=True),
@@ -4186,6 +4224,21 @@ def parser():
         "--image-preview",
         action="store_true",
         help="V2 owning start/reset TUI only: enable prompt/session image previews for this owner without changing saved CLI preferences",
+    )
+    file_open_choice = result.add_mutually_exclusive_group()
+    file_open_choice.add_argument(
+        "--host-file-open",
+        action="store_const",
+        const=True,
+        default=None,
+        help="enable Ctrl-click opening of private host-side file copies for this native TUI client",
+    )
+    file_open_choice.add_argument(
+        "--no-host-file-open",
+        dest="host_file_open",
+        action="store_const",
+        const=False,
+        help="disable Ctrl-click host opening for this native TUI client",
     )
     host_drop_choice = result.add_mutually_exclusive_group()
     host_drop_choice.add_argument(
@@ -4681,6 +4734,17 @@ def _main_command(args, argv):
         raise BoxError(
             "--image-preview applies only to an owning start/reset TUI launch."
         )
+    if getattr(args, "host_file_open", None) is not None and (
+        args.command not in ("start", "reset")
+        or args.status
+        or args.about
+        or args.version
+        or args.json
+    ):
+        raise BoxError(
+            "--host-file-open/--no-host-file-open apply only to native start/reset TUI clients."
+        )
+    validate_host_file_open(args)
     if args.host_drop is not None and (
         args.command not in ("start", "reset")
         or args.status
@@ -5067,6 +5131,7 @@ def _main_command(args, argv):
             raise BoxError("--no-vault requires native OpenCode 2.x.")
         if args.image_preview:
             image_preview_snapshot = validate_image_preview(version)
+        validate_host_file_open(args, version)
         if args.host_drop is True:
             validate_host_drop(version)
         configure_host_clipboard(args, version)
@@ -5162,6 +5227,7 @@ def _main_command(args, argv):
                 raise BoxError(
                     "An active V2 workspace accepts additional TUI clients with selectors/--resume only; change session/configuration after the owner exits."
                 )
+            validate_host_file_open(args, data.get("opencode_version"), data)
             configure_host_drop(path, data, args, data.get("opencode_version"))
             configure_host_clipboard_preferences(
                 path, data, args, data.get("opencode_version")
@@ -5186,7 +5252,7 @@ def _main_command(args, argv):
                         ),
                     ],
                     interactive=True,
-                    file_preview=True,
+                    file_preview=effective_host_file_open(args, data),
                 )
                 return run_native_tui(
                     data,
@@ -5218,10 +5284,16 @@ def _main_command(args, argv):
                 return workspace_service.web_session(
                     sys.modules[__name__], data, connection, args
                 )
-    if args.image_preview or args.host_drop is True or effective_host_clipboard(args):
+    if (
+        args.image_preview
+        or getattr(args, "host_file_open", None) is True
+        or args.host_drop is True
+        or effective_host_clipboard(args)
+    ):
         version = getattr(args, "_opencode_release", None) or detect_opencode_release()
         if args.image_preview and image_preview_snapshot is None:
             image_preview_snapshot = validate_image_preview(version)
+        validate_host_file_open(args, version, data)
         args._opencode_release = version
         configure_host_clipboard(args, version)
     if args.command in ("start", "reset"):

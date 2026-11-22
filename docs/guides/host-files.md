@@ -21,6 +21,8 @@ and [direct messages](#queue-a-direct-image-message).
 
 To open a container file on the host without a live share, see
 [experimental Ctrl-click host opening](../cli.md#experimental-ctrl-click-host-file-opening).
+Use `--host-file-open` or `--no-host-file-open` for the current native TUI client.
+This is the opposite transfer direction from the host imports below.
 
 **Choose the consent boundary first.** Live sharing needs an initial typed
 `share` disclosure consent. On supported TUI clients, host importing is enabled

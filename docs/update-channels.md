@@ -170,12 +170,14 @@ For development, explicitly select `--devel`; the manager and vault are independ
 optional features:
 
 ```sh
-curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-tui --with-vault
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/devel/install.sh | sh -s -- --devel --with-tui --with-vault
 ```
 
 Review the downloaded installer before running it if appropriate. Its source URL
-is not the target release: fetching the entrypoint from `master` does not mean
-installing moving master HEAD. Repeating the bootstrap without a selector does
+is not the target release: neither bootstrap installs moving branch HEAD. The
+development bootstrap can establish the Ctrl-click default on a verified fresh
+installation; an older bootstrap still installs the release but leaves that
+default off. Repeating the bootstrap without a selector does
 not reset a saved development choice. Selecting an older launcher warns that
 workspace/session state is not rolled back.
 

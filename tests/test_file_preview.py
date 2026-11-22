@@ -8,6 +8,8 @@ from unittest.mock import patch
 
 from oc_box import file_preview, file_preview_host, oc_box as box, workspace_service
 
+RETIRED_SWITCH = "OC_BOX_EXPERIMENTAL_FILE_OPEN"
+
 
 class PreviewAdmissionTests(unittest.TestCase):
     def setUp(self):
@@ -73,23 +75,108 @@ class PreviewAdmissionTests(unittest.TestCase):
             **kwargs,
         )
 
+    def test_cli_flags_are_mutually_exclusive_and_native_launch_only(self):
+        for prefix in ([], ["start"], ["reset"], ["--project", "/synthetic", "start"]):
+            with self.subTest(prefix=prefix):
+                parser = box.parser()
+                self.assertIsNone(parser.parse_args(prefix).host_file_open)
+                self.assertIs(
+                    parser.parse_args([*prefix, "--host-file-open"]).host_file_open,
+                    True,
+                )
+                self.assertIs(
+                    parser.parse_args([*prefix, "--no-host-file-open"]).host_file_open,
+                    False,
+                )
+        with patch("sys.stderr"), self.assertRaises(SystemExit) as conflict:
+            box.parser().parse_args(["--host-file-open", "--no-host-file-open"])
+        self.assertEqual(conflict.exception.code, 2)
+        with patch.object(box, "check_backend") as backend:
+            for command in (
+                "stop",
+                "sync",
+                "terminal",
+                "status",
+                "--status",
+                "--version",
+            ):
+                with (
+                    self.subTest(command=command),
+                    self.assertRaisesRegex(box.BoxError, "only to native start/reset"),
+                ):
+                    box.main([command, "--host-file-open"])
+            backend.assert_not_called()
+
+    def test_explicit_enable_rejects_noninteractive_launch_before_backend(self):
+        with (
+            patch.object(box.sys.stdin, "isatty", return_value=False),
+            patch.object(box, "detect_opencode_release") as native,
+            patch.object(box, "check_backend") as backend,
+            self.assertRaisesRegex(box.BoxError, "not-interactive"),
+        ):
+            box.main(["start", "--host-file-open"])
+        native.assert_not_called()
+        backend.assert_not_called()
+
+    def test_explicit_enable_rejects_old_versions_and_incompatible_arguments(self):
+        args = box.parser().parse_args(["reset", "--host-file-open"])
+        with (
+            patch.object(box.sys.stdin, "isatty", return_value=True),
+            patch.object(box.sys.stdout, "isatty", return_value=True),
+            patch("oc_box.host_drop.preflight", return_value="konsole"),
+        ):
+            with self.assertRaisesRegex(box.BoxError, "native-version-unsupported"):
+                box.validate_host_file_open(args, "2.2.6")
+            with self.assertRaisesRegex(box.BoxError, "custom Podman arguments"):
+                box.validate_host_file_open(
+                    args, "2.3.2", {"podman_args": ["synthetic-option"]}
+                )
+            args.clear_podman_args = True
+            box.validate_host_file_open(
+                args, "2.3.2", {"podman_args": ["synthetic-option"]}
+            )
+
+    def test_automatic_installation_default_does_not_authorize_restored_workspace(self):
+        with (
+            patch("oc_box.host_file_open_policy.enabled", return_value=True) as default,
+            patch.dict(os.environ, {RETIRED_SWITCH: "0"}),
+        ):
+            args = box.parser().parse_args([])
+            self.assertTrue(box.effective_host_file_open(args, self.data))
+            self.assertFalse(
+                box.effective_host_file_open(args, {**self.data, "restored_from": {}})
+            )
+            self.assertFalse(
+                box.effective_host_file_open(
+                    box.parser().parse_args(["--no-host-file-open"]), self.data
+                )
+            )
+            self.assertEqual(default.call_count, 1)
+
     def test_only_canonical_stable_native_23_is_eligible(self):
         for release in ("2.3.0", "2.3.1", "2.3.2", "2.3.79"):
             self.assertTrue(file_preview.supports(release))
         for release in ("2.2.7", "2.4.0", "2.3.02", "2.3.0-beta.1", "2.3.2\n", None):
             self.assertFalse(file_preview.supports(release))
 
-    def test_absent_opt_in_noninteractive_and_non_tui_do_not_inspect(self):
-        with patch.object(box, "podman") as engine:
-            with patch.dict(os.environ, {file_preview.FLAG: "0"}):
-                self.assertNotIn(file_preview.ROOTS, " ".join(self.command()))
-            with patch.dict(os.environ, {file_preview.FLAG: "1"}):
-                for command in (
-                    self.command(file_preview=False),
-                    self.command(interactive=False),
-                    self.command(["python3", "-I", "-S"]),
-                ):
-                    self.assertNotIn(file_preview.ROOTS, " ".join(command))
+    def test_retired_switch_and_private_marker_cannot_activate_off_clients(self):
+        with (
+            patch.dict(
+                os.environ, {RETIRED_SWITCH: "1", file_preview.ROOTS: "synthetic-roots"}
+            ),
+            patch.object(box, "podman") as engine,
+            patch.object(box.sys.stdin, "isatty", return_value=False),
+        ):
+            for command in (
+                self.command(file_preview=False),
+                self.command(interactive=False),
+                self.command(),
+                self.command(["python3", "-I", "-S"]),
+            ):
+                self.assertNotIn(file_preview.ROOTS, " ".join(command))
+                self.assertNotIn(RETIRED_SWITCH, command.environment)
+                self.assertNotIn(file_preview.ROOTS, command.environment)
+                self.assertFalse(hasattr(command, "preview_host_open"))
             engine.assert_not_called()
 
     def test_opted_in_client_uses_immutable_id_and_only_supplies_bound_roots(self):
@@ -98,7 +185,7 @@ class PreviewAdmissionTests(unittest.TestCase):
             for item in (self.info, self.volume)
         ]
         with (
-            patch.dict(os.environ, {file_preview.FLAG: "1"}),
+            patch.dict(os.environ, {RETIRED_SWITCH: "0"}),
             patch.object(box, "podman", side_effect=results) as engine,
             patch.object(
                 file_preview, "_mount_identity", side_effect=[("1", "2"), ("3", "4")]
@@ -117,7 +204,7 @@ class PreviewAdmissionTests(unittest.TestCase):
         self.assertEqual(args, ("container", "inspect", self.data["container"]))
         self.assertTrue(options["private"])
         self.assertLessEqual(options["timeout"], 5)
-        self.assertNotIn(file_preview.FLAG, options["env"])
+        self.assertNotIn(RETIRED_SWITCH, options["env"])
         self.assertIn(self.container_id, command)
         values = json.loads(command[command.index("-c") + 2])
         self.assertEqual(
@@ -141,7 +228,9 @@ class PreviewAdmissionTests(unittest.TestCase):
         for entries in cases:
             with (
                 self.subTest(entries=entries),
-                patch.dict(os.environ, {file_preview.FLAG: "1"}),
+                patch("oc_box.host_drop.preflight", return_value="konsole"),
+                patch.object(box.sys.stdin, "isatty", return_value=True),
+                patch.object(box.sys.stdout, "isatty", return_value=True),
                 patch.object(
                     box,
                     "podman",
@@ -167,7 +256,6 @@ class PreviewAdmissionTests(unittest.TestCase):
             (self.data, {**self.connection, "version": "2.3.0"}),
         )
         with (
-            patch.dict(os.environ, {file_preview.FLAG: "1"}),
             patch.object(box, "podman") as engine,
             patch("builtins.print"),
         ):
@@ -223,9 +311,8 @@ class PreviewAdmissionTests(unittest.TestCase):
         )
 
     def test_kitty_does_not_get_host_open_even_with_a_desktop(self):
-        verified = (self.container_id, {"roots": [self.project, self.data["home"]]})
         with (
-            patch.object(file_preview, "client_binding", return_value=verified),
+            patch.object(file_preview, "client_binding") as binding,
             patch.object(file_preview, "host_export_mounts") as inventory,
             patch.object(file_preview_host, "readiness_reason", return_value=None),
             patch("oc_box.host_drop.preflight", return_value="kitty"),
@@ -235,6 +322,7 @@ class PreviewAdmissionTests(unittest.TestCase):
             command = self.command()
         self.assertNotIn(file_preview.ROOTS, " ".join(command))
         self.assertFalse(hasattr(command, "preview_host_open"))
+        binding.assert_not_called()
         inventory.assert_not_called()
 
     def test_reports_desktop_and_engine_refusals_without_swallowing_native_tui(self):

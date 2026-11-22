@@ -9,6 +9,7 @@ import tempfile
 import textwrap
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 APP = Path(__file__).resolve().parents[1]
 UPSTREAM = "https://github.com/groopcd/oc-box.git"
@@ -448,6 +449,43 @@ class ChannelBootstrapTests(unittest.TestCase):
                 self.assert_refused(result)
                 self.assertFalse(self.api_log.exists())
                 self.assertFalse(self.git_log.exists())
+
+    def test_supported_bootstrap_receives_exact_commit_and_active_state_selectors(self):
+        self.git("checkout", "--quiet", "devel")
+        proof = self.remote / "src/oc_box/install.py"
+        proof.write_text(
+            'BOOTSTRAP_OPTION = "--verified-release-commit"\n'
+            'raise RuntimeError("The capability probe must not execute installer code")\n'
+        )
+        self.git("commit", "--quiet", "-am", "Synthetic commit-aware installer")
+        commit = self.git("rev-parse", "HEAD")
+        self.git("tag", "v1.7.53.dev0")
+        self.discovery["pages"] = [[release("v1.7.53.dev0", prerelease=True)]]
+        selected = {
+            "XDG_DATA_HOME": str(self.root / "different data"),
+            "XDG_STATE_HOME": str(self.root / "different state"),
+            "XDG_CACHE_HOME": str(self.root / "different cache"),
+            "OC_BOX_STATE_HOME": str(self.root / "actual registry"),
+        }
+        with patch.dict(os.environ, selected):
+            result = self.run_bootstrap("--devel")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        installed = json.loads(self.installed.read_text())
+        self.assertEqual(
+            installed["argv"],
+            [
+                "--devel",
+                "--release-version",
+                "1.7.53.dev0",
+                "--verified-release-commit",
+                commit,
+            ],
+        )
+        self.assertEqual(installed["commit"], commit)
+        self.assertEqual(
+            {name: installed["env"].get(name) for name in selected}, selected
+        )
+        self.assert_sanitized(installed["env"])
 
     def test_legacy_stable_without_tui_refuses_after_verified_checkout(self):
         for args in (

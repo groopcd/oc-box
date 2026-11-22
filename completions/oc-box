@@ -31,7 +31,7 @@ _oc_box()
     local commands='start stop sync reset repair terminal web tui share attach preferences upgrade secrets credentials backup backup-info restore purge list distros status logs doctor completion'
     local selectors='--project --workspace'
     local launch_logs='--journald --no-journald --log-dir --lifecycle-diagnostics --verbose'
-    local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks'
+    local launch='--distro --new --resume --import-session --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --host-file-open --no-host-file-open --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks'
     local help='-h --help' options
     COMPREPLY=()
     (( COMP_CWORD > 0 )) && prev=${COMP_WORDS[COMP_CWORD-1]}
@@ -124,7 +124,7 @@ _oc_box()
 
     case $command in
         start) options="$help $selectors $launch $launch_logs" ;;
-        reset) options="$help $selectors $launch_logs --distro --new --resume --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks" ;;
+        reset) options="$help $selectors $launch_logs --distro --new --resume --model --cpus --memory --pids-limit --device --podman-arg --clear-devices --clear-podman-args --no-vault --image-preview --host-file-open --no-host-file-open --host-drop --no-host-drop --host-clipboard --no-host-clipboard --host-clipboard-symlinks --no-host-clipboard-symlinks" ;;
         sync) options="$help $selectors $launch_logs --cpus --memory --pids-limit" ;;
         stop) options="$help $selectors $launch_logs" ;;
         repair) options="$help $selectors" ;;

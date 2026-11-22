@@ -60,7 +60,7 @@ see [private-output troubleshooting](cli.md#private-output-capture-and-uv-python
 **First installation — recommended GitHub path with vault and TUI:**
 
 ```sh
-curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-vault --with-tui
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/devel/install.sh | sh -s -- --devel --with-vault --with-tui
 oc-box --version
 oc-box doctor
 ```
@@ -70,6 +70,11 @@ does not yet include the dashboard. Dependencies stay private to the GitHub
 installation. This does not initialize or unlock a vault, change credential
 policy, launch the dashboard or start a workspace. The command downloads and
 runs the public installer; review it first if preferred.
+
+For a verified fresh installation the current development bootstrap sets a
+default for [Ctrl-click host opening](cli.md#experimental-ctrl-click-host-file-opening).
+Reinstalling or upgrading an unmarked installation does not set that default.
+Ordinary PyPI installs and older bootstraps do not establish it.
 
 **Already installed?** Use the existing installation, without rerunning curl:
 

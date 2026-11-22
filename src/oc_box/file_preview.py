@@ -1,4 +1,4 @@
-"""Host opt-in and mount attestation for the native in-container experiment."""
+"""Mount attestation for Ctrl-click opening in a native workspace TUI."""
 
 import json
 import os
@@ -6,6 +6,7 @@ import posixpath
 import re
 import stat
 import subprocess
+import sys
 import unicodedata
 
 if __package__:
@@ -14,7 +15,6 @@ else:
     from file_preview_host import InactiveMountSource
 
 RELEASE = re.compile(r"2\.3\.(?:0|[1-9][0-9]*)")
-FLAG = "OC_BOX_EXPERIMENTAL_FILE_OPEN"
 ROOTS = "OC_BOX_FILE_PREVIEW_ROOTS"
 NOTICE = (
     "oc-box: Experimental Ctrl-click host opening requires an ordinary "
@@ -24,6 +24,24 @@ NOTICE = (
 
 def supports(release):
     return isinstance(release, str) and RELEASE.fullmatch(release) is not None
+
+
+def client_incompatibility(release=None):
+    """Cheap terminal/version admission before any private store inspection."""
+    if release is not None and not supports(release):
+        return "native-version-unsupported"
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return "not-interactive"
+    if __package__:
+        from . import host_drop
+    else:
+        import host_drop
+    try:
+        profile = host_drop.preflight(release)
+    except host_drop.DropError:
+        return "terminal-profile-unverified"
+    # Kitty's optional remote control can inject terminal input.
+    return None if profile == "konsole" else "terminal-profile-unsupported"
 
 
 def _root(path):
@@ -132,9 +150,7 @@ def _volume_source(box, data, volume, source):
 
 
 def client_binding(box, data, connection):
-    """Read-only host admission for one already-owned native TUI client."""
-    if os.environ.get(FLAG) != "1":
-        return None
+    """Read-only host admission for one opted-in, already-owned TUI client."""
     binding = None
     release = data.get("opencode_version")
     if (

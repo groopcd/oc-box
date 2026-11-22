@@ -2696,13 +2696,38 @@ oc-box --project ~/devel/demo --image-preview
 oc-box reset --project ~/devel/demo --image-preview
 ```
 
+### --host-file-open
+
+Request Ctrl-click host file opening for this native `start` (including the
+implicit command) or `reset` TUI client. Applies to an owning client or an
+additional `start` client; it does not change a running owner's settings. A
+positive request requires interactive native OpenCode 2.3.x under direct
+Konsole or Yakuake and is incompatible with custom Podman arguments.
+If actual mount or desktop admission later fails, host opening stays off.
+
+### --no-host-file-open
+
+Disable Ctrl-click host file opening for this native `start` or `reset` TUI
+client, even if the installation default is on. Neither flag is saved or
+changes another client.
+
 ### Experimental Ctrl-click host file opening
 
-This is an unreleased development feature. Opt in for one native TUI client
-running OpenCode 2.3.x:
+The current development-channel GitHub bootstrap defaults this feature on
+only when it verifies a fresh installation. Existing installs, upgrades and
+older bootstrap scripts do not acquire a new default;
+later upgrades can retain a previously established default. Without verified
+install evidence, including ordinary PyPI `pipx`/`uv`/`pip` installs and source
+checkouts, the default is off. Automatic mode skips unsupported clients and
+does not opt a restored workspace in. Neither ordinary launch nor a host
+settings restore creates a fresh-install default. The former environment
+switch is no longer used.
+
+Turn it on or off for one native TUI client:
 
 ```sh
-OC_BOX_EXPERIMENTAL_FILE_OPEN=1 oc-box --project ~/devel/demo
+oc-box start --project ~/devel/demo --host-file-open
+oc-box start --project ~/devel/demo --no-host-file-open
 ```
 
 **Ctrl-left-click** a file link in an assistant reply to open a private local
@@ -2751,7 +2776,7 @@ remove them sooner. Copies rejected before calling the opener
 are removed immediately. Older experimental staging directories are not
 adopted or cleaned by the new launcher.
 
-The switch is not saved and does not change host OpenCode or terminal settings.
+Neither switch changes host OpenCode or terminal settings.
 If the existing owner was started before upgrading oc-box, exit it normally and
 start it again so the container gets the updated plugin. This is a private
 native renderer integration that may stop working after a 2.3.x update or in

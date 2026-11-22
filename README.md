@@ -65,7 +65,7 @@ for all methods.
 **First installation — recommended GitHub path with vault and TUI:**
 
 ```sh
-curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/master/install.sh | sh -s -- --devel --with-vault --with-tui
+curl -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/groopcd/oc-box/devel/install.sh | sh -s -- --devel --with-vault --with-tui
 oc-box --version
 oc-box doctor
 ```
@@ -74,7 +74,9 @@ This explicitly selects a **published development release**, because stable
 does not yet include the dashboard. Dependencies stay private to the GitHub
 installation. This does not initialize or unlock a vault, change credential
 policy, launch the dashboard or start a workspace. The command downloads and
-runs the public installer; review it first if preferred.
+runs the public installer; review it first if preferred. Only a verified fresh
+install through this bootstrap turns on the
+[Ctrl-click host opening default](docs/cli.md#experimental-ctrl-click-host-file-opening).
 
 **Already installed?** Use the existing installation, without rerunning curl:
 

@@ -276,6 +276,35 @@ retain their own revisions and scope.
 Keep these scopes separate; no broader checklist or host pass is established
 by the synthetic checks.
 
+### Ctrl-click CLI and installation defaults
+
+Verify the launcher options on implicit and explicit start, reset, and an
+additional native TUI with an existing owner. The retired environment input
+cannot opt in. Incompatible commands or explicit unsupported terminals refuse;
+unsupported automatic clients use ordinary native behavior. Default-off and
+explicit opt-out must not inspect preview mounts or supply private relay
+metadata. Keep the existing fresh-click, immutable mount/descriptor, opener,
+and no-write-back tests.
+
+Exercise verified fresh GitHub setup versus upgrade, early failure,
+reinstallation, existing/symlinked state, and an unverified installation
+record. Ordinary wheel or editable/source launches are not fresh-install
+evidence. The new-install default must not be reactivated by restore; attaching
+never changes another native client's choice.
+
+Before publishing this follow-up, review an exact-source disposable Linux host
+run with local rootless Podman and a native OpenCode 2.3.x TUI in direct
+Konsole/Yakuake. Check fresh flagless opening, an existing install remaining
+off on upgrade, explicit enable and a second-client opt-out. Observe fresh
+copies on two deliberate Ctrl-clicks and no open from unclicked output.
+Record native, terminal, Podman, source and installation provenance. Keep
+terminal/clipboard compatibility and ordinary owner exit/history distinct
+from synthetic PTY and package fixture results. A disposable QEMU guest with
+its own local rootless Podman and real Konsole can exercise this with scripted
+desktop input; identify that scope separately from a physical-desktop run.
+The older scoped Yakuake reports above are not evidence for the new installer
+default.
+
 ### Experimental browser attachment adapter
 
 `tests/test_web_attachments.py`, `tests/web_attachments_browser.mjs` and

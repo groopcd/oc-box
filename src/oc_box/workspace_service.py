@@ -548,58 +548,45 @@ def client_command(
             names["OC_BOX_UI_STATE_GENERATION"] = binding["generation"]
         if file_preview:
             if __package__:
-                from . import file_preview as preview
+                from . import file_preview as preview, file_preview_host
             else:
                 import file_preview as preview
-            verified = preview.client_binding(box, data, connection)
+                import file_preview_host
+            release = data.get("opencode_version")
+            verified = (
+                preview.client_binding(box, data, connection)
+                if preview.supports(release)
+                and preview.client_incompatibility(release) is None
+                else None
+            )
             if verified is not None:
                 # Use the inspected immutable container ID, not a mutable name.
                 container, mounts = verified
-                reason = "not-interactive"
-                if sys.stdin.isatty() and sys.stdout.isatty():
-                    if __package__:
-                        from . import file_preview_host, host_drop
-                    else:
-                        import file_preview_host
-                        import host_drop
-                    try:
-                        profile = host_drop.preflight(data["opencode_version"])
-                    except host_drop.DropError:
-                        reason = "terminal-profile-unverified"
-                    else:
-                        # Kitty's optional TTY remote control lets child
-                        # output inject bytes resembling a real mouse report.
-                        reason = (
-                            file_preview_host.readiness_reason()
-                            if profile == "konsole"
-                            else "terminal-profile-unsupported"
-                        )
-                    if reason is None:
-                        refusals = []
-                        sources = preview.host_export_mounts(
-                            box, data, container, refusals=refusals
-                        )
-                        reason = (
-                            (refusals[0] if refusals else "mount-inventory-unverified")
-                            if sources is None
-                            else file_preview_host.readiness_reason(host_mounts=sources)
-                        )
-                        if reason is None:
-                            command[-1] = container
-                            names[preview.ROOTS] = json.dumps(mounts)
+                reason = file_preview_host.readiness_reason()
+                if reason is None:
+                    refusals = []
+                    sources = preview.host_export_mounts(
+                        box, data, container, refusals=refusals
+                    )
+                    reason = (
+                        (refusals[0] if refusals else "mount-inventory-unverified")
+                        if sources is None
+                        else file_preview_host.readiness_reason(host_mounts=sources)
+                    )
+                if reason is None:
+                    command[-1] = container
+                    names[preview.ROOTS] = json.dumps(mounts)
 
-                            def preview_host_open(kind, candidate):
-                                sources = preview.host_export_mounts(
-                                    box, data, container
-                                )
-                                if sources is None:
-                                    raise file_preview_host.PreviewError(
-                                        "host-mounts-unverified",
-                                        reason="mount-recheck-unverified",
-                                    )
-                                file_preview_host.open_artifact(
-                                    kind, candidate, host_mounts=sources
-                                )
+                    def preview_host_open(kind, candidate):
+                        sources = preview.host_export_mounts(box, data, container)
+                        if sources is None:
+                            raise file_preview_host.PreviewError(
+                                "host-mounts-unverified",
+                                reason="mount-recheck-unverified",
+                            )
+                        file_preview_host.open_artifact(
+                            kind, candidate, host_mounts=sources
+                        )
 
                 if preview_host_open is None:
                     print(

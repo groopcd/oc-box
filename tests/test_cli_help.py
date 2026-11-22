@@ -200,12 +200,13 @@ class CliHelpTests(unittest.TestCase):
 
     def test_each_explicit_command_prints_its_own_scoped_help(self):
         selector_logging = f"{_SELECTORS} {_LAUNCH_LOGGING}"
+        host_file_open = "--host-file-open --no-host-file-open"
         scope = {
             "start": (
                 (
                     f"{selector_logging} --new --resume --import-session --model "
                     "--distro --cpus --memory --pids-limit --device --podman-arg "
-                    "--host-drop --no-vault"
+                    f"--host-drop --no-vault {host_file_open}"
                 ),
                 "--all --delete-sessions --maintenance --credential-mode --check --status --version",
             ),
@@ -213,7 +214,7 @@ class CliHelpTests(unittest.TestCase):
                 (
                     f"{selector_logging} --new --resume --model --distro --cpus "
                     "--memory --pids-limit --device --podman-arg --clear-devices "
-                    "--clear-podman-args --no-vault"
+                    f"--clear-podman-args --no-vault {host_file_open}"
                 ),
                 "--import-session --all --delete-sessions --maintenance",
             ),
@@ -256,6 +257,8 @@ class CliHelpTests(unittest.TestCase):
             with self.subTest(command=command):
                 output = self.help(command, "--help", command=command)
                 show, hide = scope.get(command, ("", ""))
+                if command not in ("start", "reset"):
+                    hide = f"{hide} {host_file_open}"
                 self.assert_options(output, show=f"--help {show}", hide=hide)
 
     def test_start_help_groups_workspace_session_and_logging_options(self):
