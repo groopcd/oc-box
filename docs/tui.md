@@ -794,10 +794,18 @@ child exit, including gaps between dialogs; local focus traversal remains usable
 
 ### Progress and cancellation
 
-The modal shows **named stage + elapsed seconds + an indeterminate progress bar**.
-It does not estimate a byte/time percentage, scan extra data to manufacture a
-total, display raw child output or write a terminal transcript to Logs. Inspection
-shows a bounded metadata projection rather than arbitrary private manifest data.
+The modal shows the **current stage**. For full and portable backup creation,
+it periodically shows how many encrypted bytes have been written for the current
+component, checked by the checksum pass, or packed into the final archive. These
+are per-stage measurements, not source size, percent complete, or proof of
+durable publication. Password-key protection, container stop/commit, and final
+sync and publication have named stages without byte counters. Elapsed time and
+the activity bar do not certify that data is moving.
+
+The dashboard does not do an extra scan to guess a total or ETA, display raw
+child output, or write a terminal transcript to Logs. It shows only the latest
+measurement and discards it on a stage change or cancellation. Inspection shows
+bounded metadata rather than arbitrary private manifest data.
 
 Cancel or Ctrl+C requests the operation child's normal cleanup. The dashboard
 waits for actual exit and verified completion before releasing its busy state.

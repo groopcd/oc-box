@@ -1058,8 +1058,10 @@ observations include:
   framing/queue bounds, atomic size/capacity rejection, uncertainty-aware
   partial-transport failure notices, read-only refusals and no clipboard
   content in journals. Container output must not issue host clipboard writes.
-- In-dashboard backup progress must identify real stages and elapsed time with
-  an indeterminate bar, not fake percentages. Inspect only after explicit action,
+- In-dashboard backup progress must identify real stages and report bounded
+  measured ciphertext bytes during streaming, checksum and packing. Opaque
+  stages show no guessed percentage or ETA; samples never delay authoritative
+  prompts, cancellation or results. Inspect only after explicit action,
   route by bounded envelope structure outside the UI thread, retain editable fresh
   destination suggestions, and refuse authentication without trying another store.
   Cancel/Ctrl+C must latch one interrupt and wait for actual cleanup/exit, including

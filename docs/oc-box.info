@@ -1422,13 +1422,15 @@ Clipboard/navigation shortcuts are fenced until child exit.  For
 password confirmation, click its box or Shift+Tab before typing; queued
 first-password text is discarded.
 
-The operation modal shows the actual named stage, elapsed seconds and an
-indeterminate progress bar, not an invented percentage.  Cancel or
-Ctrl+C requests normal cleanup and waits for real child exit; no
-automatic retry runs.  A backup can stop an unowned source before
-requesting its password, so cancellation can leave that source stopped.
-Workspace full/portable ‘.ocbox’ archives retain the normal CLI
-contracts below: fresh IDs, no overwrite and stopped restores.
+The operation modal shows the actual stage and elapsed time.  Full and
+portable backup creation shows measured encrypted bytes during
+streaming, checksumming, and archive packing.  Stages without a
+measurable total show activity, not an invented percentage or finish
+time.  Cancel or Ctrl+C requests normal cleanup and waits for real child
+exit; no automatic retry runs.  A backup can stop an unowned source
+before requesting its password, so cancellation can leave that source
+stopped.  Workspace full/portable ‘.ocbox’ archives retain the normal
+CLI contracts below: fresh IDs, no overwrite and stopped restores.
 Whole-workspace archives may contain copied config/auth.  Ordinary CLI
 password prompts remain unchanged; Storage removal retains its separate
 reviewed foreground handoff.
@@ -4962,20 +4964,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description3917
 Node: Commands9344
-Node: Options137624
-Node: Lifecycle and persistence194594
-Node: Distribution images196894
-Node: Sessions and recovery201858
-Node: Devices and host permissions208443
-Node: Resource reports210789
-Node: Configuration and environment212900
-Node: Files224281
-Node: Exit status235191
-Node: Examples236599
-Node: Troubleshooting238738
-Node: Installation and manuals250784
-Node: Authors and license260974
-Node: See also261581
+Node: Options137769
+Node: Lifecycle and persistence194739
+Node: Distribution images197039
+Node: Sessions and recovery202003
+Node: Devices and host permissions208588
+Node: Resource reports210934
+Node: Configuration and environment213045
+Node: Files224426
+Node: Exit status235336
+Node: Examples236744
+Node: Troubleshooting238883
+Node: Installation and manuals250929
+Node: Authors and license261119
+Node: See also261726
 
 End Tag Table
 

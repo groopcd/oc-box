@@ -47,6 +47,7 @@ MAX_SMALL = 4 * 1024 * 1024
 # One bounded host payload, with room for the outer age header and frame tags.
 MAX_HOST_CIPHERTEXT = MAX_SMALL + 64 * 1024
 MAX_BACKUP = 16 * 1024**4
+PROGRESS_INTERVAL = 1.0
 
 
 class BackupError(Exception):
@@ -157,12 +158,60 @@ def small_capture(command, *, data=None, timeout=30, tty_errors=False, pass_fds=
         return value
 
 
-def digest(path):
+class _ByteProgress:
+    """Best-effort, absolute bytes for one stage, never a success signal."""
+
+    def __init__(self, callback):
+        self.callback = callback
+        self.count = self.reported = 0
+        self.next_sample = time.monotonic() + PROGRESS_INTERVAL
+
+    def due(self, now):
+        if self.callback is None or now < self.next_sample:
+            return False
+        self.next_sample = now + PROGRESS_INTERVAL
+        return True
+
+    def report(self):
+        if self.callback is None or self.count <= self.reported:
+            return
+        try:
+            self.callback(self.count)
+        except Exception:
+            # Missing telemetry changes no backup result. An intentional
+            # KeyboardInterrupt (cancel/parent loss) still takes the cleanup path.
+            self.callback = None
+        else:
+            self.reported = self.count
+
+    def add(self, count):
+        if self.callback is not None:
+            self.count += count
+            if self.due(time.monotonic()):
+                self.report()
+
+    def sample(self, output):
+        if self.callback is None:
+            return
+        try:
+            self.count = os.fstat(output.fileno()).st_size
+        except OSError:
+            return
+        self.report()
+
+
+def digest(path, *, progress=None):
     checksum = hashlib.sha256()
+    meter = _ByteProgress(progress) if progress is not None else None
     with Path(path).open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             checksum.update(chunk)
-    return {"sha256": checksum.hexdigest(), "bytes": Path(path).stat().st_size}
+            if meter is not None:
+                meter.add(len(chunk))
+    result = {"sha256": checksum.hexdigest(), "bytes": Path(path).stat().st_size}
+    if meter is not None:
+        meter.report()
+    return result
 
 
 def validate_recipients(recipients):
@@ -502,9 +551,21 @@ def pipeline_error(processes, errors):
 
 
 def stream_pipeline(
-    first, second, *, source=None, destination=None, first_fds=(), timeout=3600.0
+    first,
+    second,
+    *,
+    source=None,
+    destination=None,
+    first_fds=(),
+    timeout=3600.0,
+    ciphertext_progress=None,
 ):
-    """Pipe bytes directly; stderr is anonymous memory and never echoed."""
+    """Pipe bytes directly; optionally measure the existing age stdout file."""
+    meter = (
+        _ByteProgress(ciphertext_progress)
+        if ciphertext_progress is not None and destination is not None
+        else None
+    )
     processes = []
     with memory_file() as producer_errors, memory_file() as consumer_errors:
         errors = (producer_errors, consumer_errors)
@@ -535,15 +596,20 @@ def stream_pipeline(
                 codes = [process.poll() for process in processes]
                 if all(code is not None for code in codes):
                     break
-                if time.monotonic() >= until:
+                now = time.monotonic()
+                if now >= until:
                     raise BackupError(
                         "Backup streaming operation timed out; partial data was not activated."
                     )
                 if any(code not in (None, 0) for code in codes):
                     raise pipeline_error(processes, errors)
+                if meter is not None and meter.due(now):
+                    meter.sample(destination)
                 time.sleep(0.02)
             if any(process.returncode for process in processes):
                 raise pipeline_error(processes, errors)
+            if meter is not None:
+                meter.sample(destination)
         except OSError as exc:
             raise BackupError(
                 "Cannot run backup tool; check age, Python, and Podman on the host."
@@ -565,11 +631,14 @@ def stream_pipeline(
                     process.wait()
 
 
-def encrypt_stream(producer, recipient, path):
+def encrypt_stream(producer, recipient, path, *, progress=None):
     with path.open("xb") as output:
         path.chmod(0o600)
         stream_pipeline(
-            producer, ["age", "--encrypt", "--recipient", recipient], destination=output
+            producer,
+            ["age", "--encrypt", "--recipient", recipient],
+            destination=output,
+            ciphertext_progress=progress,
         )
 
 
@@ -588,7 +657,22 @@ def decrypt_stream(path, private, consumer):
         )
 
 
-def pack(directory, output):
+class _ProgressWriter:
+    def __init__(self, output, meter):
+        self.output = output
+        self.meter = meter
+
+    def write(self, data):
+        count = self.output.write(data)
+        if count:
+            self.meter.add(count)
+        return count
+
+
+def pack(directory, output, *, progress=None):
+    meter = _ByteProgress(progress) if progress is not None else None
+    if meter is not None:
+        output = _ProgressWriter(output, meter)
     with tarfile.open(fileobj=output, mode="w|") as archive:
         for path in sorted(directory.iterdir()):
             if path.name not in COMPONENTS or not path.is_file():
@@ -597,6 +681,8 @@ def pack(directory, output):
             info.mode, info.size = 0o600, path.stat().st_size
             with path.open("rb") as stream:
                 archive.addfile(info, stream)
+    if meter is not None:
+        meter.report()
 
 
 @contextlib.contextmanager

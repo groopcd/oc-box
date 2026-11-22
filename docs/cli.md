@@ -1252,8 +1252,10 @@ event-file logging. Clipboard/navigation shortcuts are fenced until child exit.
 For password confirmation, click its box or Shift+Tab before typing; queued
 first-password text is discarded.
 
-The operation modal shows the actual named stage, elapsed seconds and an
-indeterminate progress bar, not an invented percentage. Cancel or Ctrl+C requests
+The operation modal shows the actual stage and elapsed time. Full and portable
+backup creation shows measured encrypted bytes during streaming, checksumming,
+and archive packing. Stages without a measurable total show activity, not an
+invented percentage or finish time. Cancel or Ctrl+C requests
 normal cleanup and waits for real child exit; no automatic retry runs. A backup
 can stop an unowned source before requesting its password, so cancellation can
 leave that source stopped. Workspace full/portable `.ocbox` archives retain the

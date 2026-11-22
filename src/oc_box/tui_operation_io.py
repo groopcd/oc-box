@@ -37,15 +37,22 @@ else:
 MAX_FRAME = 128 * 1024
 MAX_TRAFFIC = 2 * 1024 * 1024
 MAX_EVENTS = 4096
+MAX_PROGRESS_EVENTS = 1024
+MAX_PROGRESS_BYTES = 128 * 1024**4
 STAGES = frozenset(
     {
         "validating",
         "unlocking",
         "reviewing",
+        "backup-key",
+        "stopping",
         "project",
         "home",
         "registry",
         "image",
+        "image-commit",
+        "checksum",
+        "packing",
         "encrypting",
         "host-settings",
         "host-verify",
@@ -59,17 +66,30 @@ STAGE_LABELS = {
     "validating": "Validating reviewed source and paths",
     "unlocking": "Unlocking encrypted archive",
     "reviewing": "Waiting for metadata review",
+    "backup-key": "Protecting backup key with age",
+    "stopping": "Stopping the source container for a consistent backup",
     "project": "Streaming project files",
     "home": "Streaming private home and native history",
     "registry": "Streaming workspace metadata",
     "image": "Streaming container OS image",
+    "image-commit": "Committing container OS snapshot",
+    "checksum": "Checksumming an encrypted backup component",
+    "packing": "Packing the encrypted backup archive",
     "encrypting": "Encrypting native session history",
     "host-settings": "Capturing host settings and encrypted vault",
     "host-verify": "Verifying native credentials in an isolated store",
     "host-restore": "Installing reviewed host settings without overwrite",
-    "publishing": "Publishing encrypted backup without overwrite",
+    "publishing": "Syncing and publishing encrypted backup without overwrite",
     "verifying": "Verifying native history and final state",
     "cleanup": "Finishing operation cleanup",
+}
+PROGRESS_LABELS = {
+    "project": "Encrypted data written",
+    "home": "Encrypted data written",
+    "registry": "Encrypted data written",
+    "image": "Encrypted data written",
+    "checksum": "Encrypted data checked",
+    "packing": "Encrypted archive packed",
 }
 _TEXT_FIELDS = frozenset(
     {
@@ -306,7 +326,9 @@ def _pipe(fd, direction):
 class ChildInteraction:
     """Child main-thread API; a bounded watcher detects parent loss everywhere."""
 
-    def __init__(self, events, controls, cancellation=None, on_dispatched=None):
+    def __init__(
+        self, events, controls, cancellation=None, on_dispatched=None, *, measured=False
+    ):
         self.events, self.controls = events, controls
         self.sequence = self.prompt = self.review_id = 0
         self._review_counter = 0
@@ -320,6 +342,10 @@ class ChildInteraction:
         )
         self.broken = False
         self._on_dispatched = on_dispatched
+        self._measured = measured
+        self._stage = None
+        self._stage_seq = self._progress_bytes = self._progress_events = 0
+        self._next_sample = 0.0
 
     def start(self):
         self._reader.start()
@@ -378,6 +404,58 @@ class ChildInteraction:
         if stage not in STAGES:
             _fail()
         self.emit("stage", stage=stage)
+        self._stage, self._stage_seq = stage, self.sequence
+        self._progress_bytes = 0
+        self._next_sample = 0.0
+
+    def progress_bytes(self, count):
+        """Send an advisory measurement without blocking or filling the control pipe."""
+        if (
+            not self._measured
+            or self.broken
+            or self.cancellation.is_set()
+            or self._active_prompt is not None
+            or self.review_id
+            or self._stage not in PROGRESS_LABELS
+            or self._progress_events >= MAX_PROGRESS_EVENTS
+            or type(count) is not int
+            or not self._progress_bytes < count <= MAX_PROGRESS_BYTES
+        ):
+            return
+        now = time.monotonic()
+        if now < self._next_sample:
+            return
+        # Back off for multi-hour operations while leaving ample frame budget
+        # for required stage, prompt and result messages.
+        self._next_sample = now + min(60, 2 ** (1 + self._progress_events // 32))
+        value = _frame(
+            {
+                "version": 1,
+                "kind": "progress",
+                "stage_seq": self._stage_seq,
+                "bytes": count,
+            }
+        )
+        # Always smaller than the minimum POSIX PIPE_BUF: a nonblocking pipe
+        # write is atomic or fails with no bytes sent. Reserve half the pipe.
+        if len(value) > 512:
+            _fail()
+        try:
+            capacity = fcntl.fcntl(self.events, fcntl.F_GETPIPE_SZ)
+            queued = struct.unpack(
+                "i", fcntl.ioctl(self.events, termios.FIONREAD, struct.pack("i", 0))
+            )[0]
+            if queued + len(value) > capacity // 2:
+                return
+            written = os.write(self.events, value)
+        except OSError:
+            return
+        if written != len(value):
+            _fail()
+        # A signal can arrive after this write reaches the pipe. A sample
+        # never owns a control sequence number, even on that interruption.
+        self._progress_events += 1
+        self._progress_bytes = count
 
     def dispatched(self):
         if self._on_dispatched is not None:
@@ -481,6 +559,8 @@ def child(runtime, descriptors, *, execute, check_request):
         control_fd,
         cancellation,
         on_dispatched=lambda: state.update(dispatched=True),
+        measured=isinstance(request, dict)
+        and request.get("action") == "workspace-backup",
     )
     previous = {}
     code, error = 1, None
@@ -573,6 +653,8 @@ class OperationProcess:
         self._ready = self._cancelled = False
         self._result = None
         self._sequence = 0
+        self._stage = None
+        self._stage_seq = self._progress_bytes = self._progress_events = 0
         self._outcome_admitted = False
 
     def start(self):
@@ -719,13 +801,31 @@ class OperationProcess:
         if (
             type(event.get("version")) is not int
             or event["version"] != 1
-            or type(event.get("seq")) is not int
-            or event["seq"] != self._sequence + 1
             or self._result is not None
         ):
             _fail()
-        self._sequence += 1
         kind = event.get("kind")
+        if kind == "progress":
+            if (
+                set(event) != {"version", "kind", "stage_seq", "bytes"}
+                or not isinstance(self.request, dict)
+                or self.request.get("action") != "workspace-backup"
+                or self._stage not in PROGRESS_LABELS
+                or type(event["stage_seq"]) is not int
+                or event["stage_seq"] != self._stage_seq
+                or type(event["bytes"]) is not int
+                or not self._progress_bytes < event["bytes"] <= MAX_PROGRESS_BYTES
+                or self._progress_events >= MAX_PROGRESS_EVENTS
+                or self._prompt_open is not None
+                or self._review is not None
+            ):
+                _fail()
+            self._progress_bytes = event["bytes"]
+            self._progress_events += 1
+            return None
+        if type(event.get("seq")) is not int or event["seq"] != self._sequence + 1:
+            _fail()
+        self._sequence += 1
         fields = set(event) - {"version", "seq", "kind"}
         if self._sequence == 1 and kind != "started":
             _fail()
@@ -738,6 +838,8 @@ class OperationProcess:
         elif kind == "stage":
             if fields != {"stage"} or event["stage"] not in STAGES:
                 _fail()
+            self._stage, self._stage_seq = event["stage"], self._sequence
+            self._progress_bytes = 0
         elif kind == "prompt":
             if (
                 fields != {"id", "purpose", "maximum"}

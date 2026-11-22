@@ -240,6 +240,150 @@ class PrivateProtocolTests(unittest.TestCase):
             os.close(read)
             os.close(write)
 
+    def test_advisory_sample_backpressure_does_not_consume_control_sequence(self):
+        read, write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+        try:
+            reporter = channel.ChildInteraction(write, None, measured=True)
+            reporter.emit("started")
+            reporter.stage("project")
+            frames = channel.Frames()
+            started_and_stage = frames.feed(os.read(read, 65536))
+            capacity = fcntl.fcntl(write, fcntl.F_GETPIPE_SZ)
+            self.assertEqual(os.write(write, b"x" * (capacity // 2)), capacity // 2)
+            with patch.object(channel.time, "monotonic", return_value=0):
+                reporter.progress_bytes(1024)
+            self.assertEqual(reporter.sequence, 2)
+            self.assertEqual(os.read(read, capacity), b"x" * (capacity // 2))
+            with (
+                patch.object(channel, "MAX_PROGRESS_EVENTS", 1),
+                patch.object(channel.time, "monotonic", return_value=3),
+            ):
+                reporter.progress_bytes(2048)
+                reporter.stage("packing")
+                reporter.progress_bytes(4096)
+            reporter.emit(
+                "result",
+                code=0,
+                notice=None,
+                dispatched=True,
+                completed=True,
+                uncertain=False,
+                cancelled=False,
+            )
+            tail = frames.feed(os.read(read, 65536))
+            self.assertEqual(
+                [event["kind"] for event in tail], ["progress", "stage", "result"]
+            )
+            self.assertEqual(tail[0]["bytes"], 2048)
+            process = channel.OperationProcess(None, {"action": "workspace-backup"})
+            for event in started_and_stage + tail:
+                process._accept(event)
+            self.assertEqual(process._result["code"], 0)
+        finally:
+            os.close(read)
+            os.close(write)
+
+    def test_measured_samples_are_strictly_increasing_and_bound_to_stage_and_action(
+        self,
+    ):
+        def event(process, kind, **fields):
+            frame = {"version": 1, "kind": kind, **fields}
+            if kind != "progress":
+                frame["seq"] = process._sequence + 1
+            process._accept(frame)
+
+        for action, stage, phase, extra in (
+            ("workspace-restore", "project", None, {}),
+            ("workspace-backup", "backup-key", None, {}),
+            ("workspace-backup", "project", "prompt", {}),
+            ("workspace-backup", "project", "review", {}),
+            ("workspace-backup", "project", None, {"stage_seq": 1}),
+            ("workspace-backup", "project", None, {"stage_seq": True}),
+            ("workspace-backup", "project", None, {"seq": 3}),
+            ("workspace-backup", "project", None, {"bytes": False}),
+            ("workspace-backup", "project", None, {"bytes": 0}),
+            (
+                "workspace-backup",
+                "project",
+                None,
+                {"bytes": channel.MAX_PROGRESS_BYTES + 1},
+            ),
+            ("workspace-backup", "project", None, {"path": "/synthetic"}),
+        ):
+            with self.subTest(action=action, stage=stage, phase=phase, extra=extra):
+                process = channel.OperationProcess(None, {"action": action})
+                event(process, "started")
+                event(process, "stage", stage=stage)
+                if phase == "prompt":
+                    event(process, "prompt", id=1, purpose="backup-new", maximum=1024)
+                elif phase == "review":
+                    event(
+                        process,
+                        "review",
+                        id=1,
+                        metadata={"format": "host", "kind": "host"},
+                    )
+                with self.assertRaises(channel.OperationIOError):
+                    event(
+                        process, "progress", **{"stage_seq": 2, "bytes": 1024, **extra}
+                    )
+
+        process = channel.OperationProcess(None, {"action": "workspace-backup"})
+        event(process, "started")
+        event(process, "stage", stage="project")
+        event(process, "progress", stage_seq=2, bytes=2048)
+        event(process, "stage", stage="home")
+        event(process, "progress", stage_seq=3, bytes=512)
+        with self.assertRaises(channel.OperationIOError):
+            event(process, "progress", stage_seq=3, bytes=512)
+
+    def test_interruption_after_sample_write_preserves_cancellation_control_sequence(
+        self,
+    ):
+        read, write = os.pipe2(os.O_CLOEXEC | os.O_NONBLOCK)
+        try:
+            reporter = channel.ChildInteraction(write, None, measured=True)
+            reporter.emit("started")
+            reporter.stage("project")
+            original = os.write
+
+            def write_then_interrupt(fd, value):
+                original(fd, value)
+                reporter.cancellation.set()
+                raise KeyboardInterrupt
+
+            with (
+                patch.object(channel.os, "write", side_effect=write_then_interrupt),
+                self.assertRaises(KeyboardInterrupt),
+            ):
+                reporter.progress_bytes(4096)
+            reporter.stage("cleanup")
+            reporter.emit(
+                "result",
+                code=130,
+                notice=channel.asdict(
+                    channel.failure_notice("backup", reason="cancelled")
+                ),
+                dispatched=True,
+                completed=False,
+                uncertain=True,
+                cancelled=True,
+            )
+            events = channel.Frames().feed(os.read(read, 65536))
+            self.assertEqual(
+                [item["kind"] for item in events],
+                ["started", "stage", "progress", "stage", "result"],
+            )
+            self.assertNotIn("seq", events[2])
+            process = channel.OperationProcess(None, {"action": "workspace-backup"})
+            for item in events:
+                process._accept(item)
+            self.assertTrue(process._result["cancelled"])
+            self.assertEqual(process._result["code"], 130)
+        finally:
+            os.close(read)
+            os.close(write)
+
     def test_pipe_access_directions_and_same_underlying_object_are_not_capabilities(
         self,
     ):

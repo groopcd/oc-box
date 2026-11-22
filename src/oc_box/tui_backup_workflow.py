@@ -15,9 +15,11 @@ from textual.widgets import Button, Input, ProgressBar, Static
 
 if __package__:
     from . import secret_prompt, tui_operation_io
+    from .status_report import byte_size
 else:
     import secret_prompt
     import tui_operation_io
+    from status_report import byte_size
 
 
 def private_ui_allowed(app):
@@ -403,6 +405,7 @@ class BackupWorkflow(_PrivateOperationModal):
       padding: 1 2; border: round $warning; background: $surface; }
     BackupWorkflow #backup-operation-stage { height: auto;
       color: $warning; text-style: bold; margin-bottom: 1; }
+    BackupWorkflow #backup-operation-measured { height: auto; }
     BackupWorkflow #backup-operation-elapsed { height: auto; color: $text-muted; }
     BackupWorkflow #backup-operation-progress { width: 1fr; margin: 1 0; }
     BackupWorkflow #backup-operation-progress Bar { width: 1fr; }
@@ -422,6 +425,12 @@ class BackupWorkflow(_PrivateOperationModal):
         self.finished = False
         self.started = time.monotonic()
         self._details = []
+        self._measured = request.get("action") == "workspace-backup"
+        self._meter_stage = None
+        self._restores_workspace = (
+            request.get("action") == "workspace-restore"
+            and request.get("destination") is not None
+        )
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -431,10 +440,13 @@ class BackupWorkflow(_PrivateOperationModal):
                 markup=False,
             )
             yield Static(
-                "0 seconds elapsed · progress is indeterminate",
+                "0 seconds elapsed",
                 id="backup-operation-elapsed",
                 markup=False,
             )
+            meter = Static("", id="backup-operation-measured", markup=False)
+            meter.display = False
+            yield meter
             yield ProgressBar(
                 total=None,
                 show_eta=False,
@@ -463,11 +475,12 @@ class BackupWorkflow(_PrivateOperationModal):
     def _tick(self):
         if self.transport._cancelled and not self.finished:
             self.query_one("#backup-operation-cancel", Button).disabled = True
+            self.query_one("#backup-operation-measured", Static).display = False
             self.query_one("#backup-operation-stage", Static).update(
                 "Cancellation requested; waiting for operation cleanup…"
             )
         self.query_one("#backup-operation-elapsed", Static).update(
-            f"{int(time.monotonic() - self.started)} seconds elapsed · progress is indeterminate"
+            f"{int(time.monotonic() - self.started)} seconds elapsed"
         )
 
     @work(thread=True, group="backup-operation", exit_on_error=False)
@@ -491,9 +504,33 @@ class BackupWorkflow(_PrivateOperationModal):
     def _apply(self, event):
         kind = event["kind"]
         if kind == "stage":
-            self.query_one("#backup-operation-stage", Static).update(
-                tui_operation_io.STAGE_LABELS[event["stage"]]
-            )
+            self._meter_stage = event["stage"]
+            if not self.finished and not self.transport._cancelled:
+                self.query_one("#backup-operation-stage", Static).update(
+                    tui_operation_io.STAGE_LABELS[self._meter_stage]
+                )
+                meter = self.query_one("#backup-operation-measured", Static)
+                meter.display = (
+                    self._measured
+                    and self._meter_stage in tui_operation_io.PROGRESS_LABELS
+                )
+                if meter.display:
+                    meter.update("Waiting for the first byte count…")
+        elif kind == "progress":
+            label = tui_operation_io.PROGRESS_LABELS.get(self._meter_stage)
+            if (
+                label
+                and self._measured
+                and not self.finished
+                and not self.transport._cancelled
+            ):
+                count = event["bytes"]
+                size = byte_size(count)
+                if count >= 1024:
+                    size += f" ({count:,} bytes)"
+                self.query_one("#backup-operation-measured", Static).update(
+                    f"{label}: {size}"
+                )
         elif kind == "prompt":
             self.app.push_screen(PrivateSecretScreen(self.transport, event))
         elif kind == "prompt-closed":
@@ -541,12 +578,15 @@ class BackupWorkflow(_PrivateOperationModal):
         self.app._private_interaction = False
         self._clock.stop()
         self.query_one("#backup-operation-progress", ProgressBar).display = False
+        self.query_one("#backup-operation-measured", Static).display = False
         self.query_one("#backup-operation-cancel", Button).disabled = True
         self.query_one("#backup-operation-close", Button).disabled = False
         if result is None:
             status = "Operation outcome unverified. Inspect the explicit target before any retry."
         elif result["code"] == 0:
-            status = "Operation completed and acknowledged. Restored workspaces remain stopped."
+            status = "Operation completed and acknowledged."
+            if self._restores_workspace:
+                status += " The restored workspace remains stopped."
         else:
             notice = result.get("notice")
             status = (
@@ -576,6 +616,7 @@ class BackupWorkflow(_PrivateOperationModal):
         if not self.finished:
             accepted = self.transport.cancel()
             self.query_one("#backup-operation-cancel", Button).disabled = True
+            self.query_one("#backup-operation-measured", Static).display = False
             self.query_one("#backup-operation-stage", Static).update(
                 "Completion already verified; waiting for the result display…"
                 if accepted is False

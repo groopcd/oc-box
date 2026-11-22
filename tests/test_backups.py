@@ -201,14 +201,14 @@ class WorkspaceBackupTests(unittest.TestCase):
         kwargs["private"] = False
         return self.real_archive_command(box_arg, action, root, **kwargs)
 
-    def encrypt(self, producer, recipient, path):
+    def encrypt(self, producer, recipient, path, **kwargs):
         if producer[:2] == ["podman", "save"]:
             producer = [
                 sys.executable,
                 "-c",
                 "import sys; sys.stdout.buffer.write(b'synthetic-image-layer')",
             ]
-        return self.real_encrypt_stream(producer, recipient, path)
+        return self.real_encrypt_stream(producer, recipient, path, **kwargs)
 
     def decrypt(self, path, private, consumer):
         if consumer[:2] == ["podman", "load"]:
@@ -722,7 +722,7 @@ class WorkspaceBackupTests(unittest.TestCase):
         self.assertEqual((stage / box.MARKER).read_text().strip(), self.data["id"])
         self.assertFalse(destination.exists())
 
-    def test_dashboard_progress_inspect_projection_and_cancelled_review_before_creation(
+    def test_dashboard_stage_only_inspect_projection_and_cancelled_review_before_creation(
         self,
     ):
         stages, inspections, reviews = [], [], []
@@ -733,7 +733,23 @@ class WorkspaceBackupTests(unittest.TestCase):
             review=lambda value: reviews.append(value) or False,
         )
         self.backup(interaction=interaction)
-        self.assertEqual(stages, ["project", "home", "registry", "image", "publishing"])
+        self.assertEqual(
+            stages,
+            [
+                "backup-key",
+                "project",
+                "checksum",
+                "home",
+                "checksum",
+                "registry",
+                "checksum",
+                "image-commit",
+                "image",
+                "checksum",
+                "packing",
+                "publishing",
+            ],
+        )
         args = argparse.Namespace(file=self.archive, identity=[self.identity])
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
@@ -756,6 +772,126 @@ class WorkspaceBackupTests(unittest.TestCase):
         self.assertEqual(self.created, [])
         self.assertEqual(len(self.operations), before_operations)
         self.assertEqual(reviews[0]["destination"], str(destination))
+
+    def test_dashboard_full_backup_measures_bytes_in_actual_engine_phases(self):
+        self.running = True
+        phases = []
+        engine = []
+        encryption = []
+        key_stages = []
+        sync_stages = []
+        dispatch = []
+
+        def stage(name):
+            phases.append((name, []))
+
+        def current():
+            return phases[-1][0] if phases else None
+
+        def podman(box_arg, *args, **kwargs):
+            engine.append((current(), args[:2]))
+            return self.podman(box_arg, *args, **kwargs)
+
+        def encrypt(producer, recipient, path, **kwargs):
+            encryption.append((current(), path.name))
+            return self.encrypt(producer, recipient, path, **kwargs)
+
+        generate_key, fsync = crypto.generate_key, os.fsync
+
+        def key(*args, **kwargs):
+            key_stages.append(current())
+            return generate_key(*args, **kwargs)
+
+        def sync(fd):
+            sync_stages.append(current())
+            return fsync(fd)
+
+        interaction = SimpleNamespace(
+            stage=stage,
+            progress_bytes=lambda size: phases[-1][1].append(size),
+            dispatched=lambda: dispatch.append(current()),
+        )
+        with (
+            patch.object(backups, "command", side_effect=podman),
+            patch.object(crypto, "encrypt_stream", side_effect=encrypt),
+            patch.object(crypto, "generate_key", side_effect=key),
+            patch.object(os, "fsync", side_effect=sync),
+        ):
+            self.backup(interaction=interaction)
+        with crypto.opened(self.archive, [self.identity]) as (manifest, _, _):
+            components = manifest["components"]
+        expected = [("stopping", None), ("backup-key", None)]
+        for name in ("project", "home", "registry", "image"):
+            if name == "image":
+                expected.append(("image-commit", None))
+            size = components[name + ".age"]["bytes"]
+            expected.extend([(name, size), ("checksum", size)])
+        expected.extend(
+            [("packing", self.archive.stat().st_size), ("publishing", None)]
+        )
+        self.assertEqual(
+            [(name, sizes[-1] if sizes else None) for name, sizes in phases],
+            expected,
+        )
+        for _, sizes in phases:
+            self.assertEqual(sizes, sorted(set(sizes)))
+        self.assertEqual(key_stages, ["backup-key"])
+        self.assertEqual(
+            engine,
+            [
+                (None, ("container", "inspect")),
+                (None, ("volume", "inspect")),
+                ("stopping", ("stop", "--time")),
+                ("stopping", ("container", "inspect")),
+                ("image-commit", ("commit", "--quiet")),
+                ("publishing", ("image", "rm")),
+            ],
+        )
+        self.assertEqual(
+            encryption,
+            [
+                (name, name + ".age")
+                for name in ("project", "home", "registry", "image")
+            ],
+        )
+        self.assertEqual(sync_stages[-2:], ["publishing", "publishing"])
+        self.assertEqual(dispatch, ["stopping", "publishing"])
+        self.assertFalse(self.running)
+
+    def test_dashboard_host_only_backup_has_key_and_measured_publication_without_engine(
+        self,
+    ):
+        args = argparse.Namespace(
+            project=None,
+            workspace=None,
+            output=self.archive,
+            portable=False,
+            recipient=[self.recipient],
+            host=True,
+        )
+        phases = []
+        interaction = SimpleNamespace(
+            stage=lambda name: phases.append((name, [])),
+            progress_bytes=lambda size: phases[-1][1].append(size),
+            dispatched=lambda: None,
+        )
+        with contextlib.redirect_stdout(io.StringIO()):
+            backups.make_backup(box, args, interaction=interaction)
+        with crypto.opened(self.archive, [self.identity]) as (manifest, _, _):
+            self.assertEqual(manifest["kind"], "host")
+            host_bytes = manifest["components"]["host.age"]["bytes"]
+        self.assertEqual(
+            [(name, sizes[-1] if sizes else None) for name, sizes in phases],
+            [
+                ("host-settings", None),
+                ("backup-key", None),
+                ("host-settings", None),
+                ("checksum", host_bytes),
+                ("packing", self.archive.stat().st_size),
+                ("publishing", None),
+            ],
+        )
+        self.assertEqual(self.operations, [])
 
     def test_v2_backup_restore_retains_major_selection_and_both_databases(self):
         self.data["opencode_version"] = "2.2.6"
@@ -1184,10 +1320,10 @@ class WorkspaceBackupTests(unittest.TestCase):
     def test_failed_image_capture_removes_only_the_unique_temporary_image_tag(self):
         real = self.encrypt
 
-        def fail_image(producer, recipient, path):
+        def fail_image(producer, recipient, path, **kwargs):
             if path.name == "image.age":
                 raise crypto.BackupError("image save failed")
-            return real(producer, recipient, path)
+            return real(producer, recipient, path, **kwargs)
 
         with patch.object(crypto, "encrypt_stream", side_effect=fail_image):
             with self.assertRaisesRegex(crypto.BackupError, "image save failed"):
@@ -1202,6 +1338,26 @@ class WorkspaceBackupTests(unittest.TestCase):
         self.assertFalse(self.archive.exists())
         self.assertFalse(list(self.root.glob("oc-box-backup-ciphertext-*")))
         self.assertTrue(self.path.exists())
+
+    def test_dashboard_image_progress_interrupt_cleans_up_without_publishing(self):
+        stages = []
+
+        def cancel_image(_size):
+            if stages[-1] == "image":
+                raise KeyboardInterrupt
+
+        interaction = SimpleNamespace(
+            stage=stages.append, dispatched=lambda: None, progress_bytes=cancel_image
+        )
+        with self.assertRaises(KeyboardInterrupt):
+            self.backup(interaction=interaction)
+        captures = [args for args in self.operations if args[0] == "commit"]
+        self.assertEqual(len(captures), 1)
+        self.assertEqual(self.operations[-1], ("image", "rm", captures[0][-1]))
+        self.assertEqual(stages[-2:], ["image-commit", "image"])
+        self.assertNotIn("publishing", stages)
+        self.assertFalse(self.archive.exists())
+        self.assertFalse(list(self.root.glob("oc-box-backup-ciphertext-*")))
 
     def test_reset_restored_workspace_rebuilds_catalog_os_and_keeps_paths_home_and_sessions(
         self,
@@ -1384,7 +1540,7 @@ class ArchivePublicationTests(unittest.TestCase):
         self.pack = patch.object(
             crypto,
             "pack",
-            side_effect=lambda _, stream: stream.write(b"packed archive"),
+            side_effect=lambda _, stream, **kwargs: stream.write(b"packed archive"),
         )
         self.pack.start()
         self.addCleanup(self.pack.stop)
@@ -1402,7 +1558,7 @@ class ArchivePublicationTests(unittest.TestCase):
                 name.unlink(missing_ok=True)
                 name.write_bytes(b"unrelated")
 
-        interaction = SimpleNamespace(dispatched=substitute)
+        interaction = SimpleNamespace(stage=lambda _: None, dispatched=substitute)
         backups._publish_archive(self.root, self.output, interaction=interaction)
         self.assertEqual(self.output.read_bytes(), b"packed archive")
         self.assertEqual(
@@ -1417,7 +1573,7 @@ class ArchivePublicationTests(unittest.TestCase):
         unrelated = self.root / "unrelated"
         unrelated.write_bytes(b"keep")
         interaction = SimpleNamespace(
-            dispatched=lambda: self.output.symlink_to(unrelated)
+            stage=lambda _: None, dispatched=lambda: self.output.symlink_to(unrelated)
         )
         with self.assertRaisesRegex(crypto.BackupError, "never overwrite"):
             backups._publish_archive(self.root, self.output, interaction=interaction)

@@ -321,6 +321,39 @@ class PrivateEditorTests(unittest.IsolatedAsyncioTestCase):
                 workflow._finished(None)
                 workflow.dismiss()
 
+    async def test_measured_stage_counts_reset_and_do_not_override_cancellation(self):
+        app = DashboardApp(DemoBackend(), demo=True)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.begin(app, pilot)
+            workflow = BackupWorkflow(None, {"action": "workspace-backup"})
+            with patch.object(BackupWorkflow, "_run"):
+                await app.push_screen(workflow)
+                await pilot.pause()
+            meter = workflow.query_one("#backup-operation-measured", Static)
+            stage = workflow.query_one("#backup-operation-stage", Static)
+            workflow._apply({"kind": "stage", "stage": "backup-key"})
+            self.assertIn("Protecting backup key", str(stage.render()))
+            self.assertFalse(meter.display)
+            workflow._apply({"kind": "stage", "stage": "image"})
+            self.assertTrue(meter.display)
+            self.assertIn("first byte count", str(meter.render()))
+            workflow._apply({"kind": "progress", "bytes": 3 * 1024**3})
+            self.assertIn("Encrypted data written: 3.0 GiB", str(meter.render()))
+            self.assertIn("3,221,225,472 bytes", str(meter.render()))
+            workflow._apply({"kind": "stage", "stage": "checksum"})
+            self.assertNotIn("3.0 GiB", str(meter.render()))
+            workflow._apply({"kind": "progress", "bytes": 512})
+            self.assertIn("Encrypted data checked: 512 B", str(meter.render()))
+            workflow.action_cancel_operation()
+            workflow._apply({"kind": "stage", "stage": "packing"})
+            workflow._apply({"kind": "progress", "bytes": 1024})
+            self.assertFalse(meter.display)
+            self.assertIn("Cancellation requested", str(stage.render()))
+            workflow._finished(None)
+            self.assertFalse(meter.display)
+            self.assertIn("outcome unverified", str(stage.render()))
+            workflow.dismiss()
+
     async def test_advanced_keys_collapsed_and_host_creation_context_is_session_only(
         self,
     ):

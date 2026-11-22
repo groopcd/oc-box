@@ -233,6 +233,17 @@ def _archive_publication(output, reviewed_parent):
             os.close(fd)
 
 
+def _byte_progress(interaction):
+    callback = getattr(interaction, "progress_bytes", None)
+    return callback if callable(callback) else None
+
+
+def _checksum(path, interaction):
+    if interaction is not None:
+        interaction.stage("checksum")
+    return crypto.digest(path, progress=_byte_progress(interaction))
+
+
 def _publish_archive(
     staging, output, *, interaction=None, reviewed_parent=None, publication=None
 ):
@@ -244,7 +255,11 @@ def _publish_archive(
     with destination as (parent, fd):
         expected = _entry_identity(os.fstat(parent))
         with os.fdopen(fd, "wb", closefd=False) as stream:
-            crypto.pack(staging, stream)
+            if interaction is not None:
+                interaction.stage("packing")
+            crypto.pack(staging, stream, progress=_byte_progress(interaction))
+            if interaction is not None:
+                interaction.stage("publishing")
             stream.flush()
             os.fsync(stream.fileno())
         if interaction is not None:
@@ -281,14 +296,16 @@ def _publish_archive(
             ) from None
 
 
-def _host_components(staging, recipient, host):
+def _host_components(staging, recipient, host, interaction):
     payload, auth = host
     components = {}
     for name, value in (("host.age", payload), ("host-auth.age", auth)):
         if value is not None:
+            if interaction is not None:
+                interaction.stage("host-settings")
             destination = staging / name
             crypto.encrypt_bytes(value, recipient, destination)
-            components[name] = crypto.digest(destination)
+            components[name] = _checksum(destination, interaction)
     return components
 
 
@@ -324,6 +341,8 @@ def _make_host_only(box, args, minimum, *, interaction=None):
                 output, expected_parent, "oc-box-host-backup-ciphertext-"
             )
         )
+        if interaction is not None:
+            interaction.stage("backup-key")
         _, recipient = crypto.generate_key(
             args.recipient or [], staging / "key.age", minimum=minimum
         )
@@ -334,15 +353,13 @@ def _make_host_only(box, args, minimum, *, interaction=None):
             "kind": "host",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "oc_box": get_version_info(box.APP),
-            "components": _host_components(staging, recipient, payload),
+            "components": _host_components(staging, recipient, payload, interaction),
         }
         crypto.encrypt_bytes(
             json.dumps(manifest, sort_keys=True).encode(),
             recipient,
             staging / "manifest.age",
         )
-        if interaction is not None:
-            interaction.stage("publishing")
         _publish_archive(
             staging, output, interaction=interaction, publication=publication
         )
@@ -692,6 +709,7 @@ def make_backup(box, args, *, interaction=None, reviewed_workspace=None):
             revalidate_review()
             _check_reviewed_parent(output.parent, expected_parent)
             if interaction is not None:
+                interaction.stage("stopping")
                 interaction.dispatched()
             print(
                 "Stopping the existing container for a consistent backup. It will remain stopped; host editors/builds must also stay idle.",
@@ -709,6 +727,8 @@ def make_backup(box, args, *, interaction=None, reviewed_workspace=None):
             with _ciphertext_staging(
                 output, expected_parent, "oc-box-backup-ciphertext-"
             ) as staging:
+                if interaction is not None:
+                    interaction.stage("backup-key")
                 _, recipient = crypto.generate_key(
                     args.recipient or [], staging / "key.age", minimum=minimum
                 )
@@ -737,13 +757,14 @@ def make_backup(box, args, *, interaction=None, reviewed_workspace=None):
                             ),
                             recipient,
                             staging / name,
+                            progress=_byte_progress(interaction),
                         )
-                    parts[name] = crypto.digest(staging / name)
+                    parts[name] = _checksum(staging / name, interaction)
                 if not args.portable:
-                    if interaction is not None:
-                        interaction.stage("image")
                     with box.loading_stage("Capturing and encrypting container OS"):
                         image_tag = "localhost/oc-box-backup-" + uuid.uuid4().hex
+                        if interaction is not None:
+                            interaction.stage("image-commit")
                         image_id = command(
                             box,
                             "commit",
@@ -756,14 +777,21 @@ def make_backup(box, args, *, interaction=None, reviewed_workspace=None):
                             raise BackupError(
                                 "Unexpected committed image identity; backup was not finalized."
                             )
+                        if interaction is not None:
+                            interaction.stage("image")
                         crypto.encrypt_stream(
                             ["podman", "save", "--format", "oci-archive", image_id],
                             recipient,
                             staging / "image.age",
+                            progress=_byte_progress(interaction),
                         )
-                        parts["image.age"] = crypto.digest(staging / "image.age")
+                        parts["image.age"] = _checksum(
+                            staging / "image.age", interaction
+                        )
                 if host is not None:
-                    parts.update(_host_components(staging, recipient, host))
+                    parts.update(
+                        _host_components(staging, recipient, host, interaction)
+                    )
                 manifest = {
                     "format": "oc-box-backup",
                     "format_version": 2 if include_host else 1,
@@ -796,8 +824,6 @@ def make_backup(box, args, *, interaction=None, reviewed_workspace=None):
                     recipient,
                     staging / "manifest.age",
                 )
-                if interaction is not None:
-                    interaction.stage("publishing")
                 _publish_archive(
                     staging,
                     output,
