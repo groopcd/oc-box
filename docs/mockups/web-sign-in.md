@@ -15,6 +15,32 @@ must revoke only that browser session, including its active connections, not
 stop the workspace or sign out other users. A one-use-link guest needs a fresh
 link to return; a named user can sign in again.
 
+## Certificate setup
+
+TLS is configured per web origin, not per vault user. Creating or resetting an
+account does not issue certificates, modify browser trust, or enable a listener.
+
+| Setup | Proposed operator flow | Client trust |
+| --- | --- | --- |
+| Localhost | `oc-box web tls setup localhost` runs a guided setup. Offer to use an existing trusted certificate or an optional `mkcert` installation to generate one covering the loopback names/IPs printed by oc-box. Explain any trust-store change and ask the operator to approve it explicitly. | Check the actual browser profiles. A successful certificate-generation step alone does not prove Chrome, Firefox, or Brave trusts it. Keep this profile loopback-only. |
+| Private LAN | Supply a certificate chain and key from an existing private CA for the DNS name or IP clients actually use. Verify the endpoint before enabling the network listener. | Install only the CA's **public certificate** on client devices, explicitly or via existing device management. Never distribute the CA private key. |
+| Publicly trusted | Supply an existing certificate and key, or provision and renew them with an external ACME client such as Certbot or Caddy. A DNS challenge can work with a LAN-only origin under a domain the operator controls. | Normal public-CA trust; users visit the certified hostname. Keep the listener explicitly enabled and scoped to the desired network. |
+
+The localhost command should check prerequisites, validate the hostnames,
+certificate dates and key match, and explain how to verify trust in a real
+browser. Don't silently install tools, install a trust root, or claim all
+profiles are trusted. Use an existing external tool rather than writing a CA
+or ACME client. Keep keys private, outside workspaces and backups of
+workspace data, and refuse to start named sign-in if the TLS configuration
+is missing or invalid. If TLS terminates outside oc-box, the live design must
+verify the origin and keep the upstream path private; the wire protection and
+password-hiding requirements still apply. The first implementation should
+accept operator-supplied TLS files before adding automated provisioning.
+
+A future host-side **Set up localhost HTTPS** button could invoke the same
+guided operation after explicit approval. It should not be a pre-login web
+endpoint. The current Textual TUI remains unchanged.
+
 ## Credential boundary
 
 - Support multiple named users: keep one protocol registration record and

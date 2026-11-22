@@ -56,6 +56,8 @@
     .login-card .send { margin:0; padding:9px 13px }
     .login-card .eyebrow { color:var(--accent) }
     .login-footer { display:grid; gap:8px; margin-top:18px; padding-top:13px; border-top:1px solid var(--line) }
+    .tls-guide .toolbar { align-items:center }
+    .tls-guide code { overflow-wrap:anywhere }
     .login-error { min-height:1.5em; color:#ffb1b1; font-size:12px }
     .login-secret { display:flex; align-items:center; gap:8px; min-width:0 }
     .login-secret input { flex:1 1 auto }
@@ -695,6 +697,7 @@
       </form>
       <div class="login-footer">
         <p class="muted" id="login-help"><span class="tag demo">Demo only</span> Try <code>workspace-demo</code> / <code>oc-box-demo</code> or <code>review-demo</code> / <code>oc-box-review</code>. Nothing is sent to a server. Do not enter real credentials.</p>
+        <div><button type="button" class="text-action" id="preview-tls">Preview HTTPS setup</button></div>
         <div><button type="button" class="text-action" id="login-skip">Back to one-use link preview</button></div>
       </div>
       <div class="logout-link" id="logout-link" hidden>
@@ -703,6 +706,33 @@
       </div>
     </section>
   </main>
+  <dialog class="session-review tls-guide" id="tls-guide" aria-labelledby="tls-guide-title">
+    <p class="eyebrow">Host setup · Design preview</p>
+    <h2 id="tls-guide-title">Set up HTTPS for named users</h2>
+    <p class="muted">One certificate per web origin, not per user. Real setup happens on the host; this preview does not install trust or change any files.</p>
+    <div class="picker toolbar" role="group" aria-label="Certificate setup options">
+      <button type="button" data-tls-mode="local" aria-pressed="true">Localhost</button>
+      <button type="button" data-tls-mode="lan" aria-pressed="false">Private LAN</button>
+      <button type="button" data-tls-mode="public" aria-pressed="false">Publicly trusted</button>
+    </div>
+    <div id="tls-local">
+      <p><code>oc-box web tls setup localhost</code> <small class="muted">(proposed)</small></p>
+      <p class="muted">Use an existing trusted certificate or create one with mkcert. Stay loopback-only. Any trust-store change must be approved on the host.</p>
+      <div class="toolbar"><button type="button" class="action" id="tls-local-setup">Set up localhost HTTPS</button></div>
+      <div id="tls-local-review" hidden>
+        <p class="muted">Review which trust store would change, then verify the result in your browser. Nothing is installed by this demo.</p>
+        <div class="toolbar"><button type="button" class="action" id="tls-local-confirm">Simulate approval</button></div>
+      </div>
+      <p class="muted" id="tls-local-status" role="status"></p>
+    </div>
+    <div id="tls-lan" hidden>
+      <p class="muted">Supply a chain and key issued by your private CA for the private hostname or IP. Client devices trust the CA’s public certificate; its private key is never distributed.</p>
+    </div>
+    <div id="tls-public" hidden>
+      <p class="muted">Use a hostname you control and an existing public certificate, or provision one with an ACME tool such as Certbot or Caddy. A DNS challenge can work even for a LAN-only service.</p>
+    </div>
+    <div class="toolbar"><button type="button" class="action" id="tls-guide-close" autofocus>Close preview</button></div>
+  </dialog>
 
   <script>
     const byId = (id) => document.getElementById(id);
@@ -1834,6 +1864,25 @@
     setLayout(location.hash.slice(1));
     selectSession(selected);
     byId("preview-password").addEventListener("click", () => showLogin(true));
+    byId("preview-tls").addEventListener("click", () => {
+      resetLoginField();
+      byId("tls-guide").showModal();
+    });
+    for (const button of all("[data-tls-mode]")) button.addEventListener("click", () => {
+      for (const choice of all("[data-tls-mode]")) {
+        const current = choice === button;
+        choice.setAttribute("aria-pressed", current);
+        byId(`tls-${choice.dataset.tlsMode}`).hidden = !current;
+      }
+    });
+    byId("tls-local-setup").addEventListener("click", () => {
+      byId("tls-local-review").hidden = false;
+      byId("tls-local-confirm").focus();
+    });
+    byId("tls-local-confirm").addEventListener("click", () => {
+      byId("tls-local-status").textContent = "Approval previewed. The live setup would still need browser verification.";
+    });
+    byId("tls-guide-close").addEventListener("click", () => byId("tls-guide").close());
     byId("login-skip").addEventListener("click", () => showLogin(false));
     byId("web-logout").addEventListener("click", () => {
       const url = new URL(location.href);
