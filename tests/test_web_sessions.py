@@ -743,6 +743,29 @@ class WebSessionsTests(unittest.TestCase):
                     catalog.assert_not_called()
                     select.assert_not_called()
 
+    def test_opt_in_index_offers_history_without_guessing_a_missing_tui_selection(self):
+        gateway = service.Gateway(
+            box, self.data, self.connection, workspace_layout=True
+        )
+        gateway.url = "http://127.0.0.1:23456"
+        request = (
+            f"GET {web.INDEX} HTTP/1.1\r\nHost: 127.0.0.1:23456\r\n\r\n"
+        ).encode()
+        with (
+            patch.object(web, "_authenticated", return_value=True),
+            patch.object(
+                web, "reported_open_sessions", side_effect=box.BoxError("unavailable")
+            ),
+            patch.object(web, "explicit_session") as select,
+        ):
+            stream = Mock()
+            self.assertTrue(web.respond(gateway, stream, None, request))
+        response = stream.sendall.call_args.args[0]
+        self.assertIn(b"200 OK", response)
+        self.assertIn(b"Workspace history", response)
+        self.assertIn(b"&quot;selection&quot;: null", response)
+        select.assert_not_called()
+
     def test_attachment_slot_preserves_all_four_members_single_frame_and_home(self):
         sessions, status = self.collect(native_tabs.Snapshot("valid", self.members))
         gateway = service.Gateway(

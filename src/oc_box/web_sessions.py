@@ -680,12 +680,17 @@ def respond(gateway, stream, child, request):
         ):
             # Explicit existing private IDs do not depend on readable TUI state.
             # No automatic/default target is admitted on this fallback path.
-            if target.path not in (INDEX, SELECTION) or (
-                gateway.connection.get("web_session_override") is None
-                and "session" not in query
+            opted_in = getattr(gateway, "workspace_layout", False) is True
+            explicit = (
+                gateway.connection.get("web_session_override") is not None
+                or "session" in query
+            )
+            if not (opted_in and target.path == INDEX) and (
+                target.path not in (INDEX, SELECTION) or not explicit
             ):
                 raise
             sessions, status = [], "unavailable"
+            report = {"status": "unavailable"}
         if target.path == SELECTION:
             if set(query) != {"session"}:
                 raise ValueError("Missing selected session.")

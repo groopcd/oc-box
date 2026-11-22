@@ -212,6 +212,7 @@
       changed();
     } catch {
       membershipKnown = false;
+      if (workspace) members = []; // A failed refresh cannot leave a stale count or action.
       render();
       changed();
       status.textContent = "TUI membership could not be refreshed. Conversation retained; retry or open native Home.";
