@@ -1,8 +1,10 @@
 # Web sign-in design
 
 This is a design for a future launcher mode. The offline mockup shows the
-browser experience; it does not implement production authentication or change
-`oc-box web`.
+browser experience; it never performs authentication. Experimental runtime
+layout and TLS file preparation are documented in the [CLI reference](../cli.md#web--browser-interface).
+Named sign-in, per-browser logout and network listening remain disabled;
+operator-supplied TLS files do not enable those modes.
 
 | Mode | Proposed CLI | Link shown in the host terminal | Browser experience |
 | --- | --- | --- | --- |
@@ -22,7 +24,7 @@ account does not issue certificates, modify browser trust, or enable a listener.
 
 | Setup | Proposed operator flow | Client trust |
 | --- | --- | --- |
-| Localhost | `oc-box web tls setup localhost` runs a guided setup. Offer to use an existing trusted certificate or an optional `mkcert` installation to generate one covering the loopback names/IPs printed by oc-box. Explain any trust-store change and ask the operator to approve it explicitly. | Check the actual browser profiles. A successful certificate-generation step alone does not prove Chrome, Firefox, or Brave trusts it. Keep this profile loopback-only. |
+| Localhost | `oc-box web tls setup localhost` uses optional `mkcert` to create managed TLS files. Check existing operator-supplied files separately. Any trust-store change requires the explicit `--install-trust` option and typed host approval. | The current opt-in supports a validated user NSS database only. Verify actual profiles; generation/import does not prove Chrome, Firefox, or Brave trusts the issuer. Keep this profile loopback-only. |
 | Private LAN | Use a private CA for an internal name or private IP, **or** a Let's Encrypt certificate for a hostname under a domain you control. Verify the endpoint before enabling the network listener. | Private CA: install only its **public certificate** on client devices; never distribute the CA private key. Let's Encrypt: normal browser trust when clients use the certified hostname. |
 | Publicly trusted | Supply an existing certificate and key, or provision and renew them with an external ACME client such as Certbot or Caddy. Public certificate trust does not require making oc-box publicly reachable. | Normal public-CA trust; users visit the certified hostname. Keep the listener explicitly enabled and scoped to the desired network. |
 
@@ -51,13 +53,13 @@ accept operator-supplied TLS files before adding automated provisioning.
 
 ### Read-only checks
 
-- **`oc-box doctor --feature web-tls-local`** (proposed): report whether the
+- **`oc-box doctor --feature web-tls-local`**: report whether the
   host has the optional mkcert helper and any trust tools it needs on that
   platform (for example, `certutil` for NSS stores on Linux). A missing helper
   blocks the mkcert setup route, not ordinary guest web, supplied certificates,
   or launching with an already valid local certificate. Do not turn mkcert
   into a mandatory dependency in a default doctor run.
-- **`oc-box web tls check localhost`** (proposed): on-demand, read-only check
+- **`oc-box web tls check localhost`**: on-demand, read-only check
   of the active localhost TLS configuration. Report missing or unreadable
   files, certificate validity, name coverage, and certificate/key match
   separately from helper availability. Report browser trust as unverified
@@ -128,3 +130,30 @@ host setup command.
 
 The offline preview’s two hard-coded accounts are not a security boundary.
 They demonstrate named sign-in, the guest label, and both logout flows.
+
+## Named-mode implementation gates
+
+The internal encrypted account store, bounded PAKE exchange state machine and
+in-memory browser admission registry are not connected to a listener. Their
+tests use synthetic inputs and do not establish real authentication. Do not
+enable named mode until:
+
+- The exact OPAQUE verifier and browser build, dependencies, provenance and
+  distribution terms have been independently reviewed. A registry signature
+  or earlier audit alone does not establish that the current WebAssembly
+  artifact is safe to ship. Resolve relevant upstream advisories; require
+  reproducible offline packaging and browser/native interoperability evidence.
+- Credential entry and enrollment use a dedicated, host-controlled HTTPS
+  origin that never serves native workspace content. Keep workspace and
+  account origin cookies and trust separate. A difference in port alone is
+  not cookie isolation. Use a short-lived, single-use, browser-bound handoff
+  for an explicitly authorized workspace and verified owner. Never allow an
+  account or same-origin host API to be chosen by workspace content.
+- Every named app request and upgrade passes the new admission boundary,
+  including subsequent requests on reused connections. Preserve native
+  authorization as a separate requirement; verify the pinned native
+  HTTPS pairing/cookie contract with the actual browser and ensure logout
+  revokes the browser grant and ends its streams without claiming native
+  per-cookie revocation. No raw-password, guest-link, or HTTP fallback.
+- A separate explicit authorization design exists before exposing host-wide
+  manager data and actions. The paired workspace browser is not that design.

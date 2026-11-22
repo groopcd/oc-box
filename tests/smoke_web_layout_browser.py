@@ -34,7 +34,7 @@ from smoke_session_sync_v2 import (
     seed,
 )
 
-from oc_box import native_tabs, opencode_compat, web_sessions
+from oc_box import native_tabs, opencode_compat, web_history, web_sessions
 from oc_box import oc_box as box
 from oc_box import opencode_v2_io as bridge
 from oc_box import workspace_service as service
@@ -259,6 +259,17 @@ def exercise(binary, browser, root):
         "opencode_version": release,
     }
     original_run = box.run
+    original_popen = subprocess.Popen
+
+    def local_popen(command, *args, **settings):
+        if (
+            isinstance(command, box.ContainerCommand)
+            and command[:3] == ["podman", "exec", "-i"]
+            and data["container"] in command
+        ):
+            marker = command.index(data["container"])
+            command = command[marker + 1 :]
+        return original_popen(command, *args, **settings)
 
     def local_exec(command, **settings):
         marker = command.index(data["container"])
@@ -329,6 +340,11 @@ def exercise(binary, browser, root):
             with (
                 patch.object(box, "run", side_effect=local_exec),
                 patch.object(service, "relay_command", side_effect=local_relay),
+                patch.object(
+                    web_history.subprocess,
+                    "Popen",
+                    side_effect=local_popen,
+                ),
             ):
                 with (
                     service.Gateway(box, data, connection) as gateway,

@@ -3166,6 +3166,12 @@ Web only: explicitly select the visible, source-version-bounded browser File-dro
 adapter described under `web`. Keeps the native app and its draft/Send controls
 unchanged. No automatic prompt admission or host-path/URL reading.
 
+### --workspace-layout
+
+Web only: opt into Studio, Dashboard, Chat focus, and the read-only browser
+workspace manager. The existing one-use link and localhost listener are unchanged.
+This does not enable named sign-in or authorize host management.
+
 ### --no-vault
 
 V2-only, for one **owning** start (including `--import-session`), reset, or web

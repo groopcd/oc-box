@@ -1206,6 +1206,10 @@ oc-box credentials --project ~/devel/demo --credential-mode vault --clear-creden
 
 Web only: explicitly select the visible, source-version-bounded browser File-drop adapter described under @code{web}. Keeps the native app and its draft/Send controls unchanged. No automatic prompt admission or host-path/URL reading.
 
+@section --workspace-layout
+
+Web only: opt into Studio, Dashboard, Chat focus, and the read-only browser workspace manager. The existing one-use link and localhost listener are unchanged. This does not enable named sign-in or authorize host management.
+
 @section --no-vault
 
 V2-only, for one **owning** start (including @code{--import-session}), reset, or web invocation. Skip vault use without changing the saved workspace policy. Global mode temporarily uses legacy env-file forwarding; explicit env/selected modes skip vault entries but retain their env constraints. The next normal owner uses the saved/default policy again. Attached TUI/web clients reject this flag and never unlock or refresh an existing service. V1, info/status/list/doctor, credentials/secrets, terminal/maintenance, sync, stop, repair, purge, backup/info/ restore, upgrade, and other non-owning commands reject it. It does not erase already persisted config/auth or hide secrets from existing container processes.

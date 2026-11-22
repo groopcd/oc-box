@@ -1174,6 +1174,9 @@ oc\-box credentials \-\-project ~/devel/demo \-\-credential\-mode vault \-\-clea
 .SS \-\-attachments
 .PP
 Web only: explicitly select the visible, source\-version\-bounded browser File\-drop adapter described under \fBweb\fR\&. Keeps the native app and its draft/Send controls unchanged. No automatic prompt admission or host\-path/URL reading.
+.SS \-\-workspace\-layout
+.PP
+Web only: opt into Studio, Dashboard, Chat focus, and the read\-only browser workspace manager. The existing one\-use link and localhost listener are unchanged. This does not enable named sign\-in or authorize host management.
 .SS \-\-no\-vault
 .PP
 V2\-only, for one **owning** start (including \fB\-\-import\-session\fR), reset, or web invocation. Skip vault use without changing the saved workspace policy. Global mode temporarily uses legacy env\-file forwarding; explicit env/selected modes skip vault entries but retain their env constraints. The next normal owner uses the saved/default policy again. Attached TUI/web clients reject this flag and never unlock or refresh an existing service. V1, info/status/list/doctor, credentials/secrets, terminal/maintenance, sync, stop, repair, purge, backup/info/ restore, upgrade, and other non\-owning commands reject it. It does not erase already persisted config/auth or hide secrets from existing container processes.
