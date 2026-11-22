@@ -16,7 +16,8 @@ MIME_TYPES = MappingProxyType(
     {
         "png": frozenset({"image/png"}),
         "txt": frozenset({"text/plain"}),
-        "md": frozenset({"text/markdown", "text/plain"}),
+        # shared-mime-info lists text/x-markdown as a text/markdown alias.
+        "md": frozenset({"text/markdown", "text/x-markdown", "text/plain"}),
         "html": frozenset({"text/html"}),
     }
 )

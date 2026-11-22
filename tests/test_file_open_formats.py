@@ -92,7 +92,7 @@ class FileOpenFormatsTests(unittest.TestCase):
             {
                 "png": {"image/png"},
                 "txt": {"text/plain"},
-                "md": {"text/markdown", "text/plain"},
+                "md": {"text/markdown", "text/x-markdown", "text/plain"},
                 "html": {"text/html"},
             },
         )

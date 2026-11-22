@@ -84,6 +84,7 @@ _OPEN_FAILURES = frozenset(
         "runtime-staging-write-failed",
         "mime-query-failed",
         "mime-query-timeout",
+        "mime-query-empty",
         "mime-type-rejected",
         "opener-timeout",
         "opener-failed",
@@ -374,6 +375,13 @@ def _desktop_env():
     env = {key: value for key, value in os.environ.items() if key in _DESKTOP_ENV}
     if not (env.get("DISPLAY") or env.get("WAYLAND_DISPLAY")):
         return None
+    # xdg-utils uses these host session markers to select KDE helpers.
+    # Without the version it can take the obsolete kfile/kfmclient path.
+    version = os.environ.get("KDE_SESSION_VERSION")
+    if version in ("4", "5", "6"):
+        env["KDE_SESSION_VERSION"] = version
+    if os.environ.get("KDE_FULL_SESSION") == "true":
+        env["KDE_FULL_SESSION"] = "true"
     env["PATH"] = "/usr/bin:/bin"
     return env
 
@@ -646,6 +654,11 @@ def _verify_mime(path, types, env):
         ) from None
     if mime.returncode:
         raise PreviewError("Host MIME check failed.", reason="mime-query-failed")
+    if not mime.stdout.strip():
+        raise PreviewError(
+            "The desktop MIME helper returned no file type.",
+            reason="mime-query-empty",
+        )
     if len(mime.stdout) > 256 or mime.stdout.strip() not in {
         value.encode("ascii") for value in types
     }:

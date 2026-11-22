@@ -376,6 +376,8 @@ class HostOpenerTests(unittest.TestCase):
             "XDG_CONFIG_DIRS": "/host/site-config:/etc/xdg",
             "XDG_DATA_DIRS": "/host/site-data:/usr/share",
             "WAYLAND_DISPLAY": "wayland-0",
+            "KDE_SESSION_VERSION": "6",
+            "KDE_FULL_SESSION": "true",
             "DBUS_SESSION_BUS_ADDRESS": "unix:path=/run/user/123/bus",
             "XDG_RUNTIME_DIR": str(self.base),
             "XAUTHORITY": "/host/display-cookie",
@@ -466,6 +468,7 @@ class HostOpenerTests(unittest.TestCase):
         for kind, source, mime in (
             ("txt", b"Plain text\r\n", b"text/plain\n"),
             ("md", b"# Markdown\n", b"text/markdown\n"),
+            ("md", b"# Markdown\n", b"text/x-markdown\n"),
             ("md", b"# Markdown\n", b"text/plain\n"),
             (
                 "html",
@@ -510,7 +513,11 @@ class HostOpenerTests(unittest.TestCase):
                     host.open_artifact(kind, source)
                 self.assertEqual(
                     host.safe_open_failure(error.exception),
-                    "mime-query-failed" if returncode else "mime-type-rejected",
+                    "mime-query-failed"
+                    if returncode
+                    else "mime-type-rejected"
+                    if mime.strip()
+                    else "mime-query-empty",
                 )
                 self.assertNotIn("synthetic-private", str(error.exception))
                 self.assertNotIn(str(self.spool), str(error.exception))
@@ -520,6 +527,22 @@ class HostOpenerTests(unittest.TestCase):
                 self.assertEqual(Path(command[-1]).parent, self.spool)
                 self.assertFalse(Path(command[-1]).exists())
                 self.assertEqual(list(self.spool.iterdir()), [])
+
+    def test_only_recognized_host_kde_session_markers_are_forwarded(self):
+        for value in ("bogus", "6;synthetic", "", "7"):
+            with (
+                self.subTest(value=value),
+                patch.dict(
+                    os.environ,
+                    {
+                        "KDE_SESSION_VERSION": value,
+                        "KDE_FULL_SESSION": value,
+                    },
+                ),
+            ):
+                env = host._desktop_env()
+                self.assertNotIn("KDE_SESSION_VERSION", env)
+                self.assertNotIn("KDE_FULL_SESSION", env)
 
     def test_invalid_artifacts_never_staged_or_queried(self):
         for kind, candidate in (
