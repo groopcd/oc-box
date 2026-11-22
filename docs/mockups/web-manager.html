@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' file:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
   <meta name="color-scheme" content="dark">
   <title>oc-box · Browser workspace concepts</title>
   <style>
@@ -17,7 +17,7 @@
     body { margin:0; color:var(--text); background:var(--bg); font:14px/1.5 var(--sans) }
     button,input,textarea { font:inherit; color:inherit }
     button { cursor:pointer; border:0; background:none }
-    button:focus-visible,input:focus-visible,textarea:focus-visible,summary:focus-visible {
+    button:focus-visible,input:focus-visible,textarea:focus-visible,summary:focus-visible,.tui-viewport:focus-visible {
       outline:2px solid var(--accent); outline-offset:3px
     }
     [hidden] { display:none !important }
@@ -48,14 +48,28 @@
       background:#0f1b28; border-bottom:1px solid var(--line) }
     .review p { color:var(--muted); font-size:13px }
     .review p strong { color:var(--text) }
-    .picker { display:flex; gap:3px; padding:3px; border:1px solid var(--line); border-radius:8px; flex:none; background:var(--bg) }
+    .picker { display:flex; flex-wrap:wrap; gap:3px; padding:3px; border:1px solid var(--line); border-radius:8px; flex:none; background:var(--bg) }
     .picker button { display:flex; align-items:center; gap:6px; white-space:nowrap; border-radius:5px; padding:5px 9px; color:var(--muted); font-size:12px }
     .picker button[aria-pressed=true] { color:var(--accent); background:var(--select) }
     .picker b { font:11px var(--mono); opacity:.85 }
-    .shell { display:grid; grid-template-columns:248px minmax(0,1fr) 278px; min-height:calc(100dvh - 118px) }
+    .shell { --divider:10px; display:grid;
+      grid-template-columns:var(--left-track,0px) var(--left-gap,0px) minmax(0,1fr) var(--right-gap,0px) var(--right-track,0px);
+      min-height:calc(100dvh - 118px) }
+    .shell[data-left] { --left-track:var(--left-size,248px); --left-gap:var(--divider) }
+    .shell[data-right] { --right-track:var(--right-size,278px); --right-gap:var(--divider) }
     .library,.inspector { min-width:0; background:var(--panel); padding:17px 14px }
-    .library { border-right:1px solid var(--line) }
-    .inspector { border-left:1px solid var(--line) }
+    .library { grid-area:1 / 1; border-right:1px solid var(--line) }
+    .inspector { grid-area:1 / 5; border-left:1px solid var(--line) }
+    .splitter { position:relative; z-index:1; background:var(--bg); color:var(--muted); outline-offset:-2px;
+      cursor:col-resize; touch-action:none; user-select:none }
+    .splitter[data-split=left] { grid-area:1 / 2 }
+    .splitter[data-split=right] { grid-area:1 / 4 }
+    .splitter::before,.splitter::after { content:""; position:absolute; left:50%; transform:translateX(-50%); border-radius:3px }
+    .splitter::before { width:1px; height:100%; background:var(--line) }
+    .splitter::after { width:4px; height:36px; top:min(120px,25%); background:currentColor }
+    .splitter:hover,.splitter:focus-visible,.splitter[data-dragging] { color:var(--accent); background:var(--select) }
+    .splitter:focus-visible { outline:2px solid var(--accent) }
+    body[data-resizing],body[data-resizing] * { cursor:col-resize !important; user-select:none !important }
     .rail-head { display:flex; justify-content:space-between; align-items:center; gap:8px; margin:0 1px 12px }
     .search { display:flex; align-items:center; gap:7px; border:1px solid var(--line); border-radius:7px; padding:7px 9px; margin-bottom:12px; color:var(--muted) }
     .search:focus-within { border-color:var(--accent) }
@@ -80,6 +94,7 @@
     .nav button[aria-pressed=true] { background:var(--select); color:var(--accent) }
     .rail-note { color:var(--muted); font-size:11px; margin:10px 4px 0; max-width:28ch }
     main { min-width:0 }
+    .shell > main { grid-area:1 / 3 }
     .chat-head { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 21px;
       border-bottom:1px solid var(--line); background:var(--panel) }
     .chat-head .eyebrow { margin-bottom:4px }
@@ -128,20 +143,25 @@
     .tiles { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px }
     .tiles .card { margin:0 }
     [data-layout=dashboard] .overview { display:block }
-    [data-layout=dashboard] .shell { grid-template-columns:256px minmax(0,1fr) 250px }
     [data-layout=dashboard] .chat-body { min-height:max(420px,calc(100dvh - 374px)) }
-    [data-layout=focus] .shell { grid-template-columns:minmax(0,1fr) }
-    [data-layout=focus] .shell:has(.library[data-open]) { grid-template-columns:248px minmax(0,1fr) }
-    html:has(.inspector[hidden]):not([data-layout=focus]) .shell { grid-template-columns:248px minmax(0,1fr) }
     [data-layout=focus] .library:not([data-open]) { display:none }
     [data-layout=focus] .chat-head { padding-inline:max(21px,calc((100% - 714px) / 2)) }
     [data-layout=focus] #sessions-toggle { display:inline-flex }
     [data-layout=focus] .inspector:not([hidden]) { position:fixed; z-index:3; right:0; top:0; bottom:0;
       width:min(310px,95vw); overflow:auto; box-shadow:0 0 0 100vmax #050a11b0 }
     [data-layout=focus] .chat-body { min-height:calc(100dvh - 200px) }
+    .layout-manager { border-left:1px solid var(--line) }
+    .tui-mode { padding:20px; max-width:1960px; margin:auto }
+    .tui-head { display:flex; justify-content:space-between; align-items:start; flex-wrap:wrap; gap:14px; margin-bottom:13px }
+    .tui-head h1 { font-size:23px; letter-spacing:-.035em; margin:3px 0 4px }
+    .tui-controls { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; margin-bottom:10px }
+    .tui-controls .picker { max-width:100% }
+    .tui-viewport { max-height:calc(100dvh - 278px); min-height:260px; overflow:auto;
+      border:1px solid var(--line); border-radius:8px; background:#0a131b }
+    .tui-viewport img { display:block; width:100%; height:auto }
+    .tui-viewport[data-actual] img { width:auto; max-width:none }
+    .tui-note { margin-top:8px }
     @media (max-width:1000px) {
-      html[data-layout] .shell:has(.library) { grid-template-columns:216px minmax(0,1fr) }
-      html[data-layout=focus] .shell:not(:has(.library[data-open])) { grid-template-columns:minmax(0,1fr) }
       .inspector:not([hidden]) { position:fixed; z-index:3; top:0; bottom:0; right:0;
         width:min(300px,95vw); overflow:auto; box-shadow:0 0 0 100vmax #050a11b0 }
     }
@@ -151,7 +171,8 @@
       .top-end { gap:5px }
       .top-end .connection { display:none }
       .review { align-items:flex-start; flex-direction:column; gap:7px; padding:8px 12px }
-      html[data-layout] .shell:has(.library) { grid-template-columns:minmax(0,1fr) }
+      .review .picker { max-width:100% }
+      .shell { display:block }
       .library:not([data-open]) { display:none }
       .library[data-open] { border-right:0; border-bottom:1px solid var(--line) }
       #sessions-toggle { display:inline-flex }
@@ -159,6 +180,8 @@
       .chat-body,.overview { padding:14px 13px }
       .chat-body { min-height:410px }
       .tiles { grid-template-columns:1fr }
+      .tui-mode { padding:12px }
+      .tui-viewport { max-height:62dvh }
     }
   </style>
 </head>
@@ -191,10 +214,11 @@
       <button type="button" data-layout-option="studio"><b>A</b> Studio</button>
       <button type="button" data-layout-option="dashboard"><b>B</b> Dashboard</button>
       <button type="button" data-layout-option="focus"><b>C</b> Chat focus</button>
+      <button type="button" class="layout-manager" data-layout-option="tui" aria-controls="tui-mode"><svg class="icon" aria-hidden="true"><use href="#i-terminal"/></svg> Full TUI</button>
     </div>
   </div>
 
-  <div class="shell">
+  <div class="shell" id="workspace-shell">
     <aside id="library" class="library" aria-label="Workspace sessions and views">
       <div class="rail-head"><h2>Sessions</h2><button type="button" class="action" id="new-session">+ New</button></div>
       <label class="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input type="search" id="search" aria-label="Search session titles" placeholder="Search session titles"></label>
@@ -214,6 +238,9 @@
       <p class="rail-note">This demo shows one workspace, not the host’s sessions or archives.</p>
     </aside>
 
+    <div class="splitter" data-split="left" role="separator" aria-orientation="vertical"
+      aria-label="Resize sessions pane" aria-controls="library"
+      title="Drag or use Left/Right; double-click or press Enter to reset" tabindex="0" hidden></div>
     <main>
       <section class="overview" aria-labelledby="overview-title">
         <div class="overview-head">
@@ -252,6 +279,9 @@
       </section>
     </main>
 
+    <div class="splitter" data-split="right" role="separator" aria-orientation="vertical"
+      aria-label="Resize workspace inspector" aria-controls="inspector"
+      title="Drag or use Left/Right; double-click or press Enter to reset" tabindex="0" hidden></div>
     <aside id="inspector" class="inspector" aria-label="Workspace inspector">
       <div class="inspector-head">
         <div><p class="eyebrow">Workspace inspector</p><h2 id="panel-title"></h2></div>
@@ -261,14 +291,46 @@
     </aside>
   </div>
 
+  <main id="tui-mode" class="tui-mode" aria-labelledby="tui-title" hidden>
+    <header class="tui-head">
+      <div>
+        <p class="eyebrow">oc-box tui / Workspace manager</p>
+        <h1 id="tui-title">Full TUI</h1>
+        <p class="muted">The existing Textual manager in its own tab, with no chat or composer.</p>
+      </div>
+      <span class="tag demo">Read-only captures</span>
+    </header>
+    <div class="tui-controls">
+      <div class="picker" role="group" aria-label="Full TUI sections">
+        <button type="button" data-tui-view="status"><b>1</b> Status</button>
+        <button type="button" data-tui-view="settings"><b>2</b> Settings</button>
+        <button type="button" data-tui-view="sessions"><b>3</b> Sessions</button>
+        <button type="button" data-tui-view="terminals"><b>4</b> Terminals</button>
+        <button type="button" data-tui-view="logs"><b>5</b> Logs</button>
+        <button type="button" data-tui-view="storage"><b>6</b> Storage</button>
+        <button type="button" data-tui-view="backups"><b>7</b> Backup/restore</button>
+      </div>
+      <div class="picker" role="group" aria-label="Full TUI capture scale">
+        <button type="button" data-tui-zoom="fit" aria-pressed="true">Fit width</button>
+        <button type="button" data-tui-zoom="actual" aria-pressed="false">100%</button>
+      </div>
+    </div>
+    <div class="tui-viewport" id="tui-viewport" role="region" aria-label="Scrollable Textual capture" tabindex="0">
+      <img id="tui-image" alt="">
+    </div>
+    <p class="tui-note muted" id="tui-note"><small>Switch views using the buttons or keys 1–7. The captures use synthetic data; controls inside them are not live.</small></p>
+    <p class="tui-note muted" id="tui-error" hidden>The capture could not load. Open the demo with its companion <code>tui/</code> folder.</p>
+  </main>
+
   <script>
     const byId = (id) => document.getElementById(id);
     const all = (selector) => [...document.querySelectorAll(selector)];
     const icon = (name) => `<svg class="icon" aria-hidden="true"><use href="#i-${name}"/></svg>`;
     const layouts = {
-      studio: ["Studio", "Sessions, chat and workspace context side by side."],
+      studio: ["Studio", "Sessions, chat and workspace context. Drag the dividers, or focus one and use the arrow keys."],
       dashboard: ["Dashboard", "Manager cards first, with the selected conversation underneath."],
       focus: ["Chat focus", "More room for the conversation; open sessions or the inspector on demand."],
+      tui: ["Full TUI", "The unmodified Textual screens in a separate manager-only view."],
     };
     const groups = {
       open: "Open TUI tabs", history: "Workspace history", archive: "Archived in workspace",
@@ -309,17 +371,87 @@
       storage: ["Storage", `<div class="card"><h3>Workspace private home</h3><p class="large">2.0 GiB</p><p class="muted">Example scan result. Host storage, backups and destructive actions aren’t connected.</p></div>`],
     };
 
+    const tuiViews = {
+      status: ["Status", "Host resource cards, workspace inventory, selected workspace and retained activity."],
+      settings: ["Settings", "The manager’s expanded inline preferences form."],
+      sessions: ["Sessions", "The metadata-only session catalog with root, child and archived entries."],
+      terminals: ["Terminals", "The native session terminal panel in its disconnected state."],
+      logs: ["Logs", "The manager’s log filter controls and retained activity results."],
+      storage: ["Storage", "The workspace storage inventory with guarded actions disabled."],
+      backups: ["Backup/restore", "The backup and restore form with synthetic source and destination controls."],
+    };
     const drafts = new Map(), messages = new Map();
-    let selected = sessions[0], scope = "all", panel = "status", created = 0, inspectorReturn;
+    let selected = sessions[0], scope = "all", panel = "status", created = 0, inspectorReturn, activeDrag;
+    const shell = byId("workspace-shell"), tui = byId("tui-mode"), capture = byId("tui-image");
     const draft = byId("draft"), library = byId("library"), inspector = byId("inspector");
     const narrow = matchMedia("(max-width: 680px)"), overlay = matchMedia("(max-width: 1000px)");
-    const background = all(".top, .review, .library, main");
+    const background = all(".top, .review, .library, .splitter, .shell > main");
+    const splitters = all("[data-split]");
+    const panes = {
+      left: { min:192, initial:() => overlay.matches ? 216 : 248 },
+      right: { min:212, initial:() => 278 },
+    };
     const layout = () => document.documentElement.dataset.layout;
     const overlayMode = () => overlay.matches || layout() === "focus";
+    const maxPanelWidth = 520, minChatWidth = 380, dividerWidth = 10;
+    const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
+
+    function endDrag() {
+      if (!activeDrag) return;
+      const { handle, pointerId } = activeDrag;
+      activeDrag = null;
+      handle.removeAttribute("data-dragging");
+      document.body.removeAttribute("data-resizing");
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+    }
+
+    function syncSplitters(fixedSide) {
+      const shown = {
+        left: !shell.hidden && !narrow.matches && (layout() !== "focus" || library.hasAttribute("data-open")),
+        right: !shell.hidden && !inspector.hidden && !overlayMode(),
+      };
+      const available = shell.clientWidth - minChatWidth - dividerWidth * Object.values(shown).filter(Boolean).length;
+      const widths = { left:0, right:0 };
+      const order = fixedSide === "right" ? ["right","left"] : ["left","right"];
+      const choose = (side, reserve) => {
+        const pane = panes[side];
+        return shown[side] ? clamp(side === fixedSide ? pane.width : pane.preferred ?? pane.initial(),
+          pane.min, Math.min(maxPanelWidth, available - reserve)) : 0;
+      };
+      const [first, second] = order;
+      widths[first] = choose(first, shown[second] ? panes[second].min : 0);
+      widths[second] = choose(second, widths[first]);
+      for (const handle of splitters) {
+        const side = handle.dataset.split, opposite = side === "left" ? "right" : "left";
+        const pane = panes[side];
+        if (!shown[side] && activeDrag?.handle === handle) endDrag();
+        pane.width = widths[side];
+        pane.max = Math.max(pane.min, Math.min(maxPanelWidth, available - widths[opposite]));
+        shell.toggleAttribute(`data-${side}`, shown[side]);
+        shell.style.setProperty(`--${side}-size`, `${pane.width}px`);
+        handle.hidden = !shown[side];
+        handle.setAttribute("aria-valuemin", pane.min);
+        handle.setAttribute("aria-valuemax", pane.max);
+        handle.setAttribute("aria-valuenow", pane.width);
+        handle.setAttribute("aria-valuetext", `${pane.width} pixels`);
+      }
+    }
+
+    function resizePane(side, width) {
+      const pane = panes[side];
+      pane.preferred = clamp(Math.round(width), pane.min, pane.max);
+      syncSplitters(side === "left" ? "right" : "left");
+    }
+
+    function resetPane(side) {
+      delete panes[side].preferred;
+      syncSplitters(side === "left" ? "right" : "left");
+    }
 
     function showLibrary(open) {
       library.toggleAttribute("data-open", open);
       byId("sessions-toggle").setAttribute("aria-expanded", open);
+      syncSplitters();
     }
 
     function showInspector(open, focus = false) {
@@ -339,11 +471,26 @@
       if (open && (focus || modal)) byId("inspector-close").focus();
       if (!open && focus) (inspectorReturn?.getClientRects().length ? inspectorReturn : byId("inspector-toggle")).focus();
       if (!open) inspectorReturn = null;
+      syncSplitters();
+    }
+
+    function showTuiView(name) {
+      if (!Object.hasOwn(tuiViews, name)) name = "status";
+      const [title, description] = tuiViews[name];
+      for (const button of all("[data-tui-view]")) button.setAttribute("aria-pressed", button.dataset.tuiView === name);
+      capture.alt = `Textual ${title} view. ${description} Synthetic read-only capture.`;
+      capture.src = `tui/${name}.png`;
+      byId("tui-error").hidden = true;
+      byId("tui-viewport").scrollTo(0, 0);
     }
 
     function setLayout(name) {
       if (!Object.hasOwn(layouts, name)) name = "studio";
+      endDrag();
       document.documentElement.dataset.layout = name;
+      shell.hidden = name === "tui";
+      tui.hidden = !shell.hidden;
+      if (!tui.hidden && !capture.hasAttribute("src")) showTuiView("status");
       byId("layout-note").replaceChildren(Object.assign(document.createElement("strong"), { textContent: layouts[name][0] + ". " }), layouts[name][1]);
       for (const button of all("[data-layout-option]")) button.setAttribute("aria-pressed", button.dataset.layoutOption === name);
       showLibrary(false);
@@ -451,6 +598,42 @@
       showInspector(true, focus);
     }
 
+    for (const handle of splitters) {
+      const side = handle.dataset.split, pane = panes[side], direction = side === "left" ? 1 : -1;
+      handle.addEventListener("pointerdown", (event) => {
+        if (!event.isPrimary || event.button !== 0 || activeDrag) return;
+        event.preventDefault();
+        handle.focus({ preventScroll:true });
+        handle.setPointerCapture(event.pointerId);
+        activeDrag = { handle, start:event.clientX, width:pane.width, pointerId:event.pointerId };
+        handle.setAttribute("data-dragging", "");
+        document.body.setAttribute("data-resizing", "");
+      });
+      handle.addEventListener("pointermove", (event) => {
+        if (activeDrag?.pointerId === event.pointerId && activeDrag.handle === handle) {
+          resizePane(side, activeDrag.width + (event.clientX - activeDrag.start) * direction);
+        }
+      });
+      for (const type of ["pointerup","pointercancel","lostpointercapture"]) handle.addEventListener(type, (event) => {
+        if (activeDrag?.pointerId === event.pointerId && activeDrag.handle === handle) endDrag();
+      });
+      handle.addEventListener("dblclick", () => resetPane(side));
+      handle.addEventListener("keydown", (event) => {
+        const step = event.shiftKey ? 32 : 12;
+        const value = { ArrowLeft:pane.width - step * direction, ArrowRight:pane.width + step * direction, Home:pane.min, End:pane.max };
+        if (event.key === "Enter") resetPane(side);
+        else if (Object.hasOwn(value, event.key)) resizePane(side, value[event.key]);
+        else return;
+        event.preventDefault();
+      });
+    }
+    window.addEventListener("resize", () => endDrag());
+    let observedWidth;
+    new ResizeObserver(([entry]) => {
+      if (entry.contentRect.width === observedWidth) return;
+      observedWidth = entry.contentRect.width;
+      syncSplitters();
+    }).observe(shell);
     for (const button of all("[data-layout-option]")) button.addEventListener("click", () => {
       const name = button.dataset.layoutOption;
       location.hash = name;
@@ -460,6 +643,12 @@
       const name = location.hash.slice(1);
       if (layout() !== name) setLayout(name);
     });
+    for (const button of all("[data-tui-view]")) button.addEventListener("click", () => showTuiView(button.dataset.tuiView));
+    for (const button of all("[data-tui-zoom]")) button.addEventListener("click", () => {
+      byId("tui-viewport").toggleAttribute("data-actual", button.dataset.tuiZoom === "actual");
+      for (const option of all("[data-tui-zoom]")) option.setAttribute("aria-pressed", option === button);
+    });
+    capture.addEventListener("error", () => { byId("tui-error").hidden = false; });
     overlay.addEventListener("change", () => showInspector(!overlay.matches && layout() === "studio", inspector.contains(document.activeElement)));
     narrow.addEventListener("change", () => showLibrary(false));
     for (const button of all("[data-scope]")) button.addEventListener("click", () => {
@@ -483,6 +672,14 @@
       }
     });
     document.addEventListener("keydown", (event) => {
+      if (layout() === "tui") {
+        if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing && /^[1-7]$/.test(event.key)) {
+          showTuiView(Object.keys(tuiViews)[Number(event.key) - 1]);
+          event.preventDefault();
+        }
+        return;
+      }
+      if (event.key === "Escape" && activeDrag) { endDrag(); return; }
       if (event.key === "Tab" && !inspector.hidden && overlayMode()) {
         event.preventDefault();
         byId("inspector-close").focus();
