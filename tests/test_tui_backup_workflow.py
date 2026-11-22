@@ -65,6 +65,8 @@ class PrivateEditorTests(unittest.IsolatedAsyncioTestCase):
             app.push_screen(screen)
             await pilot.pause()
             editor = screen.query_one(SecretEditor)
+            submit = screen.query_one("#private-secret-submit", Button)
+            self.assertTrue(submit.disabled)
             self.assertFalse(isinstance(editor, Input))
             self.assertTrue(screen.PRIVATE_INPUT and editor.PRIVATE_INPUT)
             self.assertFalse(hasattr(editor, "value"))
@@ -83,7 +85,13 @@ class PrivateEditorTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn(VALUE, editor.render().plain)
             self.assertEqual(editor.get_selection(None), ("", "\n"))
             self.assertEqual(app.clipboard, "EXISTING_NONSECRET_CACHE")
-            screen.submit()
+            status = screen.query_one("#private-secret-status", Static)
+            self.assertFalse(submit.disabled)
+            self.assertIn("Click Submit password or press Enter", str(status.render()))
+            self.assertTrue(await pilot.click(submit))
+            await pilot.pause()
+            self.assertTrue(submit.disabled)
+            self.assertIn("Password submitted", str(status.render()))
             screen.submit()
             self.assertEqual(transport.submit_secret.call_count, 1)
             self.assertEqual(editor._private_editor.chars, [])
@@ -113,6 +121,7 @@ class PrivateEditorTests(unittest.IsolatedAsyncioTestCase):
             editor.post_message(events.Paste("first\nsecond"))
             await pilot.pause()
             self.assertEqual(editor._private_editor.chars, [])
+            self.assertTrue(screen.query_one("#private-secret-submit", Button).disabled)
             screen.submit()
             transport.submit_secret.assert_not_called()
             await pilot.press("ctrl+u")
@@ -152,14 +161,51 @@ class PrivateEditorTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(editor._private_editor.chars, [])
             transport.submit_secret.assert_not_called()
-            editor.focus()
+            submit = screen.query_one("#private-secret-submit", Button)
+            self.assertTrue(submit.disabled)
+            self.assertTrue(await pilot.click(editor))
             await pilot.press(*VALUE)
-            screen.submit()
+            self.assertFalse(submit.disabled)
+            self.assertTrue(await pilot.click(submit))
             await pilot.press(*VALUE, "enter")
             editor.post_message(events.Paste(VALUE))
             await pilot.pause()
             self.assertEqual(editor._private_editor.chars, [])
             transport.submit_secret.assert_called_once()
+            screen.dismiss()
+            app._private_interaction = False
+
+    async def test_short_unlock_can_be_submitted_from_editor_without_empty_submit(
+        self,
+    ):
+        app = DashboardApp(DemoBackend(), demo=True)
+        received = []
+        transport = SimpleNamespace(
+            submit_secret=lambda ident, content: received.append(
+                (ident, content == b"x")
+            ),
+            cancel=Mock(),
+        )
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.begin(app, pilot)
+            app._private_interaction = True
+            screen = PrivateSecretScreen(
+                transport, {"id": 3, "purpose": "backup-unlock"}
+            )
+            app.push_screen(screen)
+            await pilot.pause()
+            submit = screen.query_one("#private-secret-submit", Button)
+            await pilot.press("enter")
+            self.assertEqual(received, [])
+            self.assertTrue(submit.disabled)
+            await pilot.press("x", "ctrl+u")
+            self.assertTrue(submit.disabled)
+            await pilot.press("x")
+            self.assertFalse(submit.disabled)
+            await pilot.press("enter", "enter")
+            self.assertEqual(received, [(3, True)])
+            self.assertTrue(submit.disabled)
+            self.assertFalse(screen.query_one(SecretEditor)._private_editor.chars)
             screen.dismiss()
             app._private_interaction = False
 

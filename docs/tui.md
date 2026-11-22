@@ -776,8 +776,11 @@ submits completed input only to the existing child's private controlling TTY.
 No reveal, automatic clipboard read, copied-text cache, search or clear-X action
 is available there. Explicit terminal paste remains bounded and single-line.
 Password confirmation starts empty and unfocused: click its box or Shift+Tab
-before typing. A lost password is not an automatic key-management problem that
-the dashboard silently resolves.
+before typing. The prompt shows **Ready** when it has input to send. Click
+**Submit password** or press Enter in the password box; either submits it,
+without an extra confirmation click or keystroke. The prompt then shows
+**Password submitted** while the operation continues. A lost password is not an
+automatic key-management problem that the dashboard silently resolves.
 
 The manager's transient private editor is part of the secret-memory trust
 boundary. Core dumps are disabled before private input, but Python memory

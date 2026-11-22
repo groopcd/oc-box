@@ -28,6 +28,28 @@ class BackupPrivacyIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await app.workers.wait_for_complete()
         await pilot.pause()
 
+    async def mouse(self, app, pilot, kind, point, button=1):
+        x, y = point
+        widget, _ = app.screen.get_widget_at(x, y)
+        # Pilot.click injects a Click itself, skipping App's real mouse pairing.
+        await app.on_event(
+            kind(
+                widget, x, y, 0, 0, button, False, False, False, screen_x=x, screen_y=y
+            )
+        )
+        await pilot.pause()
+
+    def button_point(self, app, selector):
+        button = app.screen.query_one(selector, Button)
+        x, y = button.region.center
+        self.assertIs(app.screen.get_widget_at(x, y)[0], button)
+        return x, y
+
+    async def click(self, app, pilot, selector):
+        point = self.button_point(app, selector)
+        await self.mouse(app, pilot, events.MouseDown, point)
+        await self.mouse(app, pilot, events.MouseUp, point)
+
     async def test_real_private_editor_fences_clipboard_and_transition_gap(self):
         app = DashboardApp(DemoBackend(), demo=True)
         transport = SimpleNamespace(
@@ -87,6 +109,9 @@ class BackupPrivacyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await pilot.pause()
             self.assertEqual(editor._private_editor.chars, [])
             self.assertTrue(app._private_interaction)
+            with patch.object(app, "action_logs") as open_logs:
+                await self.click(app, pilot, "#show-logs")
+                open_logs.assert_not_called()
             with patch.object(app, "_write_clipboard") as write:
                 # The child has not acknowledged exit: ordinary screen/focus
                 # must not reopen clipboard access between private dialogs.
@@ -221,8 +246,7 @@ class BackupPrivacyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             await app.push_screen(secret)
             await pilot.pause()
             await pilot.press(*SECRET)
-            await pilot.click("#private-secret-submit")
-            await pilot.pause()
+            await self.click(app, pilot, "#private-secret-submit")
             transport.submit_secret.assert_called_once()
             self.assertEqual(transport.submit_secret.call_args.args[1], bytearray())
             secret.dismiss()
@@ -234,8 +258,7 @@ class BackupPrivacyIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 reviews.append,
             )
             await pilot.pause()
-            await pilot.click("#metadata-approve")
-            await pilot.pause()
+            await self.click(app, pilot, "#metadata-approve")
             self.assertEqual(reviews, [True])
             self.assertTrue(app._private_interaction)
 
@@ -245,15 +268,79 @@ class BackupPrivacyIntegrationTests(unittest.IsolatedAsyncioTestCase):
             with patch.object(BackupWorkflow, "_run"):
                 await app.push_screen(operation, closed.append)
                 await pilot.pause()
-            await pilot.click("#backup-operation-close")
+            await self.click(app, pilot, "#backup-operation-close")
             self.assertEqual(closed, [])
-            await pilot.click("#backup-operation-cancel")
-            await pilot.pause()
+            await self.click(app, pilot, "#backup-operation-cancel")
             transport.cancel.assert_called_once_with()
             self.assertIs(app.screen, operation)
             operation._finished(None)
             await pilot.pause()
-            await pilot.click("#backup-operation-close")
-            await pilot.pause()
+            await self.click(app, pilot, "#backup-operation-close")
             self.assertEqual(closed, [None])
             self.assertFalse(app._private_interaction)
+
+    async def test_password_drag_stale_release_and_secondary_button_do_not_submit(self):
+        app = DashboardApp(DemoBackend(), demo=True)
+        transport = SimpleNamespace(submit_secret=Mock(), cancel=Mock())
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.begin(app, pilot)
+            app._private_interaction = True
+            secret = PrivateSecretScreen(transport, {"id": 5, "purpose": "backup-new"})
+            await app.push_screen(secret)
+            await pilot.pause()
+            await pilot.press(*SECRET)
+            point = self.button_point(app, "#private-secret-submit")
+
+            await self.mouse(app, pilot, events.MouseUp, point)
+            await self.mouse(app, pilot, events.MouseDown, point, button=3)
+            await self.mouse(app, pilot, events.MouseUp, point, button=3)
+            transport.submit_secret.assert_not_called()
+
+            await self.mouse(app, pilot, events.MouseDown, point)
+            await self.mouse(app, pilot, events.MouseMove, (point[0] + 1, point[1]))
+            await self.mouse(app, pilot, events.MouseMove, point)
+            await self.mouse(app, pilot, events.MouseUp, point)
+            transport.submit_secret.assert_not_called()
+
+            await self.mouse(app, pilot, events.MouseDown, point)
+            review = MetadataReview({"format": "session", "session_count": 1})
+            await app.push_screen(review)
+            await pilot.pause()
+            review.dismiss()
+            await pilot.pause()
+            self.assertIs(app.screen, secret)
+            await self.mouse(app, pilot, events.MouseUp, point)
+            transport.submit_secret.assert_not_called()
+
+            await self.click(app, pilot, "#private-secret-submit")
+            await self.mouse(app, pilot, events.MouseUp, point)
+            transport.submit_secret.assert_called_once_with(5, bytearray())
+            transport.cancel.assert_not_called()
+            secret.dismiss()
+            app._private_interaction = False
+
+    async def test_queued_review_press_cannot_close_worker_result(self):
+        app = DashboardApp(DemoBackend(), demo=True)
+        async with app.run_test(size=(80, 24)) as pilot:
+            await self.begin(app, pilot)
+            operation = BackupWorkflow(None, {})
+            closed = []
+            with patch.object(BackupWorkflow, "_run"):
+                await app.push_screen(operation, closed.append)
+                await pilot.pause()
+            review = MetadataReview({"format": "session", "session_count": 1})
+            reviews = []
+            await app.push_screen(review, reviews.append)
+            await pilot.pause()
+            queued = Button.Pressed(review.query_one("#metadata-approve", Button))
+
+            # A native click may already be queued when the child delivers its
+            # final outcome. Deliver the press after the review was dismissed.
+            operation._finished(None)
+            review.on_button_pressed(queued)
+            await pilot.pause()
+            self.assertIs(app.screen, operation)
+            self.assertEqual(reviews, [None])
+            self.assertEqual(closed, [])
+            await self.click(app, pilot, "#backup-operation-close")
+            self.assertEqual(closed, [None])

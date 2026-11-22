@@ -249,13 +249,20 @@ class ClipboardActions:
         if getattr(self, "_selection_adapted_screen", None) is not self.screen:
             self.enable_text_selection()
 
-    def _cancel_selection_gesture(self):
+    def _disarm_pending_click(self, screen=None):
+        press = getattr(self, "_private_click_press", None)
+        if screen is None or (press is not None and press[0] is screen):
+            self._private_click_press = None
+            self._mouse_down_widget = None
+
+    def _cancel_selection_gesture(self, *, disarm_click=True):
         # A screen can be pushed and popped before mouse-up. Disarm Textual's
         # pending synthetic click too, not only our clipboard gesture tracker.
         gesture = getattr(self, "_selection_gesture", None)
         if gesture is not None and gesture[0].is_attached:
             gesture[0].clear_selection()
-        self._mouse_down_widget = None
+        if disarm_click:
+            self._disarm_pending_click()
         self._selection_gesture = None
         self._selection_dragged = False
         self._selection_keyboard_events = {}
@@ -263,9 +270,34 @@ class ClipboardActions:
     def on_unmount(self):
         self._cancel_selection_gesture()
 
+    def _private_click_event(self, event):
+        """Let Textual finish one fresh, stationary click on an operation modal."""
+        if event.is_forwarded:
+            return False
+        if isinstance(event, events.MouseDown):
+            self._disarm_pending_click()
+            if event.button == 1 and getattr(
+                self.screen, "PRIVATE_MOUSE_ACTIONS", False
+            ):
+                self.enable_text_selection()
+                self._private_click_press = (self.screen, event.screen_offset)
+                return False
+            return True  # clear Textual's mouse-down even outside an operation modal
+        if isinstance(event, (events.MouseMove, events.MouseUp)):
+            press = getattr(self, "_private_click_press", None)
+            if press != (self.screen, event.screen_offset) or (
+                isinstance(event, events.MouseUp) and event.button != 1
+            ):
+                self._disarm_pending_click()
+            return isinstance(event, events.MouseUp)
+        if isinstance(event, (events.Key, events.MouseEvent)):
+            self._disarm_pending_click()
+        return False
+
     async def on_event(self, event):
         if self._clipboard_private():
-            self._cancel_selection_gesture()
+            self._cancel_selection_gesture(disarm_click=False)
+            clear_after_dispatch = self._private_click_event(event)
             if isinstance(event, events.Key) and event.key in {
                 "ctrl+c",
                 "super+c",
@@ -294,8 +326,14 @@ class ClipboardActions:
                 event.stop()
                 event.prevent_default()
                 return
-            await super().on_event(event)
+            try:
+                await super().on_event(event)
+            finally:
+                if clear_after_dispatch:
+                    self._disarm_pending_click()
             return
+        if getattr(self, "_private_click_press", None) is not None:
+            self._disarm_pending_click()
         completed = None
         keyboard_input = None
         forwarded = event.is_forwarded

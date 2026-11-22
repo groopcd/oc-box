@@ -116,16 +116,21 @@ class SecretEditor(Widget, can_focus=True):
 
     def _changed(self):
         self.refresh()
-        notice = self._private_editor.notice
-        self.screen.query_one("#private-secret-status", Static).update(
-            notice or "Masked; no copy, reveal, or saved password."
-        )
+        self.screen.update_input_status(self)
 
     def on_unmount(self):
         self.clear_private()
 
 
-class PrivateSecretScreen(ModalScreen):
+class _PrivateOperationModal(ModalScreen):
+    PRIVATE_MOUSE_ACTIONS = True
+
+    def on_screen_suspend(self):
+        # A release after a modal round trip is not a fresh click.
+        self.app._disarm_pending_click(self)
+
+
+class PrivateSecretScreen(_PrivateOperationModal):
     PRIVATE_INPUT = True
     ALLOW_SELECT = False
     BINDINGS = [
@@ -152,26 +157,31 @@ class PrivateSecretScreen(ModalScreen):
         with Vertical():
             yield Static(
                 {
-                    "backup-new": "Choose a backup password (host creation policy applies).",
-                    "backup-confirm": "Enter the same backup password again.",
+                    "backup-new": "Step 1 of 2: Choose a backup password (host creation policy applies).",
+                    "backup-confirm": "Step 2 of 2: Enter the same backup password again.",
                     "backup-unlock": "Enter this archive's backup password.",
                 }[self.purpose],
                 markup=False,
             )
             yield Static(
-                "Keep this password safely: it is not saved and cannot be recovered. "
-                "Terminal recordings can observe input. No key file needs copying.",
+                "Input is masked and cannot be copied or revealed. Keep your password: "
+                "it is not saved and cannot be recovered. Terminal recordings can observe input.",
                 markup=False,
             )
             yield SecretEditor()
             yield Static(
-                "Masked; no copy, reveal, or saved password.",
+                "Type the password to enable Submit password.",
                 id="private-secret-status",
                 markup=False,
             )
             with Horizontal():
                 yield Button("Cancel operation", id="private-secret-cancel")
-                yield Button("Continue", id="private-secret-submit", variant="primary")
+                yield Button(
+                    "Submit password",
+                    id="private-secret-submit",
+                    variant="primary",
+                    disabled=True,
+                )
 
     def on_mount(self):
         try:
@@ -207,20 +217,37 @@ class PrivateSecretScreen(ModalScreen):
             event.stop()
             event.prevent_default()
 
+    def update_input_status(self, editor):
+        if self._submitted or editor.disabled:
+            return
+        private = editor._private_editor
+        ready = bool(private.chars) and not private.notice
+        self.query_one("#private-secret-submit", Button).disabled = not ready
+        self.query_one("#private-secret-status", Static).update(
+            private.notice
+            or (
+                "Ready. Click Submit password or press Enter in the password box."
+                if ready
+                else "Type the password to enable Submit password."
+            )
+        )
+
     def submit(self):
-        if self._submitted:
+        if self._submitted or not self.is_active:
             return
         editor = self.query_one(SecretEditor)
-        if editor._private_editor.notice:
+        private = editor._private_editor
+        if editor.disabled or not private.chars or private.notice:
+            self.update_input_status(editor)
             return
-        content = bytearray("".join(editor._private_editor.chars).encode())
+        content = bytearray("".join(private.chars).encode())
         editor.clear_private()
         self._submitted = True
         self.query_one("#private-secret-submit", Button).disabled = True
         try:
             self.transport.submit_secret(self.prompt_id, content)
             self.query_one("#private-secret-status", Static).update(
-                "Submitted to the private child terminal; waiting…"
+                "Password submitted. Waiting for the backup operation…"
             )
         except Exception:
             self.query_one("#private-secret-status", Static).update(
@@ -232,6 +259,8 @@ class PrivateSecretScreen(ModalScreen):
             content.clear()
 
     def cancel(self):
+        if not self.is_active:
+            return
         self.query_one(SecretEditor).clear_private()
         accepted = self.transport.cancel()
         self.query_one("#private-secret-status", Static).update(
@@ -254,7 +283,7 @@ class PrivateSecretScreen(ModalScreen):
             editor.clear_private()
 
 
-class MetadataReview(ModalScreen):
+class MetadataReview(_PrivateOperationModal):
     BINDINGS = [
         Binding("enter", "ignore_enter", show=False, priority=True),
         Binding("space", "press_focused_review", show=False, priority=True),
@@ -325,7 +354,9 @@ class MetadataReview(ModalScreen):
     def on_button_pressed(self, event):
         if event.button.id in {"metadata-cancel", "metadata-approve"}:
             event.stop()
-            if self._decision_sent:
+            # Textual may deliver a queued press after worker completion
+            # dismissed this review. Dismiss always pops the current top screen.
+            if self._decision_sent or not self.is_active:
                 return
             if (
                 event.button.id == "metadata-approve"
@@ -338,7 +369,7 @@ class MetadataReview(ModalScreen):
             self.dismiss(event.button.id == "metadata-approve")
 
     def action_cancel_private_input(self):
-        if self.is_mounted and not self._decision_sent:
+        if self.is_mounted and self.is_active and not self._decision_sent:
             self._decision_sent = True
             self.dismiss(False)
 
@@ -364,7 +395,7 @@ class MetadataReview(ModalScreen):
             button.press()
 
 
-class BackupWorkflow(ModalScreen):
+class BackupWorkflow(_PrivateOperationModal):
     BINDINGS = [Binding("ctrl+c", "cancel_operation", show=False, priority=True)]
     CSS = """
     BackupWorkflow { align: center middle; }
@@ -527,11 +558,18 @@ class BackupWorkflow(ModalScreen):
         self.query_one("#backup-operation-close", Button).focus()
 
     def on_button_pressed(self, event):
-        if event.button.id == "backup-operation-cancel":
-            event.stop()
+        action = event.button.id
+        if action not in {
+            "backup-operation-cancel",
+            "backup-operation-close",
+        }:
+            return
+        event.stop()
+        if not self.is_active:
+            return
+        if action == "backup-operation-cancel":
             self.action_cancel_operation()
-        elif event.button.id == "backup-operation-close" and self.finished:
-            event.stop()
+        elif self.finished:
             self.dismiss(self.result)
 
     def action_cancel_operation(self):
