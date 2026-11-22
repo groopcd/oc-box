@@ -148,7 +148,9 @@ class ManagementCardTests(unittest.IsolatedAsyncioTestCase):
                 start.assert_not_called()
                 suspend.assert_not_called()
 
-    async def test_running_card_is_indeterminate_and_cancel_waits_for_real_result(self):
+    async def test_unmeasured_card_shows_activity_and_cancel_waits_for_real_result(
+        self,
+    ):
         app = DashboardApp(DemoBackend(), demo=True)
         async with app.run_test(size=SIZES[0]) as pilot:
             await self.settle(app, pilot)
@@ -179,13 +181,18 @@ class ManagementCardTests(unittest.IsolatedAsyncioTestCase):
                         stage = workflow.query_one("#backup-operation-stage", Static)
                         self.assertIn("Encrypting", str(stage.render()))
                         self.assertGreaterEqual(stage.size.height, 1)
-                        self.assertIn(
-                            "indeterminate",
+                        self.assertRegex(
                             str(
                                 workflow.query_one(
                                     "#backup-operation-elapsed", Static
                                 ).render()
                             ),
+                            r"^\d+ seconds elapsed$",
+                        )
+                        self.assertFalse(
+                            workflow.query_one(
+                                "#backup-operation-measured", Static
+                            ).display
                         )
                         progress = workflow.query_one(ProgressBar)
                         self.assertIsNone(progress.total)
