@@ -106,6 +106,28 @@ sys.exit(channel.child(None,fds,execute=execute,check_request=tui_operations._ch
 
 
 class PrivateProtocolTests(unittest.TestCase):
+    def test_host_metadata_accepts_only_fixed_fields_and_typed_review_choices(self):
+        reviewed = {
+            "format": "host",
+            "kind": "host",
+            "host_component": True,
+            "native_auth_export": True,
+            "restore_host": True,
+            "restore_opencode": True,
+            "host_files": 2,
+        }
+        self.assertEqual(channel.metadata(reviewed), reviewed)
+        for extra in (
+            {"credential_export": "secret"},
+            {"restore_host": False},
+            {"restore_opencode": "yes"},
+            {"native_auth_export": 1},
+            {"host_files": True},
+            {"format": "session", "kind": "full"},
+        ):
+            with self.subTest(extra=extra), self.assertRaises(channel.OperationIOError):
+                channel.metadata({**reviewed, **extra})
+
     def test_next_prompt_survives_reader_transition_during_secret_write_return(self):
         process = channel.OperationProcess(None, {})
         process.master, process.slave = pty.openpty()

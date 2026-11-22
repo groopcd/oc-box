@@ -11,10 +11,11 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from oc_box import backups, backup_crypto as crypto, oc_box as box, vault
 from oc_box import workspace_preferences as preferences
+from oc_box import tui_operations
 
 
 @unittest.skipUnless(
@@ -270,6 +271,178 @@ class WorkspaceBackupTests(unittest.TestCase):
             self.assertEqual(restored["container_project"], self.data["project"])
             self.assertEqual(self.created[-1]["id"], restored["id"])
         self.assertEqual(config.read_bytes(), original)
+
+    def test_dashboard_combined_restore_reports_workspace_and_partial_host_results(
+        self,
+    ):
+        config = self.root / "config/oc-box/config.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_bytes(b"{}\n")
+        self.backup(host=True)
+        destination = self.root / "dashboard-combined"
+        interaction = Mock()
+        interaction.review.return_value = True
+        args = argparse.Namespace(
+            project=destination, file=self.archive, identity=[self.identity], host=True
+        )
+        args._reviewed_paths = {
+            "backup_parent": tui_operations.directory_identity(self.archive.parent),
+            "backup_file": tui_operations.file_identity(self.archive),
+            "destination_parent": tui_operations.directory_identity(destination.parent),
+        }
+        restore_module = backups.host_restore()
+        failure = restore_module.HostRestoreError(
+            "io-failure",
+            restore_module.RestoreResult(files_installed=1, completion_uncertain=True),
+        )
+        with (
+            patch.dict(
+                os.environ, {"XDG_CONFIG_HOME": str(self.root / "fresh-config")}
+            ),
+            patch.object(restore_module, "apply", side_effect=failure),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(restore_module.HostRestoreError),
+        ):
+            backups.restore_backup(box, args, interaction=interaction)
+        interaction.review.assert_called_once()
+        self.assertTrue(interaction.review.call_args.args[0]["restore_host"])
+        self.assertFalse(interaction.review.call_args.args[0]["restore_opencode"])
+        workspace, host = [
+            call.args[0] for call in interaction.inspection.call_args_list
+        ]
+        self.assertEqual(
+            (workspace["format"], workspace["status"]), ("workspace", "stopped")
+        )
+        self.assertEqual((host["format"], host["status"]), ("host", "incomplete"))
+        self.assertEqual(host["host_file_links"], 1)
+        self.assertTrue(host["host_completion_uncertain"])
+        self.assertTrue(destination.exists())
+
+    def test_dashboard_restore_parent_replaced_during_authenticated_review(self):
+        config = self.root / "config/oc-box/config.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_bytes(b"{}\n")
+        self.backup(host=True)
+        parent = self.root / "reviewed-parent"
+        parent.mkdir()
+        destination = parent / "restored"
+        args = argparse.Namespace(
+            project=destination, file=self.archive, identity=[self.identity], host=True
+        )
+        args._reviewed_paths = {
+            "destination_parent": tui_operations.directory_identity(parent)
+        }
+        operations_before = list(self.operations)
+
+        def move_parent(_summary):
+            parent.rename(self.root / "earlier-parent")
+            parent.mkdir()
+            return True
+
+        interaction = Mock()
+        interaction.review.side_effect = move_parent
+        with (
+            patch.dict(
+                os.environ, {"XDG_CONFIG_HOME": str(self.root / "fresh-host-config")}
+            ),
+            contextlib.redirect_stdout(io.StringIO()),
+            self.assertRaisesRegex(
+                crypto.BackupError, "Reviewed backup directory changed"
+            ),
+        ):
+            backups.restore_backup(box, args, interaction=interaction)
+        self.assertEqual(self.operations, operations_before)
+        interaction.dispatched.assert_not_called()
+        self.assertEqual(list(parent.iterdir()), [])
+        self.assertEqual(list((self.root / "earlier-parent").iterdir()), [])
+        self.assertFalse((self.root / "fresh-host-config").exists())
+
+    def test_combined_backup_refuses_plaintext_export_inside_captured_project(self):
+        export = self.project / "native-export.json"
+        export.write_bytes(b"[]")
+        export.chmod(0o600)
+        args = argparse.Namespace(
+            project=self.project,
+            workspace=None,
+            output=self.archive,
+            portable=False,
+            host=True,
+            recipient=[self.recipient],
+            opencode_auth_export=str(export),
+        )
+        self.running = True
+        with self.assertRaisesRegex(crypto.BackupError, "outside all archived"):
+            backups.make_backup(box, args)
+        self.assertTrue(self.running)
+        self.assertEqual(self.operations, [])
+        self.assertFalse(self.archive.exists())
+        self.assertEqual(export.read_bytes(), b"[]")
+
+    def test_native_export_moved_into_project_during_prompt_is_not_archived(self):
+        export = self.root / "private-export.json"
+        export.write_bytes(b"[]")
+        export.chmod(0o600)
+        destination = self.project / export.name
+        args = argparse.Namespace(
+            project=self.project,
+            workspace=None,
+            output=self.archive,
+            portable=True,
+            host=True,
+            recipient=[self.recipient],
+            opencode_auth_export=str(export),
+        )
+        generate = crypto.generate_key
+
+        def move_export(*args, **kwargs):
+            result = generate(*args, **kwargs)
+            export.rename(destination)
+            return result
+
+        with (
+            patch.object(crypto, "generate_key", side_effect=move_export),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaises(crypto.BackupError),
+        ):
+            backups.make_backup(box, args)
+        self.assertFalse(self.archive.exists())
+        self.assertEqual(destination.read_bytes(), b"[]")
+
+    def test_dashboard_restore_does_not_adopt_a_substituted_staging_inode(self):
+        self.backup(portable=True)
+        parent = self.root / "stage-swap"
+        parent.mkdir()
+        destination = parent / "restored"
+        preserved = parent / "original-stage"
+        args = argparse.Namespace(
+            project=destination, file=self.archive, identity=[self.identity]
+        )
+        args._reviewed_paths = {
+            "destination_parent": tui_operations.directory_identity(parent)
+        }
+        interaction = Mock()
+        interaction.review.return_value = True
+        activate = backups.activate_project
+
+        def substitute(staging, target, **kwargs):
+            staging.rename(preserved)
+            staging.mkdir()
+            (staging / "keep").write_text("unrelated directory")
+            activate(staging, target, **kwargs)
+
+        with (
+            patch.object(backups, "activate_project", side_effect=substitute),
+            contextlib.redirect_stdout(io.StringIO()),
+            contextlib.redirect_stderr(io.StringIO()),
+            self.assertRaisesRegex(
+                crypto.BackupError, "Reviewed project staging changed"
+            ),
+        ):
+            backups.restore_backup(box, args, interaction=interaction)
+        self.assertEqual(self.created, [])
+        self.assertEqual((destination / "keep").read_text(), "unrelated directory")
+        self.assertTrue((preserved / "unfinished.txt").exists())
 
     def test_dashboard_progress_inspect_projection_and_cancelled_review_before_creation(
         self,

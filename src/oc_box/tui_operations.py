@@ -372,10 +372,19 @@ class OperationController:
         origin=None,
         store=None,
         session=None,
+        host=False,
+        include_opencode=False,
+        auth_export=None,
     ):
         self._allowed(action)
-        if type(portable) is not bool:
+        if any(type(flag) is not bool for flag in (portable, host, include_opencode)):
             fail("invalid-backup-kind")
+        if (
+            (host and action not in {"workspace-backup", "workspace-restore"})
+            or (include_opencode and (action != "workspace-restore" or not host))
+            or (auth_export is not None and (action != "workspace-backup" or not host))
+        ):
+            fail("unsupported-action")
         if len(recipients) > 16 or len(identities) > 16:
             fail("too-many-keys")
         request = {
@@ -394,6 +403,36 @@ class OperationController:
             "bindings": {},
         }
         bindings = request["bindings"]
+        if host:
+            request["host"] = True
+            if __package__:
+                from .host_backup_payload import HostPayloadError, destinations
+            else:
+                from host_backup_payload import HostPayloadError, destinations
+            try:
+                bindings["host_roots"] = {
+                    name: str(path) for name, path in destinations().items()
+                }
+            except HostPayloadError:
+                fail("unsafe-state")
+        if include_opencode:
+            request["include_opencode"] = True
+        if auth_export is not None:
+            if (
+                not isinstance(auth_export, (str, Path))
+                or not Path(auth_export).is_absolute()
+            ):
+                fail("invalid-auth-export")
+            if __package__:
+                from .host_backup_auth import MAX_EXPORT
+            else:
+                from host_backup_auth import MAX_EXPORT
+            export = Path(auth_export)
+            identity = file_identity(export, private=True)
+            if not 0 < identity[2] <= MAX_EXPORT:
+                fail("invalid-auth-export")
+            request["auth_export"] = str(export)
+            bindings["auth_export"] = identity
         archive = Path(request["backup"])
         bindings["backup_parent"] = directory_identity(archive.parent)
         creating = action in {"workspace-backup", "session-backup"}
@@ -431,7 +470,7 @@ class OperationController:
             record = _workspace_action(self.box, workspace)
             bindings.update(_workspace_bindings(record))
             request["project"] = record.row.project
-        elif action == "workspace-backup":
+        elif action == "workspace-backup" and (not host or portable):
             fail("workspace-selection-required")
         if creating:
             protected = [Path(request["state_root"])]
@@ -439,6 +478,10 @@ class OperationController:
                 protected.append(Path(request["project"]))
             if any(archive.is_relative_to(path) for path in protected):
                 fail("protected-output-path")
+            if "auth_export" in request and any(
+                Path(request["auth_export"]).is_relative_to(path) for path in protected
+            ):
+                fail("invalid-auth-export")
         if destination is not None:
             if action == "session-restore" and origin == "workspace":
                 if (
@@ -457,22 +500,37 @@ class OperationController:
                     bindings["destination_parent"] = directory_identity(target.parent)
                 else:
                     bindings["destination_directory"] = directory_identity(target)
-        elif action in {"workspace-restore", "session-restore"}:
+        elif action == "session-restore" or (
+            action == "workspace-restore" and not host
+        ):
             fail("destination-required")
         if action == "backup-delete":
-            _recognized_archive(archive)
+            archive_kind(archive, expected=bindings["backup_file"])
         label = {
             "workspace-backup": "Create encrypted workspace backup",
-            "workspace-inspect": "Inspect encrypted workspace backup",
+            "workspace-inspect": "Inspect encrypted workspace or host configuration backup",
             "workspace-restore": "Restore workspace to a NEW directory",
             "session-backup": "Create encrypted session-tree backup",
             "session-inspect": "Inspect encrypted session-tree backup",
             "session-restore": "Restore history with fresh native session IDs",
             "backup-delete": "Delete this encrypted backup FILE only",
         }[action]
+        workspace_target = (
+            workspace if action == "workspace-backup" else request["destination"]
+        )
+        if host and action == "workspace-backup":
+            label = "Create encrypted host configuration backup"
+            if workspace_target is not None:
+                label = "Create encrypted workspace and host configuration backup"
+        elif host:
+            label = "Restore host configuration"
+            if workspace_target is not None:
+                label += " and restore workspace to a NEW directory"
         review = f"{label}\nBackup: {archive}\n"
         if workspace:
             review += f"Workspace: {workspace}\nProject: {request.get('project', '')}\n"
+        if action == "workspace-backup" and portable:
+            review += "Workspace mode: Portable (container OS image not included).\n"
         if origin:
             review += f"Native source: {origin}\nStore: {store}\n"
         if origin == "host":
@@ -485,14 +543,47 @@ class OperationController:
             review += f"Session tree: {request['session']['id']} (including native children)\n"
         if request["destination"]:
             review += f"Destination: {request['destination']}\n"
-        review += (
-            "No whole host database, global vault or shared cache is replaced or deleted. "
-            "Restores never overwrite existing workspaces or session IDs.\n"
-            "Close owning clients before workspace lifecycle operations. Existing locks and identity checks remain authoritative. "
-            "A consistent workspace backup can stop an unowned running container and leaves it stopped.\n"
-            "Passwords use the existing masked controlling-terminal reader, through the private dashboard prompt when embedded. Passwords are not saved."
-            " Whole-workspace archives can contain copied configuration/authentication and complete native history; protect the encrypted file."
-        )
+        if host and action == "workspace-backup":
+            review += (
+                "Host backup includes oc-box settings, the existing encrypted vault, and native OpenCode configuration, plugins and legacy authentication when present. "
+                "The whole host OpenCode database is not captured.\n"
+            )
+            if auth_export is None:
+                review += "No native V2 credential export is included.\n"
+            else:
+                review += (
+                    f"Native V2 credential export file: {request['auth_export']}\n"
+                    "Keep the plaintext export outside any backed-up workspace. This operation does not change or remove the export file.\n"
+                )
+        elif host:
+            review += (
+                "Host restore installs oc-box settings and the encrypted vault when present, without unlocking the vault or replacing existing files. "
+                "The whole host OpenCode database is not restored.\n"
+            )
+            if include_opencode:
+                review += (
+                    "Native OpenCode configuration, plugins and saved credentials may also be installed after separate trust approval. "
+                    "They can execute code, use credentials or change permissions on next launch. An existing native V2 store is never merged.\n"
+                )
+            else:
+                review += "Native OpenCode settings and saved credentials will not be restored.\n"
+            if workspace_target is not None:
+                review += "Workspace and host publication are not one transaction. If host activation fails after workspace restore, the workspace remains stopped.\n"
+        else:
+            if action == "workspace-restore":
+                review += "Host settings will not be restored, even if present in this archive.\n"
+            review += "No whole host database, global vault or shared cache is replaced or deleted. "
+        review += "Restores never overwrite existing workspaces or session IDs.\n"
+        if not host or workspace_target is not None:
+            review += (
+                "Close owning clients before workspace lifecycle operations. Existing locks and identity checks remain authoritative. "
+                "A consistent workspace backup can stop an unowned running container and leaves it stopped.\n"
+            )
+        else:
+            review += "No workspace or Podman resources are targeted.\n"
+        review += "Passwords use the existing masked controlling-terminal reader, through the private dashboard prompt when embedded. Passwords are not saved."
+        if not host or workspace_target is not None:
+            review += " Whole-workspace archives can contain copied configuration/authentication and complete native history; protect the encrypted file."
         # An empty phrase is explicit button approval, not authorization to
         # skip this single-use review or its parent/child binding checks.
         confirmation = "DELETE" if action == "backup-delete" else ""
@@ -519,6 +610,9 @@ class OperationController:
             origin=request["origin"],
             store=request["store"],
             session=request["session"],
+            host=request.get("host", False),
+            include_opencode=request.get("include_opencode", False),
+            auth_export=request.get("auth_export"),
         )
         self._plans.clear()
         if current.request != request:
@@ -540,7 +634,7 @@ def archive_kind(path, *, expected=None):
     else:
         from backup_archive import BoundedTarInfo
     try:
-        names = []
+        names = set()
         path = real_path(path)
         with (
             _archive_source(path, expected) as source,
@@ -554,24 +648,21 @@ def archive_kind(path, *, expected=None):
                     or entry.size < 0
                 ):
                     fail("invalid-backup-file")
-                names.append(entry.name)
-                if len(names) > 7:
+                names.add(entry.name)
+                if len(names) > 8:
                     fail("invalid-backup-file")
-        allowed = (
-            {"key.age", "manifest.age", "project.age", "home.age", "registry.age"},
-            {
-                "key.age",
-                "manifest.age",
-                "project.age",
-                "home.age",
-                "registry.age",
-                "image.age",
-            },
-            {"key.age", "manifest.age", "sessions.age"},
-        )
-        if set(names) not in allowed:
-            fail("unsupported-backup-file")
-        return "session" if "sessions.age" in names else "workspace"
+        core = {"key.age", "manifest.age"}
+        if names == core | {"sessions.age"}:
+            return "session"
+        host = "host.age" in names
+        if host:
+            names -= {"host.age", "host-auth.age"}
+            if names == core:
+                return "host"
+        workspace = core | {"project.age", "home.age", "registry.age"}
+        if names in (workspace, workspace | {"image.age"}):
+            return "workspace-host" if host else "workspace"
+        fail("unsupported-backup-file")
     except OperationError:
         raise
     except Exception:
@@ -615,10 +706,6 @@ def _archive_source(path, expected):
             yield source
     finally:
         os.close(parent)
-
-
-def _recognized_archive(path):
-    archive_kind(path)
 
 
 def environment(runtime):
@@ -823,6 +910,9 @@ def execute(runtime, request, *, progress=None, interaction=None):
         origin=request.get("origin"),
         store=request.get("store"),
         session=request.get("session"),
+        host=request.get("host", False),
+        include_opencode=request.get("include_opencode", False),
+        auth_export=request.get("auth_export"),
     )
     if plan.request != request:
         fail("selection-changed")
@@ -836,30 +926,50 @@ def execute(runtime, request, *, progress=None, interaction=None):
         )
         return 0
     if action.startswith("workspace-"):
+        cli_options = {}
+        if interaction is not None:
+            cli_options["reviewed_paths"] = {
+                name: request["bindings"][name]
+                for name in ("backup_parent", "backup_file", "destination_parent")
+                if name in request["bindings"]
+            }
         if action == "workspace-backup":
-            argv = ["backup", "--workspace", request["workspace"], "--output", archive]
+            argv = ["backup"]
+            if request["workspace"] is not None:
+                argv.extend(["--workspace", request["workspace"]])
+            argv.extend(["--output", archive])
             if request["portable"]:
                 argv.append("--portable")
+            if request.get("host"):
+                argv.append("--host")
+            if "auth_export" in request:
+                argv.extend(["--opencode-auth-export", request["auth_export"]])
+                cli_options["reviewed_auth_export"] = request["bindings"]["auth_export"]
             for recipient in request["recipients"]:
                 argv.extend(["--recipient", recipient])
+        elif action == "workspace-restore":
+            argv = ["restore", archive]
+            if request["destination"] is not None:
+                argv.extend(["--project", request["destination"]])
+            if request.get("host"):
+                argv.append("--host")
+            if request.get("include_opencode"):
+                argv.append("--include-opencode")
         else:
-            argv = (
-                ["restore", archive, "--project", request["destination"]]
-                if action == "workspace-restore"
-                else ["backup-info", archive]
-            )
+            argv = ["backup-info", archive]
+        if action != "workspace-backup":
             for identity in request["identities"]:
                 argv.extend(["--identity", identity])
         if interaction is None:
             report(dispatched=action != "workspace-inspect")
-        if interaction is None:
+        if interaction is None and not cli_options:
             code = runtime.main(argv)
         else:
             if __package__:
                 from . import backups
             else:
                 import backups
-            code = backups.cli(runtime, argv, interaction=interaction)
+            code = backups.cli(runtime, argv, interaction=interaction, **cli_options)
         if code == 0:
             report(completed=True)
         return code

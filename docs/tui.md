@@ -696,7 +696,8 @@ targets, and a source switch cannot redirect a previously reviewed action.
 <!-- tui-screenshot:backups -->
 ![Backup and restore section showing example archive and destination paths, source scope, workspace target and disabled actions](assets/tui/backups.png)
 
-*Example paths, not real archives; no backup was created, inspected or restored.*
+*Earlier view with example paths, before the host migration switches. No real
+archive was created, inspected or restored.*
 
 <!-- /tui-screenshot -->
 
@@ -706,7 +707,29 @@ inventory for a full or portable encrypted `.ocbox` backup. The ordinary
 no overwrite, no in-place restore, fresh workspace/resource IDs, private rootless
 ownership transport, no privilege reactivation, and stopped restored workspaces.
 Whole-workspace archives can contain copied config/auth and native history, but
-exclude the global host vault and normal host database. Protect the encrypted file.
+include global host settings and the encrypted vault only when explicitly selected.
+The normal host database is not backed up. Protect the encrypted file.
+
+The **ON/OFF switches** set what to create or restore:
+
+- **Create:** choose workspace data, portable mode (omit the container OS), or
+  host settings and vault. With workspace data OFF and host settings ON, create a
+  host-only archive without selecting a workspace. To include a native V2
+  credential export, enable its switch and select an existing private file by
+  absolute path outside every archived directory. Supply the path, not
+  credential contents. The dashboard never starts a live credential export.
+- **Restore:** choose workspace data and/or host settings. Native OpenCode
+  configuration, plugins and saved credentials are a separate option that
+  requires host restore. After unlocking and reviewing the authenticated
+  metadata, type `restore-opencode` and explicitly approve native restoration.
+  The switch alone does not grant consent. Host-only restore needs no workspace
+  destination, and host files are never overwritten.
+
+The same [host migration safeguards](cli.md#restore-host-settings-on-a-new-machine)
+apply. A later OpenCode launch may execute restored plugins or use restored
+permissions and credentials. If host installation is incomplete after a workspace
+restore, the dashboard reports the workspace as stopped and shows bounded host
+progress separately; it does not roll back or retry automatically.
 
 For host or workspace **session-tree history**, select that verified native source
 and root in Sessions, then choose the `.ocsession` kind. This is not a storage or
@@ -732,15 +755,16 @@ The archive path is the primary field. A blank workspace restore destination
 gets a visible, editable, absent sibling suggestion; displaying a suggestion
 creates nothing. Inspect/restore route from bounded envelope structure, not the
 filename suffix. Authentication failure never tries another engine or native
-store. Choose full/portable for creation; host scope creates one selected native
-session tree, not a whole-host backup.
+store. Enable portable mode to omit the workspace OS image. Host OpenCode scope
+creates one selected native session tree when using the session format. The host configuration archive is a
+separate settings-and-vault scope, not a whole-host or native database backup.
 
 Age recipients and existing private identity-file paths are optional **Advanced**
 controls, initially collapsed. Ordinary password backups require no manual key
 copying: a fresh per-archive identity is generated in anonymous memory and stored
 encrypted in the archive. Choose a password and keep it safely; oc-box does not
-save it and cannot recover it. The provider vault is neither reused as a backup
-password nor included in a workspace archive.
+save it and cannot recover it. The provider vault is never reused as a backup
+password; its existing encrypted bytes can be included with host settings.
 
 Create, inspect and restore stay in an operation modal. Password input is a
 custom masked, nonselectable editor, not Textual Input or ClipboardInput; it

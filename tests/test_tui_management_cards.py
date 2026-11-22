@@ -52,7 +52,10 @@ class ManagementCardTests(unittest.IsolatedAsyncioTestCase):
                     "backup-identities",
                 )
             ]
-            self.assertEqual(len(app.query("BackupPanel Input")), 4)
+            export = app.query_one("#backup-auth-export-path", ClipboardInput)
+            self.assertEqual(len(app.query("BackupPanel Input")), 5)
+            self.assertFalse(app.query_one("#backup-auth-export-field").display)
+            self.assertTrue(export.disabled)
             self.assertTrue(
                 app.query_one("BackupPanel Collapsible", Collapsible).collapsed
             )

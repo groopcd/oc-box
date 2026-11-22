@@ -600,21 +600,57 @@ def pack(directory, output):
 
 
 @contextlib.contextmanager
-def opened(archive_path, identities):
+def reviewed_directory(path, expected=None):
+    """Pin a reviewed output/input directory without following its final link."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    except OSError:
+        raise BackupError("Reviewed backup directory is no longer available.") from None
+    try:
+        if expected is not None:
+            info = os.fstat(fd)
+            if (info.st_dev, info.st_ino) != tuple(expected):
+                raise BackupError(
+                    "Reviewed backup directory changed; open a new review."
+                )
+        yield fd
+    finally:
+        os.close(fd)
+
+
+def _file_stamp(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+@contextlib.contextmanager
+def opened(archive_path, identities, *, reviewed_parent=None, reviewed_file=None):
     tools()
     archive_path = Path(archive_path).expanduser().absolute()
     with contextlib.ExitStack() as stack:
         try:
+            parent = None
+            if reviewed_parent is not None:
+                parent = stack.enter_context(
+                    reviewed_directory(archive_path.parent, reviewed_parent)
+                )
             descriptor = os.open(
-                archive_path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
+                archive_path if parent is None else archive_path.name,
+                os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK,
+                dir_fd=parent,
             )
         except OSError as exc:
             raise BackupError(
                 "Backup input must be a readable regular, non-symlink file."
             ) from exc
         source_file = stack.enter_context(os.fdopen(descriptor, "rb"))
-        if not stat.S_ISREG(os.fstat(source_file.fileno()).st_mode):
+        source_info = os.fstat(descriptor)
+        if not stat.S_ISREG(source_info.st_mode):
             raise BackupError("Backup input must be a regular, non-symlink file.")
+        if reviewed_file is not None and (
+            source_info.st_nlink != 1
+            or _file_stamp(source_info) != tuple(reviewed_file)
+        ):
+            raise BackupError("Reviewed backup file changed; open a new review.")
         temporary = stack.enter_context(
             tempfile.TemporaryDirectory(prefix="oc-box-encrypted-backup-")
         )
@@ -657,6 +693,10 @@ def opened(archive_path, identities):
                     seen.add(member.name)
         except (tarfile.TarError, EOFError, ValueError) as exc:
             raise BackupError("Invalid or truncated backup envelope.") from exc
+        if reviewed_file is not None and _file_stamp(os.fstat(descriptor)) != tuple(
+            reviewed_file
+        ):
+            raise BackupError("Reviewed backup file changed; open a new review.")
         if not {"key.age", "manifest.age"} <= seen:
             raise BackupError("Incomplete backup envelope.")
         private = load_key(directory / "key.age", identities)

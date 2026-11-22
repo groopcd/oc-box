@@ -2262,10 +2262,11 @@ MiB for the encrypted vault.
 
 Add ‘--opencode-auth-export FILE’ for native V2 provider and MCP login
 records.  Supply the native ‘opencode auth export --standalone’ output
-in a private regular file (0600), or pass ‘-’ to read it directly from a
-pipe without a plaintext export file.  This is explicit: the backup does
-not start OpenCode or open the native database itself.  Only run the
-export with a trusted native configuration and keep other writers idle.
+in a private regular file (0600) outside every archived directory, or
+pass ‘-’ to read it directly from a pipe without a plaintext export
+file.  This is explicit: the backup does not start OpenCode or open the
+native database itself.  Only run the export with a trusted native
+configuration and keep other writers idle.
 
      oc-box backup --host --output /backup/host.ocbox
      set -o pipefail
@@ -4957,20 +4958,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description3917
 Node: Commands9344
-Node: Options137262
-Node: Lifecycle and persistence194232
-Node: Distribution images196532
-Node: Sessions and recovery201496
-Node: Devices and host permissions208081
-Node: Resource reports210427
-Node: Configuration and environment212538
-Node: Files223919
-Node: Exit status234829
-Node: Examples236237
-Node: Troubleshooting238376
-Node: Installation and manuals250422
-Node: Authors and license260612
-Node: See also261219
+Node: Options137295
+Node: Lifecycle and persistence194265
+Node: Distribution images196565
+Node: Sessions and recovery201529
+Node: Devices and host permissions208114
+Node: Resource reports210460
+Node: Configuration and environment212571
+Node: Files223952
+Node: Exit status234862
+Node: Examples236270
+Node: Troubleshooting238409
+Node: Installation and manuals250455
+Node: Authors and license260645
+Node: See also261252
 
 End Tag Table
 

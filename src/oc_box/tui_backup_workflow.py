@@ -11,7 +11,7 @@ from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widget import Widget
-from textual.widgets import Button, ProgressBar, Static
+from textual.widgets import Button, Input, ProgressBar, Static
 
 if __package__:
     from . import secret_prompt, tui_operation_io
@@ -270,6 +270,7 @@ class MetadataReview(ModalScreen):
     def __init__(self, metadata):
         super().__init__()
         self.metadata = metadata
+        self._native_confirmation = metadata.get("restore_opencode") is True
         self._decision_sent = False
 
     def compose(self) -> ComposeResult:
@@ -287,16 +288,51 @@ class MetadataReview(ModalScreen):
                     "checks are process-local and cannot exclude other services.",
                     markup=False,
                 )
+                if self.metadata.get("restore_host"):
+                    yield Static(
+                        "Host settings and the encrypted vault can change future forwarding, "
+                        "updates, and journal mirroring. Existing host files are never replaced.",
+                        markup=False,
+                    )
+                if self._native_confirmation:
+                    yield Static(
+                        "Native OpenCode settings, plugins, and saved credentials may be installed. "
+                        "The next launch can execute restored code or use restored permissions "
+                        "and credentials. Proceed only if you trust this archive.",
+                        markup=False,
+                    )
+            if self._native_confirmation:
+                yield Static(
+                    "Type restore-opencode to confirm native restoration.", markup=False
+                )
+                yield Input(id="metadata-opencode-confirmation", max_length=32)
             with Horizontal():
                 yield Button("Cancel restore", id="metadata-cancel")
                 yield Button(
-                    "Restore reviewed data", id="metadata-approve", variant="primary"
+                    "Restore reviewed data",
+                    id="metadata-approve",
+                    variant="primary",
+                    disabled=self._native_confirmation,
                 )
+
+    def on_input_changed(self, event):
+        if event.input.id == "metadata-opencode-confirmation":
+            event.stop()
+            self.query_one("#metadata-approve", Button).disabled = (
+                event.value != "restore-opencode"
+            )
 
     def on_button_pressed(self, event):
         if event.button.id in {"metadata-cancel", "metadata-approve"}:
             event.stop()
             if self._decision_sent:
+                return
+            if (
+                event.button.id == "metadata-approve"
+                and self._native_confirmation
+                and self.query_one("#metadata-opencode-confirmation", Input).value
+                != "restore-opencode"
+            ):
                 return
             self._decision_sent = True
             self.dismiss(event.button.id == "metadata-approve")

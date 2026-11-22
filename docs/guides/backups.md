@@ -95,6 +95,11 @@ External paths/dependencies, shell environment, hardware and installation
 state are not restored. See the [host migration reference](../cli.md#restore-host-settings-on-a-new-machine)
 for file bounds, unsupported files and partial-failure behavior.
 
+The [dashboard Backup/restore tab](../tui.md#7-backuprestore) offers the
+same host-only and combined choices as ON/OFF switches. For an optional native
+V2 credential export, the dashboard takes a private file path rather than
+piped input.
+
 ## Check format limits and evidence
 
 The initial format refuses extra bind mounts/volumes and nested project mounts,

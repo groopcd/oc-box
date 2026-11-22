@@ -47,6 +47,9 @@ STAGES = frozenset(
         "registry",
         "image",
         "encrypting",
+        "host-settings",
+        "host-verify",
+        "host-restore",
         "publishing",
         "verifying",
         "cleanup",
@@ -61,6 +64,9 @@ STAGE_LABELS = {
     "registry": "Streaming workspace metadata",
     "image": "Streaming container OS image",
     "encrypting": "Encrypting native session history",
+    "host-settings": "Capturing host settings and encrypted vault",
+    "host-verify": "Verifying native credentials in an isolated store",
+    "host-restore": "Installing reviewed host settings without overwrite",
     "publishing": "Publishing encrypted backup without overwrite",
     "verifying": "Verifying native history and final state",
     "cleanup": "Finishing operation cleanup",
@@ -84,8 +90,29 @@ _TEXT_FIELDS = frozenset(
     }
 )
 _COUNT_FIELDS = frozenset(
-    {"session_count", "message_count", "interrupted_assistant_count"}
+    {
+        "session_count",
+        "message_count",
+        "interrupted_assistant_count",
+        "host_files",
+        "host_file_links",
+        "host_directories_created",
+    }
 )
+_BOOL_FIELDS = frozenset(
+    {
+        "host_component",
+        "native_auth_export",
+        "restore_host",
+        "restore_opencode",
+        "host_completion_uncertain",
+    }
+)
+_HOST_FIELDS = _BOOL_FIELDS | {
+    "host_files",
+    "host_file_links",
+    "host_directories_created",
+}
 
 
 class OperationIOError(RuntimeError):
@@ -103,10 +130,19 @@ def _fail():
 def metadata(value):
     """Validate a small explicit projection, not an arbitrary engine object."""
     if not isinstance(value, dict) or set(value) - (
-        _TEXT_FIELDS | _COUNT_FIELDS | {"created_ids", "planned_ids"}
+        _TEXT_FIELDS | _COUNT_FIELDS | _BOOL_FIELDS | {"created_ids", "planned_ids"}
     ):
         _fail()
-    if value.get("format") not in {"workspace", "session"}:
+    format = value.get("format")
+    if (
+        format not in {"workspace", "session", "host"}
+        or (format == "session" and _HOST_FIELDS.intersection(value))
+        or (format == "host" and value.get("kind") != "host")
+        or (
+            value.get("restore_opencode") is True
+            and value.get("restore_host") is not True
+        )
+    ):
         _fail()
     for key, item in value.items():
         if key in _TEXT_FIELDS:
@@ -116,9 +152,15 @@ def metadata(value):
                 or not all(c.isprintable() for c in item)
             ):
                 _fail()
-            if key == "kind" and item not in {"full", "portable"}:
+            if key == "kind" and item not in (
+                {"host"} if format == "host" else {"full", "portable"}
+            ):
                 _fail()
-            if key == "status" and item not in {"stopped", "incomplete"}:
+            if key == "status" and item not in (
+                {"restored", "incomplete"}
+                if format == "host"
+                else {"stopped", "incomplete"}
+            ):
                 _fail()
             if key == "source_origin" and item not in {"host", "workspace"}:
                 _fail()
@@ -128,6 +170,9 @@ def metadata(value):
                 _fail()
         elif key in _COUNT_FIELDS:
             if type(item) is not int or not 0 <= item <= 100000:
+                _fail()
+        elif key in _BOOL_FIELDS:
+            if type(item) is not bool:
                 _fail()
         else:
             recovery_ids(item)

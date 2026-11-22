@@ -385,8 +385,8 @@ their checkout ownership distinct from unrelated source and flat installations.
   backup/restore feature; use established age streaming encryption, no plaintext
   archive staging, fresh restore IDs, and no archived privilege reactivation.
 - `host_backup_payload.py` / `host_backup_restore.py` / `host_backup_auth.py`:
-  explicit CLI host migration component. Preserve bounded exact file bytes,
-  read-only no-follow capture, the already-encrypted vault and independent
+  explicit CLI and reviewed dashboard host migration component. Preserve bounded
+  exact file bytes, read-only no-follow capture, the already-encrypted vault and independent
   native OpenCode consent. No host configuration writes from workspace-only
   restore. Never restore registry identities, an archived host database,
   external paths or plaintext archive staging. V2 credentials come from an
@@ -395,6 +395,10 @@ their checkout ownership distinct from unrelated source and flat installations.
   2.x uses the fresh-store behavior checks, not a patch allowlist or the live
   history recovery policy. Refuse unexpected persisted work. No joins to the
   live host service, silent overwrite or cross-filesystem transaction claims.
+  Dashboard switches select a plan only. Use the existing private backup PTY
+  and authenticated metadata review; native restore also needs the explicit
+  trust phrase. Review and recheck private export file identity without
+  carrying its contents on the dashboard protocol, stdout or clipboard.
 - `install.py` (under the package): copies the launcher to `~/.local/share/oc-box` and creates
   `~/.local/bin/oc-box`.
 - `installation.py`: staged immutable installed copies and launcher activation.

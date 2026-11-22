@@ -2028,8 +2028,8 @@ combined, and 2 MiB for the encrypted vault.
 
 Add `--opencode-auth-export FILE` for native V2 provider and MCP login records.
 Supply the native `opencode auth export --standalone` output in a private
-regular file (0600), or pass `-` to read it directly from a pipe without a
-plaintext export file. This is explicit: the backup does not start OpenCode or
+regular file (0600) outside every archived directory, or pass `-` to read it
+directly from a pipe without a plaintext export file. This is explicit: the backup does not start OpenCode or
 open the native database itself. Only run the export with a trusted native
 configuration and keep other writers idle.
 

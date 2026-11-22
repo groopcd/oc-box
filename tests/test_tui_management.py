@@ -90,9 +90,11 @@ class ManagementInteractionTests(unittest.IsolatedAsyncioTestCase):
                 for value in ("host", "all", "workspace"):
                     app.query_one(f"#{prefix}-scope", Select).value = value
                     await pilot.pause()
-            for value in ("session", "portable", "full"):
+            for value in ("session", "full"):
                 app.query_one("#backup-kind", Select).value = value
                 await pilot.pause()
+            app.query_one(tui_management.BackupPanel).switch("portable").value = True
+            await pilot.pause()
             handoff.assert_not_called()
         self.assertEqual(backend.connections, [])
 

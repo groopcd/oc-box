@@ -11,18 +11,20 @@ from textual import work
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.screen import ModalScreen
-from textual.widgets import Button, Collapsible, DataTable, Input, Select, Static
+from textual.widgets import Button, Collapsible, DataTable, Input, Label, Select, Static
 
 if __package__:
     from . import status_report, tui_operations, tui_storage
     from .tui_backend import plain
     from .tui_clipboard import ClipboardInput, SelectableDataTable
+    from .tui_settings import RoundedSwitch
 else:
     import status_report
     import tui_operations
     import tui_storage
     from tui_backend import plain
     from tui_clipboard import ClipboardInput, SelectableDataTable
+    from tui_settings import RoundedSwitch
 
 
 SCOPES = [
@@ -30,6 +32,26 @@ SCOPES = [
     ("Selected workspace", "workspace"),
     ("All registered workspaces", "all"),
 ]
+
+BACKUP_SWITCHES = (
+    ("Include workspace data", "include-workspace", True),
+    ("Portable backup (omit OS image)", "portable", False),
+    ("Include host settings", "include-host", False),
+    ("Include native credential export", "include-auth-export", False),
+)
+
+RESTORE_SWITCHES = (
+    ("Restore workspace", "restore-workspace", True),
+    ("Restore host settings", "restore-host", False),
+    ("Restore native OpenCode", "restore-opencode", False),
+)
+
+ARCHIVE_LAYOUTS = {
+    "host": "Host settings only; requires Restore host settings ON.",
+    "workspace-host": "Workspace and host settings. Choose either component or both.",
+    "workspace": "Workspace only. Host restore is unavailable.",
+    "session": "Session tree only. Restore uses the connected Sessions source.",
+}
 
 
 class ActionReview(ModalScreen):
@@ -175,6 +197,10 @@ class BackupPanel(Vertical):
     BackupPanel .backup-field > Static { width: 13; padding: 1 0; }
     BackupPanel .backup-field > Input,
     BackupPanel .backup-field > Select { width: 1fr; min-width: 14; }
+    BackupPanel .backup-option { height: auto; min-height: 3; }
+    BackupPanel .backup-option > Label { width: 1fr; height: auto;
+      min-height: 3; content-align: left middle; }
+    BackupPanel #backup-auth-export-field { display: none; }
     BackupPanel Input { margin-bottom: 0; }
     BackupPanel Collapsible { padding: 0; margin: 0; border: none; }
     BackupPanel Collapsible > Contents { padding: 0 0 0 1; }
@@ -193,6 +219,17 @@ class BackupPanel(Vertical):
     def __init__(self, *, read_only=False, demo=False):
         super().__init__()
         self.read_only, self.demo = read_only, demo
+        self._archive_hint = None
+
+    def _compose_switches(self, options):
+        for label, name, default in options:
+            with Horizontal(classes="backup-option"):
+                yield Label(label)
+                yield RoundedSwitch(
+                    default,
+                    id="backup-" + name,
+                    disabled=self.demo or self.read_only,
+                )
 
     def compose(self) -> ComposeResult:
         with Vertical(classes="backup-card"):
@@ -259,8 +296,7 @@ class BackupPanel(Vertical):
                 yield Static("Create type", markup=False)
                 yield Select(
                     [
-                        ("Workspace · full (.ocbox)", "full"),
-                        ("Workspace · portable (.ocbox)", "portable"),
+                        ("Workspace / host settings (.ocbox)", "full"),
                         ("Session tree · history (.ocsession)", "session"),
                     ],
                     value="full",
@@ -268,9 +304,36 @@ class BackupPanel(Vertical):
                     id="backup-kind",
                 )
             yield Static(
-                "Inspect / restore auto-detect format; host scope is session-only.",
+                "Host OpenCode scope is for individual session trees. For host migration, choose a workspace scope and the workspace / host settings type.",
                 classes="card-hint",
                 markup=False,
+            )
+        with Vertical(classes="backup-card"):
+            yield Static("CREATE OPTIONS", classes="card-heading", markup=False)
+            yield from self._compose_switches(BACKUP_SWITCHES)
+            with Horizontal(classes="backup-field", id="backup-auth-export-field"):
+                yield Static("Export file", markup=False)
+                yield ClipboardInput(
+                    placeholder="Absolute path to a private OpenCode auth export",
+                    id="backup-auth-export-path",
+                    disabled=True,
+                )
+            yield Static(
+                "For a host-only backup, turn OFF Include workspace data and turn ON Include host settings. "
+                "Native credential export requires a separate private file; the dashboard never exports it for you.",
+                classes="card-hint",
+                markup=False,
+            )
+        with Vertical(classes="backup-card"):
+            yield Static("RESTORE OPTIONS", classes="card-heading", markup=False)
+            yield from self._compose_switches(RESTORE_SWITCHES)
+            yield Static(
+                "Inspect / restore checks the archive layout only when requested. A host-only restore does not use a destination path.",
+                classes="card-hint",
+                markup=False,
+            )
+            yield Static(
+                "", id="backup-archive-layout", classes="card-hint", markup=False
             )
         yield Static(
             "No global host database replacement. Restores use fresh workspace/session IDs and never auto-start a workspace.",
@@ -293,6 +356,84 @@ class BackupPanel(Vertical):
                 variant="error",
                 disabled=self.read_only or self.demo,
             )
+
+    def switch(self, name):
+        return self.query_one("#backup-" + name, RoundedSwitch)
+
+    def archive_hint(self, path):
+        if self._archive_hint is not None and self._archive_hint[0] == path:
+            return self._archive_hint[1]
+        return None
+
+    def set_archive_hint(self, path, kind):
+        self._archive_hint = (path, kind) if kind is not None else None
+        self._sync_options()
+
+    def reset_restore_options(self):
+        self.switch("restore-workspace").value = True
+        self.switch("restore-host").value = False
+        self.switch("restore-opencode").value = False
+
+    def _sync_options(self):
+        disabled = self.demo or self.read_only
+        kind_select = self.query_one("#backup-kind", Select)
+        host_scope = self.query_one("#backup-scope", Select).value == "host"
+        kind_select.disabled = host_scope
+        workspace_mode = kind_select.value == "full" and not host_scope
+        workspace = self.switch("include-workspace")
+        portable = self.switch("portable")
+        host = self.switch("include-host")
+        native_export = self.switch("include-auth-export")
+        workspace.disabled = host.disabled = disabled or not workspace_mode
+        portable.disabled = disabled or not (workspace_mode and workspace.value)
+        if not workspace_mode:
+            host.value = False
+        if not (workspace_mode and workspace.value):
+            portable.value = False
+        native_export.disabled = disabled or not (workspace_mode and host.value)
+        if not (workspace_mode and host.value):
+            native_export.value = False
+        show_export = not native_export.disabled and native_export.value
+        self.query_one("#backup-auth-export-field", Horizontal).display = show_export
+        self.query_one("#backup-auth-export-path", Input).disabled = not show_export
+
+        kind = self.archive_hint(self.query_one("#backup-file", Input).value.strip())
+        restore_workspace = self.switch("restore-workspace")
+        restore_host = self.switch("restore-host")
+        restore_native = self.switch("restore-opencode")
+        restore_workspace.disabled = disabled or kind in {"host", "session"}
+        restore_host.disabled = disabled or kind in {"workspace", "session"}
+        if kind in {"host", "session"}:
+            restore_workspace.value = False
+        if kind in {"workspace", "session"}:
+            restore_host.value = False
+        restore_native.disabled = disabled or not restore_host.value
+        if not restore_host.value:
+            restore_native.value = False
+        self.query_one("#backup-archive-layout", Static).update(
+            "Unverified archive layout: " + ARCHIVE_LAYOUTS[kind]
+            if kind in ARCHIVE_LAYOUTS
+            else ""
+        )
+
+    def on_mount(self):
+        self._sync_options()
+
+    def on_select_changed(self, event):
+        if event.select.id in {"backup-scope", "backup-kind"}:
+            self._sync_options()
+
+    def on_switch_changed(self, event):
+        self._sync_options()
+
+    def on_input_changed(self, event):
+        if (
+            event.input.id == "backup-file"
+            and self._archive_hint is not None
+            and self._archive_hint[0] != event.value.strip()
+        ):
+            self.reset_restore_options()
+            self.set_archive_hint(None, None)
 
 
 class ManagementActions:
@@ -443,7 +584,7 @@ class ManagementActions:
 
     def _management_select(self, event):
         if event.select.id in {"storage-scope", "backup-scope", "backup-kind"}:
-            if event.select.id == "backup-scope" and event.value == "host":
+            if event.select.id == "backup-scope" and event.select.value == "host":
                 self.query_one("#backup-kind", Select).value = "session"
             self._render_management()
             return True
@@ -526,6 +667,43 @@ class ManagementActions:
         review = f"Workspace: {plan.workspace_id}\nProject: {plan.project}\n{plan.review_text}"
         self.push_screen(ActionReview(review, plan.phrase), finish)
 
+    def _backup_default_project(self):
+        return next(
+            (
+                row.project
+                for row in self._management_records
+                if row.workspace_id == self.selected
+            ),
+            None,
+        )
+
+    def _backup_detection_selection(self, button):
+        """Snapshot form and source metadata, without touching any archive or service."""
+        panel = self.query_one(BackupPanel)
+        paths = (
+            panel.query_one("#backup-file", Input).value,
+            panel.query_one("#backup-identities", Input).value,
+        )
+        if button == "backup-inspect":
+            return paths
+        scope = panel.query_one("#backup-scope", Select).value
+        destination = panel.query_one("#backup-destination", Input).value
+        table = panel.query_one("#backup-table", DataTable)
+        session = (
+            self._session() if scope == "host" and not destination.strip() else None
+        )
+        return (
+            *paths,
+            destination,
+            *(panel.switch(name).value for _, name, _ in RESTORE_SWITCHES),
+            scope,
+            self._management_target("backup") if table.row_count else None,
+            self.selected,
+            self._backup_default_project(),
+            (self.catalog.origin, self.catalog.store) if self.catalog else None,
+            (session["id"], session["location"]["directory"]) if session else None,
+        )
+
     def _review_backup(
         self, button, *, detected=None, expected_path=None, expected_file=None
     ):
@@ -538,10 +716,12 @@ class ManagementActions:
             raise tui_operations.OperationError("read-only")
         if self._maintenance_busy or self._backup_preparing:
             raise tui_operations.OperationError("busy")
-        archive_path = self.query_one("#backup-file", Input).value.strip()
+        panel = self.query_one(BackupPanel)
+        archive_path = panel.query_one("#backup-file", Input).value.strip()
         if button in {"backup-inspect", "backup-restore"} and detected is None:
+            selection = self._backup_detection_selection(button)
             self._backup_preparing = True
-            self._detect_backup(button, archive_path)
+            self._detect_backup(button, archive_path, selection)
             return
         if expected_path is not None and (
             archive_path != expected_path
@@ -549,10 +729,23 @@ class ManagementActions:
             != expected_file
         ):
             raise tui_operations.OperationError("selection-changed")
-        kind = self.query_one("#backup-kind", Select).value
+        kind = panel.query_one("#backup-kind", Select).value
+        scope = panel.query_one("#backup-scope", Select).value
+        restore_workspace = panel.switch("restore-workspace").value
+        restore_host = panel.switch("restore-host").value
+        restore_native = panel.switch("restore-opencode").value
         if detected is not None:
             kind = "session" if detected == "session" else "full"
-        scope = self.query_one("#backup-scope", Select).value
+            previous = panel.archive_hint(archive_path)
+            layout_changed = previous is not None and previous != detected
+            if layout_changed:
+                panel.reset_restore_options()
+            panel.set_archive_hint(archive_path, detected)
+            if layout_changed and button == "backup-restore":
+                self._message(
+                    "The archive layout changed. Review it and choose the restore switches again."
+                )
+                return
         verb = {
             "backup-create": "backup",
             "backup-inspect": "inspect",
@@ -566,6 +759,17 @@ class ManagementActions:
         )
         workspace = None
         origin = store = session = None
+        host = portable = include_opencode = False
+        auth_export = None
+        if (
+            verb == "restore"
+            and restore_host
+            and detected not in {"host", "workspace-host"}
+        ):
+            self._message(
+                "This archive layout has no host settings. Review the restore switches and try again."
+            )
+            return
         if action in {"session-backup", "session-restore"}:
             origin, workspace, store = self._management_session("backup")
             if action == "session-backup":
@@ -573,8 +777,37 @@ class ManagementActions:
         elif action == "workspace-backup":
             if scope == "host":
                 raise tui_operations.OperationError("host-session-backups-only")
-            workspace = self._management_target("backup")
-        identities = self.query_one("#backup-identities", Input).value.strip()
+            include_workspace = panel.switch("include-workspace").value
+            host = panel.switch("include-host").value
+            if include_workspace:
+                workspace = self._management_target("backup")
+                portable = panel.switch("portable").value
+            elif not host:
+                self._message(
+                    "Turn ON Include workspace data or Include host settings."
+                )
+                return
+            if host and panel.switch("include-auth-export").value:
+                auth_export = panel.query_one(
+                    "#backup-auth-export-path", Input
+                ).value.strip()
+                if not auth_export:
+                    self._message(
+                        "Choose an existing private OpenCode auth export file or turn OFF Include native credential export."
+                    )
+                    return
+        elif action == "workspace-restore":
+            restore_workspace = restore_workspace and detected != "host"
+            host = restore_host
+            include_opencode = host and restore_native
+            if not (restore_workspace or host):
+                self._message(
+                    "Turn ON Restore host settings for this host-only archive."
+                    if detected == "host"
+                    else "Turn ON Restore workspace or Restore host settings where available."
+                )
+                return
+        identities = panel.query_one("#backup-identities", Input).value.strip()
         identities = (
             json.loads(identities)
             if identities.startswith("[")
@@ -586,7 +819,9 @@ class ManagementActions:
             isinstance(value, str) for value in identities
         ):
             raise tui_operations.OperationError("invalid-identities")
-        destination = self.query_one("#backup-destination", Input).value.strip() or None
+        destination = (
+            panel.query_one("#backup-destination", Input).value.strip() or None
+        )
         if (
             action == "session-restore"
             and origin == "workspace"
@@ -597,38 +832,42 @@ class ManagementActions:
             ).data
             destination = self.backend.box.container_project(data)
         if action == "session-restore" and origin == "host" and destination is None:
-            destination = self._session()["location"]["directory"]
-        if action == "workspace-restore" and destination is None:
-            selected = next(
-                (
-                    row
-                    for row in self._management_records
-                    if row.workspace_id == self.selected
-                ),
-                None,
-            )
-            base = (
-                Path(selected.project)
-                if selected
-                else tui_operations.real_path(archive_path).with_suffix("")
-            )
-            for count in range(100):
-                candidate = base.with_name(
-                    base.name + "-restored" + (f"-{count}" if count else "")
+            session_target = self._session()
+            if session_target is None:
+                raise tui_operations.OperationError("session-selection-required")
+            destination = session_target["location"]["directory"]
+        if action == "workspace-restore":
+            if not restore_workspace:
+                destination = None
+            elif destination is None:
+                selected_project = self._backup_default_project()
+                base = (
+                    Path(selected_project)
+                    if selected_project
+                    else tui_operations.real_path(archive_path).with_suffix("")
                 )
-                if not candidate.exists() and not candidate.is_symlink():
-                    destination = str(candidate)
-                    break
+                for count in range(100):
+                    candidate = base.with_name(
+                        base.name + "-restored" + (f"-{count}" if count else "")
+                    )
+                    if not candidate.exists() and not candidate.is_symlink():
+                        destination = str(candidate)
+                        break
+                if destination is None:
+                    raise tui_operations.OperationError("destination-required")
         if verb == "restore" and destination is not None:
-            self.query_one("#backup-destination", Input).value = destination
+            panel.query_one("#backup-destination", Input).value = destination
         self._management_controller.read_only = self.read_only
         plan = self._management_controller.prepare(
             action,
             workspace=workspace,
-            backup=self.query_one("#backup-file", Input).value.strip(),
+            backup=archive_path,
             destination=destination if verb == "restore" else None,
-            portable=kind == "portable",
-            recipients=self.query_one("#backup-recipients", Input).value.split()
+            portable=portable,
+            host=host,
+            include_opencode=include_opencode,
+            auth_export=auth_export,
+            recipients=panel.query_one("#backup-recipients", Input).value.split()
             if verb == "backup"
             else (),
             identities=identities if verb in {"restore", "inspect"} else (),
@@ -636,6 +875,13 @@ class ManagementActions:
             store=store,
             session=session,
         )
+        if (
+            expected_file is not None
+            and isinstance(plan, tui_operations.OperationPlan)
+            and plan.request["bindings"]["backup_file"] != expected_file
+        ):
+            self._management_controller.cancel(plan)
+            raise tui_operations.OperationError("selection-changed")
 
         def finish(phrase):
             if phrase is None:
@@ -654,27 +900,29 @@ class ManagementActions:
         self.push_screen(ActionReview(plan.review, plan.confirmation), finish)
 
     @work(thread=True, group="backup-format", exit_on_error=False)
-    def _detect_backup(self, button, path):
+    def _detect_backup(self, button, path, selection):
         try:
             location = tui_operations.real_path(path)
             identity = tui_operations.file_identity(location)
             detected = tui_operations.archive_kind(location, expected=identity)
-            if self.is_running:
-                self.call_from_thread(
-                    self._backup_detected, button, path, identity, detected
-                )
         except Exception:
-            if self.is_running:
-                self.call_from_thread(self._backup_detected, button, path, None, None)
-
-    def _backup_detected(self, button, path, identity, detected):
-        self._backup_preparing = False
-        if detected is None:
-            self._operation_failure(
-                operation="inspection", reason="invalid-backup-file"
+            identity = detected = None
+        if self.is_running:
+            self.call_from_thread(
+                self._backup_detected, button, path, selection, identity, detected
             )
-            return
+
+    def _backup_detected(self, button, path, selection, identity, detected):
+        self._backup_preparing = False
         try:
+            if selection != self._backup_detection_selection(button):
+                raise tui_operations.OperationError("selection-changed")
+            if detected not in ARCHIVE_LAYOUTS:
+                panel = self.query_one(BackupPanel)
+                if panel.archive_hint(path) is not None:
+                    panel.reset_restore_options()
+                    panel.set_archive_hint(None, None)
+                raise tui_operations.OperationError("invalid-backup-file")
             self._review_backup(
                 button, detected=detected, expected_path=path, expected_file=identity
             )

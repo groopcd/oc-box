@@ -401,12 +401,15 @@ def _read_file(parent, name, fd, info, limit, *, private=False):
 
 
 class _Capture:
-    def __init__(self, excluded):
+    def __init__(self, excluded, excluded_file=None):
         self.entries = _Entries()
         self.scanned = 0
         self.excluded = excluded
+        self.excluded_file = excluded_file
 
     def file(self, parent, name, fd, info, scope, relative):
+        if (info.st_dev, info.st_ino) == self.excluded_file:
+            raise HostPayloadError(_UNSAFE)
         if self.entries.files >= MAX_FILES:
             raise HostPayloadError(_UNSAFE)
         self.entries.add(
@@ -461,7 +464,7 @@ def _scope_state(fd):
     return None if fd is None else (mount_id(fd), _stamp(os.fstat(fd)))
 
 
-def capture():
+def capture(*, excluded_file=None):
     """Read only the four scoped sources; missing entries are not synthesized."""
     roots = destinations()
     if not hasattr(os, "O_PATH"):
@@ -481,7 +484,8 @@ def capture():
             # An XDG base is allowed to be a bind mount; even then, never walk
             # into a file-only scope through an alternate path in the profile.
             copied = _Capture(
-                {before[scope][1][:2] for scope in _FIXED if before[scope] is not None}
+                {before[scope][1][:2] for scope in _FIXED if before[scope] is not None},
+                excluded_file,
             )
             for scope, directory in directories.items():
                 if directory is None:

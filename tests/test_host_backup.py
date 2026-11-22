@@ -25,6 +25,8 @@ from oc_box import (
     host_backup_restore as restore,
 )
 from oc_box import oc_box as box
+from oc_box import tui_operation_io
+from oc_box import tui_operations
 
 
 class HostBackupTests(unittest.TestCase):
@@ -168,6 +170,185 @@ class HostBackupTests(unittest.TestCase):
         self.assertEqual(
             (data / "opencode/opencode.db").read_bytes(), b"untouched store"
         )
+
+    def test_native_export_reader_refuses_a_replacement_after_dashboard_review(self):
+        source = self.root / "export.json"
+        self.write(source, b"[]")
+        info = source.stat()
+        reviewed = [
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        ]
+        self.assertEqual(
+            native_auth.read_native_export(source, reviewed_identity=reviewed), b"[]"
+        )
+        source.rename(self.root / "earlier-export.json")
+        self.write(source, b"[]")
+        with (
+            patch.object(native_auth, "_read_export_stream") as read,
+            self.assertRaises(native_auth.NativeAuthError),
+        ):
+            native_auth.read_native_export(source, reviewed_identity=reviewed)
+        read.assert_not_called()
+
+    @unittest.skipUnless(
+        shutil.which("age") and shutil.which("age-keygen"), "age unavailable"
+    )
+    def test_dashboard_host_only_archive_inspects_and_waits_for_authenticated_review(
+        self,
+    ):
+        key = self.root / "identity"
+        self.write(key, crypto.small(["age-keygen"]))
+        recipient = crypto.small(["age-keygen", "-y", str(key)]).decode().strip()
+        archive = self.root / "dashboard-host.ocbox"
+        config = b'{"value":"synthetic-private-host-marker"}\n'
+        plugin = b"// synthetic native plugin"
+        interaction = Mock()
+        with (
+            self.profile(self.source),
+            patch.object(box, "check_backend") as backend,
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            roots = payload.destinations()
+            self.write(roots[payload.OC_BOX_CONFIG] / "config.json", config)
+            self.write(roots[payload.OPENCODE_CONFIG] / "plugins/fixture.js", plugin)
+            create = backups.parser_for("backup").parse_args(
+                [
+                    "--host",
+                    "--output",
+                    str(archive),
+                    "--recipient",
+                    recipient,
+                ]
+            )
+            create._reviewed_paths = {
+                "backup_parent": tui_operations.directory_identity(archive.parent)
+            }
+            backups.make_backup(box, create, interaction=interaction)
+            interaction.dispatched.assert_called_once_with()
+            interaction.reset_mock()
+            args = backups.parser_for("restore").parse_args(
+                [
+                    str(archive),
+                    "--host",
+                    "--include-opencode",
+                    "--identity",
+                    str(key),
+                ]
+            )
+            args._reviewed_paths = {
+                "backup_parent": tui_operations.directory_identity(archive.parent),
+                "backup_file": tui_operations.file_identity(archive),
+            }
+            with self.profile(self.target):
+                backups.inspect_backup(box, args, interaction=interaction)
+                preview = interaction.inspection.call_args.args[0]
+                self.assertEqual(
+                    tui_operation_io.metadata(preview),
+                    {
+                        "format": "host",
+                        "kind": "host",
+                        "host_component": True,
+                        "native_auth_export": False,
+                    },
+                )
+                self.assertFalse(self.target.exists())
+                interaction.reset_mock()
+                interaction.review.return_value = False
+                with self.assertRaises(KeyboardInterrupt):
+                    backups.restore_backup(box, args, interaction=interaction)
+                metadata = interaction.review.call_args.args[0]
+                self.assertTrue(tui_operation_io.metadata(metadata)["restore_opencode"])
+                self.assertEqual(metadata["host_files"], 2)
+                self.assertNotIn("synthetic-private-host-marker", json.dumps(metadata))
+                interaction.dispatched.assert_not_called()
+                self.assertFalse(self.target.exists())
+                interaction.reset_mock()
+                interaction.review.return_value = True
+                backups.restore_backup(box, args, interaction=interaction)
+                interaction.review.assert_called_once()
+                interaction.dispatched.assert_called_once()
+                result = tui_operation_io.metadata(
+                    interaction.inspection.call_args.args[0]
+                )
+                self.assertEqual(
+                    (result["status"], result["host_file_links"]), ("restored", 2)
+                )
+                roots = payload.destinations()
+                self.assertEqual(
+                    (roots[payload.OC_BOX_CONFIG] / "config.json").read_bytes(), config
+                )
+                self.assertEqual(
+                    (
+                        roots[payload.OPENCODE_CONFIG] / "plugins/fixture.js"
+                    ).read_bytes(),
+                    plugin,
+                )
+            backend.assert_not_called()
+
+            request = (
+                tui_operations.OperationController(box)
+                .prepare("workspace-inspect", backup=archive, identities=[key])
+                .request
+            )
+            actual_cli = backups.cli
+
+            def replace_after_child_validation(*args, **kwargs):
+                original = self.root / "original.ocbox"
+                archive.rename(original)
+                self.write(archive, original.read_bytes())
+                return actual_cli(*args, **kwargs)
+
+            with (
+                patch.object(
+                    backups, "cli", side_effect=replace_after_child_validation
+                ),
+                patch.object(backups.os, "geteuid", return_value=1000),
+                self.assertRaisesRegex(
+                    crypto.BackupError, "Reviewed backup file changed"
+                ),
+            ):
+                tui_operations.execute(box, request, interaction=Mock())
+
+    @unittest.skipUnless(
+        shutil.which("age") and shutil.which("age-keygen"), "age unavailable"
+    )
+    def test_dashboard_host_backup_output_replacement_during_key_prompt(self):
+        key = self.root / "identity"
+        self.write(key, crypto.small(["age-keygen"]))
+        recipient = crypto.small(["age-keygen", "-y", str(key)]).decode().strip()
+        parent = self.root / "output"
+        parent.mkdir()
+        archive = parent / "host.ocbox"
+        args = backups.parser_for("backup").parse_args(
+            ["--host", "--output", str(archive), "--recipient", recipient]
+        )
+        args._reviewed_paths = {
+            "backup_parent": tui_operations.directory_identity(parent)
+        }
+        generate = crypto.generate_key
+        interaction = Mock()
+
+        def move_after_key(*args, **kwargs):
+            result = generate(*args, **kwargs)
+            parent.rename(self.root / "earlier-output")
+            parent.mkdir()
+            return result
+
+        with (
+            self.profile(self.source),
+            patch.object(crypto, "generate_key", side_effect=move_after_key),
+            self.assertRaisesRegex(
+                crypto.BackupError, "Reviewed backup directory changed"
+            ),
+        ):
+            backups.make_backup(box, args, interaction=interaction)
+        interaction.dispatched.assert_not_called()
+        self.assertEqual(list(parent.iterdir()), [])
+        self.assertEqual(list((self.root / "earlier-output").iterdir()), [])
 
     def test_auth_restore_uses_the_fresh_store_contract_not_a_version_allowlist(self):
         rows = [

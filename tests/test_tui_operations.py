@@ -79,13 +79,20 @@ class OperationTests(unittest.TestCase):
                 box, demo=demo, read_only=readonly
             )
             for action in operations.ACTIONS - operations.READ_ACTIONS:
+                options = {
+                    "workspace-backup": {
+                        "host": True,
+                        "auth_export": self.root / "export",
+                    },
+                    "workspace-restore": {"host": True, "include_opencode": True},
+                }.get(action, {})
                 with (
                     self.subTest(demo=demo, action=action),
                     patch.object(operations, "real_path") as access,
                     patch.object(box, "state_root") as state,
                     patch.object(tui_storage, "read_workspace_action") as registry,
                 ):
-                    self.refusal(reason, controller.prepare, action)
+                    self.refusal(reason, controller.prepare, action, **options)
                 access.assert_not_called()
                 state.assert_not_called()
                 registry.assert_not_called()
@@ -429,9 +436,204 @@ class OperationTests(unittest.TestCase):
         request = self.controller.confirm(plan, "")
         self.assertEqual(request["workspace"], self.ident)
         self.assertEqual(request["action"], "workspace-backup")
+        for flag in ("host", "include_opencode", "auth_export"):
+            self.assertNotIn(flag, request)
         self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
         for call in self.forbidden.values():
             call.assert_not_called()
+
+    def test_host_backup_without_workspace_selection_does_not_read_registry(self):
+        self.refusal(
+            "workspace-selection-required", self.plan, host=True, portable=True
+        )
+        with patch.object(tui_storage, "read_workspace_action") as registry:
+            plan = self.plan(host=True)
+            self.assertIn("Create encrypted host configuration backup", plan.review)
+            self.assertIn("No workspace or Podman resources", plan.review)
+            self.assertNotIn("leaves it stopped", plan.review)
+            self.assertEqual(plan.confirmation, "")
+            request = self.controller.confirm(plan, "")
+            self.forbidden["main"].side_effect = None
+            self.forbidden["main"].return_value = 0
+            self.assertEqual(operations.execute(box, request), 0)
+        registry.assert_not_called()
+        self.forbidden["main"].assert_called_once_with(
+            ["backup", "--output", str(self.output), "--host"]
+        )
+        for name in ("podman", "run", "launch_credentials"):
+            self.forbidden[name].assert_not_called()
+
+    def test_combined_portable_backup_passes_explicit_host_and_workspace_flags(self):
+        from oc_box import backups
+
+        plan = self.plan(workspace=self.ident, portable=True, host=True)
+        self.assertIn("workspace and host configuration", plan.review)
+        self.assertIn("Portable", plan.review)
+        self.assertIn(self.ident, plan.review)
+        self.assertIn("No native V2 credential export is included", plan.review)
+        request = self.controller.confirm(plan, "")
+        interaction = Mock()
+        with patch.object(backups, "cli", return_value=0) as cli:
+            self.assertEqual(
+                operations.execute(box, request, interaction=interaction), 0
+            )
+        cli.assert_called_once_with(
+            box,
+            [
+                "backup",
+                "--workspace",
+                self.ident,
+                "--output",
+                str(self.output),
+                "--portable",
+                "--host",
+            ],
+            interaction=interaction,
+            reviewed_paths={
+                "backup_parent": request["bindings"]["backup_parent"],
+                "backup_file": None,
+            },
+        )
+        self.forbidden["main"].assert_not_called()
+
+    def test_host_options_are_typed_and_action_bound_before_path_access(self):
+        export = self.root / "no-export"
+        for action, options, reason in (
+            ("workspace-backup", {"host": 1}, "invalid-backup-kind"),
+            ("workspace-restore", {"include_opencode": "true"}, "invalid-backup-kind"),
+            ("workspace-inspect", {"host": True}, "unsupported-action"),
+            ("session-backup", {"host": True}, "unsupported-action"),
+            ("backup-delete", {"host": True}, "unsupported-action"),
+            (
+                "workspace-backup",
+                {"host": True, "include_opencode": True},
+                "unsupported-action",
+            ),
+            ("workspace-restore", {"include_opencode": True}, "unsupported-action"),
+            ("workspace-backup", {"auth_export": export}, "unsupported-action"),
+            (
+                "workspace-restore",
+                {"host": True, "auth_export": export},
+                "unsupported-action",
+            ),
+        ):
+            with self.subTest(action=action, options=options):
+                with patch.object(operations, "real_path") as path:
+                    self.refusal(reason, self.plan, action, **options)
+                path.assert_not_called()
+
+        request = self.controller.confirm(self.plan(host=True), "")
+        self.refusal(
+            "invalid-backup-kind", operations.execute, box, {**request, "host": 1}
+        )
+        self.refusal(
+            "unsupported-action",
+            operations.execute,
+            box,
+            {**request, "include_opencode": True},
+        )
+        self.forbidden["main"].assert_not_called()
+
+    def test_native_credential_export_must_be_absolute_bounded_and_private(self):
+        from oc_box.host_backup_auth import MAX_EXPORT
+
+        for invalid in ("-", "", "relative.json", Path("relative.json"), True):
+            with self.subTest(invalid=invalid):
+                self.refusal(
+                    "invalid-auth-export", self.plan, host=True, auth_export=invalid
+                )
+        export = self.root / "native-export.json"
+        export.write_bytes(b"[]")
+        export.chmod(0o644)
+        self.refusal(
+            "private-owned-file-required", self.plan, host=True, auth_export=export
+        )
+        export.chmod(0o600)
+        alias = self.root / "export-alias"
+        alias.symlink_to(export)
+        self.refusal("symlink-path", self.plan, host=True, auth_export=alias)
+        alias.unlink()
+        os.link(export, alias)
+        self.refusal("regular-file-required", self.plan, host=True, auth_export=export)
+        alias.unlink()
+        for size in (0, MAX_EXPORT + 1):
+            with self.subTest(size=size):
+                os.truncate(export, size)
+                self.refusal(
+                    "invalid-auth-export", self.plan, host=True, auth_export=export
+                )
+
+    def test_native_credential_export_review_and_dispatch_use_metadata_only(self):
+        from oc_box import backups
+
+        export = self.root / "native-export.json"
+        content = b"PRIVATE_NATIVE_EXPORT_SENTINEL"
+        export.write_bytes(content)
+        export.chmod(0o600)
+        plan = self.plan(host=True, auth_export=export)
+        self.assertIn(str(export), plan.review)
+        self.assertEqual(plan.request["auth_export"], str(export))
+        stamp = operations.file_identity(export, private=True)
+        self.assertEqual(plan.request["bindings"]["auth_export"], stamp)
+        self.assertNotIn(content.decode("ascii"), repr(plan))
+        request = self.controller.confirm(plan, "")
+        for interaction in (None, Mock()):
+            with self.subTest(embedded=interaction is not None):
+                with patch.object(backups, "cli", return_value=0) as cli:
+                    self.assertEqual(
+                        operations.execute(box, request, interaction=interaction), 0
+                    )
+                cli.assert_called_once_with(
+                    box,
+                    [
+                        "backup",
+                        "--output",
+                        str(self.output),
+                        "--host",
+                        "--opencode-auth-export",
+                        str(export),
+                    ],
+                    interaction=interaction,
+                    reviewed_auth_export=stamp,
+                    **(
+                        {
+                            "reviewed_paths": {
+                                "backup_parent": request["bindings"]["backup_parent"],
+                                "backup_file": None,
+                            }
+                        }
+                        if interaction is not None
+                        else {}
+                    ),
+                )
+        self.assertEqual(export.read_bytes(), content)
+        self.forbidden["main"].assert_not_called()
+
+    def test_native_credential_export_replacement_refuses_confirmation_and_dispatch(
+        self,
+    ):
+        from oc_box import backups
+
+        export = self.root / "native-export.json"
+        export.write_bytes(b"[]")
+        export.chmod(0o600)
+        request = self.controller.confirm(self.plan(host=True, auth_export=export), "")
+        plan = self.plan(host=True, auth_export=export)
+        replacement = self.root / "replacement"
+        replacement.write_bytes(b"[]")
+        replacement.chmod(0o600)
+        replacement.replace(export)
+        self.refusal("selection-changed", self.controller.confirm, plan, "")
+        with patch.object(backups, "cli") as cli:
+            self.refusal(
+                "selection-changed",
+                operations.execute,
+                box,
+                request,
+                interaction=Mock(),
+            )
+        cli.assert_not_called()
+        self.forbidden["main"].assert_not_called()
 
     def test_typed_phrase_is_reserved_for_destructive_actions_matrix(self):
         for action in sorted(operations.ACTIONS):
@@ -538,6 +740,72 @@ class OperationTests(unittest.TestCase):
             ["restore", str(self.output), "--project", str(self.root / "restored")]
         )
 
+    def test_host_restore_options_do_not_imply_destination_or_native_profile(self):
+        from oc_box import backups
+
+        core = ("key.age", "manifest.age", "host.age")
+        combined = (*core, "project.age", "home.age", "registry.age")
+        target = self.root / "restored"
+        for names, destination, host, native, expected_options, review in (
+            (core, None, True, False, ["--host"], "will not be restored"),
+            (
+                combined,
+                None,
+                True,
+                True,
+                ["--host", "--include-opencode"],
+                "separate trust approval",
+            ),
+            (
+                combined,
+                target,
+                True,
+                True,
+                ["--project", str(target), "--host", "--include-opencode"],
+                "not one transaction",
+            ),
+            (
+                combined,
+                target,
+                False,
+                False,
+                ["--project", str(target)],
+                "Host settings will not be restored",
+            ),
+        ):
+            with self.subTest(destination=destination, host=host, native=native):
+                self.archive(names=names)
+                plan = self.plan(
+                    "workspace-restore",
+                    destination=destination,
+                    host=host,
+                    include_opencode=native,
+                )
+                self.assertIn(review, plan.review)
+                if destination is None:
+                    self.assertIn("No workspace or Podman resources", plan.review)
+                    self.assertNotIn("destination_parent", plan.request["bindings"])
+                request = self.controller.confirm(plan, "")
+                interaction = Mock()
+                with patch.object(backups, "cli", return_value=0) as cli:
+                    self.assertEqual(
+                        operations.execute(box, request, interaction=interaction), 0
+                    )
+                cli.assert_called_once_with(
+                    box,
+                    ["restore", str(self.output), *expected_options],
+                    interaction=interaction,
+                    reviewed_paths={
+                        name: request["bindings"][name]
+                        for name in (
+                            "backup_parent",
+                            "backup_file",
+                            "destination_parent",
+                        )
+                        if name in request["bindings"]
+                    },
+                )
+
     def test_input_replaced_after_review_is_refused_before_cli(self):
         self.archive()
         plan = self.plan("workspace-inspect")
@@ -595,14 +863,20 @@ class OperationTests(unittest.TestCase):
     def test_archive_routing_uses_envelope_not_suffix_and_rechecks_open_file_identity(
         self,
     ):
+        core = ("key.age", "manifest.age")
+        workspace = (*core, "project.age", "home.age", "registry.age")
         for names, kind in (
-            (("key.age", "manifest.age", "sessions.age"), "session"),
-            (
-                ("key.age", "manifest.age", "project.age", "home.age", "registry.age"),
-                "workspace",
-            ),
+            ((*core, "sessions.age"), "session"),
+            (workspace, "workspace"),
+            ((*workspace, "image.age"), "workspace"),
+            ((*core, "host.age"), "host"),
+            ((*core, "host.age", "host-auth.age"), "host"),
+            ((*workspace, "host.age"), "workspace-host"),
+            ((*workspace, "host.age", "image.age"), "workspace-host"),
+            ((*workspace, "host.age", "host-auth.age"), "workspace-host"),
+            ((*workspace, "host.age", "host-auth.age", "image.age"), "workspace-host"),
         ):
-            with self.subTest(kind=kind):
+            with self.subTest(names=names, kind=kind):
                 self.archive(names=names)
                 identity = operations.file_identity(self.output)
                 self.assertEqual(
@@ -611,6 +885,22 @@ class OperationTests(unittest.TestCase):
                 self.output.write_bytes(b"replaced")
                 with self.assertRaises(operations.OperationError):
                     operations.archive_kind(self.output, expected=identity)
+
+    def test_archive_routing_rejects_host_auth_without_a_supported_host_component(self):
+        core = ("key.age", "manifest.age")
+        workspace = (*core, "project.age", "home.age", "registry.age")
+        for names in (
+            (*core, "host-auth.age"),
+            (*workspace, "host-auth.age"),
+            (*core, "sessions.age", "host.age"),
+            (*core, "sessions.age", "host.age", "host-auth.age"),
+            (*core, "host.age", "image.age"),
+        ):
+            with self.subTest(names=names):
+                self.archive(names=names)
+                self.refusal(
+                    "unsupported-backup-file", operations.archive_kind, self.output
+                )
 
     def test_backup_delete_accepts_only_private_regular_recognized_archives(self):
         self.archive()

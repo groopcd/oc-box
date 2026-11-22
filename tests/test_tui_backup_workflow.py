@@ -179,6 +179,42 @@ class PrivateEditorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result, [True])
             app._private_interaction = False
 
+    async def test_native_review_requires_exact_phrase_and_explicit_approval(self):
+        app = DashboardApp(DemoBackend(), demo=True)
+        async with app.run_test(size=(110, 40)) as pilot:
+            await self.begin(app, pilot)
+            app._private_interaction = True
+            result = []
+            review = MetadataReview(
+                {
+                    "format": "host",
+                    "kind": "host",
+                    "restore_host": True,
+                    "restore_opencode": True,
+                }
+            )
+            app.push_screen(review, result.append)
+            await pilot.pause()
+            approve = review.query_one("#metadata-approve", Button)
+            phrase = review.query_one("#metadata-opencode-confirmation", Input)
+            self.assertTrue(approve.disabled)
+            self.assertEqual(phrase.value, "")
+            phrase.focus()
+            await pilot.press("enter")
+            phrase.value = "restore-opencode "
+            await pilot.pause()
+            self.assertTrue(approve.disabled)
+            self.assertEqual(result, [])
+            phrase.value = "restore-opencode"
+            await pilot.pause()
+            self.assertFalse(approve.disabled)
+            approve.focus()
+            await pilot.press("enter")
+            self.assertEqual(result, [])
+            await pilot.press("space")
+            self.assertEqual(result, [True])
+            app._private_interaction = False
+
     async def test_metadata_cancel_private_input_alias_declines_once_never_approves(
         self,
     ):

@@ -198,9 +198,11 @@ def _read_export_stream(stream):
     _fail("invalid-export")
 
 
-def read_native_export(path=None, *, stream=None):
+def read_native_export(path=None, *, stream=None, reviewed_identity=None):
     """Read one explicit private local file or binary stream; never auto-export."""
-    if (path is None) == (stream is None):
+    if (path is None) == (stream is None) or (
+        reviewed_identity is not None and stream is not None
+    ):
         _fail("unsafe-source")
     try:
         if stream is not None:
@@ -217,6 +219,14 @@ def read_native_export(path=None, *, stream=None):
                 _fail("unsafe-source")
             if info.st_size > MAX_EXPORT:
                 _fail("invalid-export")
+            if reviewed_identity is not None and tuple(reviewed_identity) != (
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+            ):
+                _fail("unsafe-source")
             result = _read_export_stream(source)
             if _signature(info) != _signature(os.fstat(source.fileno())) or _signature(
                 info
