@@ -17,10 +17,9 @@ link to return; a named user can sign in again.
 
 ## Credential boundary
 
-- Support multiple named users: store an individually salted, memory-hard
-  password verifier (for example, Argon2id with reviewed parameters) and
-  explicit workspace access scope per username, never a reversible or plaintext
-  password. Keep these records scoped to web sign-in and separate from
+- Support multiple named users: keep one protocol registration record and
+  explicit workspace access scope per username, never a plaintext or
+  reversibly encrypted password. Keep these records scoped to web sign-in and separate from
   the vault master passphrase, provider credentials and the native service
   password. Configure it explicitly via the host vault. Do not forward it
   into provider, agent, shell or workspace environments: it is not an ordinary
@@ -32,18 +31,26 @@ link to return; a named user can sign in again.
   The all-interface bind affects only the host web listener. The container
   service remains private; do not publish its port.
 - Require HTTPS in **password mode even on localhost**. Serve the sign-in
-  page and its credential POST only over TLS. Use a trusted certificate
+  page and all authentication messages only over TLS. Use a trusted certificate
   matching the advertised hostname; fail closed if TLS is unavailable or
   misconfigured, without an HTTP fallback or instructions to bypass a browser
-  certificate warning. Accept the password only in the POST body, never in a
-  header added by client code, query string, or fragment. Do not substitute
-  browser-side hashing for TLS; a hash accepted in place of a password is a
-  reusable credential. The browser and verifier necessarily hold the entered
-  password briefly in memory; do not claim those copies can be erased
-  reliably.
-- Do not forward the password to native OpenCode or through any cleartext
-  proxy leg. No request-body logging, tracing, telemetry, or plaintext
-  persistence; mask the live password field by default. `0.0.0.0` is not an
+  certificate warning.
+- **The browser never sends the password itself, including during
+  enrollment.** Evaluate a reviewed implementation of an augmented
+  password-authenticated key exchange such as
+  [OPAQUE (RFC 9807)](https://www.rfc-editor.org/rfc/rfc9807.html).
+  Send only protocol messages, not a raw password, a reusable client-side hash,
+  or a password encrypted for the server to decrypt. No custom cryptography
+  or fallback to a password POST. Review the enrollment/reset flow, the
+  browser implementation and the protection of server-side records and keys
+  before enabling named sign-in.
+- The typed password necessarily exists briefly in the browser while entering
+  and processing it. Mask entry, clear the field after each attempt, and do
+  not intentionally persist it or claim guaranteed erasure. This does not
+  protect against a compromised browser or malicious sign-in JavaScript served
+  to the browser. Neither a TLS terminator nor the verifier should receive a
+  password it can read. Do not log protocol bodies or forward the password
+  to native OpenCode. `0.0.0.0` is not an
   authorization rule: firewall and network reachability are separate. Default
   one-use-link mode stays loopback-only regardless of other settings.
 - Before implementation, verify the native pairing/authentication contract:
