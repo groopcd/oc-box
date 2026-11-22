@@ -2816,9 +2816,12 @@ reads or pathname imports. Only an exact, valid paste end lets interception
 resume for later input. A recognized paste or ASCII CSI sequence with certain
 embedded control bytes also passes unchanged without granting an import. The
 relay resumes only after an unambiguous closing delimiter or final byte, and
-a later Ctrl+Y press is required for a clipboard read. A pending Escape followed
-by a complete, recognized mouse, focus, or Ctrl+Y report also recovers
-without treating that report as a gesture. An unfinished terminal
+a later Ctrl+Y press is required for a clipboard read. Repeated top-level
+Escapes can also recover after a complete recognized key or terminal report.
+Recognized control strings and canonical pastes reached this way stay opaque
+until their own end. None of those recovery bytes grant a clipboard read,
+file import, or host open. An overlapping OSC introducer in Kitty's reserved
+file-drop mode still stops interception to protect OSC 72 packets. An unfinished terminal
 reply or paste never grants a read. Ambiguous
 encoding, possible nested frames and other untrusted boundaries still stop
 interception for that client.

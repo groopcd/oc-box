@@ -326,7 +326,12 @@ class HostDropTests(unittest.TestCase):
             ) as put,
             contextlib.redirect_stderr(errors),
         ):
-            for frame in (b"\x1b[1\x19;2R", b"\x1b[200~synthetic\x19\x1b[201~"):
+            for frame in (
+                b"\x1b[1\x19;2R",
+                b"\x1b[200~synthetic\x19\x1b[201~",
+                b"\x1b\x1b\x1bOP",
+                b"\x1b\x1b\x1b[200~synthetic\x19\x1b[201~",
+            ):
                 self.assertEqual(relay.input_bytes(frame), frame)
             clipboard.read_selection.assert_not_called()
             put.assert_not_called()

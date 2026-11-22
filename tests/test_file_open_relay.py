@@ -37,16 +37,23 @@ def transfer(token, content):
 transfer(b'1' * 32, b'forged')
 os.write(1, b'READY')
 content = b''
+saw_grant = False
 while True:
     content += os.read(0, 4096)
     if b'Q' in content:
         break
-    found = re.search(rb'\\x1b\\]778;oc-box-click:v1:([0-9a-f]{32}):6:8\\x07', content)
-    if found:
+    grants = re.compile(rb'\\x1b\\]778;oc-box-click:v1:([0-9a-f]{32}):6:8\\x07')
+    if b'CHECK-NO-GRANT' in content:
+        assert not saw_grant and not grants.search(content), "unexpected grant before fresh click"
+        os.write(1, b'NO-PREMATURE-GRANT')
+        content = b''
+    for found in grants.finditer(content):
+        saw_grant = True
         os.write(1, found[0])
         transfer(found[1], b'actual artifact')
         transfer(found[1], b'replayed')
         os.write(1, b'TRANSFERRED')
+    if grants.search(content):
         content = b''
 """
 
@@ -88,7 +95,9 @@ class TerminalArtifactTests(unittest.TestCase):
                 os.write(master, b"\x1b[200~[<16;6;8M[<16;6;8m\x1b[201~")
                 # An Escape followed by a complete report recovers, but that
                 # report itself neither starts nor completes an authorized click.
-                os.write(master, press + b"\x1b" + release)
+                os.write(master, press + b"\x1b\x1b" + release)
+                os.write(master, b"CHECK-NO-GRANT")
+                await_visible(b"NO-PREMATURE-GRANT")
                 self.assertFalse(marker.exists())
                 os.write(master, press + release)
                 await_visible(b"TRANSFERRED")

@@ -53,10 +53,25 @@ _MOUSE_PARAMETERS = frozenset(b"<;0123456789")
 _RECOVERY_MOUSE = re.compile(
     rb"<(?:0|[1-9][0-9]{0,2});[1-9][0-9]{0,4};[1-9][0-9]{0,4}[Mm]"
 )
-_RECOVERY_CSI = frozenset((b"I", b"O", *_CLIPBOARD_KEYS))
+_RECOVERY_CSI = frozenset(
+    (b"A", b"B", b"C", b"D", b"F", b"H", b"I", b"O", b"Z", b"200~", *_CLIPBOARD_KEYS)
+)
 _RECOVERY_CSI_PREFIXES = frozenset(
     value[:index] for value in _RECOVERY_CSI for index in range(1, len(value) + 1)
 )
+_RECOVERY_CSI_KEY = re.compile(
+    rb"(?:"
+    # Modified arrows/Home/End and F1–F4.
+    rb"1;[1-9][0-9]{0,2}(?::[123])?[ABCDFHPQRS]"
+    # Navigation and function keys. In particular, no paste aliases.
+    rb"|(?:[1-8]|1[579]|2[0134689]|3[1-4])(?:;[1-9][0-9]{0,2}(?::[123])?)?~"
+    # A complete CSI-u key report with optional alternate key and event type.
+    rb"|[0-9]{1,7}(?::[0-9]{1,7}){0,2}(?:;[1-9][0-9]{0,2}(?::[123])?)?u"
+    rb")"
+)
+_RECOVERY_CSI_PARAMETERS = frozenset(b"0123456789;:")
+_RECOVERY_CSI_MAX = 32
+_RECOVERY_SS3_FINALS = frozenset(b"ABCDFHPQRS")
 
 # Includes the ASCII "72;" selector, but not the introducer or terminator.
 # The broker must independently validate its protocol/chunk/session limits.
@@ -255,6 +270,7 @@ class _Framing:
                     "intermediate": "escape-intermediate",
                     "escape-report-intro": "escape-report-prefix",
                     "escape-report-csi": "escape-report-csi",
+                    "escape-report-ss3": "escape-report-ss3",
                     "csi": "csi",
                     "paste": "bracketed-paste",
                     "string": "control-string",
@@ -293,7 +309,7 @@ class _Framing:
         self._disable_callbacks()
         if self._state == "string" and self._osc_target:
             self._string_unit(code, raw, output)
-        elif self._state in ("escape", "intermediate"):
+        elif self._state in ("escape", "intermediate", "escape-report-intro"):
             self._escape_unit(code, raw, output)
         elif self._state == "csi":
             self._csi_unit(code, raw, output)
@@ -343,7 +359,7 @@ class _Framing:
         self._csi_intermediate = False
         self._csi_number = 0
 
-    def _start_string(self, kind, prefix, output):
+    def _start_string(self, kind, prefix, output, *, probe=True):
         self._state = "string"
         self._string_kind = kind
         self._string_escape = False
@@ -353,7 +369,8 @@ class _Framing:
         self._osc_intro_length = len(prefix)
         self._osc_probe = (
             b""
-            if kind == "osc"
+            if probe
+            and kind == "osc"
             and (self._child_output or self._reserve_osc72 or self._on_osc72)
             else None
         )
@@ -377,7 +394,11 @@ class _Framing:
             self._escape_unit(code, raw, output)
         elif self._state == "csi":
             self._csi_unit(code, raw, output)
-        elif self._state in ("escape-report-intro", "escape-report-csi"):
+        elif self._state in (
+            "escape-report-intro",
+            "escape-report-csi",
+            "escape-report-ss3",
+        ):
             self._recover_escape_report(code, raw, output)
         elif code == _ESC:
             self._state = "escape"
@@ -417,19 +438,7 @@ class _Framing:
             if self._on_mouse_boundary is not None:
                 self._on_mouse_boundary()
             if code == _ESC and not self._framing_only():
-                # Do not replay the second Escape or assume a timeout made
-                # it independent. Recover only at a recognized report end.
-                if self._reserve_osc72:
-                    self._flush(output)
-                    # The second introducer could start a reserved OSC 72
-                    # packet. Keep it until the selector is known.
-                    self._held.extend(raw)
-                else:
-                    # No private output to filter. Preserve delivery of the
-                    # second Escape even if no subsequent bytes arrive.
-                    self._flush(output, raw)
-                self._state = "escape-report-intro"
-                self._escape_report.clear()
+                self._escape_overlap(raw, output)
                 return
             if code in _ESC_STRINGS:
                 prefix = bytes(self._held) + raw
@@ -453,31 +462,76 @@ class _Framing:
             self._state = "text"
             self._consume(code, raw, output)
 
+    def _escape_overlap(self, raw, output):
+        # A run of Escapes needs no counter or time-based guess. Only the
+        # last introducer may be needed for reserved OSC 72; it cannot grant.
+        if self._reserve_osc72:
+            self._flush(output)
+            self._held.extend(raw)
+        else:
+            self._flush(output, raw)
+        self._state = "escape-report-intro"
+        self._escape_report.clear()
+
     def _recover_escape_report(self, code, raw, output):
         if self._state == "escape-report-intro":
-            if code == ord("["):
+            if code == _ESC:
+                self._escape_overlap(raw, output)
+            elif code == ord("["):
                 self._state = "escape-report-csi"
                 self._flush(output, raw)
-            else:
-                self._disable_callbacks()
-                if self._reserve_osc72:
+            elif code == ord("O"):
+                self._state = "escape-report-ss3"
+                self._flush(output, raw)
+            elif code in _ESC_STRINGS:
+                if self._reserve_osc72 and code == ord("]"):
+                    # Preserve the old reservation after an ambiguous OSC
+                    # introducer: no private packet can reach either callback
+                    # or the child. Do not recover inside a control string.
+                    self._disable_callbacks()
                     self._state = "escape"
                     self._escape_unit(code, raw, output)
                 else:
                     self._flush(output, raw)
-                    self._state = "text"
+                    self._opaque_frame = True
+                    self._start_string(_ESC_STRINGS[code], b"", output, probe=False)
+            elif 0x30 <= code <= 0x7E and code not in b"NOYZ":
+                # This is a complete ESC final without a further payload.
+                self._flush(output, raw)
+                self._opaque_frame = True
+                self._end_frame()
+            else:
+                self._refuse_unit(code, raw, output)
+            return
+
+        if self._state == "escape-report-ss3":
+            if code in _RECOVERY_SS3_FINALS:
+                output.extend(raw)
+                self._opaque_frame = True
+                self._end_frame()
+            else:
+                self._refuse_unit(code, raw, output)
             return
 
         self._escape_report.extend(raw)
         candidate = bytes(self._escape_report)
         final = 0x40 <= code <= 0x7E
         if final and (
-            candidate in _RECOVERY_CSI or _RECOVERY_MOUSE.fullmatch(candidate)
+            candidate in _RECOVERY_CSI
+            or _RECOVERY_MOUSE.fullmatch(candidate)
+            or _RECOVERY_CSI_KEY.fullmatch(candidate)
         ):
             output.extend(raw)
             self._escape_report.clear()
             self._opaque_frame = True
-            self._end_frame()
+            if candidate == b"200~":
+                # The start is exact, but the overlap is not an import
+                # gesture. Stay opaque until the exact paste end.
+                self._state = "paste"
+                self._paste_length = self._paste_end = 0
+                self._paste_passthrough = True
+            else:
+                self._end_frame()
             return
         if not final and (
             candidate in _RECOVERY_CSI_PREFIXES
@@ -485,6 +539,10 @@ class _Framing:
                 candidate.startswith(b"<")
                 and len(candidate) <= 16
                 and all(byte in _MOUSE_PARAMETERS for byte in candidate)
+            )
+            or (
+                len(candidate) < _RECOVERY_CSI_MAX
+                and all(byte in _RECOVERY_CSI_PARAMETERS for byte in candidate)
             )
         ):
             output.extend(raw)
@@ -751,7 +809,7 @@ class _Framing:
                 self._held.clear()
             else:
                 self._flush(output, raw)
-            self._state = "text"
+            self._end_frame()
             return
         if self._osc_target:
             if not self._osc_discard:
@@ -793,8 +851,9 @@ class PasteInput(_Framing):
     Normally the original and subsequent bytes pass unchanged. Embedded C0/DEL
     in a recognized paste or non-cancelling C0/DEL in ASCII CSI are forwarded
     opaquely; only an unambiguous frame end permits interception of later input.
-    A pending Escape followed by an exact supported mouse, focus, or Ctrl+Y
-    CSI report recovers at its end without granting on that report.
+    Overlapping top-level Escapes recover at the end of complete recognized
+    keys, reports, ordinary control strings or canonical paste frames;
+    none of the recovery bytes authorize actions.
     There is no interior rescan or timing-based re-arm. Over-limit ordinary
     pastes also stream unchanged until their exact canonical end.
     With ``reserve_osc72=True``, refused/malformed/oversized private packets and

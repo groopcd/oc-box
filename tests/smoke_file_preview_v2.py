@@ -395,6 +395,13 @@ def run_client(
         pump(0.12)
         assert not log() and not opened.exists()
         expect_transfer("ABS_LINK", "md", file.read_bytes())
+        # Repeated Escape can precede the next terminal report. This focus
+        # report must be forwarded, not used as authority for a host action.
+        for packet in (b"\x1b", b"\x1b", b"\x1b[I"):
+            if forwarded := input_wire.feed(packet):
+                os.write(master, forwarded)
+            pump(0.08)
+        assert input_wire.recovered_framing and not input_wire.disabled
         if not private_mounts:
             assert log() == ["proof.md"]
         file.write_text("PREVIEW_SECOND_SNAPSHOT\n")
