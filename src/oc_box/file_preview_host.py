@@ -36,7 +36,8 @@ _BASENAME = re.compile(r"artifact-[0-9a-f]{32}\.(?:png|txt|md|html)")
 _DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
 _RETENTION_SECONDS = 24 * 60 * 60
-_MAX_FILES = 8
+_MAX_FILES = 128
+_MAX_STORAGE_BYTES = 64 * 1024 * 1024
 _OPENER = "/usr/bin/xdg-open"
 _MIME = "/usr/bin/xdg-mime"
 _OPEN_TIMEOUT = 5.0
@@ -538,7 +539,7 @@ def _private_file(info, uid):
     )
 
 
-def _cleanup(fd, uid):
+def _cleanup(fd, uid, incoming_bytes):
     oldest = time.time() - _RETENTION_SECONDS
     names = []
     with os.scandir(fd) as entries:
@@ -554,14 +555,16 @@ def _cleanup(fd, uid):
                     "Host PNG preview storage is not trusted.",
                     reason="runtime-staging-untrusted",
                 )
-            names.append((entry.name, info.st_mtime))
+            names.append((entry.name, info.st_mtime, info.st_size))
     remaining = 0
-    for name, modified in names:
+    retained_bytes = 0
+    for name, modified, size in names:
         if modified < oldest:
             os.unlink(name, dir_fd=fd)
         else:
             remaining += 1
-    if remaining >= _MAX_FILES:
+            retained_bytes += size
+    if remaining >= _MAX_FILES or retained_bytes + incoming_bytes > _MAX_STORAGE_BYTES:
         raise PreviewError(
             "Host PNG preview limit reached; try again later.",
             reason="runtime-staging-limit",
@@ -569,7 +572,7 @@ def _cleanup(fd, uid):
 
 
 @contextmanager
-def _storage(host_mounts):
+def _storage(host_mounts, incoming_bytes):
     uid = os.geteuid()
     name = _storage_name(uid)
     root = _storage_root()
@@ -591,7 +594,7 @@ def _storage(host_mounts):
                 raise PreviewError(
                     "Host artifact staging is busy.", reason="runtime-staging-busy"
                 ) from None
-            _cleanup(fd, uid)
+            _cleanup(fd, uid, incoming_bytes)
             yield fd, os.path.join(root, name), uid
         finally:
             os.close(fd)
@@ -601,7 +604,7 @@ def _storage(host_mounts):
 
 @contextmanager
 def _stage(kind, data, host_mounts):
-    with _storage(host_mounts) as (directory, path, uid):
+    with _storage(host_mounts, len(data)) as (directory, path, uid):
         name = f"artifact-{secrets.token_hex(16)}.{kind}"
         fd = os.open(name, _FILE_FLAGS, mode=0o600, dir_fd=directory)
         handed_off = False

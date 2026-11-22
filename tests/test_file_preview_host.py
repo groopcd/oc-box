@@ -703,6 +703,63 @@ class HostOpenerTests(unittest.TestCase):
             )
             self.assertEqual(self.run_desktop.call_count, 6)
 
+    def test_existing_eight_copies_do_not_block_repeated_small_opens(self):
+        self.spool.mkdir(mode=0o700)
+        originals = {}
+        for index in range(8):
+            path = self.spool / f"artifact-{index:032x}.md"
+            original = f"# earlier copy {index}\n".encode()
+            path.write_bytes(original)
+            path.chmod(0o600)
+            originals[path] = original
+
+        self.mime_result.stdout = b"text/markdown\n"
+        for index in range(16):
+            host.open_artifact("md", f"# current copy {index}\n".encode())
+
+        self.assertEqual(len(list(self.spool.iterdir())), 24)
+        self.assertEqual(self.run_desktop.call_count, 32)
+        self.assertTrue(
+            all(path.read_bytes() == data for path, data in originals.items())
+        )
+
+    def test_byte_budget_counts_incoming_copy_and_preserves_recent_viewer_files(self):
+        self.mime_result.stdout = b"text/plain\n"
+        with patch.object(host, "_MAX_STORAGE_BYTES", 10):
+            host.open_artifact("txt", b"first")
+            (first,) = self.spool.iterdir()
+            host.open_artifact("txt", b"12345")
+            with self.assertRaises(host.PreviewError) as error:
+                host.open_artifact("txt", b"x")
+            self.assertEqual(
+                host.safe_open_failure(error.exception), "runtime-staging-limit"
+            )
+            self.assertEqual(
+                {path.read_bytes() for path in self.spool.iterdir()},
+                {b"first", b"12345"},
+            )
+            self.assertEqual(self.run_desktop.call_count, 4)
+
+            old = time.time() - host._RETENTION_SECONDS - 60
+            os.utime(first, (old, old))
+            host.open_artifact("txt", b"third")
+            self.assertFalse(first.exists())
+            self.assertEqual(
+                {path.read_bytes() for path in self.spool.iterdir()},
+                {b"third", b"12345"},
+            )
+
+    def test_byte_budget_counts_prepared_html_instead_of_original_size(self):
+        self.mime_result.stdout = b"text/html\n"
+        with patch.object(host, "_MAX_STORAGE_BYTES", 32):
+            with self.assertRaises(host.PreviewError) as error:
+                host.open_artifact("html", b"<p>short draft</p>")
+        self.assertEqual(
+            host.safe_open_failure(error.exception), "runtime-staging-limit"
+        )
+        self.assertEqual(list(self.spool.iterdir()), [])
+        self.run_desktop.assert_not_called()
+
     def test_symlinked_or_nonprivate_spool_is_not_followed(self):
         target = self.base / "outside"
         target.mkdir()

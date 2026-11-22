@@ -2908,9 +2908,10 @@ workspace whose programs you trust to honor that click.  A rendered link
 or container output alone does not mint a grant.  No new listener or
 share is created, no file is written back, and no clipboard or model
 access is granted.  The host copy survives the asynchronous viewer
-handoff.  The launcher keeps up to eight copies, clears copies older
-than 24 hours on a later open, and leaves earlier removal to the desktop
-runtime-directory policy.  Copies rejected before calling the opener are
+handoff.  The launcher keeps up to 128 copies and 64 MiB in total.  It
+clears copies older than 24 hours on a later open rather than evicting
+recent copies to make space.  The desktop runtime-directory policy can
+remove them sooner.  Copies rejected before calling the opener are
 removed immediately.  Older experimental staging directories are not
 adopted or cleaned by the new launcher.
 
@@ -4842,19 +4843,19 @@ Node: Synopsis930
 Node: Description3846
 Node: Commands9273
 Node: Options132652
-Node: Lifecycle and persistence187996
-Node: Distribution images190296
-Node: Sessions and recovery195260
-Node: Devices and host permissions201845
-Node: Resource reports204191
-Node: Configuration and environment206302
-Node: Files217683
-Node: Exit status228593
-Node: Examples230001
-Node: Troubleshooting232140
-Node: Installation and manuals244186
-Node: Authors and license254376
-Node: See also254983
+Node: Lifecycle and persistence188061
+Node: Distribution images190361
+Node: Sessions and recovery195325
+Node: Devices and host permissions201910
+Node: Resource reports204256
+Node: Configuration and environment206367
+Node: Files217748
+Node: Exit status228658
+Node: Examples230066
+Node: Troubleshooting232205
+Node: Installation and manuals244251
+Node: Authors and license254441
+Node: See also255048
 
 End Tag Table
 

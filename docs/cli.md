@@ -2596,9 +2596,10 @@ OpenCode chooses the link target; opt in only for a workspace whose programs
 you trust to honor that click. A rendered link or container output alone does
 not mint a grant. No new listener or share is created, no file is written
 back, and no clipboard or model access is granted. The host copy survives the
-asynchronous viewer handoff. The launcher keeps up to eight copies, clears
-copies older than 24 hours on a later open, and leaves earlier removal to the
-desktop runtime-directory policy. Copies rejected before calling the opener
+asynchronous viewer handoff. The launcher keeps up to 128 copies and 64 MiB
+in total. It clears copies older than 24 hours on a later open rather than
+evicting recent copies to make space. The desktop runtime-directory policy can
+remove them sooner. Copies rejected before calling the opener
 are removed immediately. Older experimental staging directories are not
 adopted or cleaned by the new launcher.
 
