@@ -1259,8 +1259,8 @@ can stop an unowned source before requesting its password, so cancellation can
 leave that source stopped. Workspace full/portable `.ocbox` archives retain the
 normal CLI contracts below: fresh IDs, no overwrite and stopped restores.
 Whole-workspace archives may contain copied config/auth. Ordinary CLI password
-prompts remain unchanged; Storage removal and backup-file deletion retain their
-separate reviewed foreground handoff.
+prompts remain unchanged; Storage removal retains its separate reviewed
+foreground handoff.
 
 Native V2 session-tree history instead uses encrypted `.ocsession` files:
 versioned, authenticated age components, at most 50 sessions, 100,000 messages
@@ -1275,11 +1275,12 @@ within that new tree. It never executes restored work or overwrites old IDs.
 Partial failures and cancellation retain observed/attempted IDs for explicit recovery; they
 are not atomic restores and trigger no automatic rollback/delete or retry.
 
-Delete backup file is a separate typed action for one selected, owned, private,
-regular supported encrypted archive. It does not delete sessions or workspace
-storage. No tab prunes shared images, arbitrary caches, global vaults, retired
-provenance or host databases. Session search text, backup paths and transcript
-content are not added to the activity journal.
+The dashboard cannot delete backup files: it cannot guarantee that a path
+still names the reviewed file at deletion. To remove an archive, verify it in
+your host file manager and delete it there. No tab prunes shared images,
+arbitrary caches, global vaults, retired provenance or host databases. Session
+search text, backup paths and transcript content are not added to the activity
+journal.
 
 The Terminals tab embeds the existing native persistent-session terminal client
 through a local PTY and optional `pyte` emulator, not a new container shell. Attachment
@@ -2001,11 +2002,15 @@ encryption. Plaintext streams through pipes, and secret keys/captured stderr use
 anonymous memory. Temporary backup staging contains ciphertext only. At most
 16 TiB ciphertext/expanded archive bytes per component and 2 million entries
 are accepted in format v1. The output parent must exist outside the project,
-registry, and private home. New output is published atomically without replacing
-an existing file and has 0600 permissions. Expect enough free space for staged
-ciphertext, final output, and a temporary committed image. Failure leaves no
-final partial backup; the source remains stopped, not reset/deleted. The
-temporary capture image is removed by its unique tag; shared base images remain.
+registry, and private home, on a Linux filesystem that supports unnamed
+temporary files (`O_TMPFILE`) and linking them via procfs. New output is
+published atomically without replacing an existing file and has 0600 permissions.
+The launcher opens the unnamed output before stopping a running workspace.
+Expect enough free space for staged ciphertext, final output, and a temporary
+committed image. If publication cannot be confirmed after linking, a complete
+ciphertext file may remain: inspect it with `backup-info` before retrying. The
+source remains stopped, not reset/deleted. The temporary capture image is
+removed by its unique tag; shared base images remain.
 
 ### Include host settings for migration
 
@@ -2148,9 +2153,10 @@ below, or provide matching host env/vault values before normal startup.
 Outside env files are excluded.
 Copied auth/config and secrets stored in project/home/OS are part of
 the encrypted payload and remain present after restore. A failed operation
-cleans only its newly created project/volume/container/registry and preserves
-original environments; interruption may retain staging marked incomplete, which
-normal launch refuses until the operator inspects/retries. Loaded OCI images
+cleans only its verified new project/volume/container/registry and preserves
+original environments. If cleanup cannot verify staging or resource ownership,
+it retains a blocked incomplete registration for host inspection instead of
+deleting unverified data. Loaded OCI images
 may remain in shared Podman image cache after failure; no global prune is used.
 The host registry journals fresh resource IDs and `restore_staging_project`
 before payload extraction. An interrupted or failed-cleanup entry has

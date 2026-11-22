@@ -1430,8 +1430,8 @@ requesting its password, so cancellation can leave that source stopped.
 Workspace full/portable ‘.ocbox’ archives retain the normal CLI
 contracts below: fresh IDs, no overwrite and stopped restores.
 Whole-workspace archives may contain copied config/auth.  Ordinary CLI
-password prompts remain unchanged; Storage removal and backup-file
-deletion retain their separate reviewed foreground handoff.
+password prompts remain unchanged; Storage removal retains its separate
+reviewed foreground handoff.
 
 Native V2 session-tree history instead uses encrypted ‘.ocsession’
 files: versioned, authenticated age components, at most 50 sessions,
@@ -1448,12 +1448,12 @@ overwrites old IDs.  Partial failures and cancellation retain
 observed/attempted IDs for explicit recovery; they are not atomic
 restores and trigger no automatic rollback/delete or retry.
 
-Delete backup file is a separate typed action for one selected, owned,
-private, regular supported encrypted archive.  It does not delete
-sessions or workspace storage.  No tab prunes shared images, arbitrary
-caches, global vaults, retired provenance or host databases.  Session
-search text, backup paths and transcript content are not added to the
-activity journal.
+The dashboard cannot delete backup files: it cannot guarantee that a
+path still names the reviewed file at deletion.  To remove an archive,
+verify it in your host file manager and delete it there.  No tab prunes
+shared images, arbitrary caches, global vaults, retired provenance or
+host databases.  Session search text, backup paths and transcript
+content are not added to the activity journal.
 
 The Terminals tab embeds the existing native persistent-session terminal
 client through a local PTY and optional ‘pyte’ emulator, not a new
@@ -2231,12 +2231,16 @@ pipes, and secret keys/captured stderr use anonymous memory.  Temporary
 backup staging contains ciphertext only.  At most 16 TiB
 ciphertext/expanded archive bytes per component and 2 million entries
 are accepted in format v1.  The output parent must exist outside the
-project, registry, and private home.  New output is published atomically
-without replacing an existing file and has 0600 permissions.  Expect
-enough free space for staged ciphertext, final output, and a temporary
-committed image.  Failure leaves no final partial backup; the source
-remains stopped, not reset/deleted.  The temporary capture image is
-removed by its unique tag; shared base images remain.
+project, registry, and private home, on a Linux filesystem that supports
+unnamed temporary files (‘O_TMPFILE’) and linking them via procfs.  New
+output is published atomically without replacing an existing file and
+has 0600 permissions.  The launcher opens the unnamed output before
+stopping a running workspace.  Expect enough free space for staged
+ciphertext, final output, and a temporary committed image.  If
+publication cannot be confirmed after linking, a complete ciphertext
+file may remain: inspect it with ‘backup-info’ before retrying.  The
+source remains stopped, not reset/deleted.  The temporary capture image
+is removed by its unique tag; shared base images remain.
 
 4.23 Include host settings for migration
 ========================================
@@ -2389,20 +2393,20 @@ Restore archived host settings explicitly as described below, or provide
 matching host env/vault values before normal startup.  Outside env files
 are excluded.  Copied auth/config and secrets stored in project/home/OS
 are part of the encrypted payload and remain present after restore.  A
-failed operation cleans only its newly created
-project/volume/container/registry and preserves original environments;
-interruption may retain staging marked incomplete, which normal launch
-refuses until the operator inspects/retries.  Loaded OCI images may
-remain in shared Podman image cache after failure; no global prune is
-used.  The host registry journals fresh resource IDs and
-‘restore_staging_project’ before payload extraction.  An interrupted or
-failed-cleanup entry has ‘restore_incomplete: true’; list/status can
-expose its ID without launching it.  Inspect the staging location, use
-plain ‘purge --workspace ID’ for its managed resources (which skips
-history sync for incomplete restores), and retry to a new destination.
-Orphan staging directories may need manual host removal after
-inspection; the launcher never deletes a caller-supplied tree on marker
-alone.
+failed operation cleans only its verified new
+project/volume/container/registry and preserves original environments.
+If cleanup cannot verify staging or resource ownership, it retains a
+blocked incomplete registration for host inspection instead of deleting
+unverified data.  Loaded OCI images may remain in shared Podman image
+cache after failure; no global prune is used.  The host registry
+journals fresh resource IDs and ‘restore_staging_project’ before payload
+extraction.  An interrupted or failed-cleanup entry has
+‘restore_incomplete: true’; list/status can expose its ID without
+launching it.  Inspect the staging location, use plain ‘purge
+--workspace ID’ for its managed resources (which skips history sync for
+incomplete restores), and retry to a new destination.  Orphan staging
+directories may need manual host removal after inspection; the launcher
+never deletes a caller-supplied tree on marker alone.
 
 4.26 Restore host settings on a new machine
 ===========================================
@@ -4958,20 +4962,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description3917
 Node: Commands9344
-Node: Options137295
-Node: Lifecycle and persistence194265
-Node: Distribution images196565
-Node: Sessions and recovery201529
-Node: Devices and host permissions208114
-Node: Resource reports210460
-Node: Configuration and environment212571
-Node: Files223952
-Node: Exit status234862
-Node: Examples236270
-Node: Troubleshooting238409
-Node: Installation and manuals250455
-Node: Authors and license260645
-Node: See also261252
+Node: Options137624
+Node: Lifecycle and persistence194594
+Node: Distribution images196894
+Node: Sessions and recovery201858
+Node: Devices and host permissions208443
+Node: Resource reports210789
+Node: Configuration and environment212900
+Node: Files224281
+Node: Exit status235191
+Node: Examples236599
+Node: Troubleshooting238738
+Node: Installation and manuals250784
+Node: Authors and license260974
+Node: See also261581
 
 End Tag Table
 

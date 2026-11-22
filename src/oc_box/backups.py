@@ -213,28 +213,72 @@ def _apply_host_restore(plan, include_opencode, *, prepared_auth=None):
     return installed
 
 
-def _publish_archive(staging, output, *, interaction=None, reviewed_parent=None):
+@contextmanager
+def _archive_publication(output, reviewed_parent):
     with crypto.reviewed_directory(output.parent, reviewed_parent) as parent:
-        name = ".oc-box-backup-" + uuid.uuid4().hex
-        fd = os.open(
-            name,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
-            0o600,
-            dir_fd=parent,
-        )
+        # No source pathname to substitute (or inadvertently unlink). Require
+        # Linux O_TMPFILE and procfs linkat support on the output filesystem
+        # rather than falling back to a racy named temporary file.
         try:
-            with os.fdopen(fd, "wb") as stream:
-                crypto.pack(staging, stream)
-                stream.flush()
-                os.fsync(stream.fileno())
-            if interaction is not None:
-                interaction.dispatched()
-            _check_reviewed_parent(output.parent, reviewed_parent)
-            os.link(name, output.name, src_dir_fd=parent, dst_dir_fd=parent)
-            os.fsync(parent)
-            _check_reviewed_parent(output.parent, reviewed_parent)
+            fd = os.open(
+                ".", os.O_WRONLY | os.O_TMPFILE | os.O_CLOEXEC, 0o600, dir_fd=parent
+            )
+        except OSError:
+            raise BackupError(
+                "Choose an output directory on a filesystem that supports unnamed temporary files."
+            ) from None
+        try:
+            yield parent, fd
         finally:
-            os.unlink(name, dir_fd=parent)
+            os.close(fd)
+
+
+def _publish_archive(
+    staging, output, *, interaction=None, reviewed_parent=None, publication=None
+):
+    destination = (
+        _archive_publication(output, reviewed_parent)
+        if publication is None
+        else nullcontext(publication)
+    )
+    with destination as (parent, fd):
+        expected = _entry_identity(os.fstat(parent))
+        with os.fdopen(fd, "wb", closefd=False) as stream:
+            crypto.pack(staging, stream)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if interaction is not None:
+            interaction.dispatched()
+        _check_reviewed_parent(output.parent, expected)
+        try:
+            # dir_fd selects linkat, with AT_SYMLINK_FOLLOW on the procfs
+            # descriptor reference. The output name is never replaced.
+            os.link(
+                f"/proc/self/fd/{fd}",
+                output.name,
+                dst_dir_fd=parent,
+                follow_symlinks=True,
+            )
+        except FileExistsError:
+            raise BackupError(
+                "Backup output already exists; choose a new filename (backups never overwrite)."
+            ) from None
+        except OSError:
+            raise BackupError(
+                "Cannot publish the encrypted archive from its open file; choose an output directory with Linux procfs hard-link support."
+            ) from None
+        # Never unlink the public name on failure: it may already have
+        # been observed, or since replaced by an unrelated entry.
+        try:
+            os.fsync(parent)
+            _check_reviewed_parent(output.parent, expected)
+            named = os.stat(output.name, dir_fd=parent, follow_symlinks=False)
+            if _entry_identity(named) != _entry_identity(os.fstat(fd)):
+                raise BackupError("Archive output changed after publication.")
+        except (OSError, BackupError):
+            raise BackupError(
+                "Archive publication could not be confirmed; inspect the output directory before retrying."
+            ) from None
 
 
 def _host_components(staging, recipient, host):
@@ -269,16 +313,21 @@ def _make_host_only(box, args, minimum, *, interaction=None):
     _check_reviewed_parent(output.parent, reviewed_parent)
     if output.exists() or output.is_symlink():
         raise BackupError("Backup output already exists; choose a new filename.")
-    if interaction is not None:
-        interaction.stage("host-settings")
-    payload = _capture_host(args, output)
-    with _ciphertext_staging(
-        output, reviewed_parent, "oc-box-host-backup-ciphertext-"
-    ) as staging:
+    with ExitStack() as stack:
+        publication = stack.enter_context(_archive_publication(output, reviewed_parent))
+        expected_parent = _entry_identity(os.fstat(publication[0]))
+        if interaction is not None:
+            interaction.stage("host-settings")
+        payload = _capture_host(args, output)
+        staging = stack.enter_context(
+            _ciphertext_staging(
+                output, expected_parent, "oc-box-host-backup-ciphertext-"
+            )
+        )
         _, recipient = crypto.generate_key(
             args.recipient or [], staging / "key.age", minimum=minimum
         )
-        _check_reviewed_parent(output.parent, reviewed_parent)
+        _check_reviewed_parent(output.parent, expected_parent)
         manifest = {
             "format": "oc-box-backup",
             "format_version": 2,
@@ -295,7 +344,7 @@ def _make_host_only(box, args, minimum, *, interaction=None):
         if interaction is not None:
             interaction.stage("publishing")
         _publish_archive(
-            staging, output, interaction=interaction, reviewed_parent=reviewed_parent
+            staging, output, interaction=interaction, publication=publication
         )
     print("Encrypted host configuration backup saved.")
 
@@ -382,32 +431,40 @@ def owned_volume(box, data):
     return info
 
 
-def remove_restore_resource(box, kind, data):
+def remove_restore_resource(box, kind, data, *, allow_missing=True):
     """Never delete a same-named resource unless its fresh owner label matches."""
     name = data["container"] if kind == "container" else data["home_volume"]
     exists = command(box, kind, "exists", name, check=False)
     if exists.returncode == 1:
-        return True
+        # If create never acknowledged a return, one absence observation
+        # cannot rule out a late engine side effect.
+        return allow_missing
     if exists.returncode:
         return False
     if kind == "container":
-        owned_container(box, data)
+        info = owned_container(box, data)
+        if info is None:
+            return allow_missing
+        # Prefer the inspected immutable container ID over a mutable name.
+        resource = info.get("Id") or name
     else:
         owned_volume(box, data)
+        resource = name
     return (
         command(
             box,
             kind,
             "rm",
             *(["--force"] if kind == "container" else []),
-            name,
+            resource,
             check=False,
         ).returncode
         == 0
+        and command(box, kind, "exists", name, check=False).returncode == 1
     )
 
 
-def remove_staged_tree(path):
+def remove_staged_tree(path, *, expected=None):
     """Remove only this operation's tree, even if archived modes were 0000.
 
     Destination roots are private and caller-owned; never follow archived links
@@ -421,6 +478,9 @@ def remove_staged_tree(path):
         )
     fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
     try:
+        identity = _entry_identity(os.fstat(fd))
+        if expected is not None and identity != expected:
+            raise BackupError("Rollback tree changed; inspect staging manually.")
         os.fchmod(fd, 0o700)
 
         def unlock(directory):
@@ -443,9 +503,20 @@ def remove_staged_tree(path):
                     os.close(descriptor)
 
         unlock(fd)
+        # Delete data by descriptor, never through an attacker-replaced root
+        # name. The last pathname operation can only remove an empty directory.
+        for name in os.listdir(fd):
+            entry = os.stat(name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISDIR(entry.st_mode):
+                # Python 3.10 rmtree does not take dir_fd.
+                shutil.rmtree(Path(f"/proc/self/fd/{fd}") / name)
+            else:
+                os.unlink(name, dir_fd=fd)
+        if not _stage_entry_matches(path, identity):
+            raise BackupError("Rollback tree changed; inspect staging manually.")
+        path.rmdir()
     finally:
         os.close(fd)
-    shutil.rmtree(path)
 
 
 def safe_config(data):
@@ -489,26 +560,26 @@ def activate_project(staging, destination, *, parent_fd=None):
         )
 
 
-def _stage_entry_matches(path, fd):
-    if fd is None:
-        return True
+def _entry_identity(info):
+    return (info.st_dev, info.st_ino)
+
+
+def _stage_entry_matches(path, identity):
+    if identity is None:
+        return False
     try:
         named = path.lstat()
     except OSError:
         return False
-    opened = os.fstat(fd)
-    return stat.S_ISDIR(named.st_mode) and (named.st_dev, named.st_ino) == (
-        opened.st_dev,
-        opened.st_ino,
-    )
+    return stat.S_ISDIR(named.st_mode) and _entry_identity(named) == identity
 
 
-def _check_stage_entry(path, fd):
-    if not _stage_entry_matches(path, fd):
+def _check_stage_entry(path, identity):
+    if not _stage_entry_matches(path, identity):
         raise BackupError("Reviewed project staging changed; it cannot be activated.")
 
 
-def make_backup(box, args, *, interaction=None):
+def make_backup(box, args, *, interaction=None, reviewed_workspace=None):
     crypto.validate_recipients(args.recipient or [])
     minimum = crypto.passphrase_minimum(
         args.recipient or [], getattr(args, "min_passphrase_length", None)
@@ -518,7 +589,10 @@ def make_backup(box, args, *, interaction=None):
         raise BackupError("--opencode-auth-export requires --host.")
     if include_host and not (args.project or args.workspace or args.portable):
         return _make_host_only(box, args, minimum, interaction=interaction)
-    path, data = box.find_workspace(args.project, args.workspace)
+    if reviewed_workspace is None:
+        path, data = box.find_workspace(args.project, args.workspace)
+    else:
+        path, data = reviewed_workspace()
     if data is None:
         raise BackupError(
             "No registered workspace to back up; select an existing project or workspace ID."
@@ -542,10 +616,28 @@ def make_backup(box, args, *, interaction=None):
             )
     if include_host:
         _exclude_captured_export(args, data["project"], box.state_root(), path.parent)
-    box.check_backend(env=crypto.environment(), feature="backup")
+
+    def revalidate_review():
+        if reviewed_workspace is not None:
+            current_path, current_data = reviewed_workspace()
+            if current_path != path or current_data != data:
+                raise BackupError("Reviewed workspace changed; open a new review.")
+
+    if reviewed_workspace is None:
+        box.check_backend(env=crypto.environment(), feature="backup")
     crypto.tools()
-    with box.workspace_lock(path):
-        box.refresh_workspace_identity(path, data)
+    with box.workspace_lock(path), ExitStack() as stack:
+        if reviewed_workspace is None:
+            box.refresh_workspace_identity(path, data)
+        else:
+            revalidate_review()
+            # Keep the reviewed fingerprint stable. The ordinary CLI's
+            # verified legacy identity migration is not a dashboard write.
+            current_path, current_data = box.find_workspace(data["project"])
+            if current_path != path or current_data != data:
+                raise BackupError("Reviewed workspace changed; open a new review.")
+            box.check_backend(env=crypto.environment(), feature="backup")
+            revalidate_review()
         info = owned_container(box, data)
         if info is None:
             raise BackupError(
@@ -554,6 +646,12 @@ def make_backup(box, args, *, interaction=None):
         if info["State"].get("Paused"):
             raise BackupError("Container is paused; stop it from the host first.")
         volume = owned_volume(box, data)
+        if output.is_relative_to(Path(volume["Mountpoint"]).resolve()):
+            raise BackupError("Backup output cannot be inside the private home volume.")
+        # Check filesystem support and keep the exact file and parent pinned
+        # before stopping the source or capturing any data.
+        publication = stack.enter_context(_archive_publication(output, reviewed_parent))
+        expected_parent = _entry_identity(os.fstat(publication[0]))
         if include_host:
             _exclude_captured_export(args, volume["Mountpoint"])
             if interaction is not None:
@@ -561,8 +659,6 @@ def make_backup(box, args, *, interaction=None):
             host = _capture_host(args, output)
         else:
             host = None
-        if output.is_relative_to(Path(volume["Mountpoint"]).resolve()):
-            raise BackupError("Backup output cannot be inside the private home volume.")
         # External mounts and volumes are never silently captured. A full backup
         # records their requirements but is not claimed to preserve their data.
         approved = {
@@ -593,6 +689,8 @@ def make_backup(box, args, *, interaction=None):
                 "This container has additional bind mounts/volumes. Back up those separately and remove them from a dedicated backup fixture first; implicit capture of outside host data is refused."
             )
         if info["State"]["Running"]:
+            revalidate_review()
+            _check_reviewed_parent(output.parent, expected_parent)
             if interaction is not None:
                 interaction.dispatched()
             print(
@@ -609,12 +707,13 @@ def make_backup(box, args, *, interaction=None):
         image_tag = None
         try:
             with _ciphertext_staging(
-                output, reviewed_parent, "oc-box-backup-ciphertext-"
+                output, expected_parent, "oc-box-backup-ciphertext-"
             ) as staging:
                 _, recipient = crypto.generate_key(
                     args.recipient or [], staging / "key.age", minimum=minimum
                 )
-                _check_reviewed_parent(output.parent, reviewed_parent)
+                revalidate_review()
+                _check_reviewed_parent(output.parent, expected_parent)
                 parts = {}
                 for name, root, mapped in (
                     ("project.age", data["project"], False),
@@ -703,7 +802,7 @@ def make_backup(box, args, *, interaction=None):
                     staging,
                     output,
                     interaction=interaction,
-                    reviewed_parent=reviewed_parent,
+                    publication=publication,
                 )
                 print(
                     f"Encrypted {'portable' if args.portable else 'full'} backup saved: {output}"
@@ -985,16 +1084,21 @@ def restore_backup(box, args, *, interaction=None):
                     error, host_restore().HostRestoreError
                 ):
                     progress = error.result
-                    interaction.inspection(
-                        {
-                            "format": "host",
-                            "kind": "host",
-                            "status": "incomplete",
-                            "host_file_links": progress.files_installed,
-                            "host_directories_created": progress.directories_created,
-                            "host_completion_uncertain": progress.completion_uncertain,
-                        }
-                    )
+                    try:
+                        interaction.inspection(
+                            {
+                                "format": "host",
+                                "kind": "host",
+                                "status": "incomplete",
+                                "host_file_links": progress.files_installed,
+                                "host_directories_created": progress.directories_created,
+                                "host_lock_files_created": progress.lock_files_created,
+                                "host_completion_uncertain": progress.completion_uncertain,
+                                "host_failure_category": error.category,
+                            }
+                        )
+                    except (Exception, KeyboardInterrupt):
+                        pass  # do not change the failure or its cancellation category
                 if args.project is not None:
                     print(
                         "The workspace was restored and remains stopped; host configuration restore did not finish.",
@@ -1042,6 +1146,108 @@ def _workspace_destination(box, project):
     return destination
 
 
+def _rollback_restore(
+    box,
+    data,
+    record_path,
+    registry_identity,
+    staged_target,
+    activated_target,
+    *,
+    stage_attempted,
+    stage_identity,
+    project_extracted,
+    activation_attempted,
+    completion_attempted,
+    create_returned,
+    interaction,
+):
+    directory = record_path.parent
+    fenced = _stage_entry_matches(directory, registry_identity)
+    if fenced and completion_attempted:
+        # An interrupted atomic write may have exposed a complete record.
+        # Re-fence under the workspace lock before removing any resources.
+        try:
+            box.atomic_json(record_path, data)
+        except (Exception, KeyboardInterrupt):
+            fenced = False
+    cleanup_ok = fenced
+    if fenced:
+        for kind in ("container", "volume"):
+            if not data.get(f"restore_{kind}_create_attempted"):
+                continue
+            # create_container may re-create an unexpectedly missing home.
+            # Its own unacknowledged attempt also makes volume absence uncertain.
+            allow_missing = kind in create_returned and (
+                kind != "volume"
+                or not data.get("restore_container_create_attempted")
+                or "container" in create_returned
+            )
+            try:
+                removed = remove_restore_resource(
+                    box, kind, data, allow_missing=allow_missing
+                )
+                cleanup_ok = removed and cleanup_ok
+            except (Exception, KeyboardInterrupt):
+                cleanup_ok = False
+        if stage_attempted:
+            try:
+                if _stage_entry_matches(staged_target, stage_identity):
+                    if project_extracted:
+                        remove_staged_tree(staged_target, expected=stage_identity)
+                    else:
+                        # The inode observed after mkdir is not proof of
+                        # provenance. Do not traverse or modify an unconfirmed
+                        # tree, including interrupted extraction output.
+                        staged_target.rmdir()
+                elif (
+                    cleanup_ok
+                    and activation_attempted
+                    and _stage_entry_matches(activated_target, stage_identity)
+                ):
+                    remove_staged_tree(activated_target, expected=stage_identity)
+                else:
+                    cleanup_ok = False
+            except (Exception, KeyboardInterrupt):
+                cleanup_ok = False
+    if cleanup_ok:
+        try:
+            remove_staged_tree(directory, expected=registry_identity)
+            return
+        except (Exception, KeyboardInterrupt):
+            # A partial removal could have already unlinked the journal.
+            if _stage_entry_matches(directory, registry_identity):
+                try:
+                    box.atomic_json(record_path, data)
+                except (Exception, KeyboardInterrupt):
+                    fenced = False
+            else:
+                fenced = False
+    ident = data["id"]
+    if not fenced:
+        print(
+            f"Restore cleanup or its registry fence could not be verified. Inspect workspace {ident} on the host before retrying.",
+            file=sys.stderr,
+        )
+        return
+    print(
+        f"Restore cleanup could not remove all new resources. Incomplete workspace {ident} retained for host inspection/purge; it cannot be started.",
+        file=sys.stderr,
+    )
+    if interaction is not None:
+        try:
+            interaction.inspection(
+                {
+                    "format": "workspace",
+                    "workspace_id": ident,
+                    "destination": data["project"],
+                    "status": "incomplete",
+                }
+            )
+        except (Exception, KeyboardInterrupt):
+            pass  # never mask the original failure to report UI metadata
+
+
 def _restore_workspace(
     box, destination, opened, *, interaction=None, host=False, reviewed_parent=None
 ):
@@ -1071,41 +1277,22 @@ def _restore_workspace(
                 "Archived device mappings/additional Podman options are NOT activated; reconfigure them explicitly after inspecting backup-info."
             )
         ident = uuid.uuid4().hex
-        parent_fd = None
-        if reviewed_parent is not None:
-            parent_fd = stack.enter_context(
-                crypto.reviewed_directory(destination.parent, reviewed_parent)
-            )
+        parent_fd = stack.enter_context(
+            crypto.reviewed_directory(destination.parent, reviewed_parent)
+        )
+        expected_parent = _entry_identity(os.fstat(parent_fd))
         if interaction is not None:
             interaction.dispatched()
         directory = box.state_root() / "workspaces" / ident
+        record_path = directory / "workspace.json"
+        name = ".oc-box-restore-" + ident
+        project_stage = destination.parent / name
+        # Child extraction and rollback address the pinned parent even
+        # if its public pathname changes after the review.
+        pinned = Path(f"/proc/{os.getpid()}/fd/{parent_fd}")
+        staged_target = pinned / name
+        activated_target = pinned / destination.name
         project_fd = None
-        if parent_fd is None:
-            project_stage = staged_target = Path(
-                tempfile.mkdtemp(prefix=".oc-box-restore-", dir=destination.parent)
-            )
-            activated_target = destination
-        else:
-            _check_reviewed_parent(destination.parent, reviewed_parent)
-            name = ".oc-box-restore-" + uuid.uuid4().hex
-            os.mkdir(name, 0o700, dir_fd=parent_fd)
-            project_stage = destination.parent / name
-            # Child extraction and rollback address the pinned parent even
-            # if its public pathname changes after the review.
-            pinned = Path(f"/proc/{os.getpid()}/fd/{parent_fd}")
-            staged_target = pinned / name
-            activated_target = pinned / destination.name
-            project_fd = os.open(
-                name,
-                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                dir_fd=parent_fd,
-            )
-            stack.callback(os.close, project_fd)
-        project_contents = (
-            Path(f"/proc/{os.getpid()}/fd/{project_fd}")
-            if project_fd is not None
-            else staged_target
-        )
         volume_name = "oc-box-home-" + ident
         data = {
             "version": 2,
@@ -1139,38 +1326,61 @@ def _restore_workspace(
         }
         if config.get("opencode_version"):
             data["opencode_version"] = config["opencode_version"]
-        volume_created = False
-        registry_created = False
-        container_created = False
-        project_activated = False
+        stage_attempted = False
+        stage_identity = None
+        project_extracted = False
+        activation_attempted = False
+        completion_attempted = False
+        create_returned = set()
         success = False
-        try:
-            _check_reviewed_parent(destination.parent, reviewed_parent)
-            _check_stage_entry(staged_target, project_fd)
-            # Validate the new location without putting an active marker there.
-            box.validate_project(project_stage)
-            if destination.is_relative_to(
-                box.state_root()
-            ) or destination.is_relative_to(box.vault.vault_path().parent):
-                raise BackupError(
-                    "Restore destination cannot be inside private host state/vault storage."
+        _check_reviewed_parent(destination.parent, expected_parent)
+        directory.mkdir(parents=True, mode=0o700, exist_ok=False)
+        registry_identity = _entry_identity(directory.lstat())
+        with box.workspace_lock(record_path):
+            try:
+                # Record the stage name before mkdir. An interruption before
+                # we capture its inode must leave a fence, not authorize
+                # deleting whatever is at that pathname during rollback.
+                box.atomic_json(record_path, data)
+                (directory / "controller").mkdir(mode=0o700)
+                _check_reviewed_parent(destination.parent, expected_parent)
+                stage_attempted = True
+                try:
+                    os.mkdir(name, 0o700, dir_fd=parent_fd)
+                except FileExistsError:
+                    stage_attempted = False
+                    raise BackupError(
+                        "Fresh project staging name is occupied."
+                    ) from None
+                entry = staged_target.lstat()
+                if (
+                    not stat.S_ISDIR(entry.st_mode)
+                    or entry.st_uid != os.geteuid()
+                    or entry.st_mode & 0o077
+                ):
+                    raise BackupError("New project staging is not a private directory.")
+                stage_identity = _entry_identity(entry)
+                project_fd = os.open(
+                    name,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                    dir_fd=parent_fd,
                 )
-            directory.mkdir(parents=True, mode=0o700, exist_ok=False)
-            registry_created = True
-            (directory / "controller").mkdir(mode=0o700)
-            with box.workspace_lock(directory / "workspace.json"):
-                # Journal our fresh resource IDs before any large restoration.
-                # A hard host/process crash must leave an identifiable, blocked
-                # registry entry rather than an anonymous private-home volume.
+                stack.callback(os.close, project_fd)
+                if _entry_identity(os.fstat(project_fd)) != stage_identity:
+                    raise BackupError(
+                        "Reviewed project staging changed before opening."
+                    )
+                _check_reviewed_parent(destination.parent, expected_parent)
+                _check_stage_entry(staged_target, stage_identity)
+                with os.scandir(project_fd) as entries:
+                    if next(entries, None) is not None:
+                        raise BackupError("New project staging was not empty.")
+                box.validate_project(project_stage)
+                project_contents = Path(f"/proc/{os.getpid()}/fd/{project_fd}")
                 workspace_identity.record(
-                    data,
-                    *(
-                        workspace_identity.snapshot_fd(project_fd)
-                        if project_fd is not None
-                        else workspace_identity.snapshot(staged_target)
-                    ),
+                    data, *workspace_identity.snapshot_fd(project_fd)
                 )
-                box.atomic_json(directory / "workspace.json", data)
+                box.atomic_json(record_path, data)
                 with box.loading_stage("Restoring project into private staging"):
                     if interaction is not None:
                         interaction.stage("project")
@@ -1182,7 +1392,7 @@ def _restore_workspace(
                             "extract",
                             project_contents,
                             limit=manifest["expanded_byte_limit"],
-                            pinned=project_fd is not None,
+                            pinned=True,
                         ),
                     )
                 marker = project_contents / box.MARKER
@@ -1197,8 +1407,9 @@ def _restore_workspace(
                         "Project backup marker does not match the encrypted manifest."
                     )
                 marker.write_text(ident + "\n")
-                _check_reviewed_parent(destination.parent, reviewed_parent)
-                _check_stage_entry(staged_target, project_fd)
+                project_extracted = True
+                _check_reviewed_parent(destination.parent, expected_parent)
+                _check_stage_entry(staged_target, stage_identity)
                 box.validate_project(project_stage)
                 for kind, name in (
                     ("volume", volume_name),
@@ -1208,6 +1419,11 @@ def _restore_workspace(
                         raise BackupError(
                             "Fresh restore resource name already exists or could not be checked; refusing to reuse it."
                         )
+                # A create can commit in Podman before its caller receives
+                # success (or cancellation). Roll back an attempt, not only
+                # a successful return, against the new workspace label.
+                data["restore_volume_create_attempted"] = True
+                box.atomic_json(record_path, data)
                 command(
                     box,
                     "volume",
@@ -1216,7 +1432,7 @@ def _restore_workspace(
                     f"{box.LABEL}={ident}",
                     volume_name,
                 )
-                volume_created = True
+                create_returned.add("volume")
                 volume = owned_volume(box, data)
                 with box.loading_stage("Restoring private home and session database"):
                     if interaction is not None:
@@ -1286,128 +1502,87 @@ def _restore_workspace(
                             "Loaded image does not match manifest identity."
                         )
                 # Rename a staged directory only if destination is still absent.
-                _check_reviewed_parent(destination.parent, reviewed_parent)
-                _check_stage_entry(staged_target, project_fd)
+                _check_reviewed_parent(destination.parent, expected_parent)
+                _check_stage_entry(staged_target, stage_identity)
                 if (
                     destination.exists()
                     or destination.is_symlink()
                     or any(
-                        record != directory / "workspace.json"
+                        record != record_path
                         for record, _ in box.registered_projects(destination)
                     )
                 ):
                     raise BackupError(
                         "Restore destination appeared during staging; no overwrite was attempted."
                     )
-                if parent_fd is None:
-                    activate_project(project_stage, destination)
-                else:
-                    activate_project(project_stage, destination, parent_fd=parent_fd)
-                project_activated = True
-                _check_reviewed_parent(destination.parent, reviewed_parent)
-                _check_stage_entry(activated_target, project_fd)
-                workspace_identity.record(
-                    data, *workspace_identity.snapshot(activated_target)
-                )
+                activation_attempted = True
+                activate_project(project_stage, destination, parent_fd=parent_fd)
+                _check_reviewed_parent(destination.parent, expected_parent)
+                _check_stage_entry(activated_target, stage_identity)
                 saved = manifest["sessions"]
                 box.atomic_json(
-                    box.session_file(directory / "workspace.json"),
+                    box.session_file(record_path),
                     {"sessions": saved.get("sessions", []), "last": saved.get("last")},
                 )
-                box.atomic_json(directory / "workspace.json", data)
                 # create_container adds only standard known limits/mounts and
                 # overrides the image entrypoint; it does not start image code.
-                _check_reviewed_parent(destination.parent, reviewed_parent)
-                _check_stage_entry(activated_target, project_fd)
-                container_created = True
+                _check_reviewed_parent(destination.parent, expected_parent)
+                _check_stage_entry(activated_target, stage_identity)
+                data["restore_container_create_attempted"] = True
+                box.atomic_json(record_path, data)
                 box.create_container(
-                    directory / "workspace.json", data, environment=crypto.environment()
+                    record_path, data, environment=crypto.environment()
                 )
+                create_returned.add("container")
                 data["ready"] = manifest["kind"] == "full" and bool(config.get("ready"))
-                data.pop("restore_incomplete", None)
-                data.pop("restore_staging_project", None)
-                box.atomic_json(directory / "workspace.json", data)
-                success = True
-            if interaction is not None:
-                interaction.inspection(
-                    {
-                        "format": "workspace",
-                        "workspace_id": ident,
-                        "destination": str(destination),
-                        "kind": manifest["kind"],
-                        "status": "stopped",
-                    }
-                )
-            print(f"Restored stopped workspace {ident} at {destination}.")
-            print(f"Resume with: oc-box --workspace {ident}")
-            if not host:
-                print(
-                    "The host vault was not restored/unlocked. Recreate required vault/env values before a selected-mode launch. Portable restores reinstall baseline/OS dependencies on their first normal start."
-                )
-        finally:
-            if not success:
-                cleanup_ok = True
-                if container_created:
-                    try:
-                        cleanup_ok = remove_restore_resource(box, "container", data)
-                    except BackupError:
-                        cleanup_ok = False
-                if volume_created:
-                    try:
-                        volume_ok = remove_restore_resource(box, "volume", data)
-                        cleanup_ok = cleanup_ok and volume_ok
-                    except BackupError:
-                        cleanup_ok = False
-                if project_activated and cleanup_ok:
-                    # Delete only the newly staged directory with our fresh ID;
-                    # never touch an unrelated path that appeared at destination.
-                    marker = activated_target / box.MARKER
-                    if (
-                        activated_target.is_dir()
-                        and not activated_target.is_symlink()
-                        and marker.is_file()
-                        and not marker.is_symlink()
-                        and marker.read_text().strip() == ident
-                        and workspace_identity.same_project(data, activated_target)
-                    ):
-                        try:
-                            remove_staged_tree(activated_target)
-                        except (OSError, BackupError):
-                            cleanup_ok = False
-                    else:
-                        cleanup_ok = False
-                # This directory was created with our random ID. Do not remove
-                # caller-supplied paths or a registry that predated this attempt.
-                if (
-                    cleanup_ok
-                    and registry_created
-                    and directory.is_dir()
-                    and not directory.is_symlink()
+                _check_reviewed_parent(destination.parent, expected_parent)
+                _check_stage_entry(activated_target, stage_identity)
+                completion_attempted = True
+                completed = data.copy()
+                for key in (
+                    "restore_incomplete",
+                    "restore_staging_project",
+                    "restore_volume_create_attempted",
+                    "restore_container_create_attempted",
                 ):
-                    remove_staged_tree(directory)
-                elif not cleanup_ok and registry_created:
-                    data["restore_incomplete"] = True
-                    box.atomic_json(directory / "workspace.json", data)
-                    print(
-                        f"Restore cleanup could not remove all new resources. Incomplete workspace {ident} retained for host inspection/purge; it cannot be started.",
-                        file=sys.stderr,
+                    completed.pop(key)
+                box.atomic_json(record_path, completed)
+                _check_reviewed_parent(destination.parent, expected_parent)
+                _check_stage_entry(activated_target, stage_identity)
+                success = True
+            finally:
+                if not success:
+                    _rollback_restore(
+                        box,
+                        data,
+                        record_path,
+                        registry_identity,
+                        staged_target,
+                        activated_target,
+                        stage_attempted=stage_attempted,
+                        stage_identity=stage_identity,
+                        project_extracted=project_extracted,
+                        activation_attempted=activation_attempted,
+                        completion_attempted=completion_attempted,
+                        create_returned=create_returned,
+                        interaction=interaction,
                     )
-                    if interaction is not None:
-                        try:
-                            interaction.inspection(
-                                {
-                                    "format": "workspace",
-                                    "workspace_id": ident,
-                                    "destination": str(destination),
-                                    "status": "incomplete",
-                                }
-                            )
-                        except (Exception, KeyboardInterrupt):
-                            pass  # never interrupt remaining cleanup to report UI metadata
-            if staged_target.exists() and _stage_entry_matches(
-                staged_target, project_fd
-            ):
-                remove_staged_tree(staged_target)
+        if interaction is not None:
+            interaction.inspection(
+                {
+                    "format": "workspace",
+                    "workspace_id": ident,
+                    "destination": str(destination),
+                    "kind": manifest["kind"],
+                    "status": "stopped",
+                }
+            )
+        print(f"Restored stopped workspace {ident} at {destination}.")
+        print(f"Resume with: oc-box --workspace {ident}")
+        if not host:
+            print(
+                "The host vault was not restored/unlocked. Recreate required vault/env values before a selected-mode launch. Portable restores reinstall baseline/OS dependencies on their first normal start."
+            )
 
 
 def parser_for(action):
@@ -1470,7 +1645,13 @@ def parser_for(action):
 
 
 def cli(
-    box, arguments, *, interaction=None, reviewed_auth_export=None, reviewed_paths=None
+    box,
+    arguments,
+    *,
+    interaction=None,
+    reviewed_auth_export=None,
+    reviewed_paths=None,
+    reviewed_workspace=None,
 ):
     action = arguments[0]
     parser = parser_for(action)
@@ -1509,10 +1690,15 @@ def cli(
             handlers[sig] = signal.signal(sig, cancel)
         try:
             if action == "backup":
-                if interaction is None:
+                if interaction is None and reviewed_workspace is None:
                     make_backup(box, args)
                 else:
-                    make_backup(box, args, interaction=interaction)
+                    make_backup(
+                        box,
+                        args,
+                        interaction=interaction,
+                        reviewed_workspace=reviewed_workspace,
+                    )
             elif action == "backup-info":
                 if interaction is None:
                     inspect_backup(box, args)

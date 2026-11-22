@@ -1040,8 +1040,9 @@ observations include:
 - Encrypted session-tree backup/restore to host and existing workspace sources,
   including history above 4 MiB, fresh IDs, cleared privileges, verified import,
   retained source/independent histories, and honest partial-failure recovery.
-  Backup-file deletion affects only the reviewed owned encrypted file. No whole
-  host database or shared-cache deletion, implicit owner launch or backup overwrite.
+  The dashboard does not delete backup files; even a stale review request must
+  refuse without mutating the archive or its neighbors. No whole host database
+  or shared-cache deletion, implicit owner launch or backup overwrite.
 - Visible-text selection/copy across diagnostics, table/log rows, the embedded
   shell, graphs, control labels and modal reviews/settings, including wide/
   combining characters and scrolled views. Verify visible highlighting over
@@ -2375,6 +2376,7 @@ use `uv run --no-project --with-editable . --with cryptography --with coverage`
 and `python -B -m coverage run --branch --source=src/oc_box,tools -m unittest`
 with `discover -s tests`; store coverage data outside the project/HOME. Coverage
 is a developer tool, not a runtime dependency or replacement for native tests.
+
 ### Host configuration migration
 
 Use synthetic XDG config/data roots for `backup --host` and `restore --host`.
@@ -2390,3 +2392,34 @@ stable OpenCode 2.x in CI. Use synthetic unfamiliar 2.x releases to check that
 eligibility depends on the round trip, and reject unexpected persisted work
 before import and before publication. This does not broaden live history
 recovery's version policy.
+
+For changes to the backup transport or restore lifecycle, repeat the
+[disposable full/portable Podman fixture](../CONTRIBUTING.md#live-backuprestore-validation)
+on the frozen source, from an ordinary non-root Linux host terminal. For
+changes to host migration or its dashboard path, also verify the following
+on that same source:
+
+1. Use a disposable host user or VM and fresh private synthetic XDG, registry,
+   workspace and native auth stores. Record the clean source SHA, runner
+   identity, installed version, Linux/Podman/age/native OpenCode versions and
+   the isolation used. Do not copy real settings, vault entries or credentials.
+2. Create and inspect a host-only archive in the dashboard using the private
+   passphrase prompt. Restore host settings to a fresh scope without needing
+   Podman. Check exact settings and encrypted-vault bytes and that the native
+   profile/store remains absent without its opt-in. Repeat with an occupied
+   destination and verify nothing was overwritten. For recipient-mode creation,
+   verify that the final review shows all selected public recipients.
+3. Use a fresh synthetic running workspace and a private synthetic V2 export
+   for a combined archive. Try declined and incorrect native confirmation
+   before an approved restore to a fresh destination. Verify fresh workspace
+   IDs, retained project/history, a stopped restored container, exact settings,
+   and native credential retention by internal comparison only. Keep passphrases
+   and exported values out of the report.
+4. On another disposable destination, cancel or exercise a controlled refusal
+   after the workspace restore but during host application. Check the stopped
+   workspace separately, the bounded partial-host report and absence of an
+   overwrite/retry. Verify that changing the selected archive clears its
+   privileged restore switches and that the dashboard offers no archive deletion.
+
+Report failed or unperformed cases separately; do not infer dashboard or live
+host acceptance from mocked Podman or native auth smoke tests.

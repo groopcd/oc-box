@@ -49,7 +49,6 @@ ACTIONS = frozenset(
         "session-backup",
         "session-inspect",
         "session-restore",
-        "backup-delete",
     }
 )
 READ_ACTIONS = frozenset({"workspace-inspect", "session-inspect"})
@@ -160,6 +159,31 @@ def _workspace_bindings(record):
         "workspace_registry": [list(value) for value in record.registry_identity],
         "workspace_condition": record.project_condition,
     }
+
+
+def _selected_workspace(runtime, workspace, expected):
+    record = _workspace_action(runtime, workspace)
+    if expected is not None and (
+        workspace != expected.get("workspace")
+        or str(record.row.state_root) != expected.get("state_root")
+        or record.row.project != expected.get("project")
+        or any(
+            expected.get("bindings", {}).get(key) != value
+            for key, value in _workspace_bindings(record).items()
+        )
+    ):
+        fail("selection-changed")
+    return record.row.record_path, record.data
+
+
+def _workspace_revalidator(runtime, request):
+    """Re-read the child's reviewed source without serializing the registration."""
+    expected = copy.deepcopy(request)
+
+    def revalidate():
+        return _selected_workspace(runtime, expected["workspace"], expected)
+
+    return revalidate
 
 
 def _session_import(value, executable, *, server=None):
@@ -295,19 +319,7 @@ class _OperationBackend(DashboardBackend):
         )
 
     def selected(self, workspace):
-        record = _workspace_action(self.box, workspace)
-        expected = self._operation_request
-        if expected is not None and (
-            workspace != expected.get("workspace")
-            or str(record.row.state_root) != expected.get("state_root")
-            or record.row.project != expected.get("project")
-            or any(
-                expected.get("bindings", {}).get(key) != value
-                for key, value in _workspace_bindings(record).items()
-            )
-        ):
-            fail("selection-changed")
-        return record.row.record_path, record.data
+        return _selected_workspace(self.box, workspace, self._operation_request)
 
     def inventory(self):
         # Host archive associations need multiple registrations, not native
@@ -352,6 +364,10 @@ class OperationController:
         self._plans = {}
 
     def _allowed(self, action):
+        if action == "backup-delete":
+            # An open backup descriptor does not authorize unlinking a directory
+            # entry that another process can replace. Do not even offer a review.
+            fail("backup-delete-disabled")
         if action not in ACTIONS:
             fail("unsupported-action")
         if self.demo:
@@ -441,9 +457,7 @@ class OperationController:
                 fail("output-exists")
             bindings["backup_file"] = None
         else:
-            bindings["backup_file"] = file_identity(
-                archive, private=action == "backup-delete"
-            )
+            bindings["backup_file"] = file_identity(archive)
         if recipients:
             if __package__:
                 from .backup_crypto import validate_recipients
@@ -504,8 +518,6 @@ class OperationController:
             action == "workspace-restore" and not host
         ):
             fail("destination-required")
-        if action == "backup-delete":
-            archive_kind(archive, expected=bindings["backup_file"])
         label = {
             "workspace-backup": "Create encrypted workspace backup",
             "workspace-inspect": "Inspect encrypted workspace or host configuration backup",
@@ -513,7 +525,6 @@ class OperationController:
             "session-backup": "Create encrypted session-tree backup",
             "session-inspect": "Inspect encrypted session-tree backup",
             "session-restore": "Restore history with fresh native session IDs",
-            "backup-delete": "Delete this encrypted backup FILE only",
         }[action]
         workspace_target = (
             workspace if action == "workspace-backup" else request["destination"]
@@ -527,6 +538,15 @@ class OperationController:
             if workspace_target is not None:
                 label += " and restore workspace to a NEW directory"
         review = f"{label}\nBackup: {archive}\n"
+        if creating:
+            if request["recipients"]:
+                review += (
+                    "Encryption: age public recipients (no password). Anyone with "
+                    "a matching private identity can decrypt this archive.\n"
+                    + "".join(f"  {recipient}\n" for recipient in request["recipients"])
+                )
+            else:
+                review += "Encryption: a new backup password (no public recipients).\n"
         if workspace:
             review += f"Workspace: {workspace}\nProject: {request.get('project', '')}\n"
         if action == "workspace-backup" and portable:
@@ -581,14 +601,14 @@ class OperationController:
             )
         else:
             review += "No workspace or Podman resources are targeted.\n"
-        review += "Passwords use the existing masked controlling-terminal reader, through the private dashboard prompt when embedded. Passwords are not saved."
+        if not creating or not request["recipients"]:
+            review += "Passwords use the existing masked controlling-terminal reader, through the private dashboard prompt when embedded. Passwords are not saved."
         if not host or workspace_target is not None:
             review += " Whole-workspace archives can contain copied configuration/authentication and complete native history; protect the encrypted file."
         # An empty phrase is explicit button approval, not authorization to
         # skip this single-use review or its parent/child binding checks.
-        confirmation = "DELETE" if action == "backup-delete" else ""
         plan = OperationPlan(
-            secrets.token_hex(24), action, confirmation, review, copy.deepcopy(request)
+            secrets.token_hex(24), action, "", review, copy.deepcopy(request)
         )
         self._plans = {plan.token: copy.deepcopy(plan)}
         return plan
@@ -860,20 +880,23 @@ def execute(runtime, request, *, progress=None, interaction=None):
         if progress is not None:
             progress(**fields)
 
-    if (
-        not isinstance(request, dict)
-        or request.get("version") != 1
-        or request.get("action") not in ACTIONS | {"workspace-purge"}
-    ):
+    if not isinstance(request, dict) or request.get("version") != 1:
+        fail("invalid-request")
+    action = request.get("action")
+    if action == "backup-delete":
+        # Older dashboard reviews must not reach pathname mutation either.
+        report(operation=operation_tag(action))
+        fail("backup-delete-disabled")
+    if action not in ACTIONS | {"workspace-purge"}:
         fail("invalid-request")
     if request.get("state_root") != str(runtime.state_root().resolve()):
         fail("state-root-changed")
-    report(operation=operation_tag(request["action"]))
+    report(operation=operation_tag(action))
     if interaction is not None:
-        if request["action"] not in ACTIONS - {"backup-delete"}:
+        if action not in ACTIONS:
             fail("unsupported-action")
         interaction.stage("validating")
-    if request["action"] == "workspace-purge":
+    if action == "workspace-purge":
         if __package__:
             from . import tui_storage
         else:
@@ -900,7 +923,7 @@ def execute(runtime, request, *, progress=None, interaction=None):
         return code
     controller = OperationController(runtime)
     plan = controller.prepare(
-        request["action"],
+        action,
         workspace=request.get("workspace"),
         backup=request.get("backup"),
         destination=request.get("destination"),
@@ -916,15 +939,7 @@ def execute(runtime, request, *, progress=None, interaction=None):
     )
     if plan.request != request:
         fail("selection-changed")
-    action, archive = request["action"], request["backup"]
-    if action == "backup-delete":
-        report(dispatched=True)
-        Path(archive).unlink()
-        report(completed=True)
-        print(
-            "Selected encrypted backup file deleted; sessions and workspace storage were not changed."
-        )
-        return 0
+    archive = request["backup"]
     if action.startswith("workspace-"):
         cli_options = {}
         if interaction is not None:
@@ -937,6 +952,9 @@ def execute(runtime, request, *, progress=None, interaction=None):
             argv = ["backup"]
             if request["workspace"] is not None:
                 argv.extend(["--workspace", request["workspace"]])
+                cli_options["reviewed_workspace"] = _workspace_revalidator(
+                    runtime, request
+                )
             argv.extend(["--output", archive])
             if request["portable"]:
                 argv.append("--portable")

@@ -213,13 +213,13 @@ class BackupPanel(Vertical):
       padding: 0; margin-right: 1; }
     BackupPanel #backup-table { height: 6; min-height: 4; }
     BackupPanel #backup-details { height: auto; padding: 0; margin-bottom: 1; }
-    BackupPanel #backup-delete { margin-left: 3; }
     """
 
     def __init__(self, *, read_only=False, demo=False):
         super().__init__()
         self.read_only, self.demo = read_only, demo
         self._archive_hint = None
+        self._restore_archive_path = ""
 
     def _compose_switches(self, options):
         for label, name, default in options:
@@ -350,12 +350,6 @@ class BackupPanel(Vertical):
             yield Button(
                 "Restore…", id="backup-restore", disabled=self.read_only or self.demo
             )
-            yield Button(
-                "Delete backup file…",
-                id="backup-delete",
-                variant="error",
-                disabled=self.read_only or self.demo,
-            )
 
     def switch(self, name):
         return self.query_one("#backup-" + name, RoundedSwitch)
@@ -365,9 +359,16 @@ class BackupPanel(Vertical):
             return self._archive_hint[1]
         return None
 
-    def set_archive_hint(self, path, kind):
-        self._archive_hint = (path, kind) if kind is not None else None
+    def set_archive_hint(self, path, kind, identity=None):
+        self._archive_hint = (path, kind, identity) if kind is not None else None
         self._sync_options()
+
+    def archive_selection_changed(self, path, kind, identity):
+        return (
+            self._archive_hint is not None
+            and self._archive_hint[0] == path
+            and self._archive_hint[1:] != (kind, identity)
+        )
 
     def reset_restore_options(self):
         self.switch("restore-workspace").value = True
@@ -402,10 +403,11 @@ class BackupPanel(Vertical):
         restore_host = self.switch("restore-host")
         restore_native = self.switch("restore-opencode")
         restore_workspace.disabled = disabled or kind in {"host", "session"}
-        restore_host.disabled = disabled or kind in {"workspace", "session"}
+        can_restore_host = kind in {"host", "workspace-host"}
+        restore_host.disabled = disabled or not can_restore_host
         if kind in {"host", "session"}:
             restore_workspace.value = False
-        if kind in {"workspace", "session"}:
+        if not can_restore_host:
             restore_host.value = False
         restore_native.disabled = disabled or not restore_host.value
         if not restore_host.value:
@@ -427,11 +429,11 @@ class BackupPanel(Vertical):
         self._sync_options()
 
     def on_input_changed(self, event):
-        if (
-            event.input.id == "backup-file"
-            and self._archive_hint is not None
-            and self._archive_hint[0] != event.value.strip()
-        ):
+        if event.input.id != "backup-file":
+            return
+        path = event.value.strip()
+        if path != self._restore_archive_path:
+            self._restore_archive_path = path
             self.reset_restore_options()
             self.set_archive_hint(None, None)
 
@@ -611,7 +613,6 @@ class ManagementActions:
             "backup-create",
             "backup-inspect",
             "backup-restore",
-            "backup-delete",
         }:
             return False
         event.stop()
@@ -628,13 +629,7 @@ class ManagementActions:
             else:
                 self._review_backup(action)
         except (tui_operations.OperationError, tui_storage.StorageError) as error:
-            operation = (
-                "workspace-purge"
-                if action == "storage-purge"
-                else "backup-file-delete"
-                if action == "backup-delete"
-                else "storage"
-            )
+            operation = "workspace-purge" if action == "storage-purge" else "storage"
             self._operation_failure(error, operation=operation)
         except Exception:
             self._operation_failure(operation="storage")
@@ -736,27 +731,25 @@ class ManagementActions:
         restore_native = panel.switch("restore-opencode").value
         if detected is not None:
             kind = "session" if detected == "session" else "full"
-            previous = panel.archive_hint(archive_path)
-            layout_changed = previous is not None and previous != detected
-            if layout_changed:
+            archive_changed = panel.archive_selection_changed(
+                archive_path, detected, expected_file
+            ) or (restore_host and panel.archive_hint(archive_path) is None)
+            if archive_changed:
                 panel.reset_restore_options()
-            panel.set_archive_hint(archive_path, detected)
-            if layout_changed and button == "backup-restore":
+                restore_workspace = panel.switch("restore-workspace").value
+                restore_host = restore_native = False
+            panel.set_archive_hint(archive_path, detected, expected_file)
+            if archive_changed and button == "backup-restore":
                 self._message(
-                    "The archive layout changed. Review it and choose the restore switches again."
+                    "The selected archive changed. Review it and choose the restore switches again."
                 )
                 return
         verb = {
             "backup-create": "backup",
             "backup-inspect": "inspect",
             "backup-restore": "restore",
-            "backup-delete": "delete",
         }[button]
-        action = (
-            "backup-delete"
-            if verb == "delete"
-            else ("session-" if kind == "session" else "workspace-") + verb
-        )
+        action = ("session-" if kind == "session" else "workspace-") + verb
         workspace = None
         origin = store = session = None
         host = portable = include_opencode = False
@@ -892,10 +885,7 @@ class ManagementActions:
                 request = self._management_controller.confirm(plan, phrase)
                 self._perform_management(request)
             except Exception as error:
-                operation = (
-                    "backup-file-delete" if action == "backup-delete" else "storage"
-                )
-                self._operation_failure(error, operation=operation)
+                self._operation_failure(error, operation="storage")
 
         self.push_screen(ActionReview(plan.review, plan.confirmation), finish)
 
@@ -949,7 +939,7 @@ class ManagementActions:
         ):
             self._operation_failure(operation=operation, reason="busy")
             return
-        if request["action"] in tui_operations.ACTIONS - {"backup-delete"}:
+        if request["action"] in tui_operations.ACTIONS:
             if __package__:
                 from .tui_backup_workflow import BackupWorkflow, private_ui_allowed
             else:

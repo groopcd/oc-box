@@ -38,6 +38,7 @@ _DIAGNOSTICS = {
     "io-failure": "a host filesystem operation failed",
     "interrupted": "host file activation was interrupted",
 }
+HOST_FAILURE_CATEGORIES = frozenset(_DIAGNOSTICS)
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class HostRestoreError(BackupError):
         if result is None:
             result = RestoreResult()
         self.category = category
+        self.reason = "cancelled" if category == "interrupted" else None
         self.result = result
         message = (
             f"Host backup restore refused or incomplete: {_DIAGNOSTICS[category]}."

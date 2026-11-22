@@ -96,6 +96,11 @@ class HostBackupSwitchTests(unittest.IsolatedAsyncioTestCase):
                         panel.query_one(
                             "#backup-file", Input
                         ).value = "/synthetic/archive"
+                        await pilot.pause()
+                        self.assertTrue(panel.switch("restore-host").disabled)
+                        panel.set_archive_hint(
+                            "/synthetic/archive", "workspace-host", [1]
+                        )
                         panel.switch("include-host").value = True
                         panel.switch("restore-host").value = True
                         await pilot.pause()
@@ -178,6 +183,7 @@ class HostBackupSwitchTests(unittest.IsolatedAsyncioTestCase):
                 panel.query_one(
                     "#backup-destination", Input
                 ).value = "/synthetic/unused"
+                await pilot.pause()
                 app._review_backup("backup-restore")
                 await self.settle(app, pilot)
                 controller.prepare.assert_not_called()
@@ -221,6 +227,7 @@ class HostBackupSwitchTests(unittest.IsolatedAsyncioTestCase):
                 controller = self.controller(app)
                 panel.query_one("#backup-file", Input).value = path
                 panel.query_one("#backup-destination", Input).value = destination
+                await pilot.pause()
                 for workspace, host in ((True, False), (True, True), (False, True)):
                     with self.subTest(workspace=workspace, host=host):
                         panel.switch("restore-workspace").value = workspace
@@ -238,9 +245,54 @@ class HostBackupSwitchTests(unittest.IsolatedAsyncioTestCase):
                         )
                         await self.dismiss_review(app, pilot)
 
-    async def test_workspace_archive_does_not_silently_discard_host_restore_request(
-        self,
-    ):
+    async def test_restore_privileges_do_not_follow_a_path_change(self):
+        app = DashboardApp(DemoBackend())
+        async with app.run_test(size=(110, 40)) as pilot:
+            panel = await self.open_backups(app, pilot)
+            path = panel.query_one("#backup-file", Input)
+            path.value = "/synthetic/archive-a"
+            await pilot.pause()
+            self.assertTrue(panel.switch("restore-host").disabled)
+            panel.set_archive_hint(path.value, "workspace-host", [1])
+            panel.switch("restore-host").value = True
+            panel.switch("restore-opencode").value = True
+            await pilot.pause()
+            self.assertTrue(panel.switch("restore-opencode").value)
+            path.value = "/synthetic/archive-b"
+            await pilot.pause()
+            self.assertTrue(panel.switch("restore-host").disabled)
+            self.assertFalse(panel.switch("restore-host").value)
+            self.assertFalse(panel.switch("restore-opencode").value)
+
+    async def test_restore_privileges_reset_if_same_path_gets_a_new_archive(self):
+        with tempfile.TemporaryDirectory(prefix="oc-box-host-switch-") as directory:
+            root = Path(directory)
+            path = root / "host.ocbox"
+            envelope(path, "host.age", "host-auth.age")
+            app = DashboardApp(DemoBackend())
+            async with app.run_test(size=(110, 40)) as pilot:
+                panel = await self.open_backups(app, pilot)
+                controller = self.controller(app)
+                panel.query_one("#backup-file", Input).value = str(path)
+                await pilot.pause()
+                app._review_backup("backup-restore")
+                await self.settle(app, pilot)
+                self.assertEqual(panel.archive_hint(str(path)), "host")
+                panel.switch("restore-host").value = True
+                panel.switch("restore-opencode").value = True
+                await pilot.pause()
+
+                replacement = root / "replacement.ocbox"
+                envelope(replacement, "host.age", "host-auth.age")
+                replacement.replace(path)
+                app._review_backup("backup-restore")
+                await self.settle(app, pilot)
+                controller.prepare.assert_not_called()
+                self.assertFalse(panel.switch("restore-host").value)
+                self.assertFalse(panel.switch("restore-opencode").value)
+                self.assertEqual(panel.archive_hint(str(path)), "host")
+
+    async def test_workspace_archive_does_not_enable_host_restore(self):
         with tempfile.TemporaryDirectory(prefix="oc-box-host-switch-") as directory:
             path = envelope(Path(directory) / "workspace.ocbox", *WORKSPACE_COMPONENTS)
             app = DashboardApp(DemoBackend())
@@ -248,14 +300,12 @@ class HostBackupSwitchTests(unittest.IsolatedAsyncioTestCase):
                 panel = await self.open_backups(app, pilot)
                 controller = self.controller(app)
                 panel.query_one("#backup-file", Input).value = path
-                panel.switch("restore-host").value = True
+                await pilot.pause()
+                self.assertTrue(panel.switch("restore-host").disabled)
                 app._review_backup("backup-restore")
                 await self.settle(app, pilot)
-                controller.prepare.assert_not_called()
                 self.assertTrue(panel.switch("restore-host").disabled)
                 self.assertFalse(panel.switch("restore-host").value)
-                app._review_backup("backup-restore")
-                await self.settle(app, pilot)
                 self.assertTrue(
                     controller.prepare.call_args.kwargs["destination"].endswith(
                         "-restored"
@@ -323,6 +373,8 @@ class HostBackupSwitchTests(unittest.IsolatedAsyncioTestCase):
             panel = await self.open_backups(app, pilot)
             controller = self.controller(app)
             panel.query_one("#backup-file", Input).value = "/synthetic/both.ocbox"
+            await pilot.pause()
+            panel.set_archive_hint("/synthetic/both.ocbox", "workspace-host", [1])
             options = (
                 (panel.switch("restore-workspace"), False),
                 (panel.switch("restore-host"), True),

@@ -36,7 +36,7 @@ import errno,os,signal,subprocess,sys,time
 from pathlib import Path
 from unittest.mock import patch
 sys.path.insert(0,SOURCE)
-from oc_box import backups,backup_crypto,secret_prompt,tui_operation_io as channel,tui_operations
+from oc_box import backups,backup_crypto,host_backup_restore,secret_prompt,tui_operation_io as channel,tui_operations
 fds=tuple(int(v) for v in sys.argv[2::2])
 def execute(runtime,request,*,progress,interaction):
  scenario=request["scenario"]
@@ -83,6 +83,11 @@ for fd in fds:
   # production-entrypoint test retains real root/container refusal.
   with patch.object(backups.os,"geteuid",return_value=1000),patch.dict(os.environ,{"OC_BOX_CONTAINER":"0"}),patch.object(backup_crypto,"tools"),patch.object(backups,"make_backup",side_effect=synthetic_backup):
    backups.cli(None,["backup","--output","/synthetic-unused-output"])
+ elif scenario=="host-activation-interrupted":
+  progress(operation="restore",dispatched=True)
+  interaction.inspection({"format":"host","kind":"host","status":"incomplete",
+                          "host_lock_files_created":1,"host_failure_category":"interrupted"})
+  raise host_backup_restore.HostRestoreError("interrupted",host_backup_restore.RestoreResult(lock_files_created=1))
  elif scenario in ("slow","prompt-slow","startup-slow"):
   progress(dispatched=True)
   try:
@@ -127,6 +132,25 @@ class PrivateProtocolTests(unittest.TestCase):
         ):
             with self.subTest(extra=extra), self.assertRaises(channel.OperationIOError):
                 channel.metadata({**reviewed, **extra})
+
+    def test_partial_host_metadata_is_fixed_and_retains_lock_side_effects(self):
+        incomplete = {
+            "format": "host",
+            "kind": "host",
+            "status": "incomplete",
+            "host_lock_files_created": 1,
+            "host_failure_category": "interrupted",
+        }
+        self.assertEqual(channel.metadata(incomplete), incomplete)
+        for extra in (
+            {"host_failure_category": "/private/raw-error"},
+            {"host_failure_category": ["interrupted"]},
+            {"host_lock_files_created": True},
+            {"status": "restored"},
+            {"format": "session", "kind": "session"},
+        ):
+            with self.subTest(extra=extra), self.assertRaises(channel.OperationIOError):
+                channel.metadata({**incomplete, **extra})
 
     def test_next_prompt_survives_reader_transition_during_secret_write_return(self):
         process = channel.OperationProcess(None, {})
@@ -499,6 +523,21 @@ class PrivateProcessTests(unittest.TestCase):
         self.assertEqual(result["code"], 130)
         self.assertTrue(result["uncertain"])
         self.assertIn("inspection", [event["kind"] for event in events])
+
+    def test_interrupted_host_activation_reports_cancel_and_partial_side_effects(self):
+        process = self.launch("host-activation-interrupted")
+        events = []
+        result = process.run(events.append)
+        self.assertEqual(result["code"], 130)
+        self.assertTrue(result["cancelled"])
+        self.assertTrue(result["uncertain"])
+        self.assertFalse(result["completed"])
+        inspected = [
+            event["metadata"] for event in events if event["kind"] == "inspection"
+        ]
+        self.assertEqual(len(inspected), 1)
+        self.assertEqual(inspected[0]["host_failure_category"], "interrupted")
+        self.assertEqual(inspected[0]["host_lock_files_created"], 1)
 
     def test_prompt_interrupt_then_parent_eof_cannot_interrupt_cleanup_again(self):
         process = self.launch("prompt-slow")

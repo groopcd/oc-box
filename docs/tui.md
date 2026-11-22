@@ -718,9 +718,13 @@ The **ON/OFF switches** set what to create or restore:
   credential export, enable its switch and select an existing private file by
   absolute path outside every archived directory. Supply the path, not
   credential contents. The dashboard never starts a live credential export.
+  The final review shows whether the archive uses a password or public age
+  recipients and lists every recipient selected in Advanced settings.
 - **Restore:** choose workspace data and/or host settings. Native OpenCode
   configuration, plugins and saved credentials are a separate option that
-  requires host restore. After unlocking and reviewing the authenticated
+  requires host restore. Use Inspect or Restore to detect the selected archive's
+  layout before choosing host restore. A path change or a detected replacement
+  clears the host and native selections. After unlocking and reviewing the authenticated
   metadata, type `restore-opencode` and explicitly approve native restoration.
   The switch alone does not grant consent. Host-only restore needs no workspace
   destination, and host files are never overwritten.
@@ -801,14 +805,13 @@ observed fresh IDs, including cancellation after submission. Inspect the explici
 target before retrying an unverified outcome. A cancellation after completion
 was already verified is identified as such, not reported as an accepted cancel.
 
-Ordinary CLI password prompts remain unchanged. Storage removal and encrypted
-file deletion retain their separate foreground handoff and destructive typed
-review.
+Ordinary CLI password prompts remain unchanged. Storage removal retains its
+separate foreground handoff and destructive typed review.
 
-**Inspect backup** is explicit and available in CLI read-only mode. **Delete backup
-file** is a distinct typed operation on one owned, private, regular supported
-encrypted archive; deleting it does not remove any live session or storage.
-Cancel, stale selection and read-only checks apply again at execution time.
+**Inspect backup** is explicit and available in CLI read-only mode. The dashboard
+does not delete backup files: it cannot guarantee that a path still names the
+reviewed archive at deletion. Verify and remove unwanted archives in the host
+file manager instead. Existing screenshots may show the former delete control.
 Backup file paths and decrypted transcript text never enter the activity journal.
 
 ## Stable-release validation gate

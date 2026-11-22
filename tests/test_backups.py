@@ -1,5 +1,6 @@
 import argparse
 import contextlib
+import errno
 import io
 import json
 import os
@@ -186,7 +187,12 @@ class WorkspaceBackupTests(unittest.TestCase):
                 args, 0, json.dumps([{"Id": "sha256:" + self.snapshot_image}]), ""
             )
         elif args[:2] == ("volume", "rm"):
-            shutil.rmtree(self.volumes[args[2]])
+            shutil.rmtree(self.volumes.pop(args[2]))
+            self.labels.pop(args[2])
+        elif args[:2] == ("container", "rm"):
+            self.created[:] = [
+                data for data in self.created if data["container"] != args[-1]
+            ]
         return subprocess.CompletedProcess(args, 0, "", "")
 
     def archive_command(self, box_arg, action, root, **kwargs):
@@ -292,8 +298,13 @@ class WorkspaceBackupTests(unittest.TestCase):
         }
         restore_module = backups.host_restore()
         failure = restore_module.HostRestoreError(
-            "io-failure",
-            restore_module.RestoreResult(files_installed=1, completion_uncertain=True),
+            "interrupted",
+            restore_module.RestoreResult(
+                files_installed=1,
+                directories_created=2,
+                lock_files_created=1,
+                completion_uncertain=True,
+            ),
         )
         with (
             patch.dict(
@@ -316,8 +327,13 @@ class WorkspaceBackupTests(unittest.TestCase):
         )
         self.assertEqual((host["format"], host["status"]), ("host", "incomplete"))
         self.assertEqual(host["host_file_links"], 1)
+        self.assertEqual(host["host_directories_created"], 2)
+        self.assertEqual(host["host_lock_files_created"], 1)
+        self.assertEqual(host["host_failure_category"], "interrupted")
         self.assertTrue(host["host_completion_uncertain"])
-        self.assertTrue(destination.exists())
+        _, restored = box.find_workspace(destination)
+        self.assertEqual(restored["id"], workspace["workspace_id"])
+        self.assertNotIn("restore_incomplete", restored)
 
     def test_dashboard_restore_parent_replaced_during_authenticated_review(self):
         config = self.root / "config/oc-box/config.json"
@@ -357,6 +373,99 @@ class WorkspaceBackupTests(unittest.TestCase):
         self.assertEqual(list(parent.iterdir()), [])
         self.assertEqual(list((self.root / "earlier-parent").iterdir()), [])
         self.assertFalse((self.root / "fresh-host-config").exists())
+
+    def test_dashboard_backup_revalidates_exact_workspace_under_lock_before_engine(
+        self,
+    ):
+        args = argparse.Namespace(
+            project=None,
+            workspace=self.data["id"],
+            output=self.archive,
+            portable=True,
+            recipient=[self.recipient],
+        )
+        self.running = True
+        interaction = Mock()
+        locked = False
+        real_lock = box.workspace_lock
+
+        @contextlib.contextmanager
+        def lock(path):
+            nonlocal locked
+            self.assertEqual(path, self.path)
+            with real_lock(path):
+                locked = True
+                try:
+                    yield
+                finally:
+                    locked = False
+
+        for outcome in ("refusal", "different-record"):
+            with self.subTest(outcome=outcome):
+                checks = []
+
+                def revalidate():
+                    checks.append(locked)
+                    if locked:
+                        if outcome == "refusal":
+                            raise tui_operations.OperationError("selection-changed")
+                        return self.path.with_name("replacement.json"), self.data.copy()
+                    return self.path, self.data.copy()
+
+                with (
+                    patch.object(box, "workspace_lock", side_effect=lock),
+                    patch.object(box, "check_backend") as backend,
+                    self.assertRaises(
+                        tui_operations.OperationError
+                        if outcome == "refusal"
+                        else crypto.BackupError
+                    ),
+                ):
+                    backups.make_backup(
+                        box,
+                        args,
+                        interaction=interaction,
+                        reviewed_workspace=revalidate,
+                    )
+                self.assertEqual(checks, [False, True])
+                backend.assert_not_called()
+        interaction.dispatched.assert_not_called()
+        self.assertEqual(self.operations, [])
+        self.assertTrue(self.running)
+        self.assertFalse(self.archive.exists())
+
+    def test_backup_refuses_unsupported_publication_before_stopping_or_capturing(self):
+        self.running = True
+        interaction = Mock()
+        real_open = os.open
+        attempted = []
+
+        def refuse(path, flags, *args, **kwargs):
+            if flags & os.O_TMPFILE == os.O_TMPFILE:
+                attempted.append(path)
+                raise OSError(errno.EOPNOTSUPP, "synthetic unsupported filesystem")
+            return real_open(path, flags, *args, **kwargs)
+
+        with (
+            patch.object(os, "open", side_effect=refuse),
+            patch.object(backups, "_capture_host") as capture_host,
+            patch.object(crypto, "generate_key") as generate,
+            self.assertRaisesRegex(
+                crypto.BackupError, "supports unnamed temporary files"
+            ),
+        ):
+            self.backup(interaction=interaction, host=True)
+        self.assertEqual(attempted, ["."])
+        self.assertTrue(self.running)
+        self.assertFalse(
+            any(operation[0] in ("stop", "commit") for operation in self.operations)
+        )
+        capture_host.assert_not_called()
+        generate.assert_not_called()
+        crypto.encrypt_stream.assert_not_called()
+        interaction.dispatched.assert_not_called()
+        self.assertFalse(self.archive.exists())
+        self.assertFalse(list(self.root.glob("oc-box-backup-ciphertext-*")))
 
     def test_combined_backup_refuses_plaintext_export_inside_captured_project(self):
         export = self.project / "native-export.json"
@@ -443,6 +552,175 @@ class WorkspaceBackupTests(unittest.TestCase):
         self.assertEqual(self.created, [])
         self.assertEqual((destination / "keep").read_text(), "unrelated directory")
         self.assertTrue((preserved / "unfinished.txt").exists())
+        pending = [record for record in box.workspace_paths() if record != self.path]
+        self.assertEqual(len(pending), 1)
+        self.assertTrue(box.read_json(pending[0])["restore_incomplete"])
+        self.assertEqual(self.volumes, {self.data["home_volume"]: self.home})
+
+    def test_namespace_replacement_during_complete_registration_rolls_back_pinned_tree(
+        self,
+    ):
+        self.backup(portable=True)
+        parent = self.root / "register-parent"
+        parent.mkdir()
+        destination = parent / "restored"
+        preserved = self.root / "original-parent"
+        atomic_json = box.atomic_json
+
+        def replace_parent(path, data):
+            atomic_json(path, data)
+            if (
+                path.name == "workspace.json"
+                and data.get("project") == str(destination)
+                and not data.get("restore_incomplete")
+            ):
+                parent.rename(preserved)
+                destination.mkdir(parents=True)
+                (destination / "keep").write_text("unrelated directory")
+
+        with (
+            patch.object(box, "atomic_json", side_effect=replace_parent),
+            self.assertRaisesRegex(
+                crypto.BackupError, "Reviewed backup directory changed"
+            ),
+        ):
+            self.restore(destination)
+        self.assertEqual(self.created, [])
+        self.assertEqual(self.volumes, {self.data["home_volume"]: self.home})
+        self.assertEqual(box.workspace_paths(), [self.path])
+        self.assertEqual((destination / "keep").read_text(), "unrelated directory")
+        self.assertFalse(list(preserved.iterdir()))
+
+    def test_interruption_after_staging_mkdir_retains_fenced_unknown_stage(self):
+        self.backup(portable=True)
+        mkdir = os.mkdir
+
+        def interrupt_after_create(path, *args, **kwargs):
+            mkdir(path, *args, **kwargs)
+            if isinstance(path, str) and path.startswith(".oc-box-restore-"):
+                raise KeyboardInterrupt
+
+        with (
+            patch.object(os, "mkdir", side_effect=interrupt_after_create),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.restore(self.root / "mkdir-interrupted")
+        pending = [record for record in box.workspace_paths() if record != self.path]
+        self.assertEqual(len(pending), 1)
+        data = box.read_json(pending[0])
+        self.assertTrue(data["restore_incomplete"])
+        stage = Path(data["restore_staging_project"])
+        self.assertTrue(stage.is_dir())
+        self.assertFalse(list(stage.iterdir()))
+        self.assertEqual(self.volumes, {self.data["home_volume"]: self.home})
+
+    def test_interruption_during_staging_open_removes_only_verified_stage(self):
+        self.backup(portable=True)
+        real_open = os.open
+        destination = self.root / "open-interrupted"
+
+        def interrupt(path, *args, **kwargs):
+            if isinstance(path, str) and path.startswith(".oc-box-restore-"):
+                raise KeyboardInterrupt
+            return real_open(path, *args, **kwargs)
+
+        with (
+            patch.object(os, "open", side_effect=interrupt),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.restore(destination)
+        self.assertEqual(box.workspace_paths(), [self.path])
+        self.assertFalse(list(self.root.glob(".oc-box-restore-*")))
+        self.assertFalse(destination.exists())
+
+    def test_replacement_during_staging_open_is_not_populated_or_removed(self):
+        self.backup(portable=True)
+        real_open = os.open
+        destination = self.root / "open-replaced"
+        preserved = self.root / "original-stage"
+
+        def substitute(path, *args, **kwargs):
+            if isinstance(path, str) and path.startswith(".oc-box-restore-"):
+                named = self.root / path
+                named.rename(preserved)
+                named.mkdir(mode=0o700)
+                (named / "keep").write_text("unrelated")
+            return real_open(path, *args, **kwargs)
+
+        with (
+            patch.object(os, "open", side_effect=substitute),
+            self.assertRaisesRegex(
+                crypto.BackupError, "staging changed before opening"
+            ),
+        ):
+            self.restore(destination)
+        pending = [record for record in box.workspace_paths() if record != self.path]
+        self.assertEqual(len(pending), 1)
+        data = box.read_json(pending[0])
+        self.assertTrue(data["restore_incomplete"])
+        self.assertEqual(
+            (Path(data["restore_staging_project"]) / "keep").read_text(), "unrelated"
+        )
+        self.assertFalse(list(preserved.iterdir()))
+        self.assertFalse(destination.exists())
+
+    def test_nonempty_private_staging_replaced_before_first_lstat_is_preserved(self):
+        self.backup(portable=True)
+        destination = self.root / "early-stage-replaced"
+        original = self.root / "original-stage"
+        replacement = self.root / "unrelated-private-directory"
+        replacement.mkdir(mode=0o700)
+        (replacement / "keep").write_text("unrelated directory")
+        mkdir = os.mkdir
+
+        def substitute(path, *args, **kwargs):
+            mkdir(path, *args, **kwargs)
+            if isinstance(path, str) and path.startswith(".oc-box-restore-"):
+                name = self.root / path
+                name.rename(original)
+                (original / "keep").write_text("original directory")
+                replacement.rename(name)
+
+        operations_before = list(self.operations)
+        with (
+            patch.object(os, "mkdir", side_effect=substitute),
+            patch.object(crypto, "decrypt_stream") as extract,
+            self.assertRaisesRegex(crypto.BackupError, "staging was not empty"),
+        ):
+            self.restore(destination)
+        extract.assert_not_called()
+        self.assertEqual(self.operations, operations_before)
+        [(_, data)] = box.registered_projects(destination)
+        self.assertTrue(data["restore_incomplete"])
+        stage = Path(data["restore_staging_project"])
+        self.assertEqual((stage / "keep").read_text(), "unrelated directory")
+        self.assertEqual((original / "keep").read_text(), "original directory")
+        self.assertFalse(destination.exists())
+
+    def test_unconfirmed_project_extraction_keeps_nonempty_stage_fenced(self):
+        self.backup(portable=True)
+        destination = self.root / "extract-interrupted"
+        operations_before = list(self.operations)
+
+        def interrupt(path, private, consumer):
+            self.assertEqual(path.name, "project.age")
+            self.decrypt(path, private, consumer)
+            raise KeyboardInterrupt
+
+        with (
+            patch.object(crypto, "decrypt_stream", side_effect=interrupt),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.restore(destination)
+        self.assertEqual(self.operations, operations_before)
+        [(_, data)] = box.registered_projects(destination)
+        self.assertTrue(data["restore_incomplete"])
+        stage = Path(data["restore_staging_project"])
+        self.assertEqual(
+            (stage / "unfinished.txt").read_text(), "uncommitted source edits"
+        )
+        self.assertEqual((stage / box.MARKER).read_text().strip(), self.data["id"])
+        self.assertFalse(destination.exists())
 
     def test_dashboard_progress_inspect_projection_and_cancelled_review_before_creation(
         self,
@@ -514,7 +792,6 @@ class WorkspaceBackupTests(unittest.TestCase):
                 "is_present",
                 side_effect=AssertionError("Backups must not probe the host vault"),
             ),
-            patch.object(backups.os, "geteuid", return_value=1000),
             patch.object(
                 vault,
                 "select_all",
@@ -548,7 +825,10 @@ class WorkspaceBackupTests(unittest.TestCase):
                         box.atomic_json(self.path, self.data)
                         self.archive = self.root / f"policy-{index}-{portable}.ocbox"
                         self.backup(portable=portable)
-                        with contextlib.redirect_stdout(io.StringIO()):
+                        with (
+                            contextlib.redirect_stdout(io.StringIO()),
+                            patch.object(backups.os, "geteuid", return_value=1000),
+                        ):
                             backups.cli(
                                 box,
                                 [
@@ -719,9 +999,12 @@ class WorkspaceBackupTests(unittest.TestCase):
     def test_create_failure_rolls_back_only_new_resources_and_preserves_original(self):
         self.backup(portable=True)
         destination = self.root / "failed-restore"
-        with patch.object(
-            box, "create_container", side_effect=box.BoxError("create failed")
-        ):
+
+        def partial_create(*args, **kwargs):
+            self.create_container(*args, **kwargs)
+            raise box.BoxError("create failed")
+
+        with patch.object(box, "create_container", side_effect=partial_create):
             with self.assertRaisesRegex(box.BoxError, "create failed"):
                 self.restore(destination)
         self.assertFalse(destination.exists())
@@ -731,6 +1014,27 @@ class WorkspaceBackupTests(unittest.TestCase):
             (self.project / "unfinished.txt").read_text(), "uncommitted source edits"
         )
         self.assertFalse(list(self.root.glob(".oc-box-restore-*")))
+
+    def test_interrupted_container_create_does_not_assume_home_will_stay_absent(self):
+        self.backup(portable=True)
+        destination = self.root / "interrupted-container"
+
+        def interrupt(_path, data, **kwargs):
+            # The existing home disappears just as the real create path
+            # could try to recreate it; observe neither side effect yet.
+            self.podman(box, "volume", "rm", data["home_volume"])
+            raise KeyboardInterrupt
+
+        with (
+            patch.object(box, "create_container", side_effect=interrupt),
+            self.assertRaises(KeyboardInterrupt),
+        ):
+            self.restore(destination)
+        _, data = box.find_workspace(destination)
+        self.assertTrue(data["restore_incomplete"])
+        self.assertTrue(data["restore_volume_create_attempted"])
+        self.assertTrue(data["restore_container_create_attempted"])
+        self.assertTrue(destination.is_dir())
 
     def test_incomplete_authenticated_component_never_activates_destination(self):
         self.backup(portable=True)
@@ -990,6 +1294,54 @@ class WorkspaceBackupTests(unittest.TestCase):
                 box.main(["--workspace", data["id"]])
         start.assert_not_called()
 
+    def test_interrupted_volume_create_rolls_back_only_verified_ownership(self):
+        self.backup(portable=True)
+        for outcome in ("owned", "foreign", "unobserved"):
+            with self.subTest(outcome=outcome):
+                destination = self.root / outcome
+                volume = None
+
+                def commands(box_arg, *args, **kwargs):
+                    nonlocal volume
+                    if args[:2] == ("volume", "create"):
+                        volume = args[-1]
+                        ident = args[3].split("=", 1)[1]
+                        journal = box.read_json(
+                            self.path.parent.parent / ident / "workspace.json"
+                        )
+                        self.assertTrue(journal["restore_incomplete"])
+                        self.assertTrue(journal["restore_volume_create_attempted"])
+                        self.assertEqual(journal["home_volume"], volume)
+                        if outcome != "unobserved":
+                            self.podman(box_arg, *args, **kwargs)
+                            if outcome == "foreign":
+                                self.labels[volume] = "f" * 32
+                        raise KeyboardInterrupt
+                    return self.podman(box_arg, *args, **kwargs)
+
+                with (
+                    patch.object(backups, "command", side_effect=commands),
+                    self.assertRaises(KeyboardInterrupt),
+                ):
+                    self.restore(destination)
+                self.assertIsNotNone(volume)
+                self.assertFalse(destination.exists())
+                self.assertFalse(list(self.root.glob(".oc-box-restore-*")))
+                pending = box.registered_projects(destination)
+                if outcome == "owned":
+                    self.assertEqual(pending, [])
+                    self.assertNotIn(volume, self.volumes)
+                    self.assertIn(("volume", "inspect", volume), self.operations)
+                    self.assertIn(("volume", "rm", volume), self.operations)
+                else:
+                    self.assertEqual(len(pending), 1)
+                    _, data = pending[0]
+                    self.assertTrue(data["restore_incomplete"])
+                    self.assertTrue(data["restore_volume_create_attempted"])
+                    self.assertNotIn(("volume", "rm", volume), self.operations)
+                    self.assertEqual(volume in self.volumes, outcome == "foreign")
+                self.assertTrue(self.home.is_dir())
+
     def test_incomplete_restore_purge_never_starts_or_syncs_it(self):
         self.data["restore_incomplete"] = True
         args = argparse.Namespace(yes=True, delete_sessions=False, all=False)
@@ -1021,6 +1373,74 @@ class WorkspaceBackupTests(unittest.TestCase):
                 for command in self.operations
             )
         )
+
+
+class ArchivePublicationTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(prefix="oc-box-publication-")
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.output = self.root / "archive.ocbox"
+        self.pack = patch.object(
+            crypto,
+            "pack",
+            side_effect=lambda _, stream: stream.write(b"packed archive"),
+        )
+        self.pack.start()
+        self.addCleanup(self.pack.stop)
+
+    def test_archive_publishes_the_packed_descriptor_and_never_uses_a_staging_name(
+        self,
+    ):
+        def substitute():
+            # A named-source implementation would publish the substitute and
+            # unlink it during cleanup. Neither can occur with an unnamed fd.
+            found = list(self.root.glob(".oc-box-backup-*"))
+            if not found:
+                found = [self.root / ".oc-box-backup-unrelated"]
+            for name in found:
+                name.unlink(missing_ok=True)
+                name.write_bytes(b"unrelated")
+
+        interaction = SimpleNamespace(dispatched=substitute)
+        backups._publish_archive(self.root, self.output, interaction=interaction)
+        self.assertEqual(self.output.read_bytes(), b"packed archive")
+        self.assertEqual(
+            [
+                candidate.read_bytes()
+                for candidate in self.root.glob(".oc-box-backup-*")
+            ],
+            [b"unrelated"],
+        )
+
+    def test_archive_publication_does_not_replace_a_racing_output_symlink(self):
+        unrelated = self.root / "unrelated"
+        unrelated.write_bytes(b"keep")
+        interaction = SimpleNamespace(
+            dispatched=lambda: self.output.symlink_to(unrelated)
+        )
+        with self.assertRaisesRegex(crypto.BackupError, "never overwrite"):
+            backups._publish_archive(self.root, self.output, interaction=interaction)
+        self.assertTrue(self.output.is_symlink())
+        self.assertEqual(unrelated.read_bytes(), b"keep")
+        self.assertCountEqual(self.root.iterdir(), [self.output, unrelated])
+
+    def test_archive_publication_never_unlinks_a_replacement_after_link(self):
+        preserved = self.root / "published-original"
+        link = os.link
+
+        def replace_output(source, destination, **kwargs):
+            link(source, destination, **kwargs)
+            self.output.rename(preserved)
+            self.output.write_bytes(b"keep")
+
+        with (
+            patch.object(os, "link", side_effect=replace_output),
+            self.assertRaisesRegex(crypto.BackupError, "could not be confirmed"),
+        ):
+            backups._publish_archive(self.root, self.output)
+        self.assertEqual(preserved.read_bytes(), b"packed archive")
+        self.assertEqual(self.output.read_bytes(), b"keep")
 
 
 class BackupCliTests(unittest.TestCase):

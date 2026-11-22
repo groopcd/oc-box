@@ -87,13 +87,11 @@ class ManagementCardTests(unittest.IsolatedAsyncioTestCase):
                     with patch.object(app, "_review_backup") as review:
                         self.assertTrue(await pilot.click("#backup-inspect"))
                         review.assert_called_once_with("backup-inspect")
-                    for name in ("backup-create", "backup-restore", "backup-delete"):
+                    for name in ("backup-create", "backup-restore"):
                         button = app.query_one("#" + name, Button)
                         await self.reveal(pilot, button)
                         self.assertTrue(button.disabled)
-                    delete = app.query_one("#backup-delete", Button)
-                    self.assertEqual(delete.variant, "error")
-                    self.assertGreater(delete.styles.margin.left, 0)
+                    self.assertFalse(app.query("#backup-delete"))
             self.assertEqual(fields[0].value, "/synthetic/archive.ocbox")
             self.assertEqual(fields[1].value, "/synthetic/new-project")
 

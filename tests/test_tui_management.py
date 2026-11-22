@@ -109,9 +109,9 @@ class ManagementInteractionTests(unittest.IsolatedAsyncioTestCase):
                         "storage-purge",
                         "backup-create",
                         "backup-restore",
-                        "backup-delete",
                     ):
                         self.assertTrue(app.query_one("#" + ident, Button).disabled)
+                    self.assertFalse(app.query("#backup-delete"))
                     self.assertEqual(
                         app.query_one("#backup-inspect", Button).disabled, demo
                     )

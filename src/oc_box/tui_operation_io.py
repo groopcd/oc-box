@@ -97,6 +97,7 @@ _COUNT_FIELDS = frozenset(
         "host_files",
         "host_file_links",
         "host_directories_created",
+        "host_lock_files_created",
     }
 )
 _BOOL_FIELDS = frozenset(
@@ -112,6 +113,8 @@ _HOST_FIELDS = _BOOL_FIELDS | {
     "host_files",
     "host_file_links",
     "host_directories_created",
+    "host_lock_files_created",
+    "host_failure_category",
 }
 
 
@@ -130,7 +133,10 @@ def _fail():
 def metadata(value):
     """Validate a small explicit projection, not an arbitrary engine object."""
     if not isinstance(value, dict) or set(value) - (
-        _TEXT_FIELDS | _COUNT_FIELDS | _BOOL_FIELDS | {"created_ids", "planned_ids"}
+        _TEXT_FIELDS
+        | _COUNT_FIELDS
+        | _BOOL_FIELDS
+        | {"created_ids", "planned_ids", "host_failure_category"}
     ):
         _fail()
     format = value.get("format")
@@ -139,13 +145,24 @@ def metadata(value):
         or (format == "session" and _HOST_FIELDS.intersection(value))
         or (format == "host" and value.get("kind") != "host")
         or (
+            {"host_failure_category", "host_lock_files_created"}.intersection(value)
+            and (format != "host" or value.get("status") != "incomplete")
+        )
+        or (
             value.get("restore_opencode") is True
             and value.get("restore_host") is not True
         )
     ):
         _fail()
     for key, item in value.items():
-        if key in _TEXT_FIELDS:
+        if key == "host_failure_category":
+            if __package__:
+                from .host_backup_restore import HOST_FAILURE_CATEGORIES
+            else:
+                from host_backup_restore import HOST_FAILURE_CATEGORIES
+            if not isinstance(item, str) or item not in HOST_FAILURE_CATEGORIES:
+                _fail()
+        elif key in _TEXT_FIELDS:
             if (
                 not isinstance(item, str)
                 or len(item.encode()) > 4096

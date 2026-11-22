@@ -38,6 +38,9 @@ temporarily staged. Native age public recipients can replace the passphrase for
 unattended backups using `--recipient age1...`; restore/info use the matching
 private `--identity FILE`. See [passphrase creation policy](credentials.md#enter-and-protect-secret-values)
 for separate vault/backup minimums and existing-password compatibility.
+Choose an output directory that supports unnamed temporary files and hard links
+on Linux. To store the archive on other media, create and verify it locally
+first, then copy the encrypted file.
 
 ## Understand what is included
 

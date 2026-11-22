@@ -11,7 +11,7 @@ import tarfile
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from oc_box import (
     oc_box as box,
@@ -114,6 +114,8 @@ class OperationTests(unittest.TestCase):
                 registry.assert_not_called()
 
     def test_false_duplicate_id_cannot_change_review_or_canonical_cli_dispatch(self):
+        from oc_box import backups
+
         other_project = self.root / "misleading-project"
         other_project.mkdir()
         false_record = self.state / "workspaces" / ("0" * 32) / "workspace.json"
@@ -135,24 +137,23 @@ class OperationTests(unittest.TestCase):
             request = self.controller.confirm(plan, "")
             self.assertNotIn("PRIVATE_REGISTRATION_VALUE", json.dumps(request))
 
-            def production_selector(argv):
+            def production_selector(runtime, argv, *, interaction, reviewed_workspace):
+                self.assertIs(runtime, box)
+                self.assertIsNone(interaction)
                 self.assertEqual(
                     argv,
                     ["backup", "--workspace", self.ident, "--output", str(self.output)],
                 )
-                selected = self.state / "workspaces" / argv[2] / "workspace.json"
-                self.assertEqual(
-                    json.loads(selected.read_bytes())["project"], request["project"]
-                )
+                self.assertEqual(reviewed_workspace(), (self.record, self.data))
                 return 0
 
-            self.forbidden["main"].side_effect = production_selector
-            self.assertEqual(operations.execute(box, request), 0)
+            with patch.object(backups, "cli", side_effect=production_selector) as cli:
+                self.assertEqual(operations.execute(box, request), 0)
         scan.assert_not_called()
         raw.assert_not_called()
-        self.forbidden["main"].assert_called_once()
-        for name in ("podman", "run", "launch_credentials"):
-            self.forbidden[name].assert_not_called()
+        cli.assert_called_once()
+        for operation in self.forbidden.values():
+            operation.assert_not_called()
 
     def test_selected_directory_with_another_json_id_refuses_before_execution(self):
         box.atomic_json(self.record, {**self.data, "id": "f" * 32})
@@ -370,6 +371,42 @@ class OperationTests(unittest.TestCase):
         for operation in self.forbidden.values():
             operation.assert_not_called()
 
+    def test_backup_engine_handoff_rechecks_registration_after_child_validation(self):
+        from oc_box import backups
+
+        for change in ("record", "registry"):
+            with self.subTest(change=change):
+                request = self.controller.confirm(
+                    self.plan(workspace=self.ident, host=change == "registry"), ""
+                )
+                old = self.root / "old-registry"
+
+                def engine(_runtime, _argv, *, reviewed_workspace, **_options):
+                    self.assertEqual(reviewed_workspace(), (self.record, self.data))
+                    if change == "record":
+                        box.atomic_json(self.record, {**self.data, "distro": "ubuntu"})
+                    else:
+                        self.state.rename(old)
+                        self.state.mkdir(mode=0o700)
+                        (old / "workspaces").rename(self.state / "workspaces")
+                    reviewed_workspace()
+                    self.fail("execution was allowed to use a changed registration")
+
+                interaction = Mock() if change == "registry" else None
+                with patch.object(backups, "cli", side_effect=engine) as cli:
+                    self.refusal(
+                        "selection-changed",
+                        operations.execute,
+                        box,
+                        request,
+                        interaction=interaction,
+                    )
+                cli.assert_called_once()
+                if change == "record":
+                    box.atomic_json(self.record, self.data)
+        for operation in self.forbidden.values():
+            operation.assert_not_called()
+
     def test_child_workspace_connection_uses_canonical_target_and_review_bindings(self):
         self.data["opencode_version"] = "2.2.6"
         box.atomic_json(self.record, self.data)
@@ -432,6 +469,7 @@ class OperationTests(unittest.TestCase):
         plan = self.plan(workspace=self.ident)
         self.assertIn(self.ident, plan.review)
         self.assertIn("global vault", plan.review)
+        self.assertIn("a new backup password (no public recipients)", plan.review)
         self.assertEqual(plan.confirmation, "")
         request = self.controller.confirm(plan, "")
         self.assertEqual(request["workspace"], self.ident)
@@ -463,6 +501,19 @@ class OperationTests(unittest.TestCase):
         for name in ("podman", "run", "launch_credentials"):
             self.forbidden[name].assert_not_called()
 
+    def test_host_backup_review_names_every_selected_age_recipient(self):
+        recipients = ["age1" + (char * 58) for char in "ab"]
+        for workspace in (None, self.ident):
+            with self.subTest(workspace=workspace):
+                plan = self.plan(host=True, workspace=workspace, recipients=recipients)
+                self.assertIn("age public recipients (no password)", plan.review)
+                for recipient in recipients:
+                    self.assertIn(recipient, plan.review)
+                self.assertNotIn("a new backup password", plan.review)
+                self.assertEqual(
+                    self.controller.confirm(plan, "")["recipients"], recipients
+                )
+
     def test_combined_portable_backup_passes_explicit_host_and_workspace_flags(self):
         from oc_box import backups
 
@@ -489,10 +540,14 @@ class OperationTests(unittest.TestCase):
                 "--host",
             ],
             interaction=interaction,
+            reviewed_workspace=ANY,
             reviewed_paths={
                 "backup_parent": request["bindings"]["backup_parent"],
                 "backup_file": None,
             },
+        )
+        self.assertEqual(
+            cli.call_args.kwargs["reviewed_workspace"](), (self.record, self.data)
         )
         self.forbidden["main"].assert_not_called()
 
@@ -503,7 +558,7 @@ class OperationTests(unittest.TestCase):
             ("workspace-restore", {"include_opencode": "true"}, "invalid-backup-kind"),
             ("workspace-inspect", {"host": True}, "unsupported-action"),
             ("session-backup", {"host": True}, "unsupported-action"),
-            ("backup-delete", {"host": True}, "unsupported-action"),
+            ("backup-delete", {"host": True}, "backup-delete-disabled"),
             (
                 "workspace-backup",
                 {"host": True, "include_opencode": True},
@@ -635,7 +690,7 @@ class OperationTests(unittest.TestCase):
         cli.assert_not_called()
         self.forbidden["main"].assert_not_called()
 
-    def test_typed_phrase_is_reserved_for_destructive_actions_matrix(self):
+    def test_backup_reviews_use_single_use_button_approval_matrix(self):
         for action in sorted(operations.ACTIONS):
             with self.subTest(action=action):
                 archive = self.root / (action + ".ocbox")
@@ -661,23 +716,19 @@ class OperationTests(unittest.TestCase):
                         "time": {"created": 1, "updated": 2},
                     }
                 plan = self.controller.prepare(action, backup=archive, **options)
-                phrase = "DELETE" if action == "backup-delete" else ""
-                self.assertEqual(plan.confirmation, phrase)
+                self.assertEqual(plan.confirmation, "")
                 self.assertIn("leaves it stopped", plan.review)
-                self.assertEqual(self.controller.confirm(plan, phrase), plan.request)
-                self.refusal(
-                    "invalid-confirmation", self.controller.confirm, plan, phrase
-                )
+                self.assertEqual(self.controller.confirm(plan, ""), plan.request)
+                self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
         for call in self.forbidden.values():
             call.assert_not_called()
 
-    def test_empty_phrase_does_not_authorize_unreviewed_or_destructive_actions(self):
+    def test_empty_phrase_does_not_authorize_an_unreviewed_or_disabled_action(self):
         plan = self.plan(workspace=self.ident)
         self.refusal("invalid-confirmation", self.controller.confirm, plan, None)
         self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
         self.archive()
-        plan = self.plan("backup-delete")
-        self.refusal("invalid-confirmation", self.controller.confirm, plan, "")
+        self.refusal("backup-delete-disabled", self.plan, "backup-delete")
         self.assertTrue(self.output.exists())
         self.forbidden["main"].assert_not_called()
 
@@ -902,29 +953,82 @@ class OperationTests(unittest.TestCase):
                     "unsupported-backup-file", operations.archive_kind, self.output
                 )
 
-    def test_backup_delete_accepts_only_private_regular_recognized_archives(self):
-        self.archive()
-        self.output.chmod(0o644)
-        self.refusal("private-owned-file-required", self.plan, "backup-delete")
-        self.output.chmod(0o600)
-        plan = self.plan("backup-delete")
-        self.refusal("invalid-confirmation", self.controller.confirm, plan, "CONFIRM")
-        self.assertTrue(self.output.exists())
-        self.output.write_bytes(b"not a backup")
-        self.refusal("invalid-backup-file", self.plan, "backup-delete")
+    def test_backup_delete_does_not_offer_reviews_for_any_archive_kind(self):
+        core = ("key.age", "manifest.age")
+        for names in (
+            (*core, "project.age", "home.age", "registry.age"),
+            (*core, "sessions.age"),
+            (*core, "host.age"),
+            (
+                *core,
+                "project.age",
+                "home.age",
+                "registry.age",
+                "host.age",
+                "host-auth.age",
+            ),
+        ):
+            with self.subTest(names=names):
+                self.archive(names=names)
+                before = self.output.read_bytes()
+                with patch.object(operations, "real_path") as path:
+                    self.refusal("backup-delete-disabled", self.plan, "backup-delete")
+                path.assert_not_called()
+                self.assertEqual(self.output.read_bytes(), before)
 
-    def test_backup_delete_revalidates_in_foreground_child(self):
-        self.archive()
-        plan = self.plan("backup-delete")
-        request = self.controller.confirm(plan, "DELETE")
-        with patch("sys.stdout", new_callable=io.StringIO):
-            self.assertEqual(operations.execute(box, request), 0)
-        self.assertFalse(self.output.exists())
-        self.assertTrue(self.project.exists())
-        self.assertTrue(self.record.exists())
+    def test_backup_delete_cannot_mutate_archive_or_neighbors_after_legacy_review(self):
+        for change in ("unchanged", "file-swap", "parent-swap"):
+            with self.subTest(change=change):
+                parent = self.root / change
+                parent.mkdir()
+                archive = self.archive(parent / "backup.ocbox")
+                original = archive.read_bytes()
+                sibling = self.archive(parent / "neighbor.ocbox")
+                # Construct the bindings made by an older review before the
+                # target is swapped, including its validated routing envelope.
+                plan = self.controller.prepare("workspace-inspect", backup=archive)
+                request = self.controller.confirm(plan, "")
+                operations.archive_kind(
+                    archive, expected=request["bindings"]["backup_file"]
+                )
+                request["action"] = "backup-delete"
+
+                retained = archive
+                if change == "file-swap":
+                    retained = archive.rename(parent / "retained.ocbox")
+                    archive.write_bytes(b"unreviewed replacement")
+                elif change == "parent-swap":
+                    old_parent = parent.rename(self.root / "renamed-parent")
+                    retained = old_parent / archive.name
+                    parent.mkdir()
+                    archive.write_bytes(b"unreviewed replacement")
+                    sibling.write_bytes(b"unreviewed neighbor")
+                observed = {
+                    folder: {path.name: path.read_bytes() for path in folder.iterdir()}
+                    for folder in {archive.parent, retained.parent}
+                }
+                progress = Mock()
+                with patch.object(operations.OperationController, "prepare") as review:
+                    self.refusal(
+                        "backup-delete-disabled",
+                        operations.execute,
+                        box,
+                        request,
+                        progress=progress,
+                    )
+                review.assert_not_called()
+                progress.assert_called_once_with(operation="backup-file-delete")
+                self.assertEqual(retained.read_bytes(), original)
+                for folder, entries in observed.items():
+                    self.assertEqual(
+                        {path.name: path.read_bytes() for path in folder.iterdir()},
+                        entries,
+                    )
+                self.assertTrue(self.project.exists())
+                self.assertTrue(self.record.exists())
         self.forbidden["main"].assert_not_called()
 
-    def test_archive_delete_rejects_duplicate_and_foreign_members(self):
+    def test_archive_routing_rejects_duplicate_and_foreign_members(self):
         for names in (
             ("key.age", "manifest.age", "sessions.age", "sessions.age"),
             ("key.age", "manifest.age", "../foreign"),
@@ -932,7 +1036,7 @@ class OperationTests(unittest.TestCase):
             with self.subTest(names=names):
                 self.archive(names=names)
                 with self.assertRaises(operations.OperationError):
-                    self.plan("backup-delete")
+                    operations.archive_kind(self.output)
 
     def test_symlink_and_hardlink_inputs_are_refused(self):
         self.archive()
