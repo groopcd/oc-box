@@ -181,31 +181,35 @@ class HostBackupTests(unittest.TestCase):
         ]
         canonical = native_auth.validate_native_export(json.dumps(rows).encode())
         cases = (
-            (b"opencode v2.8.9\n", None, None, "success", 1),
-            (b"v2.0.0\n", "2.0.0", None, "success", 1),
-            (b"opencode v2.8.9\n", "2.8.8", None, "native-version", 0),
-            (b"opencode v2.8.9-rc.1\n", None, None, "native-version", 0),
-            (b"opencode v3.0.0\n", None, None, "native-version", 0),
-            (b"opencode v2.8.9\n", None, "before", "native-operation", 0),
-            (b"opencode v2.8.9\n", None, "after", "native-operation", 1),
-            (b"opencode v2.8.9\n", None, "missing", "native-operation", 1),
-            (b"opencode v2.8.9\n", None, "roundtrip", "native-operation", 1),
+            (b"opencode v2.8.9\n", None, None, "success", 1, 2),
+            (b"v2.0.0\n", "2.0.0", None, "success", 1, 2),
+            (b"opencode v2.8.9\n", "2.8.8", None, "native-version", 0, 0),
+            (b"opencode v2.8.9-rc.1\n", None, None, "native-version", 0, 0),
+            (b"opencode v3.0.0\n", None, None, "native-version", 0, 0),
+            (b"opencode v2.8.9\n", None, "preexisting", "native-operation", 0, 0),
+            (b"opencode v2.8.9\n", None, "before", "native-operation", 0, 1),
+            (b"opencode v2.8.9\n", None, "trigger", "native-operation", 0, 1),
+            (b"opencode v2.8.9\n", None, "after", "native-operation", 1, 1),
+            (b"opencode v2.8.9\n", None, "drift", "native-operation", 1, 1),
+            (b"opencode v2.8.9\n", None, "missing", "native-operation", 1, 1),
+            (b"opencode v2.8.9\n", None, "roundtrip", "native-operation", 1, 2),
+            (b"opencode v2.8.9\n", None, "verification-work", "native-operation", 1, 2),
         )
-        for index, (reported, expected, break_at, outcome, imports) in enumerate(cases):
+        for index, (
+            reported,
+            expected,
+            break_at,
+            outcome,
+            imports,
+            exports,
+        ) in enumerate(cases):
             with self.subTest(reported=reported, expected=expected, break_at=break_at):
                 stage = self.root / str(index)
                 db = stage / "data/opencode/opencode.db"
                 db.parent.mkdir(parents=True)
-                with contextlib.closing(sqlite3.connect(db)) as sql:
-                    sql.execute("CREATE TABLE credential (id TEXT)")
-                    # A hypothetical new native table must be allowed empty,
-                    # but never if the process has persisted something there.
-                    sql.execute("CREATE TABLE future_work (id TEXT)")
-                    if break_at == "before":
-                        sql.execute("INSERT INTO future_work VALUES ('fixture')")
-                    sql.commit()
-                db.chmod(0o600)
-                received = []
+                if break_at == "preexisting":
+                    self.write(db, b"unexpected existing scratch file")
+                received, exported = [], []
 
                 def call(
                     *args,
@@ -213,6 +217,7 @@ class HostBackupTests(unittest.TestCase):
                     reported=reported,
                     db=db,
                     received=received,
+                    exported=exported,
                     break_at=break_at,
                     **_,
                 ):
@@ -221,9 +226,30 @@ class HostBackupTests(unittest.TestCase):
                     if args == ("debug", "paths", "db"):
                         return os.fsencode(db) + b"\n"
                     if args == ("auth", "export", "--standalone"):
-                        return (
-                            canonical if received and break_at != "roundtrip" else b"[]"
-                        )
+                        exported.append(True)
+                        if len(exported) == 1:
+                            with contextlib.closing(sqlite3.connect(db)) as sql:
+                                sql.execute("CREATE TABLE credential (id TEXT)")
+                                sql.execute("CREATE TABLE future_work (id TEXT)")
+                                if break_at == "before":
+                                    sql.execute(
+                                        "INSERT INTO future_work VALUES ('fixture')"
+                                    )
+                                if break_at == "trigger":
+                                    sql.execute(
+                                        "CREATE TRIGGER unexpected AFTER INSERT ON credential "
+                                        "BEGIN INSERT INTO future_work VALUES ('fixture'); END"
+                                    )
+                                sql.commit()
+                            db.chmod(0o600)
+                            return b"[]"
+                        if break_at == "verification-work":
+                            with contextlib.closing(sqlite3.connect(db)) as sql:
+                                sql.execute(
+                                    "INSERT INTO future_work VALUES ('fixture')"
+                                )
+                                sql.commit()
+                        return b"[]" if break_at == "roundtrip" else canonical
                     self.assertEqual(args, ("auth", "import", "--standalone"))
                     self.assertEqual(payload, canonical)
                     received.append(True)
@@ -234,6 +260,8 @@ class HostBackupTests(unittest.TestCase):
                             )
                         if break_at == "after":
                             sql.execute("INSERT INTO future_work VALUES ('fixture')")
+                        if break_at == "drift":
+                            sql.execute("CREATE TABLE unexpected_empty (id TEXT)")
                         sql.commit()
                     return b""
 
@@ -254,6 +282,7 @@ class HostBackupTests(unittest.TestCase):
                             )
                         self.assertEqual(error.exception.reason, outcome)
                 self.assertEqual(len(received), imports)
+                self.assertEqual(len(exported), exports)
 
     def test_native_database_publication_cannot_move_to_a_replaced_parent(self):
         with self.profile(self.target):
