@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -46,6 +47,150 @@ class LifecycleOutputTests(unittest.TestCase):
         config.parent.mkdir(parents=True, exist_ok=True)
         config.write_text(json.dumps({"logs": settings}))
         return config
+
+    def test_preparation_output_is_quiet_by_default_and_live_with_verbose_all(self):
+        driver = """
+import sys
+from pathlib import Path
+from oc_box import lifecycle_output, oc_box as box
+with lifecycle_output.invocation("reset", Path(sys.argv[1]), console_level=sys.argv[2] or None):
+    lifecycle_output.bind_workspace(sys.argv[3])
+    box.run(
+        [sys.executable, "-c", "import os, sys; assert sys.stdin.read() == 'setup input'; "
+         "os.write(1, b'SYNTHETIC_STDOUT\\\\n'); os.write(2, b'SYNTHETIC_STDERR\\\\n')"],
+        input="setup input",
+        preparation="baseline-tools",
+    )
+    box.run([sys.executable, "-c", "print('NATIVE_OUTPUT_UNCHANGED')"])
+"""
+        repo = Path(__file__).resolve().parents[1]
+        for level in ("", "debug", "all"):
+            with self.subTest(level=level):
+                result = subprocess.run(
+                    [
+                        sys.executable,
+                        "-B",
+                        "-c",
+                        driver,
+                        str(self.root),
+                        level,
+                        WORKSPACE,
+                    ],
+                    env={**os.environ, "PYTHONPATH": str(repo / "src")},
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    timeout=15,
+                )
+                self.assertIn("NATIVE_OUTPUT_UNCHANGED", result.stdout)
+                self.assertEqual("SYNTHETIC_STDOUT" in result.stdout, level == "all")
+                self.assertEqual("SYNTHETIC_STDERR" in result.stderr, level == "all")
+                self.assertEqual(
+                    "Setting up container runtime tools (details: oc-box logs --tail)"
+                    in result.stderr,
+                    level != "all",
+                )
+        events = activity_log.read_events(self.root, preparation_only=True)
+        self.assertEqual(
+            [(row["event"], row.get("outcome"), row["workspace"]) for row in events],
+            [
+                ("preparation.started", None, WORKSPACE),
+                ("preparation.finished", "success", WORKSPACE),
+            ]
+            * 3,
+        )
+        payload = (self.root / "log/preparation/activity.jsonl").read_text()
+        self.assertNotIn("SYNTHETIC_", payload)
+        self.assertNotIn("NATIVE_OUTPUT", payload)
+        self.assertNotIn("setup input", payload)
+
+    def test_preparation_start_is_readable_before_child_exit_and_refusals_stay_fixed(
+        self,
+    ):
+        command = ["synthetic"]
+        for fault, exception, reason, outcome in (
+            (subprocess.TimeoutExpired(command, 2), box.BoxError, "timeout", "failure"),
+            (KeyboardInterrupt(), KeyboardInterrupt, None, "cancelled"),
+            (None, box.BoxError, None, "failure"),
+        ):
+            with self.subTest(outcome=outcome, reason=reason):
+
+                def child(_args, **kwargs):
+                    self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+                    self.assertEqual(kwargs["stdout"], subprocess.DEVNULL)
+                    self.assertEqual(kwargs["stderr"], subprocess.DEVNULL)
+                    rows = activity_log.read_events(self.root, preparation_only=True)
+                    self.assertEqual(rows[-1]["event"], "preparation.started")
+                    if fault is not None:
+                        raise fault
+                    return subprocess.CompletedProcess(command, 7)
+
+                stderr = io.StringIO()
+                with (
+                    lifecycle_output.invocation("start", self.root),
+                    contextlib.redirect_stderr(stderr),
+                    patch.object(box.subprocess, "run", side_effect=child),
+                    self.assertRaises(exception) as result,
+                ):
+                    box.run(command, preparation="container-image", timeout=2)
+                self.assertIn(
+                    "Creating container and pulling its image if needed",
+                    stderr.getvalue(),
+                )
+                rows = activity_log.read_events(self.root, preparation_only=True)
+                self.assertEqual(rows[-1]["outcome"], outcome)
+                self.assertEqual(rows[-1].get("reason"), reason)
+                self.assertEqual(
+                    rows[-1].get("exit_code"), 7 if fault is None else None
+                )
+                if exception is box.BoxError:
+                    self.assertIn("oc-box logs --tail", str(result.exception))
+
+    def test_unavailable_preparation_journal_does_not_expose_output_or_block_child(
+        self,
+    ):
+        destination = self.root.parent / "unsafe"
+        destination.mkdir(mode=0o755)
+        with (
+            lifecycle_output.invocation("start", self.root),
+            log_config.overrides(directory=destination),
+            contextlib.redirect_stderr(io.StringIO()) as stderr,
+            patch.object(
+                box.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)
+            ) as child,
+        ):
+            box.run(["synthetic"], preparation="native-cli-install")
+        self.assertIn("log unavailable; use --verbose", stderr.getvalue())
+        self.assertEqual(child.call_args.kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(list(destination.iterdir()), [])
+        self.assertFalse(self.root.exists())
+
+    def test_preparation_failure_honors_selected_log_and_late_interrupt(self):
+        destination = self.root.parent / "custom journal"
+        hint = f"oc-box logs --tail --log-dir '{destination}'"
+        for final_append in (True, False, KeyboardInterrupt()):
+            with (
+                self.subTest(final_append=final_append),
+                lifecycle_output.invocation("reset", self.root),
+                log_config.overrides(directory=destination),
+                contextlib.redirect_stderr(io.StringIO()) as stderr,
+                patch.object(
+                    activity_log, "record_event", side_effect=[True, final_append]
+                ),
+                patch.object(
+                    box.subprocess,
+                    "run",
+                    return_value=subprocess.CompletedProcess([], 9),
+                ),
+                self.assertRaisesRegex(box.BoxError, "failed \\(exit 9\\)") as result,
+            ):
+                box.run(["synthetic"], preparation="baseline-tools")
+            self.assertIn(hint, stderr.getvalue())
+            if final_append is True:
+                self.assertIn(hint, str(result.exception))
+            else:
+                self.assertNotIn("logs --tail", str(result.exception))
+                self.assertIn("could not be logged", str(result.exception))
 
     def test_scoped_report_context_resets_after_error_and_nested_invocation(self):
         self.assertFalse(lifecycle_output.concise())

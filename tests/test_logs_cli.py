@@ -63,6 +63,93 @@ class LogsCliTests(unittest.TestCase):
         self.config.parent.mkdir(parents=True)
         self.config.write_text(json.dumps({"logs": settings}))
 
+    def test_tail_reads_only_preparation_with_filters_and_no_writes(self):
+        from oc_box import activity_log, log_config
+
+        custom = self.base / "custom"
+        with log_config.overrides(directory=custom):
+            self.assertTrue(
+                activity_log.record_event(
+                    "preparation.started", command="start", stage="baseline-packages"
+                )
+            )
+            self.assertTrue(
+                activity_log.record_event("command.started", command="start")
+            )
+            self.assertTrue(
+                activity_log.record_event(
+                    "preparation.finished",
+                    command="start",
+                    stage="baseline-packages",
+                    outcome="failure",
+                    exit_code=7,
+                    duration_ms=1500,
+                )
+            )
+            self.assertTrue(
+                activity_log.record_event("command.finished", command="start")
+            )
+        options = ("--tail", "--log-dir", str(custom))
+        active = custom / "activity.jsonl"
+        preparation = custom / "preparation" / "activity.jsonl"
+        before = active.read_bytes(), preparation.read_bytes()
+        _, text = self.run_cli(*options)
+        self.assertIn("Installing container baseline packages — started", text)
+        self.assertIn(
+            "Installing container baseline packages — failure (exit 7) (1.5s)", text
+        )
+        self.assertNotIn("command.", text)
+        _, jsonl = self.run_cli(*options, "--limit", "1", "--level", "info", "--json")
+        self.assertEqual(json.loads(jsonl)["exit_code"], 7)
+        _, table = self.run_cli(*options, "--table")
+        self.assertIn("Installing container baseline packages", table)
+        self.assertIn("ACTIVITY", table)
+        self.assertEqual((active.read_bytes(), preparation.read_bytes()), before)
+        self.assertNotIn(b"preparation.", before[0])
+        self.assertNotIn(b"command.finished", before[1])
+        self.assertFalse(self.root.exists())
+
+    def test_tail_unavailable_is_read_only_and_refuses_other_sources(self):
+        self.assertEqual(self.run_cli("--tail"), (0, ""))
+        for choice in ("--journald", "--path"):
+            with (
+                contextlib.redirect_stderr(io.StringIO()),
+                self.assertRaises(SystemExit),
+            ):
+                self.run_cli("--tail", choice)
+        self.assertFalse(self.root.exists())
+
+    def test_tail_follow_prints_live_preparation_only_without_replay(self):
+        def append(event, **fields):
+            self.assertTrue(
+                logs_cli.activity_log.record_event(
+                    event, command="reset", stage="native-cli-install", **fields
+                )
+            )
+
+        def next_poll(_):
+            action = next(events, None)
+            if action is None:
+                raise KeyboardInterrupt
+            action()
+
+        events = iter(
+            (
+                lambda: append("preparation.started"),
+                lambda: logs_cli.activity_log.record_event(
+                    "command.finished", command="stop"
+                ),
+                lambda: append("preparation.finished", outcome="success", exit_code=0),
+            )
+        )
+        with patch.object(logs_cli.time, "sleep", side_effect=next_poll):
+            code, output = self.run_cli("--tail", "--follow", "--json")
+        self.assertEqual(code, 130)
+        self.assertEqual(
+            [json.loads(line)["event"] for line in output.splitlines()],
+            ["preparation.started", "preparation.finished"],
+        )
+
     def test_path_reports_default_configured_and_invocation_override_without_writes(
         self,
     ):

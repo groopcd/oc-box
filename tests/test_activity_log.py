@@ -113,7 +113,11 @@ class ActivityLogTests(ActivityJournalFixture):
 
     def test_all_fixed_events_commands_and_outcomes_are_supported(self):
         for event in journal.EVENTS:
-            self.assertTrue(journal.record_event(event, root=self.root))
+            fields = {}
+            if event.startswith("preparation."):
+                self.assertFalse(journal.record_event(event, root=self.root))
+                fields = {"command": "start", "stage": "baseline-packages"}
+            self.assertTrue(journal.record_event(event, root=self.root, **fields))
         for command in journal.COMMANDS:
             self.assertTrue(
                 journal.record_event("command.started", command=command, root=self.root)
@@ -122,8 +126,47 @@ class ActivityLogTests(ActivityJournalFixture):
             self.assertTrue(self.record(outcome=outcome))
         self.assertEqual(
             len(journal.read_events(self.root)),
-            len(journal.EVENTS) + len(journal.COMMANDS) + len(journal.OUTCOMES),
+            len(journal.EVENTS - journal.PREPARATION_EVENTS)
+            + len(journal.COMMANDS)
+            + len(journal.OUTCOMES),
         )
+        self.assertEqual(
+            {
+                record["event"]
+                for record in journal.read_events(self.root, preparation_only=True)
+            },
+            journal.PREPARATION_EVENTS,
+        )
+
+    def test_preparation_is_not_mirrored_and_unsafe_ring_does_not_block_activity(self):
+        custom = self.root.parent / "custom"
+        event = dict(command="start", stage="baseline-tools", root=self.root)
+        with (
+            patch.dict(os.environ, {"OC_BOX_CONTAINER": "0"}),
+            overrides(directory=custom, journald=True),
+            patch.object(journal_output, "emit") as emit,
+        ):
+            self.assertTrue(journal.record_event("preparation.started", **event))
+            emit.assert_not_called()
+            self.assertTrue(
+                journal.record_event("command.started", command="start", root=self.root)
+            )
+            emit.assert_called_once()
+            active = custom / "preparation/activity.jsonl"
+            before = active.read_bytes()
+            active.chmod(0o644)
+            self.assertFalse(journal.record_event("preparation.finished", **event))
+            self.assertEqual(journal.read_events(self.root, preparation_only=True), [])
+            self.assertEqual(active.read_bytes(), before)
+            self.assertTrue(
+                journal.record_event(
+                    "command.finished", command="start", root=self.root
+                )
+            )
+            self.assertEqual(
+                [row["event"] for row in journal.read_events(self.root)],
+                ["command.started", "command.finished"],
+            )
 
     def test_structured_history_record_fits_existing_journal_bounds(self):
         metrics = {name: journal.MAX_METRIC_VALUE for name in journal.METRICS}

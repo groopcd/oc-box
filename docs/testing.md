@@ -155,12 +155,22 @@ Check lifecycle flag scope for `start` (including the implicit command),
 `reset`, `stop`, `sync`, `terminal`, and `web`. Check `--lifecycle-diagnostics`
 separately from the quiet default; it must not persist to later invocations.
 Check bare `--verbose`, case-insensitive `ALL` and minimum-severity filtering
-on the launcher console. Only allowlisted activity fields may appear in its
-added output, even when the private journal is unavailable. Native import
+on the launcher console. Only allowlisted fields may appear in the added
+activity diagnostics, even when the private journal is unavailable. Native import
 notices stay short by default and disclose details only at informational
 verbosity (`info`, `debug` or `ALL`); actionable refusals remain visible.
 For the read-only `logs` command, cover `--verbose=ALL` with both source
 choices and an explicit limit that overrides its larger initial view.
+For owning preparation, verify selected subprocesses write neither stdout
+nor stderr to the default console and that only bare `--verbose` or `ALL`
+restores those streams. The task-specific start records are visible before
+the subprocess exits, and results retain fixed failure categories and exit
+codes. Exercise `logs --tail --follow`, filters, missing/unsafe destinations,
+and untouched native/credential output. Keep preparation records in a
+separate bounded ring so older launchers can still write to the normal log.
+An interrupted final append must not replace an already-known child result.
+`tools/demo_preparation_logs.py`
+exercises these paths with disposable state and synthetic subprocesses.
 For version-pinned scripted checks that parse legacy launcher output, pass
 the flag only to the invocation under test. In the sharing host fixture that
 is the owner expecting an explicit stop, solely for its legacy pending-history

@@ -29,7 +29,7 @@ oc-box web tls check-local-pair --account-cert PEM --account-key PEM --workspace
 oc-box web tls setup localhost [--install-trust]
 oc-box --status [--project PATH | --workspace ID] [--json | --table]
 oc-box status [--project PATH | --workspace ID] [--json | --table]
-oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--follow] [--json | --table]
+oc-box logs [--journald | --log-dir PATH] [--project PATH | --workspace ID] [--level LEVEL | --verbose[=LEVEL]] [--limit N] [--tail] [--follow] [--json | --table]
 oc-box logs [--log-dir PATH] --path
 oc-box tui [--project PATH | --workspace ID] [--read-only] [--demo]
 oc-box upgrade [--check] [--stable | --devel] [--vault] [--tui]
@@ -108,7 +108,12 @@ shows transient stage progress on one line and clears it instead of leaving a
 transcript of each step. Noninteractive output, including pipes and `TERM=dumb`,
 does not get routine stage start/done lines. Actionable warnings, errors and
 confirmation or credential prompts remain visible. Native OpenCode output and
-the native terminal and browser UIs are not changed. Native host drops and
+the native terminal and browser UIs are not changed. During a cold start or
+reset, image fetching and package installation show one short line for each
+task instead of printing the installers' output. Use `oc-box logs --tail`
+to see which tasks started, their results, and how long they took, or add
+`--follow` to watch from another terminal. If you used a one-time `--log-dir`,
+use that same directory when reading the log. Native host drops and
 clipboard importing print one short line each when enabled. Use
 `oc-box start --verbose` for the full behavior, limits and clipboard symlink policy.
 
@@ -120,10 +125,10 @@ work finished. Incomplete results retain guidance for retrying
 `oc-box sync` when appropriate. The presentation does not change lifecycle steps,
 recovery eligibility, history verification or exit codes.
 
-Use `oc-box logs --verbose=ALL` to inspect retained stage details, or
-`oc-box start --verbose=ALL` for safe activity diagnostics from the current
-launch. See [Launcher diagnostics](#launcher-diagnostics) for the older
-`--lifecycle-diagnostics` option.
+Use `oc-box logs --verbose=ALL` to inspect all retained activity, or
+`oc-box start --verbose` to show live installer output and launcher diagnostics
+for one launch. See [Launcher diagnostics](#launcher-diagnostics) for
+`--lifecycle-diagnostics`.
 
 ### OpenCode versions
 
@@ -1638,6 +1643,20 @@ running workspace is needed. The command does not create, trim or rotate logs,
 start a container, or modify the workspace registry, project files or session
 history. It does not read Podman output or native OpenCode logfiles.
 
+Use `oc-box logs --tail` for the preparation view: container creation and
+image pulls, baseline packages, runtime tools, the matching OpenCode CLI, and
+plugin dependencies. It shows task starts and results, with elapsed time and
+exit status on failure. These are written while preparation runs, so you can
+watch them with `--tail --follow`. The view defaults to all preparation levels;
+explicit severity, workspace, limit, and output-format options still apply.
+Raw installer output is not saved: package managers, registries and plugin
+scripts can emit sensitive data. Preparation records are stored separately
+in `preparation/activity.jsonl` under the selected private log directory,
+with the same retention settings applied to that ring independently. This
+keeps the ordinary activity log compatible with older launchers. Preparation
+records are not mirrored to the system journal. `--tail` cannot be combined
+with `--journald` or `--path`.
+
 By default, show the latest 100 retained entries at `info` or above.
 `--level debug` includes lower-severity stage detail; `--level warn` or
 `--level error` narrows the output. Alternatively use `--verbose=LEVEL`. Bare
@@ -1675,6 +1694,8 @@ under [Dashboard state and activity journal](#dashboard-state-and-activity-journ
 ```sh
 oc-box logs
 oc-box logs --verbose=ALL
+oc-box logs --tail
+oc-box logs --tail --follow
 oc-box logs --path
 oc-box logs --log-dir ~/.local/state/oc-box-diagnostics --path
 oc-box logs --project ~/devel/demo --level debug --limit 50
@@ -2492,7 +2513,7 @@ oc-box logs --follow --table
 ### --level debug|info|warn|error
 
 For `logs`, set the minimum severity displayed, from `debug` (all levels) to
-`error` (errors only). Default: `info`. This is a read filter; it does not change
+`error` (errors only). Default: `info`, or all levels with `--tail`. This is a read filter; it does not change
 what gets journaled or what an owning launcher prints.
 
 ### --limit N
@@ -2506,6 +2527,14 @@ Rotation may leave fewer entries available.
 For `logs`, keep displaying newly retained matching entries after the initial
 output. Follow is best-effort: entries rotated out before they are read cannot
 be recovered. Stop following with Ctrl-C.
+
+### --tail
+
+Show recent environment preparation tasks and their results instead of general
+activity. Add `--follow` to watch new preparation records live. This is
+read-only, uses a separate ring under the same private log directory (including
+any `--log-dir` override), and
+does not show raw installer streams.
 
 ### --journald
 
@@ -2551,21 +2580,26 @@ severity: `debug`, `info`, `warn`, or `error`. Levels are case-insensitive.
 Activity diagnostics are buffered and may appear at command exit.
 Bare `--verbose` means `--verbose=ALL`; both include every severity. With
 `info`, `debug`, or `ALL`, the native TUI startup
-notices also explain the enabled host-import features. This option never adds
-raw arguments, environment values, credentials, native errors or output, or
-clipboard content to these diagnostics. It does not suppress existing warnings,
-refusals or prompts, alter native output, or change what gets journaled.
+notices also explain the enabled host-import features. Bare `--verbose` and
+`--verbose=ALL` additionally restore the selected preparation tools' live
+stdout and stderr for that invocation. Named severity levels alone keep those
+streams quiet. Live installer output can contain sensitive details; avoid
+recording or sharing it. Raw tool output still never goes to the activity
+journal. The option does not suppress launcher warnings, refusals or prompts,
+alter the interactive native OpenCode output, or change what gets journaled.
 
 For `logs`, this is a read filter rather than a launcher setting. Use it instead
 of `--level`; `ALL` includes all validated retained records within the read
 bounds. It works with `--follow`, `--json` and the same explicit source choices.
+It never changes the verbosity of an owning launcher; put `--verbose` on
+`start` or `reset` to display live installer output.
 
 ### --path
 
 For `logs`, display the effective private `activity.jsonl` pathname without
 reading or creating the journal. Use `oc-box logs --path` alone or with
 `--log-dir PATH`, not with `--journald`, workspace filters, `--follow`,
-`--verbose`, `--json`, or `--table`. `--level` and `--limit` have no effect
+`--tail`, `--verbose`, `--json`, or `--table`. `--level` and `--limit` have no effect
 when showing a path.
 
 ### --about
@@ -4197,6 +4231,13 @@ a workspace. For diagnostics from the current invocation:
 oc-box start --project ~/devel/demo --verbose=ALL
 oc-box sync --project ~/devel/demo --verbose=warn
 ```
+
+Use `oc-box logs --tail --follow` in a second terminal to watch preparation
+tasks and their outcomes. The launch form `--verbose=ALL` also shows live
+installer streams; the `logs` form does not change a running launcher.
+From a source checkout, run `python3 tools/demo_preparation_logs.py` to see
+both modes with synthetic subprocesses and a disposable private journal, with
+no Podman, real workspaces or OpenCode sessions involved.
 
 Scripts that consume older verbose lifecycle messages should continue using
 `--lifecycle-diagnostics` for routine start/done lines in a pipe. Neither flag

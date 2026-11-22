@@ -275,6 +275,11 @@ def overrides(*, directory: Path | str | None = None, journald: bool | None = No
         _OVERRIDES.reset(token)
 
 
+def overridden_directory():
+    """Return the current invocation's explicit log-directory choice, if any."""
+    return _OVERRIDES.get()[0]
+
+
 def _verbosity(value):
     if __package__:
         from .activity_log import LEVELS
@@ -326,7 +331,11 @@ def add_launch_arguments(parser: argparse.ArgumentParser) -> None:
         help="show expanded launcher lifecycle diagnostics",
     )
     add_verbosity(
-        parser, help_text="print safe launcher activity at this level or higher"
+        parser,
+        help_text=(
+            "print safe launcher activity at this level or higher; "
+            "all also shows live installer output during environment preparation"
+        ),
     )
 
 
