@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src 'self' file:; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; base-uri 'none'; form-action 'none'">
   <meta name="color-scheme" content="dark">
   <title>oc-box · Browser workspace concepts</title>
   <style>
@@ -15,9 +15,9 @@
     }
     * { box-sizing:border-box }
     body { margin:0; color:var(--text); background:var(--bg); font:14px/1.5 var(--sans) }
-    button,input,textarea { font:inherit; color:inherit }
+    button,input,textarea,select { font:inherit; color:inherit }
     button { cursor:pointer; border:0; background:none }
-    button:focus-visible,input:focus-visible,textarea:focus-visible,summary:focus-visible,.tui-viewport:focus-visible {
+    button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible,summary:focus-visible,[role=tabpanel]:focus-visible {
       outline:2px solid var(--accent); outline-offset:3px
     }
     [hidden] { display:none !important }
@@ -95,7 +95,7 @@
     .rail-note { color:var(--muted); font-size:11px; margin:10px 4px 0; max-width:28ch }
     main { min-width:0 }
     .shell > main { grid-area:1 / 3 }
-    .chat-head { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:14px 21px;
+    .chat-head { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:12px; padding:14px 21px;
       border-bottom:1px solid var(--line); background:var(--panel) }
     .chat-head .eyebrow { margin-bottom:4px }
     .heading-tags { display:flex; align-items:center; gap:8px }
@@ -138,9 +138,9 @@
     .event { display:flex; align-items:baseline; justify-content:space-between; gap:7px; margin-top:8px; font-size:12px }
     .event time { color:var(--muted); font-size:10px; flex:none }
     .overview { display:none; padding:19px 21px 17px; border-bottom:1px solid var(--line); background:#0d1723 }
-    .overview-head { display:flex; justify-content:space-between; align-items:end; gap:12px; margin-bottom:11px }
+    .overview-head { display:flex; flex-wrap:wrap; justify-content:space-between; align-items:end; gap:12px; margin-bottom:11px }
     .overview h1 { font-size:25px; letter-spacing:-.04em }
-    .tiles { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:9px }
+    .tiles { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,145px),1fr)); gap:9px }
     .tiles .card { margin:0 }
     [data-layout=dashboard] .overview { display:block }
     [data-layout=dashboard] .chat-body { min-height:max(420px,calc(100dvh - 374px)) }
@@ -151,16 +151,49 @@
       width:min(310px,95vw); overflow:auto; box-shadow:0 0 0 100vmax #050a11b0 }
     [data-layout=focus] .chat-body { min-height:calc(100dvh - 200px) }
     .layout-manager { border-left:1px solid var(--line) }
-    .tui-mode { padding:20px; max-width:1960px; margin:auto }
-    .tui-head { display:flex; justify-content:space-between; align-items:start; flex-wrap:wrap; gap:14px; margin-bottom:13px }
-    .tui-head h1 { font-size:23px; letter-spacing:-.035em; margin:3px 0 4px }
-    .tui-controls { display:flex; flex-wrap:wrap; justify-content:space-between; gap:8px; margin-bottom:10px }
-    .tui-controls .picker { max-width:100% }
-    .tui-viewport { max-height:calc(100dvh - 278px); min-height:260px; overflow:auto;
-      border:1px solid var(--line); border-radius:8px; background:#0a131b }
-    .tui-viewport img { display:block; width:100%; height:auto }
-    .tui-viewport[data-actual] img { width:auto; max-width:none }
-    .tui-note { margin-top:8px }
+    .tui-mode { padding:22px; max-width:1580px; margin:auto }
+    .tui-head,.view-head,.toolbar { display:flex; justify-content:space-between; align-items:start; flex-wrap:wrap; gap:12px }
+    .tui-head h1 { font-size:28px; letter-spacing:-.04em; margin:3px 0 }
+    .tui-tabs { display:flex; flex-wrap:wrap; gap:4px; margin:18px 0 20px; padding:4px 0 0; border-bottom:1px solid var(--line) }
+    .tui-tabs button { display:flex; align-items:center; gap:7px; padding:9px 11px; border-radius:6px 6px 0 0; color:var(--muted) }
+    .tui-tabs button:hover { background:var(--surface) }
+    .tui-tabs [aria-selected=true] { color:var(--accent); background:var(--select); box-shadow:inset 0 -2px var(--accent) }
+    .tui-tabs b { font:11px var(--mono) }
+    .view-head { margin-bottom:13px }
+    .view-head p { margin-top:3px }
+    .manager-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr)); gap:10px; margin-bottom:12px }
+    .manager-split { display:grid; grid-template-columns:minmax(0,2fr) minmax(0,1fr); gap:12px; margin-bottom:12px }
+    .manager-grid .card,.manager-split .card { margin:0; }
+    .manager-grid .card,.manager-split .card,.manager-panel { padding:14px }
+    .manager-panel + .manager-panel { margin-top:12px }
+    .manager-stat .large { font-size:23px }
+    .table-scroll { overflow:auto; margin-top:10px }
+    .manager-table { border-collapse:collapse; width:100%; min-width:430px; text-align:left }
+    .manager-table th,.manager-table td { padding:9px 8px; border-bottom:1px solid var(--line); vertical-align:top }
+    .tui-mode[data-compact] .manager-table :is(th,td) { padding-block:5px }
+    .manager-table th { color:var(--muted); font-size:12px }
+    .manager-table tbody tr:last-child td { border-bottom:0 }
+    .manager-table tr.is-selected { background:var(--select) }
+    .text-action { text-align:left; color:var(--accent); padding:0; text-decoration:underline; text-underline-offset:3px }
+    .entry-state { color:var(--green) }
+    .entry-state.stopped { color:var(--muted) }
+    .manager-fields { display:grid; gap:10px; margin-top:10px }
+    .toolbar { justify-content:start; align-items:end; margin-top:10px }
+    .toolbar .push { margin-left:auto; align-self:center }
+    .manager-field { display:grid; gap:4px; color:var(--muted); min-width:0 }
+    .manager-field input:not([type=checkbox]),.manager-field select {
+      min-width:0; width:100%; padding:7px 9px; border:1px solid var(--line); border-radius:6px;
+      color:var(--text); background:var(--bg)
+    }
+    .manager-field input::placeholder { color:var(--muted) }
+    .manager-check { display:flex; align-items:center; gap:6px; color:var(--muted); min-height:35px }
+    .manager-check input { accent-color:var(--accent) }
+    .manager-split details { margin-top:11px }
+    .manager-panel .action:disabled,.manager-split .action:disabled { opacity:.55; cursor:not-allowed; background:none }
+    .manager-table .child-name { padding-inline-start:24px }
+    .terminal-placeholder { min-height:154px; margin-top:11px; padding:13px; background:var(--bg);
+      border:1px solid var(--line); border-radius:6px; color:var(--muted); overflow-wrap:anywhere }
+    @media (max-width:850px) { .manager-split { grid-template-columns:minmax(0,1fr) } }
     @media (max-width:1000px) {
       .inspector:not([hidden]) { position:fixed; z-index:3; top:0; bottom:0; right:0;
         width:min(300px,95vw); overflow:auto; box-shadow:0 0 0 100vmax #050a11b0 }
@@ -181,7 +214,7 @@
       .chat-body { min-height:410px }
       .tiles { grid-template-columns:1fr }
       .tui-mode { padding:12px }
-      .tui-viewport { max-height:62dvh }
+      .tui-tabs button { padding:7px 8px }
     }
   </style>
 </head>
@@ -294,32 +327,116 @@
   <main id="tui-mode" class="tui-mode" aria-labelledby="tui-title" hidden>
     <header class="tui-head">
       <div>
-        <p class="eyebrow">oc-box tui / Workspace manager</p>
-        <h1 id="tui-title">Full TUI</h1>
-        <p class="muted">The existing Textual manager in its own tab, with no chat or composer.</p>
+        <p class="eyebrow">oc-box / Manager</p>
+        <h1 id="tui-title">Workspace manager</h1>
+        <p class="muted">The same seven sections as the TUI, adapted for the browser.</p>
       </div>
-      <span class="tag demo">Read-only captures</span>
+      <span class="tag demo">Synthetic data · No live operations</span>
     </header>
-    <div class="tui-controls">
-      <div class="picker" role="group" aria-label="Full TUI sections">
-        <button type="button" data-tui-view="status"><b>1</b> Status</button>
-        <button type="button" data-tui-view="settings"><b>2</b> Settings</button>
-        <button type="button" data-tui-view="sessions"><b>3</b> Sessions</button>
-        <button type="button" data-tui-view="terminals"><b>4</b> Terminals</button>
-        <button type="button" data-tui-view="logs"><b>5</b> Logs</button>
-        <button type="button" data-tui-view="storage"><b>6</b> Storage</button>
-        <button type="button" data-tui-view="backups"><b>7</b> Backup/restore</button>
-      </div>
-      <div class="picker" role="group" aria-label="Full TUI capture scale">
-        <button type="button" data-tui-zoom="fit" aria-pressed="true">Fit width</button>
-        <button type="button" data-tui-zoom="actual" aria-pressed="false">100%</button>
-      </div>
+    <div class="tui-tabs" role="tablist" aria-label="Workspace manager sections">
+      <button type="button" role="tab" id="tab-status" data-tui-view="status" aria-controls="manager-status"><b>1</b> Status</button>
+      <button type="button" role="tab" id="tab-settings" data-tui-view="settings" aria-controls="manager-settings"><b>2</b> Settings</button>
+      <button type="button" role="tab" id="tab-sessions" data-tui-view="sessions" aria-controls="manager-sessions"><b>3</b> Sessions</button>
+      <button type="button" role="tab" id="tab-terminals" data-tui-view="terminals" aria-controls="manager-terminals"><b>4</b> Terminals</button>
+      <button type="button" role="tab" id="tab-logs" data-tui-view="logs" aria-controls="manager-logs"><b>5</b> Logs</button>
+      <button type="button" role="tab" id="tab-storage" data-tui-view="storage" aria-controls="manager-storage"><b>6</b> Storage</button>
+      <button type="button" role="tab" id="tab-backups" data-tui-view="backups" aria-controls="manager-backups"><b>7</b> Backup/restore</button>
     </div>
-    <div class="tui-viewport" id="tui-viewport" role="region" aria-label="Scrollable Textual capture" tabindex="0">
-      <img id="tui-image" alt="">
-    </div>
-    <p class="tui-note muted" id="tui-note"><small>Switch views using the buttons or keys 1–7. The captures use synthetic data; controls inside them are not live.</small></p>
-    <p class="tui-note muted" id="tui-error" hidden>The capture could not load. Open the demo with its companion <code>tui/</code> folder.</p>
+    <section role="tabpanel" id="manager-status" aria-labelledby="tab-status" tabindex="0">
+      <div class="view-head">
+        <div><h2>Overview</h2><p class="muted">Host resources, registered workspaces, and the selected workspace.</p></div>
+        <span class="tag"><span class="dot"></span> Example snapshot</span>
+      </div>
+      <div class="manager-grid" id="host-metrics"></div>
+      <div class="manager-split">
+        <div class="card"><h3>Workspaces</h3><p class="muted">Select a workspace to inspect its resources.</p>
+          <div class="table-scroll" id="manager-workspaces"></div>
+        </div>
+        <div class="card" id="manager-workspace"></div>
+      </div>
+      <div class="card manager-panel"><h3>Retained activity</h3><p class="muted">Fixed-category events. No transcripts or terminal output.</p>
+        <div class="table-scroll" id="manager-activity"></div>
+      </div>
+    </section>
+    <section role="tabpanel" id="manager-settings" aria-labelledby="tab-settings" tabindex="0" hidden>
+      <div class="view-head">
+        <div><h2>Settings</h2><p class="muted">Preview manager preferences. Changes stay on this page and do not change host configuration.</p></div>
+      </div>
+      <div class="manager-grid">
+        <div class="card"><h3>Monitoring</h3><div class="manager-fields">
+          <label class="manager-check"><input type="checkbox" checked> Automatic refresh</label>
+          <label class="manager-field">Refresh interval (seconds)<input type="number" value="1" min="1" max="60"></label>
+        </div></div>
+        <div class="card"><h3>Display</h3><div class="manager-fields">
+          <label class="manager-field">Density<select id="manager-density"><option>Comfortable</option><option>Compact</option></select></label>
+          <label class="manager-check"><input type="checkbox"> Expand workspace details</label>
+        </div></div>
+        <div class="card"><h3>Sessions</h3><div class="manager-fields">
+          <label class="manager-field">Browse scope<select id="settings-scope"><option value="workspace">Selected workspace</option><option value="host">Host · all projects</option></select></label>
+          <p class="muted">Changing scope does not connect to a service.</p>
+        </div></div>
+        <div class="card"><h3>Logs</h3><div class="manager-fields">
+          <label class="manager-field">Minimum severity<select id="settings-severity"><option value="all">All severities</option><option value="info">Info and above</option><option value="warning">Warning and above</option></select></label>
+          <label class="manager-check"><input type="checkbox"> Follow retained activity</label>
+        </div></div>
+        <div class="card"><h3>Host logging</h3><p class="muted">Private activity log · system journal mirror off.</p><p><span class="tag">Host settings not connected</span></p></div>
+        <div class="card"><h3>Clipboard</h3><p class="muted">Host clipboard and terminal copy preferences stay in the terminal manager.</p><p><span class="tag">Not connected</span></p></div>
+      </div>
+    </section>
+    <section role="tabpanel" id="manager-sessions" aria-labelledby="tab-sessions" tabindex="0" hidden>
+      <div class="view-head"><div><h2>Sessions</h2><p class="muted">Browse session metadata, including children and archives. There’s no conversation pane in this view.</p></div><span class="tag">Example catalog</span></div>
+      <div class="card manager-panel">
+        <div class="toolbar">
+          <label class="manager-field">Source<select id="manager-session-source"><option value="workspace">Selected workspace</option><option value="host">Host · all projects</option></select></label>
+          <label class="manager-field">Search titles<input type="search" id="manager-session-search" placeholder="Filter sessions"></label>
+          <label class="manager-check"><input type="checkbox" id="manager-include-archives" checked> Include archived</label>
+          <span class="tag push" id="manager-session-count" aria-live="polite"></span>
+        </div>
+        <div class="table-scroll" id="manager-session-list"></div>
+      </div>
+    </section>
+    <section role="tabpanel" id="manager-terminals" aria-labelledby="tab-terminals" tabindex="0" hidden>
+      <div class="view-head"><div><h2>Terminals</h2><p class="muted">A dedicated view for existing native session terminals.</p></div><span class="tag">Disconnected</span></div>
+      <div class="card manager-panel"><h3>Session terminal</h3>
+        <div class="toolbar"><label class="manager-field">Session<select><option>Improve history sync</option><option>Polish session tabs</option></select></label><button type="button" class="action" disabled>Attach terminal</button></div>
+        <div class="terminal-placeholder mono">No terminal is attached. This preview does not send keystrokes, open a shell or display live output.</div>
+      </div>
+    </section>
+    <section role="tabpanel" id="manager-logs" aria-labelledby="tab-logs" tabindex="0" hidden>
+      <div class="view-head"><div><h2>Logs</h2><p class="muted">Filter retained activity by severity or message.</p></div><span class="tag">Private activity · Demo</span></div>
+      <div class="card manager-panel">
+        <div class="toolbar">
+          <label class="manager-field">Search events<input type="search" id="manager-log-search" placeholder="Filter log events"></label>
+          <label class="manager-field">Severity<select id="manager-log-severity"><option value="all">All severities</option><option value="info">Info and above</option><option value="warning">Warning and above</option></select></label>
+          <button type="button" class="action" disabled>Load external source</button>
+          <span class="tag push" id="manager-log-count" aria-live="polite"></span>
+        </div>
+        <div class="table-scroll" id="manager-log-list"></div>
+      </div>
+    </section>
+    <section role="tabpanel" id="manager-storage" aria-labelledby="tab-storage" tabindex="0" hidden>
+      <div class="view-head"><div><h2>Storage</h2><p class="muted">Inspect storage by scope. Unknown sizes are shown separately from measured sizes.</p></div><span class="tag">Example inventory</span></div>
+      <div class="card manager-panel"><h3>Storage inventory</h3>
+        <div class="toolbar">
+          <label class="manager-field">Scope<select id="manager-storage-scope"><option value="all">All workspaces</option><option value="selected">Selected workspace</option><option value="host">Host</option></select></label>
+          <button type="button" class="action" disabled>Scan sizes</button>
+        </div>
+        <div class="table-scroll" id="manager-storage-list"></div>
+        <p class="muted">Backup and removal actions require a separate review; neither runs in this preview.</p>
+      </div>
+    </section>
+    <section role="tabpanel" id="manager-backups" aria-labelledby="tab-backups" tabindex="0" hidden>
+      <div class="view-head"><div><h2>Backup and restore</h2><p class="muted">Choose an operation and review what would be included before proceeding.</p></div><span class="tag">No archive access</span></div>
+      <div class="manager-split">
+        <div class="card"><h3>Operation</h3>
+          <div class="manager-fields">
+            <label class="manager-field">Action<select id="manager-backup-action"><option value="backup">Create backup</option><option value="restore">Restore backup</option></select></label>
+            <label class="manager-field">Archive kind<select id="manager-backup-kind"><option value="portable">Portable workspace</option><option value="full">Full workspace</option><option value="sessions">Native session history</option></select></label>
+          </div>
+        </div>
+        <div class="card"><h3>Review</h3><p id="manager-backup-summary" class="muted" aria-live="polite"></p><p><button type="button" class="action" disabled>Continue to review</button></p></div>
+      </div>
+    </section>
   </main>
 
   <script>
@@ -330,7 +447,7 @@
       studio: ["Studio", "Sessions, chat and workspace context. Drag the dividers, or focus one and use the arrow keys."],
       dashboard: ["Dashboard", "Manager cards first, with the selected conversation underneath."],
       focus: ["Chat focus", "More room for the conversation; open sessions or the inspector on demand."],
-      tui: ["Full TUI", "The unmodified Textual screens in a separate manager-only view."],
+      tui: ["Full TUI", "The TUI’s manager views reworked for the browser, without chat."],
     };
     const groups = {
       open: "Open TUI tabs", history: "Workspace history", archive: "Archived in workspace",
@@ -371,18 +488,27 @@
       storage: ["Storage", `<div class="card"><h3>Workspace private home</h3><p class="large">2.0 GiB</p><p class="muted">Example scan result. Host storage, backups and destructive actions aren’t connected.</p></div>`],
     };
 
-    const tuiViews = {
-      status: ["Status", "Host resource cards, workspace inventory, selected workspace and retained activity."],
-      settings: ["Settings", "The manager’s expanded inline preferences form."],
-      sessions: ["Sessions", "The metadata-only session catalog with root, child and archived entries."],
-      terminals: ["Terminals", "The native session terminal panel in its disconnected state."],
-      logs: ["Logs", "The manager’s log filter controls and retained activity results."],
-      storage: ["Storage", "The workspace storage inventory with guarded actions disabled."],
-      backups: ["Backup/restore", "The backup and restore form with synthetic source and destination controls."],
-    };
+    const managerTabs = all("[data-tui-view]");
+    const workspaceRows = [
+      { name:"orbit-web", os:"Debian", cpu:"73.4%", ram:"1.8 GiB", home:"2.0 GiB", quota:18, memory:22 },
+      { name:"atlas-api", os:"Fedora", cpu:"124%", ram:"3.1 GiB", home:"2.8 GiB", quota:31, memory:39 },
+      { name:"docs-site", os:"Ubuntu", home:"3.6 GiB" },
+      { name:"data-pipeline", os:"Debian", cpu:"38.2%", ram:"1.2 GiB", home:"4.4 GiB", quota:19, memory:30 },
+      { name:"cli-tools", os:"Alpine", home:"5.2 GiB" },
+      { name:"research-notes", os:"Debian" },
+    ];
+    const workspaceCatalog = sessions.map((s) => [s.title, s.parent ? "Child" : "Root", s.group === "archive" ? "Archived" : s.group === "open" ? (s.parent ? "Child of open tab" : "Open TUI tab") : "History"]);
+    const otherCatalogs = { "atlas-api":[["Review API response shapes","Root","History"]] };
+    const hostCatalog = [["Review dashboard navigation","Root","History"],["Verify metadata filters","Child","History"],["Old staging notes","Root","Archived"]];
+    const retainedEvents = [
+      ["14:26","info","Session opened"], ["14:18","info","History sync finished"],
+      ["14:02","info","Web client attached"], ["13:51","warning","Storage size unavailable"],
+      ["13:38","debug","Workspace metadata read"],
+    ];
     const drafts = new Map(), messages = new Map();
     let selected = sessions[0], scope = "all", panel = "status", created = 0, inspectorReturn, activeDrag;
-    const shell = byId("workspace-shell"), tui = byId("tui-mode"), capture = byId("tui-image");
+    let panePriority = "left", managerView = "status", managerWorkspace = workspaceRows[0];
+    const shell = byId("workspace-shell"), tui = byId("tui-mode");
     const draft = byId("draft"), library = byId("library"), inspector = byId("inspector");
     const narrow = matchMedia("(max-width: 680px)"), overlay = matchMedia("(max-width: 1000px)");
     const background = all(".top, .review, .library, .splitter, .shell > main");
@@ -393,7 +519,7 @@
     };
     const layout = () => document.documentElement.dataset.layout;
     const overlayMode = () => overlay.matches || layout() === "focus";
-    const maxPanelWidth = 520, minChatWidth = 380, dividerWidth = 10;
+    const dividerWidth = 10;
     const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
 
     function endDrag() {
@@ -405,18 +531,17 @@
       if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
     }
 
-    function syncSplitters(fixedSide) {
+    function syncSplitters() {
       const shown = {
         left: !shell.hidden && !narrow.matches && (layout() !== "focus" || library.hasAttribute("data-open")),
         right: !shell.hidden && !inspector.hidden && !overlayMode(),
       };
-      const available = shell.clientWidth - minChatWidth - dividerWidth * Object.values(shown).filter(Boolean).length;
+      const available = shell.clientWidth - 320 - dividerWidth * Object.values(shown).filter(Boolean).length;
       const widths = { left:0, right:0 };
-      const order = fixedSide === "right" ? ["right","left"] : ["left","right"];
+      const order = panePriority === "right" ? ["right","left"] : ["left","right"];
       const choose = (side, reserve) => {
         const pane = panes[side];
-        return shown[side] ? clamp(side === fixedSide ? pane.width : pane.preferred ?? pane.initial(),
-          pane.min, Math.min(maxPanelWidth, available - reserve)) : 0;
+        return shown[side] ? clamp(pane.preferred ?? pane.initial(), pane.min, available - reserve) : 0;
       };
       const [first, second] = order;
       widths[first] = choose(first, shown[second] ? panes[second].min : 0);
@@ -426,7 +551,7 @@
         const pane = panes[side];
         if (!shown[side] && activeDrag?.handle === handle) endDrag();
         pane.width = widths[side];
-        pane.max = Math.max(pane.min, Math.min(maxPanelWidth, available - widths[opposite]));
+        pane.max = Math.max(pane.min, available - (shown[opposite] ? panes[opposite].min : 0));
         shell.toggleAttribute(`data-${side}`, shown[side]);
         shell.style.setProperty(`--${side}-size`, `${pane.width}px`);
         handle.hidden = !shown[side];
@@ -439,13 +564,15 @@
 
     function resizePane(side, width) {
       const pane = panes[side];
+      panePriority = side;
       pane.preferred = clamp(Math.round(width), pane.min, pane.max);
-      syncSplitters(side === "left" ? "right" : "left");
+      syncSplitters();
     }
 
     function resetPane(side) {
       delete panes[side].preferred;
-      syncSplitters(side === "left" ? "right" : "left");
+      panePriority = side;
+      syncSplitters();
     }
 
     function showLibrary(open) {
@@ -474,14 +601,79 @@
       syncSplitters();
     }
 
-    function showTuiView(name) {
-      if (!Object.hasOwn(tuiViews, name)) name = "status";
-      const [title, description] = tuiViews[name];
-      for (const button of all("[data-tui-view]")) button.setAttribute("aria-pressed", button.dataset.tuiView === name);
-      capture.alt = `Textual ${title} view. ${description} Synthetic read-only capture.`;
-      capture.src = `tui/${name}.png`;
-      byId("tui-error").hidden = true;
-      byId("tui-viewport").scrollTo(0, 0);
+    function showTuiView(name, focus = false) {
+      managerView = name;
+      for (const tab of managerTabs) {
+        const current = tab.dataset.tuiView === name;
+        tab.setAttribute("aria-selected", current);
+        tab.tabIndex = current ? 0 : -1;
+        byId(tab.getAttribute("aria-controls")).hidden = !current;
+        if (current && focus) tab.focus();
+      }
+    }
+
+    function table(headers, rows, empty = "No rows to show.") {
+      if (!rows.length) return `<p class="muted">${empty}</p>`;
+      return `<table class="manager-table"><thead><tr>${headers.map((h) => `<th scope="col">${h}</th>`).join("")}</tr></thead><tbody>
+        ${rows.map(({ cells, current=false }) => `<tr${current ? ' class="is-selected"' : ""}>${cells.map((cell) => `<td>${cell}</td>`).join("")}</tr>`).join("")}
+        </tbody></table>`;
+    }
+
+    function resourceMeter(label, value, amount) {
+      return `<div class="metric"><span>${label}</span><span class="mono">${value}</span>
+        <progress aria-label="${label}" max="100" value="${amount}"></progress></div>`;
+    }
+
+    function renderManagerStatus() {
+      const current = managerWorkspace;
+      byId("manager-workspaces").innerHTML = table(["Project","State","CPU","Memory","Private home"], workspaceRows.map((w) => ({
+        current:w === current, cells:[
+          `<button type="button" class="text-action" data-inspect="${w.name}" aria-pressed="${w === current}">${w.name}</button>`,
+          w.cpu ? '<span class="entry-state">Running</span>' : '<span class="entry-state stopped">Stopped</span>',
+          w.cpu ?? "—", w.ram ?? "—", w.home ?? "Not scanned",
+        ],
+      })));
+      byId("manager-workspace").innerHTML = `<h3>Selected workspace</h3><p><strong>${current.name}</strong> <span class="muted">· ${current.os}</span></p>
+        ${current.cpu ? resourceMeter("CPU usage · quota scale", current.cpu, current.quota) +
+          resourceMeter("Memory usage · limit scale", current.ram, current.memory) : '<p class="muted">Stopped · No live readings</p>'}
+        <p class="muted">Private home: ${current.home ?? "not scanned"}</p>
+        <details><summary>Workspace details</summary><p class="muted">Example project · Native sessions not connected</p></details>`;
+    }
+
+    function renderManagerSessions() {
+      const host = byId("manager-session-source").value === "host";
+      const query = byId("manager-session-search").value.trim().toLowerCase();
+      const archive = byId("manager-include-archives").checked;
+      const catalog = host ? hostCatalog : managerWorkspace.name === "orbit-web" ? workspaceCatalog : otherCatalogs[managerWorkspace.name] ?? [];
+      const matches = catalog.filter(([title,, state]) =>
+        title.toLowerCase().includes(query) && (archive || state !== "Archived"));
+      byId("manager-session-count").textContent = `${matches.length} ${matches.length === 1 ? "session" : "sessions"}`;
+      byId("manager-session-list").innerHTML = table(["Title","Kind","State"], matches.map(([title, kind, state]) => ({
+        cells:[kind === "Child" ? `<span class="child-name">${title}</span>` : title, kind, state],
+      })), "No matching sessions.");
+    }
+
+    function renderManagerLogs() {
+      const query = byId("manager-log-search").value.trim().toLowerCase();
+      const severity = byId("manager-log-severity").value;
+      const order = { debug:0, info:1, warning:2 };
+      const matches = retainedEvents.filter(([,level,message]) =>
+        message.toLowerCase().includes(query) && order[level] >= (order[severity] ?? 0));
+      byId("manager-log-count").textContent = `${matches.length} ${matches.length === 1 ? "match" : "matches"}`;
+      byId("manager-log-list").innerHTML = table(["Time","Severity","Event"], matches.map((cells) => ({ cells })), "No matching events.");
+    }
+
+    function renderManagerStorage() {
+      const mode = byId("manager-storage-scope").value;
+      const rows = mode === "host" ? [["Host home file system","124 GiB used / 512 GiB capacity"]] :
+        (mode === "all" ? workspaceRows : [managerWorkspace]).map((w) => [w.name, w.home ?? "Not scanned"]);
+      byId("manager-storage-list").innerHTML = table(["Scope","Size"], rows.map((cells) => ({ cells })));
+    }
+
+    function renderManagerBackups() {
+      const action = byId("manager-backup-action").value === "restore" ? "Restore" : "Create";
+      const kind = byId("manager-backup-kind").selectedOptions[0].textContent;
+      byId("manager-backup-summary").textContent = `${action} · ${kind}. A live operation would require an explicit review. No files are opened or written here.`;
     }
 
     function setLayout(name) {
@@ -490,7 +682,7 @@
       document.documentElement.dataset.layout = name;
       shell.hidden = name === "tui";
       tui.hidden = !shell.hidden;
-      if (!tui.hidden && !capture.hasAttribute("src")) showTuiView("status");
+      if (!tui.hidden) showTuiView(managerView);
       byId("layout-note").replaceChildren(Object.assign(document.createElement("strong"), { textContent: layouts[name][0] + ". " }), layouts[name][1]);
       for (const button of all("[data-layout-option]")) button.setAttribute("aria-pressed", button.dataset.layoutOption === name);
       showLibrary(false);
@@ -643,12 +835,39 @@
       const name = location.hash.slice(1);
       if (layout() !== name) setLayout(name);
     });
-    for (const button of all("[data-tui-view]")) button.addEventListener("click", () => showTuiView(button.dataset.tuiView));
-    for (const button of all("[data-tui-zoom]")) button.addEventListener("click", () => {
-      byId("tui-viewport").toggleAttribute("data-actual", button.dataset.tuiZoom === "actual");
-      for (const option of all("[data-tui-zoom]")) option.setAttribute("aria-pressed", option === button);
+    managerTabs.forEach((tab, index) => {
+      tab.addEventListener("click", () => showTuiView(tab.dataset.tuiView));
+      tab.addEventListener("keydown", (event) => {
+        const max = managerTabs.length - 1;
+        const target = { ArrowLeft:index ? index - 1 : max, ArrowRight:index === max ? 0 : index + 1, Home:0, End:max };
+        if (!Object.hasOwn(target, event.key)) return;
+        event.preventDefault();
+        showTuiView(managerTabs[target[event.key]].dataset.tuiView, true);
+      });
     });
-    capture.addEventListener("error", () => { byId("tui-error").hidden = false; });
+    byId("manager-workspaces").addEventListener("click", (event) => {
+      const name = event.target.closest("[data-inspect]")?.dataset.inspect;
+      const workspace = workspaceRows.find((row) => row.name === name);
+      if (!workspace) return;
+      managerWorkspace = workspace;
+      renderManagerStatus();
+      renderManagerSessions();
+      renderManagerStorage();
+      byId("manager-workspaces").querySelector("[aria-pressed=true]").focus();
+    });
+    byId("manager-density").addEventListener("change", (event) => tui.toggleAttribute("data-compact", event.target.value === "Compact"));
+    byId("settings-scope").addEventListener("change", (event) => {
+      byId("manager-session-source").value = event.target.value;
+      renderManagerSessions();
+    });
+    byId("settings-severity").addEventListener("change", (event) => {
+      byId("manager-log-severity").value = event.target.value;
+      renderManagerLogs();
+    });
+    for (const id of ["manager-session-source","manager-session-search","manager-include-archives"]) byId(id).addEventListener("input", renderManagerSessions);
+    for (const id of ["manager-log-search","manager-log-severity"]) byId(id).addEventListener("input", renderManagerLogs);
+    byId("manager-storage-scope").addEventListener("change", renderManagerStorage);
+    for (const id of ["manager-backup-action","manager-backup-kind"]) byId(id).addEventListener("change", renderManagerBackups);
     overlay.addEventListener("change", () => showInspector(!overlay.matches && layout() === "studio", inspector.contains(document.activeElement)));
     narrow.addEventListener("change", () => showLibrary(false));
     for (const button of all("[data-scope]")) button.addEventListener("click", () => {
@@ -673,8 +892,9 @@
     });
     document.addEventListener("keydown", (event) => {
       if (layout() === "tui") {
-        if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing && /^[1-7]$/.test(event.key)) {
-          showTuiView(Object.keys(tuiViews)[Number(event.key) - 1]);
+        if (!event.altKey && !event.ctrlKey && !event.metaKey && !event.isComposing &&
+            event.target.closest("[role=tablist]") && /^[1-7]$/.test(event.key)) {
+          showTuiView(managerTabs[Number(event.key) - 1].dataset.tuiView, true);
           event.preventDefault();
         }
         return;
@@ -714,6 +934,19 @@
 
     byId("panel-title").textContent = panels.status[0];
     byId("panel-content").innerHTML = panels.status[1];
+    byId("host-metrics").innerHTML = [
+      ["Host CPU","18%","Overall utilization",18],
+      ["Host memory","9.0 / 32 GiB","28% used",28],
+      ["Host home file system","124 / 512 GiB","24% used",24],
+      ["Workspaces","3 / 6","Running / registered",null],
+    ].map(([title,value,note,amount]) => `<div class="card manager-stat"><h3 class="eyebrow">${title}</h3><p class="large">${value}</p>
+      <small class="muted">${note}</small>${amount === null ? "" : `<div class="metric"><progress aria-label="${title} used" max="100" value="${amount}"></progress></div>`}</div>`).join("");
+    byId("manager-activity").innerHTML = table(["Time","Severity","Event"], retainedEvents.slice(0,3).map((cells) => ({ cells })));
+    renderManagerStatus();
+    renderManagerSessions();
+    renderManagerLogs();
+    renderManagerStorage();
+    renderManagerBackups();
     setLayout(location.hash.slice(1));
     selectSession(selected);
   </script>
