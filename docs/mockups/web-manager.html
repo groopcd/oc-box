@@ -194,18 +194,28 @@
     .terminal-window { padding:12px }
     .terminal-window-title { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:10px }
     .terminal-window-title h1 { font-size:18px }
-    .terminal-window .terminal-screen { height:max(130px,calc(100dvh - 270px)); max-height:max(130px,calc(100dvh - 210px)) }
+    .terminal-window .terminal-viewport { height:max(130px,calc(100dvh - 270px)); max-height:max(130px,calc(100dvh - 210px)) }
     .terminal-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px }
-    .terminal-grid { display:flex; flex-wrap:wrap; gap:10px 18px; margin-top:11px }
-    .terminal-grid label { display:flex; flex-wrap:wrap; align-items:center; gap:6px; color:var(--muted) }
-    .terminal-grid input { accent-color:var(--accent); max-width:125px }
-    .terminal-screen { width:100%; max-width:100%; min-width:min(100%,180px); height:280px;
-      min-height:130px; max-height:65dvh; margin:11px 0 0; padding:13px; resize:both; overflow:auto;
-      white-space:pre-wrap; overflow-wrap:anywhere; background:var(--bg); border:1px solid var(--line);
-      border-radius:6px; color:var(--muted); font:13px/1.6 var(--mono) }
-    .terminal-screen:focus-visible { outline:2px solid var(--accent); outline-offset:2px }
+    .terminal-grid { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-top:10px }
+    .terminal-viewport { position:relative; width:100%; max-width:100%; min-width:min(100%,180px); height:280px;
+      min-height:130px; max-height:max(130px,65dvh); margin-top:11px; background:var(--bg);
+      border:1px solid var(--line); border-radius:6px }
+    .terminal-screen { width:100%; height:100%; margin:0; padding:13px 28px 22px 13px; overflow:auto;
+      scrollbar-width:none; white-space:pre-wrap; overflow-wrap:anywhere; color:var(--muted); font:13px/1.6 var(--mono) }
+    .terminal-screen::-webkit-scrollbar { display:none }
+    .terminal-screen:focus-visible { outline:2px solid var(--accent); outline-offset:-2px }
+    .terminal-resize { position:absolute; right:0; bottom:0; width:32px; height:32px;
+      border-radius:6px 0 5px 0; color:var(--accent); background:var(--select); cursor:nwse-resize;
+      touch-action:none; user-select:none }
+    .terminal-resize::before { content:""; position:absolute; inset:8px; background:
+      linear-gradient(135deg,transparent 46%,currentColor 46% 52%,transparent 52% 66%,currentColor 66% 72%,transparent 72%) }
+    .terminal-resize:hover,.terminal-resize[data-dragging] { color:var(--bg); background:var(--accent) }
+    body[data-terminal-resizing],body[data-terminal-resizing] * { cursor:nwse-resize !important; user-select:none !important }
     .terminal-card[data-attached] .terminal-screen { color:var(--text) }
     .terminal-window-notice { margin-top:10px }
+    .log-search-head { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:14px }
+    .log-search-head .search { flex:1 1 260px; margin:0; padding:9px 11px; background:var(--bg) }
+    .log-search-head .search input { min-height:23px }
     .backup-section { margin-top:13px; padding-top:11px; border-top:1px solid var(--line) }
     .backup-switches { display:grid; gap:3px; margin:10px 0 }
     .backup-switches .manager-check { min-height:27px; align-items:start }
@@ -426,14 +436,16 @@
           <button type="button" class="action" id="terminal-attach" aria-controls="terminal-screen"></button>
           <button type="button" class="action push" id="terminal-popout" aria-describedby="terminal-window-notice">Open in new window</button>
         </div>
-        <pre class="terminal-screen" id="terminal-screen" aria-label="Simulated terminal viewport" tabindex="0"></pre>
+        <div class="terminal-viewport" id="terminal-viewport">
+          <pre class="terminal-screen" id="terminal-screen" aria-label="Simulated terminal viewport" tabindex="0"></pre>
+          <button type="button" class="terminal-resize" id="terminal-resize" aria-label="Resize terminal"
+            aria-controls="terminal-viewport" title="Drag to resize; use arrow keys when focused"></button>
+        </div>
         <div class="terminal-grid">
-          <label>Width <input id="terminal-width" type="range" min="180" max="880" step="1" value="880"></label>
-          <label>Height <input id="terminal-height" type="range" min="130" max="600" step="1" value="280"></label>
-          <output id="terminal-size" class="tag" for="terminal-width terminal-height" aria-live="off"></output>
+          <output id="terminal-size" class="tag" aria-live="off"></output>
           <button type="button" class="action" id="terminal-reset">Reset size</button>
         </div>
-        <p class="muted"><small>Drag the bottom-right corner or use the size controls. Ctrl+] detaches the sample session; it doesn’t end it. This preview never opens a shell or forwards input.</small></p>
+        <p class="muted"><small>Drag the corner grip to resize, or focus it and use the arrow keys. Ctrl+] detaches the sample session without ending it. This preview never opens a shell or forwards input.</small></p>
       </div>
       </div>
       <div id="terminal-window-panel" class="card manager-panel" hidden>
@@ -449,11 +461,14 @@
     <section role="tabpanel" id="manager-logs" aria-labelledby="tab-logs" tabindex="0" hidden>
       <div class="view-head"><div><h2>Logs</h2><p class="muted">Filter retained activity by severity or message.</p></div><span class="tag">Private activity · Demo</span></div>
       <div class="card manager-panel">
+        <div class="log-search-head">
+          <label class="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input type="search" id="manager-log-search" aria-label="Search logs" placeholder="Search logs…" autocomplete="off"></label>
+          <button type="button" class="action" id="manager-log-clear" disabled>Clear search</button>
+          <span class="tag" id="manager-log-count" aria-live="polite"></span>
+        </div>
         <div class="toolbar">
-          <label class="manager-field">Search events<input type="search" id="manager-log-search" placeholder="Filter log events"></label>
           <label class="manager-field">Severity<select id="manager-log-severity"><option value="all">All severities</option><option value="info">Info and above</option><option value="warning">Warning and above</option></select></label>
           <button type="button" class="action" disabled>Load external source</button>
-          <span class="tag push" id="manager-log-count" aria-live="polite"></span>
         </div>
         <div class="table-scroll" id="manager-log-list"></div>
       </div>
@@ -598,13 +613,13 @@
     const terminalCard = byId("terminal-card");
     const terminalElement = (id) => terminalCard.querySelector(`#${id}`);
     const terminalScreen = terminalElement("terminal-screen");
-    const terminalSizes = { width:terminalElement("terminal-width"), height:terminalElement("terminal-height") };
+    const terminalViewport = terminalElement("terminal-viewport"), terminalGrip = terminalElement("terminal-resize");
     const sampleTerminals = {
       sync: "$ git status --short\n M src/history_reader.py\n$ pytest tests/test_history.py -q\n8 passed\n$ ",
       tabs: "$ git status --short\n M src/web_sessions.js\n$ pytest tests/test_web_sessions.py -q\n6 passed\n$ ",
     };
     const seenTerminals = new Set();
-    let terminalAttached = false, terminalWindow = null, dockedTerminalSize = null, inspectedArchive = null;
+    let terminalAttached = false, terminalWindow = null, dockedTerminalSize = null, terminalDrag, inspectedArchive = null;
     const draft = byId("draft"), library = byId("library"), inspector = byId("inspector");
     const narrow = matchMedia("(max-width: 680px)"), overlay = matchMedia("(max-width: 1000px)");
     const background = all(".top, .review, .library, .splitter, .shell > main");
@@ -752,10 +767,11 @@
 
     function renderManagerLogs() {
       const query = byId("manager-log-search").value.trim().toLowerCase();
+      byId("manager-log-clear").disabled = !byId("manager-log-search").value;
       const severity = byId("manager-log-severity").value;
       const order = { debug:0, info:1, warning:2 };
-      const matches = retainedEvents.filter(([,level,message]) =>
-        message.toLowerCase().includes(query) && order[level] >= (order[severity] ?? 0));
+      const matches = retainedEvents.filter((row) =>
+        row.join(" ").toLowerCase().includes(query) && order[row[1]] >= (order[severity] ?? 0));
       byId("manager-log-count").textContent = `${matches.length} ${matches.length === 1 ? "match" : "matches"}`;
       byId("manager-log-list").innerHTML = table(["Time","Severity","Event"], matches.map((cells) => ({ cells })), "No matching events.");
     }
@@ -786,25 +802,37 @@
     }
 
     function syncTerminalSize() {
-      if (!terminalScreen.getClientRects().length) return;
-      const available = Math.max(1, terminalCard.clientWidth - 28);
-      const view = terminalScreen.ownerDocument.defaultView;
-      const maxHeight = view === window ? Math.max(130, Math.floor(view.innerHeight * .65)) : Math.max(130, view.innerHeight - 210);
-      const { width, height } = terminalScreen.getBoundingClientRect();
-      terminalSizes.width.min = Math.min(180, available);
-      terminalSizes.width.max = available;
-      terminalSizes.height.max = maxHeight;
-      terminalSizes.width.value = Math.round(width);
-      terminalSizes.height.value = Math.round(height);
+      if (!terminalViewport.getClientRects().length) return;
+      const { width, height } = terminalViewport.getBoundingClientRect();
       terminalElement("terminal-size").value = `${Math.round(width)} × ${Math.round(height)} px`;
+    }
+
+    function resizeTerminal(width, height) {
+      const view = terminalViewport.ownerDocument.defaultView;
+      const cardStyle = view.getComputedStyle(terminalCard);
+      const available = terminalCard.clientWidth - parseFloat(cardStyle.paddingLeft) - parseFloat(cardStyle.paddingRight);
+      const maxHeight = parseFloat(view.getComputedStyle(terminalViewport).maxHeight);
+      terminalViewport.style.width = `${Math.round(clamp(width, Math.min(180, available), available))}px`;
+      terminalViewport.style.height = `${Math.round(clamp(height, 130, maxHeight))}px`;
+      syncTerminalSize();
+    }
+
+    function finishTerminalDrag() {
+      if (!terminalDrag) return;
+      const { pointerId, body } = terminalDrag;
+      terminalDrag = null;
+      body.removeAttribute("data-terminal-resizing");
+      terminalGrip.removeAttribute("data-dragging");
+      if (terminalGrip.hasPointerCapture(pointerId)) terminalGrip.releasePointerCapture(pointerId);
     }
 
     function dockTerminal(popup, { close = false, focus = false } = {}) {
       if (popup !== terminalWindow) return;
+      finishTerminalDrag();
       terminalWindow = null;
       byId("terminal-dock").append(terminalCard);
-      terminalScreen.style.width = dockedTerminalSize.width;
-      terminalScreen.style.height = dockedTerminalSize.height;
+      terminalViewport.style.width = dockedTerminalSize.width;
+      terminalViewport.style.height = dockedTerminalSize.height;
       dockedTerminalSize = null;
       terminalElement("terminal-popout").textContent = "Open in new window";
       terminalElement("terminal-popout").setAttribute("aria-describedby", "terminal-window-notice");
@@ -848,13 +876,13 @@
         header.append(title, badge);
         doc.body.replaceChildren(header);
         popup.opener = null;
-        dockedTerminalSize = { width:terminalScreen.style.width, height:terminalScreen.style.height };
+        dockedTerminalSize = { width:terminalViewport.style.width, height:terminalViewport.style.height };
         terminalWindow = popup;
         popup.addEventListener("pagehide", () => dockTerminal(popup));
         popup.addEventListener("resize", syncTerminalSize);
         doc.body.append(terminalCard);
-        terminalScreen.style.removeProperty("width");
-        terminalScreen.style.removeProperty("height");
+        terminalViewport.style.removeProperty("width");
+        terminalViewport.style.removeProperty("height");
         terminalElement("terminal-popout").textContent = "Return to manager";
         terminalElement("terminal-popout").removeAttribute("aria-describedby");
         byId("terminal-window-panel").hidden = false;
@@ -1134,6 +1162,12 @@
     });
     for (const id of ["manager-session-source","manager-session-search","manager-include-archives"]) byId(id).addEventListener("input", renderManagerSessions);
     for (const id of ["manager-log-search","manager-log-severity"]) byId(id).addEventListener("input", renderManagerLogs);
+    byId("manager-log-clear").addEventListener("click", () => {
+      const input = byId("manager-log-search");
+      input.value = "";
+      renderManagerLogs();
+      input.focus();
+    });
     byId("manager-storage-scope").addEventListener("change", renderManagerStorage);
     terminalElement("terminal-attach").addEventListener("click", toggleTerminalAttachment);
     terminalElement("terminal-session").addEventListener("change", renderTerminal);
@@ -1154,20 +1188,41 @@
         event.preventDefault();
       }
     });
+    terminalGrip.addEventListener("pointerdown", (event) => {
+      if (terminalDrag || event.button !== 0 || !event.isPrimary) return;
+      event.preventDefault();
+      terminalGrip.setPointerCapture(event.pointerId);
+      const { width, height } = terminalViewport.getBoundingClientRect();
+      const body = terminalGrip.ownerDocument.body;
+      terminalDrag = { pointerId:event.pointerId, body, width, height, x:event.clientX, y:event.clientY };
+      body.setAttribute("data-terminal-resizing", "");
+      terminalGrip.setAttribute("data-dragging", "");
+    });
+    terminalGrip.addEventListener("pointermove", (event) => {
+      if (event.pointerId !== terminalDrag?.pointerId) return;
+      resizeTerminal(terminalDrag.width + event.clientX - terminalDrag.x, terminalDrag.height + event.clientY - terminalDrag.y);
+    });
+    for (const type of ["pointerup","pointercancel","lostpointercapture"]) terminalGrip.addEventListener(type, (event) => {
+      if (event.pointerId === terminalDrag?.pointerId) finishTerminalDrag();
+    });
+    terminalGrip.addEventListener("keydown", (event) => {
+      const steps = { ArrowLeft:[-1,0], ArrowRight:[1,0], ArrowUp:[0,-1], ArrowDown:[0,1] };
+      if (!Object.hasOwn(steps, event.key)) return;
+      event.preventDefault();
+      const [x,y] = steps[event.key], step = event.shiftKey ? 32 : 12;
+      const { width, height } = terminalViewport.getBoundingClientRect();
+      resizeTerminal(width + x * step, height + y * step);
+    });
     window.addEventListener("focus", checkTerminalWindow);
     window.addEventListener("pagehide", () => {
       if (terminalWindow) dockTerminal(terminalWindow, { close:true });
     });
-    for (const [axis, slider] of Object.entries(terminalSizes)) slider.addEventListener("input", () => {
-      terminalScreen.style[axis] = `${slider.value}px`;
-      syncTerminalSize();
-    });
     terminalElement("terminal-reset").addEventListener("click", () => {
-      terminalScreen.style.removeProperty("width");
-      terminalScreen.style.removeProperty("height");
+      terminalViewport.style.removeProperty("width");
+      terminalViewport.style.removeProperty("height");
       syncTerminalSize();
     });
-    new ResizeObserver(syncTerminalSize).observe(terminalScreen);
+    new ResizeObserver(syncTerminalSize).observe(terminalViewport);
     byId("manager-backups").addEventListener("change", (event) => {
       if (event.target.id === "backup-sample") {
         inspectedArchive = null;
