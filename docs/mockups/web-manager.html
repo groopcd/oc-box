@@ -847,7 +847,7 @@
       byId("login-title").textContent = ended ? "You’re logged out" : "Sign in to orbit-web";
       byId("login-description").textContent = ended ? "The one-use link has already been used." : "Use the dedicated web password for this workspace.";
       byId("login-reach").hidden = ended;
-      byId("login-reach-label").textContent = networkEntrance ? "Network-accessible sign-in preview · HTTPS required" : "Localhost only";
+      byId("login-reach-label").textContent = networkEntrance ? "Network-accessible sign-in preview · HTTPS required" : "Localhost sign-in preview · HTTPS required";
       byId("login-form").hidden = ended;
       byId("login-help").parentElement.hidden = ended;
       byId("logout-link").hidden = !ended;
@@ -856,7 +856,8 @@
       byId("web-account").hidden = open;
       byId("web-account-name").textContent = signedInUser ?? "Workspace guest";
       byId("web-account-method").textContent = signedInUser ? "Password sign-in" : "One-use link";
-      byId("web-account-reach").firstElementChild.textContent = signedInUser && networkEntrance ? "Network access · HTTPS" : "Localhost only";
+      byId("web-account-reach").firstElementChild.textContent = signedInUser ?
+        (networkEntrance ? "Network access · HTTPS" : "Localhost · HTTPS") : "Localhost only";
       byId("preview-password").hidden = !!signedInUser;
       if (open) (ended ? byId("demo-new-link") : loginUser).focus();
       else byId(signedInUser ? "web-account-toggle" : "preview-password").focus();
