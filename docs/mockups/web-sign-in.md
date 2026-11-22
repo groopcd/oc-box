@@ -6,12 +6,19 @@ browser experience; it does not implement production authentication or change
 
 | Mode | Proposed CLI | Link shown in the host terminal | Browser experience |
 | --- | --- | --- | --- |
-| One-use link (default) | `oc-box web` | Native `/auth/connect/<one-use-code>` URL, as today. | Native pairing opens the workspace without a password form. |
-| Password | `oc-box web --auth password` | Plain loopback URL, for example `http://127.0.0.1:55061/auth/oc-box-login`. It contains no grant, password or pairing code. | A centered workspace-branded form asks for a dedicated web password. Only successful sign-in opens the workspace. |
+| One-use link (default) | `oc-box web` | Native `/auth/connect/<one-use-code>` URL, as today. | Native pairing opens the workspace as **Workspace guest**. The link proves access, not the identity of the person opening it. |
+| Password | `oc-box web --auth password` | Plain loopback URL, for example `http://127.0.0.1:55061/auth/oc-box-login`. It contains no grant, password or pairing code. | A centered workspace-branded form asks for a web username and password. The account menu shows the authenticated name. |
+
+Both modes put **Log out** in the top-left account dropdown. Live logout
+must revoke only that browser session, including its active connections, not
+stop the workspace or sign out other users. A one-use-link guest needs a fresh
+link to return; a named user can sign in again.
 
 ## Credential boundary
 
-- Keep the dedicated web credential scoped to web sign-in and separate from
+- Support multiple named users: store one salted password verifier and
+  explicit workspace access scope per username, not reusable plaintext
+  passwords. Keep these records scoped to web sign-in and separate from
   the vault master passphrase, provider credentials and the native service
   password. Configure it explicitly via the host vault. Do not forward it
   into provider, agent, shell or workspace environments: it is not an ordinary
@@ -32,5 +39,5 @@ browser experience; it does not implement production authentication or change
   native pairing, not the separate host manager, host catalogs, terminal
   administration or backup operations.
 
-The offline preview’s known test password is not a security boundary. It
-demonstrates the centered form, masked entry, show/hide and retry states only.
+The offline preview’s two hard-coded accounts are not a security boundary.
+They demonstrate named sign-in, the guest label, and both logout flows.

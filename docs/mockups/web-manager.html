@@ -59,6 +59,15 @@
     .login-error { min-height:1.5em; color:#ffb1b1; font-size:12px }
     .login-secret { display:flex; align-items:center; gap:8px; min-width:0 }
     .login-secret input { flex:1 1 auto }
+    .web-account { position:relative; z-index:3; min-width:0 }
+    .web-account > summary { display:flex; align-items:center; gap:6px; cursor:pointer; list-style:none;
+      color:var(--accent); padding:5px 7px; border:1px solid var(--line); border-radius:7px }
+    .web-account > summary::-webkit-details-marker { display:none }
+    .web-account > summary .mono { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px }
+    .account-menu { position:absolute; top:calc(100% + 5px); left:0; min-width:175px; padding:9px; background:var(--panel);
+      border:1px solid var(--line); border-radius:8px; box-shadow:0 10px 28px #0008 }
+    .account-menu button { width:100%; margin-top:6px; text-align:left; font-size:13px; padding:5px 0 }
+    .logout-link { display:grid; gap:10px; margin-top:16px }
     #preview-password { white-space:normal }
     .review { display:flex; align-items:center; justify-content:space-between; gap:16px; padding:10px 22px;
       background:#0f1b28; border-bottom:1px solid var(--line) }
@@ -242,7 +251,6 @@
     .log-search-head { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-bottom:14px }
     .log-search-head .search { flex:1 1 260px; margin:0; padding:9px 11px; background:var(--bg) }
     .log-search-head .search input { min-height:23px }
-    .global-log-search { margin:-8px 0 16px }
     .log-raw { overflow:auto; white-space:pre; padding:12px; border:1px solid var(--line); border-radius:6px; background:var(--bg) }
     .session-source-bar .manager-field { flex:1 1 240px }
     .session-catalog-search { margin:12px 0 0 }
@@ -276,6 +284,8 @@
       .top-end { gap:5px }
       .top-end .connection { display:none }
       #preview-password { font-size:11px; padding:4px 6px }
+      .top:has(.web-account:not([hidden])) .project { display:none }
+      .web-account > summary .mono { max-width:112px }
       .review { align-items:flex-start; flex-direction:column; gap:7px; padding:8px 12px }
       .review .picker { max-width:100% }
       .shell { display:block }
@@ -294,6 +304,7 @@
 <body>
   <svg width="0" height="0" style="position:absolute" aria-hidden="true">
     <symbol id="i-box" viewBox="0 0 24 24"><path d="m12 2 9 5v10l-9 5-9-5V7zM3 7l9 5 9-5m-9 5v10m-4.5-17.5 9 5"/></symbol>
+    <symbol id="i-user" viewBox="0 0 24 24"><circle cx="12" cy="8" r="4"/><path d="M4 21v-2a5 5 0 0 1 5-5h6a5 5 0 0 1 5 5v2"/></symbol>
     <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 4h16v13H9l-5 4zM8 9h8m-8 4h5"/></symbol>
     <symbol id="i-search" viewBox="0 0 24 24"><circle cx="10.5" cy="10.5" r="6"/><path d="m15 15 5 5"/></symbol>
     <symbol id="i-grid" viewBox="0 0 24 24"><path d="M3 4h18v16H3zm7 0v16m0-10h11"/></symbol>
@@ -308,6 +319,13 @@
   <header class="top">
     <div class="brand"><svg class="icon" aria-hidden="true"><use href="#i-box"/></svg>oc-box</div>
     <div class="project"><span class="eyebrow">Workspace</span> orbit-web</div>
+    <details class="web-account" id="web-account" hidden>
+      <summary id="web-account-toggle"><svg class="icon" aria-hidden="true"><use href="#i-user"/></svg><span class="mono" id="web-account-name"></span><span aria-hidden="true">▾</span></summary>
+      <div class="account-menu">
+        <p class="muted" id="web-account-method"></p>
+        <button type="button" class="text-action" id="web-logout">Log out</button>
+      </div>
+    </details>
     <div class="top-end">
       <span class="tag connection"><span class="dot"></span> Private workspace</span>
       <button type="button" class="action" id="preview-password">Preview sign-in</button>
@@ -421,12 +439,6 @@
       <button type="button" role="tab" id="tab-backups" data-tui-view="backups" aria-controls="manager-backups"><b>7</b> Backup/restore</button>
     </div>
     <p class="muted" id="manager-refresh-notice" role="status"></p>
-    <div class="log-search-head global-log-search">
-      <label class="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input type="search" id="manager-log-search" aria-label="Search logs" placeholder="Search retained logs…" autocomplete="off"></label>
-      <button type="button" class="action" id="manager-log-clear" disabled>Clear search</button>
-      <span class="tag" id="manager-log-count" aria-live="polite"></span>
-      <button type="button" class="action" id="manager-open-logs">Logs</button>
-    </div>
     <section role="tabpanel" id="manager-status" aria-labelledby="tab-status" tabindex="0">
       <div class="view-head">
         <div><h2>Overview</h2><p class="muted">Host resources, registered workspaces, and the selected workspace.</p></div>
@@ -464,7 +476,6 @@
         <div class="card"><h3>Logs</h3><div class="manager-fields">
           <label class="manager-field">Minimum severity<select id="settings-severity"><option value="all">All severities</option><option value="info">Info and above</option><option value="warning">Warning and above</option></select></label>
           <label class="manager-field">Visible source<select id="settings-log-source"><option value="all">All sources</option><option value="oc-box">Private activity</option><option value="podman">Sample Podman output</option><option value="mirror">System journal mirror</option></select></label>
-          <label class="manager-field">Log search<input type="search" id="settings-log-search" placeholder="Literal keyword"></label>
           <label class="manager-check"><input type="checkbox" id="settings-log-follow" checked> Follow retained activity</label>
         </div></div>
         <div class="card"><h3>Host logging</h3><div class="manager-fields">
@@ -560,6 +571,11 @@
     <section role="tabpanel" id="manager-logs" aria-labelledby="tab-logs" tabindex="0" hidden>
       <div class="view-head"><div><h2>Logs</h2><p class="muted">Filter retained activity by severity or message.</p></div><span class="tag">Private activity · Demo</span></div>
       <div class="card manager-panel">
+        <div class="log-search-head">
+          <label class="search"><svg class="icon" aria-hidden="true"><use href="#i-search"/></svg><input type="search" id="manager-log-search" aria-label="Search logs" placeholder="Search retained logs…" autocomplete="off"></label>
+          <button type="button" class="action" id="manager-log-clear" disabled>Clear search</button>
+          <span class="tag" id="manager-log-count" aria-live="polite"></span>
+        </div>
         <div class="toolbar">
           <label class="manager-field">Source<select id="manager-log-source"><option value="all">All sources</option><option value="oc-box">Private activity</option><option value="podman">Sample Podman output</option><option value="mirror">System journal mirror</option></select></label>
           <label class="manager-field">Severity<select id="manager-log-severity"><option value="all">All severities</option><option value="info">Info and above</option><option value="warning">Warning and above</option></select></label>
@@ -660,9 +676,11 @@
       <span class="icon-box"><svg class="icon" aria-hidden="true"><use href="#i-box"/></svg></span>
       <p class="eyebrow">oc-box / Web sign-in</p>
       <h1 id="login-title">Sign in to orbit-web</h1>
-      <p class="muted">Use the dedicated web password for this workspace.</p>
+      <p class="muted" id="login-description">Use the dedicated web password for this workspace.</p>
       <form id="login-form" class="login-form" autocomplete="off">
-        <p class="muted">Web user: <strong class="mono">workspace-demo</strong></p>
+        <label class="manager-field">Web username
+          <input type="text" id="login-user" required autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="64" aria-describedby="login-help login-error">
+        </label>
         <div class="manager-field">
           <label for="login-password">Web password</label>
           <div class="login-secret">
@@ -674,8 +692,12 @@
         <button type="submit" class="send">Sign in</button>
       </form>
       <div class="login-footer">
-        <p class="muted" id="login-help"><span class="tag demo">Demo only</span> Use <code>oc-box-demo</code>. Do not enter a real password or vault passphrase.</p>
+        <p class="muted" id="login-help"><span class="tag demo">Demo only</span> Try <code>workspace-demo</code> / <code>oc-box-demo</code> or <code>review-demo</code> / <code>oc-box-review</code>. Do not enter real credentials.</p>
         <div><button type="button" class="text-action" id="login-skip">Back to one-use link preview</button></div>
+      </div>
+      <div class="logout-link" id="logout-link" hidden>
+        <p class="muted">Request a fresh one-use link from the host before reconnecting.</p>
+        <button type="button" class="action" id="demo-new-link">Simulate a new link</button>
       </div>
     </section>
   </main>
@@ -769,11 +791,14 @@
     let logRaw = false, selectedLog = null, visibleLogs = [], logSort = { index:0, descending:true };
     const settingsDefaults = { "manager-auto-refresh":true, "manager-refresh-seconds":"1", "manager-density":"Comfortable",
       "manager-expand-details":false, "settings-scope":"host", "settings-session-filter":"",
-      "settings-severity":"all", "settings-log-source":"all", "settings-log-search":"", "settings-log-follow":true };
+      "settings-severity":"all", "settings-log-source":"all", "settings-log-follow":true };
     let activeSettings = { ...settingsDefaults }, storageSelection = null;
     const sampleStorageSizes = new Map();
     const shell = byId("workspace-shell"), tui = byId("tui-mode");
-    const loginStage = byId("login-stage"), loginPassword = byId("login-password"), loginShow = byId("login-show");
+    const loginStage = byId("login-stage"), loginUser = byId("login-user"), loginPassword = byId("login-password"), loginShow = byId("login-show");
+    const demoWebUsers = new Map([["workspace-demo","oc-box-demo"],["review-demo","oc-box-review"]]);
+    let signedInUser = null, passwordEntrance = new URLSearchParams(location.search).get("auth") === "password";
+    const loggedOutLink = new URLSearchParams(location.search).get("auth") === "link-ended";
     const terminalCard = byId("terminal-card");
     const terminalElement = (id) => terminalCard.querySelector(`#${id}`);
     const terminalScreen = terminalElement("terminal-screen");
@@ -805,16 +830,28 @@
       byId("login-error").textContent = "";
     }
 
-    function showLogin(open) {
+    function showLogin(open, ended = false) {
       if (open) {
         byId("session-review").close();
         if (terminalWindow) dockTerminal(terminalWindow, { close:true });
       }
       resetLoginField();
+      loginUser.value = "";
       document.body.toggleAttribute("data-login", open);
       loginStage.hidden = !open;
-      if (open) loginPassword.focus();
-      else byId("preview-password").focus();
+      byId("login-title").textContent = ended ? "You’re logged out" : "Sign in to orbit-web";
+      byId("login-description").textContent = ended ? "The one-use link has already been used." : "Use the dedicated web password for this workspace.";
+      byId("login-form").hidden = ended;
+      byId("login-help").parentElement.hidden = ended;
+      byId("logout-link").hidden = !ended;
+      byId("login-skip").hidden = passwordEntrance;
+      byId("web-account").open = false;
+      byId("web-account").hidden = open;
+      byId("web-account-name").textContent = signedInUser ?? "Workspace guest";
+      byId("web-account-method").textContent = signedInUser ? "Password sign-in" : "One-use link";
+      byId("preview-password").hidden = !!signedInUser;
+      if (open) (ended ? byId("demo-new-link") : loginUser).focus();
+      else byId(signedInUser ? "web-account-toggle" : "preview-password").focus();
     }
     const clamp = (value, min, max) => Math.max(min, Math.min(value, max));
 
@@ -1093,7 +1130,7 @@
         setManagerSessionConnection(false);
       }
       for (const [control, key] of [["manager-session-search","settings-session-filter"],["manager-log-source","settings-log-source"],
-        ["manager-log-severity","settings-severity"],["manager-log-search","settings-log-search"]]) byId(control).value = draft[key];
+        ["manager-log-severity","settings-severity"]]) byId(control).value = draft[key];
       byId("manager-log-follow").checked = draft["settings-log-follow"];
       byId("settings-monitor-status").textContent = `${draft["manager-auto-refresh"] ? "Auto" : "Paused"} · ${seconds}s · simulation`;
       renderManagerSessions();
@@ -1555,10 +1592,6 @@
       if (managerView === "sessions" && action === "delete") byId("manager-session-connect").focus();
     });
     for (const id of ["manager-log-search","manager-log-severity"]) byId(id).addEventListener("input", renderManagerLogs);
-    byId("manager-open-logs").addEventListener("click", () => {
-      showTuiView("logs");
-      byId("manager-log-search").focus();
-    });
     byId("manager-log-source").addEventListener("change", () => {
       byId("manager-log-info").textContent = "";
       renderManagerLogs();
@@ -1793,6 +1826,27 @@
     selectSession(selected);
     byId("preview-password").addEventListener("click", () => showLogin(true));
     byId("login-skip").addEventListener("click", () => showLogin(false));
+    byId("web-logout").addEventListener("click", () => {
+      const url = new URL(location.href);
+      url.searchParams.set("auth", signedInUser ? "password" : "link-ended");
+      location.replace(url.href);
+    });
+    byId("demo-new-link").addEventListener("click", () => {
+      const url = new URL(location.href);
+      url.searchParams.delete("auth");
+      location.replace(url.href);
+    });
+    document.addEventListener("click", (event) => {
+      const account = byId("web-account");
+      if (!account.contains(event.target)) account.open = false;
+    });
+    byId("web-account").addEventListener("keydown", (event) => {
+      if (event.key !== "Escape" || !byId("web-account").open) return;
+      byId("web-account").open = false;
+      byId("web-account-toggle").focus();
+      event.preventDefault();
+      event.stopPropagation();
+    });
     loginShow.addEventListener("click", () => {
       const show = loginPassword.type === "password";
       loginPassword.type = show ? "text" : "password";
@@ -1802,16 +1856,25 @@
     });
     byId("login-form").addEventListener("submit", (event) => {
       event.preventDefault();
-      const accepted = loginPassword.value === "oc-box-demo";
+      const username = loginUser.value.trim();
+      const accepted = demoWebUsers.get(username) === loginPassword.value;
       resetLoginField();
-      if (accepted) showLogin(false);
+      if (accepted) {
+        signedInUser = username;
+        showLogin(false);
+      }
       else {
-        byId("login-error").textContent = "Incorrect demo password. Use oc-box-demo.";
+        byId("login-error").textContent = "Incorrect demo username or password.";
         loginPassword.setAttribute("aria-invalid", "true");
         loginPassword.focus();
       }
     });
-    if (new URLSearchParams(location.search).get("auth") === "password") showLogin(true);
+    if (passwordEntrance || loggedOutLink) showLogin(true, loggedOutLink);
+    else {
+      byId("web-account").hidden = false;
+      byId("web-account-name").textContent = "Workspace guest";
+      byId("web-account-method").textContent = "One-use link";
+    }
   </script>
 </body>
 </html>

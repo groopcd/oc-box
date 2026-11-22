@@ -3,8 +3,10 @@
 Open [`web-manager.html`](web-manager.html) as a local file. There are no
 companion files, dependencies, network requests or live service connections.
 It opens directly by default. Use **Preview sign-in** or append
-`?auth=password` to the file URL to open the password-mode preview. The only
-demo password is `oc-box-demo`; never enter a real password or vault passphrase.
+`?auth=password` to the file URL to open the password-mode preview. Use
+`workspace-demo` / `oc-box-demo` or `review-demo` / `oc-box-review`. Never
+enter real credentials. The top-left account menu shows the signed-in name or
+**Workspace guest** for the one-use-link preview, with **Log out** inside.
 See the [web sign-in design](web-sign-in.md) for the proposed launcher modes.
 
 - **Studio** keeps chat, sessions and the inspector side by side. Drag a
