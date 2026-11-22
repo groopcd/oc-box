@@ -5,11 +5,12 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import tarfile
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from oc_box import backup_crypto as crypto
 from oc_box import (
@@ -167,6 +168,92 @@ class HostBackupTests(unittest.TestCase):
         self.assertEqual(
             (data / "opencode/opencode.db").read_bytes(), b"untouched store"
         )
+
+    def test_auth_restore_uses_the_fresh_store_contract_not_a_version_allowlist(self):
+        rows = [
+            {
+                "id": "cred_synthetic",
+                "integrationID": "provider.synthetic",
+                "label": "Synthetic",
+                "active": True,
+                "value": {"type": "key", "key": "opaque-export-sentinel"},
+            }
+        ]
+        canonical = native_auth.validate_native_export(json.dumps(rows).encode())
+        cases = (
+            (b"opencode v2.8.9\n", None, None, "success", 1),
+            (b"v2.0.0\n", "2.0.0", None, "success", 1),
+            (b"opencode v2.8.9\n", "2.8.8", None, "native-version", 0),
+            (b"opencode v2.8.9-rc.1\n", None, None, "native-version", 0),
+            (b"opencode v3.0.0\n", None, None, "native-version", 0),
+            (b"opencode v2.8.9\n", None, "before", "native-operation", 0),
+            (b"opencode v2.8.9\n", None, "after", "native-operation", 1),
+            (b"opencode v2.8.9\n", None, "missing", "native-operation", 1),
+            (b"opencode v2.8.9\n", None, "roundtrip", "native-operation", 1),
+        )
+        for index, (reported, expected, break_at, outcome, imports) in enumerate(cases):
+            with self.subTest(reported=reported, expected=expected, break_at=break_at):
+                stage = self.root / str(index)
+                db = stage / "data/opencode/opencode.db"
+                db.parent.mkdir(parents=True)
+                with contextlib.closing(sqlite3.connect(db)) as sql:
+                    sql.execute("CREATE TABLE credential (id TEXT)")
+                    # A hypothetical new native table must be allowed empty,
+                    # but never if the process has persisted something there.
+                    sql.execute("CREATE TABLE future_work (id TEXT)")
+                    if break_at == "before":
+                        sql.execute("INSERT INTO future_work VALUES ('fixture')")
+                    sql.commit()
+                db.chmod(0o600)
+                received = []
+
+                def call(
+                    *args,
+                    payload=None,
+                    reported=reported,
+                    db=db,
+                    received=received,
+                    break_at=break_at,
+                    **_,
+                ):
+                    if args == ("--version",):
+                        return reported
+                    if args == ("debug", "paths", "db"):
+                        return os.fsencode(db) + b"\n"
+                    if args == ("auth", "export", "--standalone"):
+                        return (
+                            canonical if received and break_at != "roundtrip" else b"[]"
+                        )
+                    self.assertEqual(args, ("auth", "import", "--standalone"))
+                    self.assertEqual(payload, canonical)
+                    received.append(True)
+                    with contextlib.closing(sqlite3.connect(db)) as sql:
+                        if break_at != "missing":
+                            sql.execute(
+                                "INSERT INTO credential VALUES ('cred_synthetic')"
+                            )
+                        if break_at == "after":
+                            sql.execute("INSERT INTO future_work VALUES ('fixture')")
+                        sql.commit()
+                    return b""
+
+                with (
+                    patch.object(native_auth, "_Native", return_value=Mock(call=call)),
+                    patch.object(native_auth, "_environment", return_value={}),
+                ):
+                    if outcome == "success":
+                        version, database = native_auth._stage_database(
+                            stage, "/native", rows, canonical, expected
+                        )
+                        self.assertTrue(version.startswith("2."))
+                        self.assertEqual(database, db.read_bytes())
+                    else:
+                        with self.assertRaises(native_auth.NativeAuthError) as error:
+                            native_auth._stage_database(
+                                stage, "/native", rows, canonical, expected
+                            )
+                        self.assertEqual(error.exception.reason, outcome)
+                self.assertEqual(len(received), imports)
 
     def test_native_database_publication_cannot_move_to_a_replaced_parent(self):
         with self.profile(self.target):

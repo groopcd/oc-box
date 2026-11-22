@@ -383,7 +383,9 @@ their checkout ownership distinct from unrelated source and flat installations.
   restore. Never restore registry identities, an archived host database,
   external paths or plaintext archive staging. V2 credentials come from an
   explicit native export and are verified in an isolated tmpfs-backed native
-  store before publication to a reviewed, absent host database. No joins to the
+  store before publication to a reviewed, absent host database. Stable native
+  2.x uses the fresh-store behavior checks, not a patch allowlist or the live
+  history recovery policy. Refuse unexpected persisted work. No joins to the
   live host service, silent overwrite or cross-filesystem transaction claims.
 - `install.py` (under the package): copies the launcher to `~/.local/share/oc-box` and creates
   `~/.local/bin/oc-box`.

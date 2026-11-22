@@ -2180,10 +2180,12 @@ terminal before restoring native files and any supplied native V2 export.
 Restored settings can enable forwarding, updates or system-journal mirroring.
 Restored OpenCode configuration and plugins can execute code or change
 permissions on the next launch. Only restore trusted archives. Native V2 import
-requires OpenCode 2.2.6, 2.3.0 or 2.3.1, a Linux `/dev/shm` tmpfs, no active
-managed OpenCode config, and a fresh credential destination. It verifies the
-imported records before publishing the new database and never merges with an
-existing database. Credential validity on a new host is not guaranteed.
+tries any stable OpenCode 2.x release. It requires a Linux `/dev/shm` tmpfs,
+no active managed OpenCode config, and a fresh credential destination. Before
+publishing, it verifies the native import/export round trip and that the new
+database contains no unexpected saved work. An incompatible native release
+fails without installing a database; an existing database is never merged.
+Credential validity on a new host is not guaranteed.
 
 Host files are published without overwrite, privately, one file at a time.
 This requires a Linux filesystem supporting anonymous temporary files and

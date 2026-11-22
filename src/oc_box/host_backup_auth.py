@@ -9,12 +9,13 @@ import json
 import os
 import re
 import signal
+import sqlite3
 import stat
 import subprocess
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,16 +28,20 @@ else:
     from backup_crypto import BackupError
 
 
-SUPPORTED_VERSIONS = frozenset(("2.2.6", "2.3.0", "2.3.1"))
 MAX_EXPORT = 2 * 1024 * 1024
 MAX_CREDENTIALS = 512
 MAX_DATABASE = 16 * 1024 * 1024
+_MAX_TABLES = 128
 _DATABASE = "opencode.db"
 _LEGACY_NEIGHBORS = frozenset(("auth.json", "mcp-auth.json"))
 _SHM = Path("/dev/shm")
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _READ_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 _ID = re.compile(r"cred_[A-Za-z0-9_-]{1,128}")
+_V2_VERSION = re.compile(
+    rb"(?:opencode )?v?(2\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*))\n"
+)
+_TABLE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,127}")
 _VALUE_FIELDS = {
     "key": frozenset(("type", "key")),
     "oauth": frozenset(("type", "methodID", "access", "refresh", "expires")),
@@ -48,7 +53,7 @@ _MESSAGES = {
     "approval": "Native credential restore requires separate explicit approval.",
     "platform": "Native credential restore requires a supported Linux host.",
     "destination": "Native credential restore requires a fresh host OpenCode data directory with no existing store.",
-    "native-version": "The native OpenCode executable or its exact version is not supported for credential restore.",
+    "native-version": "Native credential restore could not verify the stable OpenCode 2.x executable or its database path.",
     "native-operation": "Isolated native credential restore could not be verified; no destination database was created.",
     "system-config": "Managed native OpenCode configuration prevents isolated credential restore.",
     "memory-stage": "Verified Linux tmpfs staging is unavailable; no native credential store was created.",
@@ -493,26 +498,103 @@ def _sidecars(db):
     )
 
 
+def _fresh_database(db, stage, credentials=0):
+    """Read only a quiescent scratch database; reject any saved work."""
+    if _sidecars(db) or db.parent.resolve(strict=True) != db.parent:
+        _fail("native-operation")
+    with os.fdopen(os.open(db, _READ_FLAGS), "rb") as source:
+        info = os.fstat(source.fileno())
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_uid != os.getuid()
+            or info.st_nlink != 1
+            or info.st_mode & 0o077
+            or not 0 < info.st_size <= MAX_DATABASE
+        ):
+            _fail("native-operation")
+        # Unlike history recovery, this is a newly created tmpfs DB with no
+        # sidecars and no surviving native process. Immutable read-only mode
+        # does not create its own SQLite sidecars in that private directory.
+        with closing(
+            sqlite3.connect(db.as_uri() + "?mode=ro&immutable=1", uri=True, timeout=1)
+        ) as database:
+            deadline = time.monotonic() + 1
+            database.set_progress_handler(
+                lambda: int(time.monotonic() >= deadline), 1000
+            )
+            database.execute("PRAGMA trusted_schema=OFF")
+            tables = database.execute(
+                "SELECT name, sql FROM sqlite_schema WHERE type = 'table' LIMIT ?",
+                (_MAX_TABLES + 1,),
+            ).fetchall()
+            if not tables or len(tables) > _MAX_TABLES:
+                _fail("native-operation")
+            seen_credentials = 0
+            for name, definition in tables:
+                if (
+                    not isinstance(name, str)
+                    or not _TABLE_NAME.fullmatch(name)
+                    or not isinstance(definition, str)
+                    or not definition.upper().startswith("CREATE TABLE ")
+                ):
+                    _fail("native-operation")
+                if name in ("migration", "__drizzle_migrations", "sqlite_sequence"):
+                    continue
+                if name == "credential":
+                    seen_credentials = len(
+                        database.execute(
+                            'SELECT 1 FROM "credential" LIMIT ?', (credentials + 1,)
+                        ).fetchall()
+                    )
+                elif name == "project":
+                    # The native importer registers its empty config directory.
+                    # Allow only that inert scratch record, not project commands.
+                    projects = database.execute(
+                        'SELECT worktree, commands, sandboxes FROM "project" LIMIT 2'
+                    ).fetchall()
+                    if projects not in (
+                        [],
+                        [(str(stage / "config/opencode"), None, "[]")],
+                    ):
+                        _fail("native-operation")
+                elif database.execute(f'SELECT 1 FROM "{name}" LIMIT 1').fetchone():
+                    # Includes schedules, automations, jobs, KV and history,
+                    # even when future native versions add new table names.
+                    _fail("native-operation")
+            if seen_credentials != credentials:
+                _fail("native-operation")
+        result = source.read(MAX_DATABASE + 1) if credentials else None
+        if (
+            (
+                result is not None
+                and (
+                    len(result) != info.st_size
+                    or not result.startswith(b"SQLite format 3\0")
+                )
+            )
+            or _signature(os.fstat(source.fileno())) != _signature(info)
+            or _signature(db.lstat()) != _signature(info)
+            or db.parent.resolve(strict=True) != db.parent
+            or _sidecars(db)
+        ):
+            _fail("native-operation")
+        return result
+
+
 def _stage_database(stage, binary, rows, canonical, version):
     native = _Native(binary, stage, _environment(stage))
     reported = native.call("--version", limit=64, reason="native-version")
-    detected = next(
-        (
-            value
-            for value in SUPPORTED_VERSIONS
-            if reported == f"opencode v{value}\n".encode()
-        ),
-        None,
-    )
+    match = _V2_VERSION.fullmatch(reported)
+    detected = match[1].decode("ascii") if match else None
     if detected is None or (version is not None and version != detected):
         _fail("native-version")
     db = stage / "data" / "opencode" / _DATABASE
     if native.call("debug", "paths", "db", limit=4096) != os.fsencode(db) + b"\n":
         _fail("native-version")
     try:
-        if _decoded(native.call("auth", "export", "--standalone"))[0] or _sidecars(db):
+        if _decoded(native.call("auth", "export", "--standalone"))[0]:
             _fail("native-operation")
-        history_reader._check_database(db, version=detected)
+        _fresh_database(db, stage)
         native.call("auth", "import", "--standalone", payload=canonical, limit=1024)
         verified = _decoded(native.call("auth", "export", "--standalone"))[0]
         key = lambda row: row["id"]
@@ -522,33 +604,12 @@ def _stage_database(stage, binary, rows, canonical, version):
             json.dumps(sorted(verified, key=key), ensure_ascii=False).encode()
         ):
             _fail("native-operation")
-        if _sidecars(db):
-            _fail("native-operation")
-        with os.fdopen(os.open(db, _READ_FLAGS), "rb") as source:
-            info = os.fstat(source.fileno())
-            if (
-                not stat.S_ISREG(info.st_mode)
-                or info.st_uid != os.getuid()
-                or info.st_nlink != 1
-                or info.st_mode & 0o077
-                or not 0 < info.st_size <= MAX_DATABASE
-            ):
-                _fail("native-operation")
-            database = source.read(MAX_DATABASE + 1)
-            if (
-                len(database) != info.st_size
-                or not database.startswith(b"SQLite format 3\0")
-                or _signature(os.fstat(source.fileno())) != _signature(info)
-                or _signature(db.lstat()) != _signature(info)
-                or _sidecars(db)
-            ):
-                _fail("native-operation")
-        return detected, database
+        return detected, _fresh_database(db, stage, len(rows))
     except NativeAuthError as error:
         if error.reason == "invalid-export":
             _fail("native-operation")
         raise
-    except (OSError, history_reader.Refusal, ValueError, RecursionError):
+    except (OSError, sqlite3.Error, ValueError, RuntimeError):
         _fail("native-operation")
 
 

@@ -2363,3 +2363,8 @@ plaintext in the outer archive and fixed partial-restore reporting. Cover
 malformed payloads, cross-scope paths, changed destinations and no overwrite.
 Native V2 credential verification must use disposable credentials and a fresh
 native store; an offline fixture does not establish host lifecycle acceptance.
+The native smoke runs against the pinned regression binary and the current
+stable OpenCode 2.x in CI. Use synthetic unfamiliar 2.x releases to check that
+eligibility depends on the round trip, and reject unexpected persisted work
+before import and before publication. This does not broaden live history
+recovery's version policy.

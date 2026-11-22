@@ -2423,12 +2423,13 @@ on the controlling terminal before restoring native files and any
 supplied native V2 export.  Restored settings can enable forwarding,
 updates or system-journal mirroring.  Restored OpenCode configuration
 and plugins can execute code or change permissions on the next launch.
-Only restore trusted archives.  Native V2 import requires OpenCode
-2.2.6, 2.3.0 or 2.3.1, a Linux ‘/dev/shm’ tmpfs, no active managed
-OpenCode config, and a fresh credential destination.  It verifies the
-imported records before publishing the new database and never merges
-with an existing database.  Credential validity on a new host is not
-guaranteed.
+Only restore trusted archives.  Native V2 import tries any stable
+OpenCode 2.x release.  It requires a Linux ‘/dev/shm’ tmpfs, no active
+managed OpenCode config, and a fresh credential destination.  Before
+publishing, it verifies the native import/export round trip and that the
+new database contains no unexpected saved work.  An incompatible native
+release fails without installing a database; an existing database is
+never merged.  Credential validity on a new host is not guaranteed.
 
 Host files are published without overwrite, privately, one file at a
 time.  This requires a Linux filesystem supporting anonymous temporary
@@ -4882,20 +4883,20 @@ Node: Name769
 Node: Synopsis930
 Node: Description3917
 Node: Commands9344
-Node: Options137128
-Node: Lifecycle and persistence189720
-Node: Distribution images192020
-Node: Sessions and recovery196984
-Node: Devices and host permissions203569
-Node: Resource reports205915
-Node: Configuration and environment208026
-Node: Files219407
-Node: Exit status230317
-Node: Examples231725
-Node: Troubleshooting233864
-Node: Installation and manuals245910
-Node: Authors and license256100
-Node: See also256707
+Node: Options137262
+Node: Lifecycle and persistence189854
+Node: Distribution images192154
+Node: Sessions and recovery197118
+Node: Devices and host permissions203703
+Node: Resource reports206049
+Node: Configuration and environment208160
+Node: Files219541
+Node: Exit status230451
+Node: Examples231859
+Node: Troubleshooting233998
+Node: Installation and manuals246044
+Node: Authors and license256234
+Node: See also256841
 
 End Tag Table
 
