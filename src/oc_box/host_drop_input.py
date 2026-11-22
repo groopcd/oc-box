@@ -72,6 +72,10 @@ _RECOVERY_CSI_KEY = re.compile(
 _RECOVERY_CSI_PARAMETERS = frozenset(b"0123456789;:")
 _RECOVERY_CSI_MAX = 32
 _RECOVERY_SS3_FINALS = frozenset(b"ABCDFHPQRS")
+# Common control keys may arrive while an Escape is pending. None is an ESC
+# final (or CAN/SUB). Pass them to the native client, but don't authorize
+# anything until a complete subsequent frame resolves the pending Escape.
+_ESCAPE_PASSTHROUGH_KEYS = frozenset(b"\x03\b\t\n\r\x16\x19\x7f")
 
 # Includes the ASCII "72;" selector, but not the introducer or terminator.
 # The broker must independently validate its protocol/chunk/session limits.
@@ -440,6 +444,10 @@ class _Framing:
             if code == _ESC and not self._framing_only():
                 self._escape_overlap(raw, output)
                 return
+            if code in _ESCAPE_PASSTHROUGH_KEYS and not self._framing_only():
+                self._flush(output, raw)
+                self._state = "escape-report-intro"
+                return
             if code in _ESC_STRINGS:
                 prefix = bytes(self._held) + raw
                 self._held.clear()
@@ -477,6 +485,10 @@ class _Framing:
         if self._state == "escape-report-intro":
             if code == _ESC:
                 self._escape_overlap(raw, output)
+            elif code in _ESCAPE_PASSTHROUGH_KEYS:
+                # A second control key (including Ctrl+Y) is not a boundary
+                # either. Leave the recovery state open and forward in order.
+                self._flush(output, raw)
             elif code == ord("["):
                 self._state = "escape-report-csi"
                 self._flush(output, raw)
@@ -851,9 +863,10 @@ class PasteInput(_Framing):
     Normally the original and subsequent bytes pass unchanged. Embedded C0/DEL
     in a recognized paste or non-cancelling C0/DEL in ASCII CSI are forwarded
     opaquely; only an unambiguous frame end permits interception of later input.
-    Overlapping top-level Escapes recover at the end of complete recognized
-    keys, reports, ordinary control strings or canonical paste frames;
-    none of the recovery bytes authorize actions.
+    Overlapping top-level Escapes and select control keys after a pending
+    Escape recover at the end of complete recognized keys, reports, ordinary
+    control strings or canonical paste frames. None of the recovery bytes
+    authorize actions, including any Ctrl+Y before the boundary.
     There is no interior rescan or timing-based re-arm. Over-limit ordinary
     pastes also stream unchanged until their exact canonical end.
     With ``reserve_osc72=True``, refused/malformed/oversized private packets and

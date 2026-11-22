@@ -231,10 +231,13 @@ remaining ambiguous frames still fail closed. The fixed exit notice
 `input-framing-recovered` contains no frame data. These are offline checks, not
 a reproduction or validation of the reported Yakuake failure.
 
-The expanded relay recovery retains those regressions and adds runs of Escape,
-recognized mouse/focus/key reports, and opaque paste or control-string ends.
-It forwards recovery input without minting a clipboard or click action, and a
-later independent gesture can operate in the same client. Keep OSC 72
+The expanded relay recovery retains those regressions and covers runs of Escape,
+common control keys after a pending Escape, recognized mouse/focus/key reports,
+and opaque paste or control-string ends. A Ctrl+Y, Enter or Tab after repeated
+Escape reproduced the same `escape-report-prefix` category as the operator's
+report on `5b13a83`; the report did not identify which input actually arrived.
+The relay forwards the recovery input without minting a clipboard or click
+action, and a later independent gesture can operate in the same client. Keep OSC 72
 reservation, ordinary Ctrl+V, callback refusal and cross-fragment tests. A
 synthetic PTY acknowledgment checks that no host-open grant is sent before a
 fresh click. `tests/smoke_file_preview_v2.py` additionally exercises native

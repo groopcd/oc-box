@@ -296,8 +296,8 @@ class HostDropTests(unittest.TestCase):
         )
         errors = io.StringIO()
         self.assertEqual(relay.input_bytes(b"\x1b"), b"")
-        # A Meta-prefixed Ctrl+Y is ambiguous, not a clipboard gesture.
-        self.assertEqual(relay.input_bytes(b"\x19"), b"\x1b\x19")
+        # Unknown escape input is still refused; a later shortcut cannot grant.
+        self.assertEqual(relay.input_bytes(b"\x01"), b"\x1b\x01")
         self.assertEqual(relay.input_bytes(b"\x19"), b"\x19")
         with contextlib.redirect_stderr(errors):
             relay.__exit__()
@@ -331,6 +331,8 @@ class HostDropTests(unittest.TestCase):
                 b"\x1b[200~synthetic\x19\x1b[201~",
                 b"\x1b\x1b\x1bOP",
                 b"\x1b\x1b\x1b[200~synthetic\x19\x1b[201~",
+                b"\x1b\x1b\x19\r\x19",
+                b"\x1b[D",
             ):
                 self.assertEqual(relay.input_bytes(frame), frame)
             clipboard.read_selection.assert_not_called()
