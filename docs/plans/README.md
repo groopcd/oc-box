@@ -10,6 +10,8 @@ updates are distinct; read its source and scope qualifications.
   investigation, recovery design and follow-up observations.
 - [Host-owned terminal input](trusted-terminal-input.md): possible clipboard
   and click authorization outside a raw PTY input stream.
+- [Browser workspace runtime](web-runtime.md): opt-in workspace layouts,
+  host TLS preparation and remaining named sign-in gates.
 
 For current commands, use the [CLI reference](../cli.md). For acceptance
 status and publication requirements, use [Testing](../testing.md) and the
